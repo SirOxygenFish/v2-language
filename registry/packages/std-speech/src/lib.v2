@@ -1,0 +1,50 @@
+// std.speech — reference package.
+//
+// This is the community/package home for std.speech. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func speak(...args) {
+    // TODO: implement std.speech.speak
+    return null
+}
+
+func stop(...args) {
+    // TODO: implement std.speech.stop
+    return null
+}
+
+func voices(...args) {
+    // TODO: implement std.speech.voices
+    return null
+}
+
+func set_voice(...args) {
+    // TODO: implement std.speech.set_voice
+    return null
+}
+
+func set_rate(...args) {
+    // TODO: implement std.speech.set_rate
+    return null
+}
+
+func set_volume(...args) {
+    // TODO: implement std.speech.set_volume
+    return null
+}
+
+func recognize(...args) {
+    // TODO: implement std.speech.recognize
+    return null
+}
+
+func start_listening(...args) {
+    // TODO: implement std.speech.start_listening
+    return null
+}
+
+func stop_listening(...args) {
+    // TODO: implement std.speech.stop_listening
+    return null
+}

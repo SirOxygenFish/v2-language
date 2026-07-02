@@ -1,0 +1,85 @@
+// std.excel — reference package.
+//
+// This is the community/package home for std.excel. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func new(...args) {
+    // TODO: implement std.excel.new
+    return null
+}
+
+func open(...args) {
+    // TODO: implement std.excel.open
+    return null
+}
+
+func add_sheet(...args) {
+    // TODO: implement std.excel.add_sheet
+    return null
+}
+
+func sheet(...args) {
+    // TODO: implement std.excel.sheet
+    return null
+}
+
+func set_cell(...args) {
+    // TODO: implement std.excel.set_cell
+    return null
+}
+
+func get_cell(...args) {
+    // TODO: implement std.excel.get_cell
+    return null
+}
+
+func set_row(...args) {
+    // TODO: implement std.excel.set_row
+    return null
+}
+
+func set_column(...args) {
+    // TODO: implement std.excel.set_column
+    return null
+}
+
+func set_range(...args) {
+    // TODO: implement std.excel.set_range
+    return null
+}
+
+func set_format(...args) {
+    // TODO: implement std.excel.set_format
+    return null
+}
+
+func set_col_width(...args) {
+    // TODO: implement std.excel.set_col_width
+    return null
+}
+
+func set_row_height(...args) {
+    // TODO: implement std.excel.set_row_height
+    return null
+}
+
+func freeze_panes(...args) {
+    // TODO: implement std.excel.freeze_panes
+    return null
+}
+
+func chart(...args) {
+    // TODO: implement std.excel.chart
+    return null
+}
+
+func add_chart(...args) {
+    // TODO: implement std.excel.add_chart
+    return null
+}
+
+func save(...args) {
+    // TODO: implement std.excel.save
+    return null
+}

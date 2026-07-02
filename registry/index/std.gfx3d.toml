@@ -1,0 +1,4 @@
+# registry entry for std.gfx3d
+name = "std.gfx3d"
+path = "packages/std-gfx3d"
+version = "0.1.0"

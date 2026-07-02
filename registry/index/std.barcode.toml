@@ -1,0 +1,4 @@
+# registry entry for std.barcode
+name = "std.barcode"
+path = "packages/std-barcode"
+version = "0.1.0"

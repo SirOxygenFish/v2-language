@@ -1,0 +1,65 @@
+// std.2d — reference package.
+//
+// This is the community/package home for std.2d. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func canvas(...args) {
+    // TODO: implement std.2d.canvas
+    return null
+}
+
+func rect(...args) {
+    // TODO: implement std.2d.rect
+    return null
+}
+
+func circle(...args) {
+    // TODO: implement std.2d.circle
+    return null
+}
+
+func line(...args) {
+    // TODO: implement std.2d.line
+    return null
+}
+
+func arc(...args) {
+    // TODO: implement std.2d.arc
+    return null
+}
+
+func path(...args) {
+    // TODO: implement std.2d.path
+    return null
+}
+
+func text(...args) {
+    // TODO: implement std.2d.text
+    return null
+}
+
+func image(...args) {
+    // TODO: implement std.2d.image
+    return null
+}
+
+func gradient(...args) {
+    // TODO: implement std.2d.gradient
+    return null
+}
+
+func transform(...args) {
+    // TODO: implement std.2d.transform
+    return null
+}
+
+func save_png(...args) {
+    // TODO: implement std.2d.save_png
+    return null
+}
+
+func save_svg(...args) {
+    // TODO: implement std.2d.save_svg
+    return null
+}

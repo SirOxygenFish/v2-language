@@ -1,0 +1,8 @@
+[project]
+name       = "std.ml.audio"
+version    = "0.1.0"
+entry      = "src/lib.v2"
+description = "Reference package for std.ml.audio (community-maintainable)."
+license    = "MIT"
+
+[dependencies]

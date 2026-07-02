@@ -1,0 +1,45 @@
+// std.office — reference package.
+//
+// This is the community/package home for std.office. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func docx_new(...args) {
+    // TODO: implement std.office.docx_new
+    return null
+}
+
+func docx_open(...args) {
+    // TODO: implement std.office.docx_open
+    return null
+}
+
+func docx_add_paragraph(...args) {
+    // TODO: implement std.office.docx_add_paragraph
+    return null
+}
+
+func docx_save(...args) {
+    // TODO: implement std.office.docx_save
+    return null
+}
+
+func pptx_new(...args) {
+    // TODO: implement std.office.pptx_new
+    return null
+}
+
+func pptx_open(...args) {
+    // TODO: implement std.office.pptx_open
+    return null
+}
+
+func pptx_add_slide(...args) {
+    // TODO: implement std.office.pptx_add_slide
+    return null
+}
+
+func pptx_save(...args) {
+    // TODO: implement std.office.pptx_save
+    return null
+}

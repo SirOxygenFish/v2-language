@@ -1,0 +1,165 @@
+// std.term — reference package.
+//
+// This is the community/package home for std.term. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func red(...args) {
+    // TODO: implement std.term.red
+    return null
+}
+
+func green(...args) {
+    // TODO: implement std.term.green
+    return null
+}
+
+func yellow(...args) {
+    // TODO: implement std.term.yellow
+    return null
+}
+
+func blue(...args) {
+    // TODO: implement std.term.blue
+    return null
+}
+
+func cyan(...args) {
+    // TODO: implement std.term.cyan
+    return null
+}
+
+func magenta(...args) {
+    // TODO: implement std.term.magenta
+    return null
+}
+
+func white(...args) {
+    // TODO: implement std.term.white
+    return null
+}
+
+func gray(...args) {
+    // TODO: implement std.term.gray
+    return null
+}
+
+func bold(...args) {
+    // TODO: implement std.term.bold
+    return null
+}
+
+func italic(...args) {
+    // TODO: implement std.term.italic
+    return null
+}
+
+func underline(...args) {
+    // TODO: implement std.term.underline
+    return null
+}
+
+func strikethrough(...args) {
+    // TODO: implement std.term.strikethrough
+    return null
+}
+
+func dim(...args) {
+    // TODO: implement std.term.dim
+    return null
+}
+
+func move_to(...args) {
+    // TODO: implement std.term.move_to
+    return null
+}
+
+func move_up(...args) {
+    // TODO: implement std.term.move_up
+    return null
+}
+
+func move_down(...args) {
+    // TODO: implement std.term.move_down
+    return null
+}
+
+func move_left(...args) {
+    // TODO: implement std.term.move_left
+    return null
+}
+
+func move_right(...args) {
+    // TODO: implement std.term.move_right
+    return null
+}
+
+func save_cursor(...args) {
+    // TODO: implement std.term.save_cursor
+    return null
+}
+
+func restore_cursor(...args) {
+    // TODO: implement std.term.restore_cursor
+    return null
+}
+
+func hide_cursor(...args) {
+    // TODO: implement std.term.hide_cursor
+    return null
+}
+
+func show_cursor(...args) {
+    // TODO: implement std.term.show_cursor
+    return null
+}
+
+func clear_screen(...args) {
+    // TODO: implement std.term.clear_screen
+    return null
+}
+
+func clear_line(...args) {
+    // TODO: implement std.term.clear_line
+    return null
+}
+
+func clear_to_end(...args) {
+    // TODO: implement std.term.clear_to_end
+    return null
+}
+
+func size(...args) {
+    // TODO: implement std.term.size
+    return null
+}
+
+func raw_mode(...args) {
+    // TODO: implement std.term.raw_mode
+    return null
+}
+
+func read_key(...args) {
+    // TODO: implement std.term.read_key
+    return null
+}
+
+func supports_color(...args) {
+    // TODO: implement std.term.supports_color
+    return null
+}
+
+func color_depth(...args) {
+    // TODO: implement std.term.color_depth
+    return null
+}
+
+func progress_bar(...args) {
+    // TODO: implement std.term.progress_bar
+    return null
+}
+
+func spinner(...args) {
+    // TODO: implement std.term.spinner
+    return null
+}

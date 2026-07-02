@@ -1,0 +1,40 @@
+// std.ipc — reference package.
+//
+// This is the community/package home for std.ipc. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func channel(...args) {
+    // TODO: implement std.ipc.channel
+    return null
+}
+
+func send(...args) {
+    // TODO: implement std.ipc.send
+    return null
+}
+
+func recv(...args) {
+    // TODO: implement std.ipc.recv
+    return null
+}
+
+func named_pipe_server(...args) {
+    // TODO: implement std.ipc.named_pipe_server
+    return null
+}
+
+func named_pipe_client(...args) {
+    // TODO: implement std.ipc.named_pipe_client
+    return null
+}
+
+func shared_memory(...args) {
+    // TODO: implement std.ipc.shared_memory
+    return null
+}
+
+func close(...args) {
+    // TODO: implement std.ipc.close
+    return null
+}

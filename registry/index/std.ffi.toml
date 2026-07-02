@@ -1,0 +1,4 @@
+# registry entry for std.ffi
+name = "std.ffi"
+path = "packages/std-ffi"
+version = "0.1.0"

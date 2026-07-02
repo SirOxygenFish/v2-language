@@ -1,0 +1,183 @@
+// Regression tests for core-semantics fixes: error objects/typed catch,
+// static methods, dict destructuring, yield* delegation, Unicode length.
+let passed = 0
+let failed = 0
+func check(name, got, want) {
+    if (str(got) == str(want)) {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        println(f"FAIL: ${name}: got ${got} want ${want}")
+    }
+}
+
+// ---- error objects carry .message; typed catch matches by class ----
+func try_value() {
+    try { throw ValueError("bad value") } catch (e: ValueError) { return e.message }
+}
+check("error .message", try_value(), "bad value")
+
+func try_inheritance() {
+    try { throw ValueError("x") } catch (e: Error) { return "base:" + e.message }
+}
+check("catch base class", try_inheritance(), "base:x")
+
+func try_reraise() {
+    try {
+        try { throw TypeError("t") } catch (e: ValueError) { return "wrong" }
+    } catch (e) { return "outer:" + e.message }
+}
+check("no-match re-raises", try_reraise(), "outer:t")
+
+func try_multi() {
+    try { throw NetworkError("net") }
+    catch (e: ValueError) { return "v" }
+    catch (e: NetworkError) { return "n:" + e.message }
+    catch (e) { return "all" }
+}
+check("multi-catch picks right", try_multi(), "n:net")
+
+// ---- static methods on classes ----
+class MathUtil {
+    static func square(x) { return x * x }
+    static func cube(x) { return x * x * x }
+}
+check("static square", MathUtil.square(6), 36)
+check("static cube", MathUtil.cube(3), 27)
+
+class Point {
+    func init(x, y) {
+        self.x = x
+        self.y = y
+    }
+    static func origin() { return Point(0, 0) }
+}
+check("static factory", Point.origin().x, 0)
+
+// ---- dict destructuring in for-loops and comprehensions ----
+let d = {"a": 1, "b": 2, "c": 3}
+let sum = 0
+for (k, v) in d { sum = sum + v }
+check("dict for (k,v)", sum, 6)
+
+let scores = {"a": 40, "b": 60, "c": 80}
+let filtered = {k: v for (k, v) in scores if v >= 50}
+check("dict comprehension", filtered.len(), 2)
+
+// ---- single-paren tuple destructure in for-loops ----
+let pairs = [(1, 10), (2, 20)]
+let total = 0
+for (a, b) in pairs { total = total + a + b }
+check("for (a,b) tuple", total, 33)
+
+let names = ["x", "y", "z"]
+let joined = ""
+for (i, name) in names.enumerate() { joined = joined + str(i) + name }
+check("for enumerate", joined, "0x1y2z")
+
+// ---- generator yield* delegation ----
+func* inner() {
+    yield 1
+    yield 2
+}
+func* outer() {
+    yield 0
+    yield* inner()
+    yield 3
+}
+check("yield* delegation", outer().collect(), "[0, 1, 2, 3]")
+
+// ---- Unicode string length (code points, not bytes) ----
+check("unicode len", "héllo".len(), 5)
+check("byte_len", "héllo".byte_len(), 6)
+check("ascii len", "hello".len(), 5)
+
+// ---- && and || logical operators ----
+check("logical and true", true && true, true)
+check("logical and false", true && false, false)
+check("logical or", false || true, true)
+check("mixed logical", 5 > 0 && 5 < 10, true)
+let sc_called = false
+func sc_side() {
+    sc_called = true
+    return true
+}
+let sc = false && sc_side()
+check("short-circuit &&", sc_called, false)
+
+// ---- chained if let ... && let ... ----
+func chained_ok() {
+    if let Some(x) = Some(1) && let Some(y) = Some(2) {
+        return x + y
+    } else {
+        return -1
+    }
+}
+check("chained if-let match", chained_ok(), 3)
+
+func chained_fail() {
+    if let Some(x) = Some(1) && let Some(y) = None {
+        return x
+    } else {
+        return -1
+    }
+}
+check("chained if-let fail", chained_fail(), -1)
+
+func chained_cond() {
+    if let Some(x) = Some(5) && x > 3 {
+        return "big"
+    } else {
+        return "small"
+    }
+}
+check("chained if-let cond", chained_cond(), "big")
+
+// ---- async generators + for await + comprehension over generator ----
+func* count_gen() {
+    yield 1
+    yield 2
+    yield 3
+}
+check("comprehension over gen", [x * 10 for x in count_gen()], "[10, 20, 30]")
+
+async func* astream() {
+    yield 5
+    yield 15
+}
+async func consume() {
+    let total = 0
+    for await (v in astream()) {
+        total = total + v
+    }
+    return total
+}
+check("for await", await consume(), 20)
+
+// ---- dict destructuring with ?? defaults ----
+let cfg = {"name": "app"}
+let {name, port ?? 8080} = cfg
+check("destructure name", name, "app")
+check("destructure default missing", port, 8080)
+let cfg2 = {"host": "h", "port": 3000}
+let {host, port ?? 8080} = cfg2
+check("destructure default present", port, 3000)
+
+// ---- block-if expression (documented form) ----
+let score = 85
+let grade = {
+    if (score >= 90) { "A" }
+    elif (score >= 80) { "B" }
+    else { "C" }
+}
+check("block-if expression", grade, "B")
+
+// ---- range methods ----
+check("range collect", (1..=5).collect(), "[1, 2, 3, 4, 5]")
+check("range sum", (1..=10).sum(), 55)
+
+// ---- .sorted() non-mutating ----
+check("sorted method", [3, 1, 2].sorted(), "[1, 2, 3]")
+
+println(f"semantics: ${passed} passed, ${failed} failed")
+assert_eq(failed, 0)

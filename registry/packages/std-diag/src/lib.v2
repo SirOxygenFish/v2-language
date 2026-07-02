@@ -1,0 +1,45 @@
+// std.diag — reference package.
+//
+// This is the community/package home for std.diag. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func trace(...args) {
+    // TODO: implement std.diag.trace
+    return null
+}
+
+func span(...args) {
+    // TODO: implement std.diag.span
+    return null
+}
+
+func metric(...args) {
+    // TODO: implement std.diag.metric
+    return null
+}
+
+func counter(...args) {
+    // TODO: implement std.diag.counter
+    return null
+}
+
+func histogram(...args) {
+    // TODO: implement std.diag.histogram
+    return null
+}
+
+func gauge(...args) {
+    // TODO: implement std.diag.gauge
+    return null
+}
+
+func health_check(...args) {
+    // TODO: implement std.diag.health_check
+    return null
+}
+
+func export(...args) {
+    // TODO: implement std.diag.export
+    return null
+}

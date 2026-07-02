@@ -1,0 +1,55 @@
+// ── Batch 15 Tests ─────────────────────────────────────
+let passed = 0
+let failed = 0
+
+func assert_eq(a, b, msg) {
+    if (a == b) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg} | expected ${b}, got ${a}")
+        failed += 1
+    }
+}
+
+func assert_err(fn_to_call, msg) {
+    try {
+        fn_to_call()
+        println(f"FAIL: ${msg} | expected error")
+        failed += 1
+    } catch (e) {
+        passed += 1
+    }
+}
+
+// ── 1. Expression-style macro ──────────────────────────
+macro max2!(a, b) {
+    a > b ? a : b
+}
+
+let m = max2!(10, 20)
+assert_eq(m, 20, "macros: expression body returns final value")
+
+// ── 2. Block-style macro ───────────────────────────────
+macro debug!(expr) {
+    print(expr)
+    expr
+}
+
+let x = debug!(42)
+assert_eq(x, 42, "macros: block body can return last expression")
+
+// ── 3. Assert macro ────────────────────────────────────
+macro assert_macro!(condition, message) {
+    if (!condition) {
+        throw message
+    }
+}
+
+assert_macro!(true, "should not fail")
+assert_eq(1, 1, "macros: assert macro passes when true")
+assert_err(lambda() {
+    assert_macro!(false, "x must be positive")
+}, "macros: assert macro throws when false")
+
+// ── Summary ────────────────────────────────────────────
+println(f"Batch 15: ${passed} passed, ${failed} failed")

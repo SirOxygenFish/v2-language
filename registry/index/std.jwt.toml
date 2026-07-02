@@ -1,0 +1,4 @@
+# registry entry for std.jwt
+name = "std.jwt"
+path = "packages/std-jwt"
+version = "0.1.0"

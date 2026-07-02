@@ -1,0 +1,8 @@
+[project]
+name       = "std.bluetooth"
+version    = "0.1.0"
+entry      = "src/lib.v2"
+description = "Reference package for std.bluetooth (community-maintainable)."
+license    = "MIT"
+
+[dependencies]

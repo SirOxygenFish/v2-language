@@ -1,0 +1,4 @@
+# registry entry for std.ui
+name = "std.ui"
+path = "packages/std-ui"
+version = "0.1.0"

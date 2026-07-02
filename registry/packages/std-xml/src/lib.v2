@@ -1,0 +1,35 @@
+// std.xml — reference package.
+//
+// This is the community/package home for std.xml. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func parse(...args) {
+    // TODO: implement std.xml.parse
+    return null
+}
+
+func parse_html(...args) {
+    // TODO: implement std.xml.parse_html
+    return null
+}
+
+func parse_file(...args) {
+    // TODO: implement std.xml.parse_file
+    return null
+}
+
+func parse_html_file(...args) {
+    // TODO: implement std.xml.parse_html_file
+    return null
+}
+
+func element(...args) {
+    // TODO: implement std.xml.element
+    return null
+}
+
+func stringify(...args) {
+    // TODO: implement std.xml.stringify
+    return null
+}

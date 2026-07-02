@@ -1,0 +1,4 @@
+# registry entry for std.qr
+name = "std.qr"
+path = "packages/std-qr"
+version = "0.1.0"

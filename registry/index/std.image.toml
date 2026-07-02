@@ -1,0 +1,4 @@
+# registry entry for std.image
+name = "std.image"
+path = "packages/std-image"
+version = "0.1.0"

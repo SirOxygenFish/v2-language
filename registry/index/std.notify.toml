@@ -1,0 +1,4 @@
+# registry entry for std.notify
+name = "std.notify"
+path = "packages/std-notify"
+version = "0.1.0"

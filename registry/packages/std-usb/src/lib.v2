@@ -1,0 +1,40 @@
+// std.usb — reference package.
+//
+// This is the community/package home for std.usb. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func list_devices(...args) {
+    // TODO: implement std.usb.list_devices
+    return null
+}
+
+func open(...args) {
+    // TODO: implement std.usb.open
+    return null
+}
+
+func close(...args) {
+    // TODO: implement std.usb.close
+    return null
+}
+
+func read(...args) {
+    // TODO: implement std.usb.read
+    return null
+}
+
+func write(...args) {
+    // TODO: implement std.usb.write
+    return null
+}
+
+func claim_interface(...args) {
+    // TODO: implement std.usb.claim_interface
+    return null
+}
+
+func release_interface(...args) {
+    // TODO: implement std.usb.release_interface
+    return null
+}

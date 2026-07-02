@@ -1,0 +1,4 @@
+# registry entry for std.multipart
+name = "std.multipart"
+path = "packages/std-multipart"
+version = "0.1.0"

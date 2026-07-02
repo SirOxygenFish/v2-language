@@ -1,0 +1,4 @@
+# registry entry for std.accessibility
+name = "std.accessibility"
+path = "packages/std-accessibility"
+version = "0.1.0"

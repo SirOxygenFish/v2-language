@@ -1,0 +1,4 @@
+# registry entry for std.pdf
+name = "std.pdf"
+path = "packages/std-pdf"
+version = "0.1.0"

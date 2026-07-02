@@ -1,0 +1,4 @@
+# registry entry for std.excel
+name = "std.excel"
+path = "packages/std-excel"
+version = "0.1.0"

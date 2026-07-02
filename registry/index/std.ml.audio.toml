@@ -1,0 +1,4 @@
+# registry entry for std.ml.audio
+name = "std.ml.audio"
+path = "packages/std-ml_audio"
+version = "0.1.0"

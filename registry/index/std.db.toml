@@ -1,0 +1,4 @@
+# registry entry for std.db
+name = "std.db"
+path = "packages/std-db"
+version = "0.1.0"

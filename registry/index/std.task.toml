@@ -1,0 +1,4 @@
+# registry entry for std.task
+name = "std.task"
+path = "packages/std-task"
+version = "0.1.0"

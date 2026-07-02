@@ -1,0 +1,1398 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>___V2_DOC_TITLE___ | V2 Language</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80' font-family='sans-serif' font-weight='bold' fill='%236366f1'>V2</text></svg>"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --bg: #ffffff;
+        --surface: #f6f8fa;
+        --surface-2: #eaeef2;
+        --border: #d8dee4;
+        --text: #1f2328;
+        --text-muted: #656d76;
+        --text-faint: #8c959f;
+        --accent: #4f46e5;
+        --accent-hover: #4338ca;
+        --accent-bg: rgba(79, 70, 229, 0.08);
+        --code-bg: #f6f8fa;
+        --code-border: #d8dee4;
+        --header-bg: rgba(255, 255, 255, 0.82);
+        --sidebar-bg: #ffffff;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+        --radius: 8px;
+        --radius-sm: 5px;
+        --hk: #cf222e;
+        --hs: #0a3069;
+        --hn: #0550ae;
+        --hc: #6e7781;
+        --hf: #8250df;
+        --hv: #953800;
+        --ht: #116329;
+        --ho: #cf222e;
+        --hb: #953800;
+        --scrollbar: #d0d7de;
+        --scrollbar-hover: #afb8c1;
+      }
+      [data-theme="dark"] {
+        --bg: #0d1117;
+        --surface: #161b22;
+        --surface-2: #1c2128;
+        --border: #30363d;
+        --text: #e6edf3;
+        --text-muted: #8b949e;
+        --text-faint: #6e7681;
+        --accent: #818cf8;
+        --accent-hover: #a5b4fc;
+        --accent-bg: rgba(129, 140, 248, 0.1);
+        --code-bg: #161b22;
+        --code-border: #30363d;
+        --header-bg: rgba(1, 4, 9, 0.82);
+        --sidebar-bg: #010409;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+        --hk: #ff7b72;
+        --hs: #a5d6ff;
+        --hn: #79c0ff;
+        --hc: #8b949e;
+        --hf: #d2a8ff;
+        --hv: #ffa657;
+        --ht: #7ee787;
+        --ho: #ff7b72;
+        --hb: #ffa657;
+        --scrollbar: #30363d;
+        --scrollbar-hover: #484f58;
+      }
+      html {
+        scroll-behavior: smooth;
+        font-size: 16px;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica,
+          Arial, sans-serif;
+        color: var(--text);
+        background: var(--bg);
+        line-height: 1.6;
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        grid-template-rows: 60px 1fr;
+        grid-template-areas: "header header" "sidebar main";
+        height: 100vh;
+        overflow: hidden;
+        transition:
+          background 0.2s,
+          color 0.2s;
+      }
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--scrollbar);
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--scrollbar-hover);
+      }
+
+      /* ── Header ──────────────────────────────── */
+      .header {
+        grid-area: header;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 0 20px;
+        background: var(--header-bg);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border);
+        z-index: 100;
+        position: sticky;
+        top: 0;
+      }
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+      .sidebar-toggle {
+        display: none;
+        background: none;
+        border: none;
+        color: var(--text);
+        font-size: 22px;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: var(--radius-sm);
+      }
+      .sidebar-toggle:hover {
+        background: var(--surface);
+      }
+      .logo {
+        font-size: 20px;
+        font-weight: 800;
+        color: var(--accent);
+        text-decoration: none;
+        letter-spacing: -0.5px;
+        padding: 4px 10px;
+        border-radius: var(--radius-sm);
+        background: var(--accent-bg);
+        white-space: nowrap;
+      }
+      .doc-badge {
+        font-size: 13px;
+        color: var(--text-muted);
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .header-center {
+        flex: 1;
+        display: flex;
+        justify-content: center;
+        max-width: 560px;
+        margin: 0 auto;
+      }
+      .search-box {
+        position: relative;
+        width: 100%;
+        max-width: 480px;
+      }
+      .search-box input {
+        width: 100%;
+        padding: 8px 14px 8px 38px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--text);
+        font-size: 14px;
+        outline: none;
+        transition:
+          border 0.15s,
+          box-shadow 0.15s;
+      }
+      .search-box input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-bg);
+      }
+      .search-box input::placeholder {
+        color: var(--text-faint);
+      }
+      .search-box .search-icon {
+        position: absolute;
+        left: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 16px;
+        height: 16px;
+        color: var(--text-faint);
+        pointer-events: none;
+      }
+      .search-box kbd {
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 11px;
+        padding: 2px 6px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--text-faint);
+        background: var(--bg);
+        font-family: inherit;
+        line-height: 1;
+        pointer-events: none;
+      }
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .theme-btn {
+        background: none;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        width: 36px;
+        height: 36px;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s;
+      }
+      .theme-btn:hover {
+        background: var(--surface);
+        color: var(--text);
+        border-color: var(--text-muted);
+      }
+      .theme-btn svg {
+        width: 18px;
+        height: 18px;
+      }
+      [data-theme="dark"] .sun-icon {
+        display: block;
+      }
+      [data-theme="dark"] .moon-icon {
+        display: none;
+      }
+      [data-theme="light"] .sun-icon,
+      [data-theme=""] .sun-icon {
+        display: none;
+      }
+      [data-theme="light"] .moon-icon,
+      [data-theme=""] .moon-icon {
+        display: block;
+      }
+
+      /* ── Search Results ──────────────────────── */
+      .search-results {
+        position: fixed;
+        top: 60px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 90%;
+        max-width: 640px;
+        max-height: 70vh;
+        overflow-y: auto;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow-lg);
+        z-index: 200;
+        display: none;
+      }
+      .search-results.active {
+        display: block;
+      }
+      .sr-item {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+      .sr-item:last-child {
+        border-bottom: none;
+      }
+      .sr-item:hover,
+      .sr-item.selected {
+        background: var(--accent-bg);
+      }
+      .sr-item-title {
+        font-weight: 600;
+        font-size: 14px;
+        margin-bottom: 2px;
+      }
+      .sr-item-context {
+        font-size: 13px;
+        color: var(--text-muted);
+        line-height: 1.4;
+      }
+      .sr-item-context mark {
+        background: rgba(250, 204, 21, 0.35);
+        color: inherit;
+        border-radius: 2px;
+        padding: 0 1px;
+      }
+      .sr-empty {
+        padding: 24px 16px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+      .search-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 150;
+        display: none;
+      }
+      .search-overlay.active {
+        display: block;
+      }
+
+      /* ── Sidebar ─────────────────────────────── */
+      .sidebar {
+        grid-area: sidebar;
+        overflow-y: auto;
+        padding: 16px 0;
+        background: var(--sidebar-bg);
+        border-right: 1px solid var(--border);
+        position: sticky;
+        top: 60px;
+        height: calc(100vh - 60px);
+      }
+      .toc {
+        padding: 0 12px;
+      }
+      .toc-section {
+        margin-bottom: 4px;
+      }
+      .toc-h2 {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        text-decoration: none;
+        transition: background 0.1s;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+      .toc-h2:hover {
+        background: var(--surface);
+      }
+      .toc-h2.active {
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      .toc-children {
+        overflow: hidden;
+        transition: max-height 0.25s ease;
+        max-height: 0;
+      }
+      .toc-section.open .toc-children {
+        max-height: 2000px;
+      }
+      .toc-h3 {
+        display: block;
+        padding: 4px 10px 4px 28px;
+        font-size: 12.5px;
+        color: var(--text-muted);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        text-decoration: none;
+        transition: all 0.1s;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+      .toc-h3:hover {
+        background: var(--surface);
+        color: var(--text);
+      }
+      .toc-h3.active {
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      .toc-arrow {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        transition: transform 0.2s;
+        color: var(--text-faint);
+      }
+      .toc-section.open .toc-arrow {
+        transform: rotate(90deg);
+      }
+
+      /* ── Main Content ────────────────────────── */
+      .main {
+        grid-area: main;
+        overflow-y: auto;
+        padding: 32px 40px 80px;
+        scroll-behavior: smooth;
+        position: relative;
+      }
+      .content {
+        max-width: 880px;
+        margin: 0 auto;
+      }
+
+      /* ── Typography ──────────────────────────── */
+      .content h1 {
+        font-size: 2em;
+        font-weight: 700;
+        margin: 0 0 16px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .content h2 {
+        font-size: 1.5em;
+        font-weight: 600;
+        margin: 40px 0 16px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .content h3 {
+        font-size: 1.25em;
+        font-weight: 600;
+        margin: 32px 0 12px;
+      }
+      .content h4 {
+        font-size: 1em;
+        font-weight: 600;
+        margin: 24px 0 8px;
+      }
+      .content h5,
+      .content h6 {
+        font-size: 0.9em;
+        font-weight: 600;
+        margin: 20px 0 8px;
+        color: var(--text-muted);
+      }
+      .content h1:first-child {
+        margin-top: 0;
+      }
+      .content p {
+        margin: 0 0 16px;
+      }
+      .content a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .content a:hover {
+        text-decoration: underline;
+      }
+      .content strong {
+        font-weight: 600;
+      }
+      .content img {
+        max-width: 100%;
+        border-radius: var(--radius);
+      }
+      .content hr {
+        border: none;
+        border-top: 2px solid var(--border);
+        margin: 32px 0;
+      }
+      .content ul,
+      .content ol {
+        margin: 0 0 16px;
+        padding-left: 24px;
+      }
+      .content li {
+        margin-bottom: 4px;
+      }
+      .content li > ul,
+      .content li > ol {
+        margin: 4px 0 0;
+      }
+      .content blockquote {
+        border-left: 3px solid var(--accent);
+        padding: 8px 16px;
+        margin: 0 0 16px;
+        background: var(--accent-bg);
+        border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        color: var(--text-muted);
+      }
+      .content blockquote p:last-child {
+        margin-bottom: 0;
+      }
+
+      /* ── Inline Code ─────────────────────────── */
+      .content code:not(pre code) {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.88em;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: var(--surface-2);
+        border: 1px solid var(--code-border);
+        word-break: break-word;
+      }
+
+      /* ── Code Blocks ─────────────────────────── */
+      .content pre {
+        position: relative;
+        margin: 0 0 16px;
+        border-radius: var(--radius);
+        border: 1px solid var(--code-border);
+        overflow: hidden;
+      }
+      .content pre code {
+        display: block;
+        padding: 16px 20px;
+        overflow-x: auto;
+        font-size: 13.5px;
+        line-height: 1.55;
+        background: var(--code-bg);
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        tab-size: 4;
+      }
+      .code-lang {
+        position: absolute;
+        top: 6px;
+        right: 46px;
+        font-size: 11px;
+        color: var(--text-faint);
+        pointer-events: none;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .copy-btn {
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        padding: 4px 8px;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        font-size: 12px;
+        opacity: 0;
+        transition: opacity 0.15s;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .content pre:hover .copy-btn {
+        opacity: 1;
+      }
+      .copy-btn:hover {
+        background: var(--accent-bg);
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .copy-btn.copied {
+        color: var(--ht);
+        border-color: var(--ht);
+      }
+
+      /* ── Tables ──────────────────────────────── */
+      .content table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 0 16px;
+        font-size: 14px;
+        overflow: hidden;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        display: block;
+        overflow-x: auto;
+      }
+      .content thead {
+        background: var(--surface);
+      }
+      .content th {
+        padding: 10px 14px;
+        text-align: left;
+        font-weight: 600;
+        border-bottom: 2px solid var(--border);
+      }
+      .content td {
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .content tbody tr:hover {
+        background: var(--surface);
+      }
+
+      /* ── Heading Anchors ─────────────────────── */
+      .heading-anchor {
+        color: var(--text-faint);
+        text-decoration: none;
+        margin-left: 8px;
+        opacity: 0;
+        transition: opacity 0.15s;
+        font-weight: 400;
+      }
+      .content h1:hover .heading-anchor,
+      .content h2:hover .heading-anchor,
+      .content h3:hover .heading-anchor,
+      .content h4:hover .heading-anchor {
+        opacity: 1;
+      }
+      .heading-anchor:hover {
+        color: var(--accent);
+      }
+
+      /* ── Back to Top ─────────────────────────── */
+      .back-to-top {
+        position: fixed;
+        bottom: 28px;
+        right: 28px;
+        width: 42px;
+        height: 42px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: var(--shadow);
+        opacity: 0;
+        transform: translateY(12px);
+        transition: all 0.2s;
+        color: var(--text-muted);
+        z-index: 50;
+      }
+      .back-to-top.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .back-to-top:hover {
+        background: var(--accent-bg);
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .back-to-top svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      /* ── Syntax Highlighting ─────────────────── */
+      .hljs {
+        background: transparent !important;
+      }
+      .hljs-keyword,
+      .hljs-selector-tag {
+        color: var(--hk);
+      }
+      .hljs-string,
+      .hljs-doctag,
+      .hljs-template-tag,
+      .hljs-template-variable {
+        color: var(--hs);
+      }
+      .hljs-number,
+      .hljs-literal {
+        color: var(--hn);
+      }
+      .hljs-comment {
+        color: var(--hc);
+        font-style: italic;
+      }
+      .hljs-function .hljs-title,
+      .hljs-title.function_ {
+        color: var(--hf);
+      }
+      .hljs-variable,
+      .hljs-attr {
+        color: var(--hv);
+      }
+      .hljs-type,
+      .hljs-title.class_ {
+        color: var(--ht);
+      }
+      .hljs-operator,
+      .hljs-punctuation {
+        color: var(--ho);
+      }
+      .hljs-built_in,
+      .hljs-builtin-name {
+        color: var(--hb);
+      }
+      .hljs-meta,
+      .hljs-meta .hljs-keyword {
+        color: var(--hf);
+      }
+      .hljs-params {
+        color: var(--text);
+      }
+      .hljs-symbol,
+      .hljs-bullet {
+        color: var(--hn);
+      }
+      .hljs-section {
+        color: var(--hk);
+        font-weight: 600;
+      }
+      .hljs-addition {
+        color: var(--ht);
+        background: rgba(46, 160, 67, 0.15);
+      }
+      .hljs-deletion {
+        color: var(--hk);
+        background: rgba(248, 81, 73, 0.15);
+      }
+
+      /* ── Loading ─────────────────────────────── */
+      .loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 60vh;
+        gap: 16px;
+        color: var(--text-muted);
+      }
+      .spinner {
+        width: 36px;
+        height: 36px;
+        border: 3px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ── Responsive ──────────────────────────── */
+      @media (max-width: 1024px) {
+        body {
+          grid-template-columns: 1fr;
+        }
+        .sidebar {
+          position: fixed;
+          left: -300px;
+          top: 60px;
+          bottom: 0;
+          width: 280px;
+          z-index: 90;
+          transition: left 0.25s ease;
+          box-shadow: none;
+        }
+        .sidebar.open {
+          left: 0;
+          box-shadow: var(--shadow-lg);
+        }
+        .sidebar-toggle {
+          display: flex;
+        }
+        .main {
+          padding: 24px 20px 80px;
+        }
+      }
+      @media (max-width: 640px) {
+        .header-center {
+          display: none;
+        }
+        .doc-badge {
+          display: none;
+        }
+        .main {
+          padding: 16px 14px 80px;
+        }
+        .content pre code {
+          font-size: 12.5px;
+          padding: 12px 14px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <button
+          class="sidebar-toggle"
+          id="sidebar-toggle"
+          aria-label="Toggle sidebar"
+        >
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M3 12h18M3 6h18M3 18h18" />
+          </svg>
+        </button>
+        <a class="logo" href="#">V2</a>
+        <span class="doc-badge">___V2_DOC_TITLE___</span>
+      </div>
+      <div class="header-center">
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 16 16" fill="currentColor">
+            <path
+              d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm-.82 4.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04Z"
+            />
+          </svg>
+          <input
+            type="text"
+            id="search-input"
+            placeholder="Search docs..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <kbd>/</kbd>
+        </div>
+      </div>
+      <div class="header-right">
+        <button
+          class="theme-btn"
+          id="theme-toggle"
+          title="Toggle theme"
+          aria-label="Toggle theme"
+        >
+          <svg
+            class="sun-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <circle cx="12" cy="12" r="5" />
+            <path
+              d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+            />
+          </svg>
+          <svg
+            class="moon-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Search overlay (click to close) -->
+    <div class="search-overlay" id="search-overlay"></div>
+    <!-- Search results -->
+    <div class="search-results" id="search-results"></div>
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <nav class="toc" id="toc"></nav>
+    </aside>
+
+    <!-- Main -->
+    <main class="main" id="main">
+      <article class="content" id="content">
+        <div class="loading">
+          <div class="spinner"></div>
+          <span>Rendering docs...</span>
+        </div>
+      </article>
+    </main>
+
+    <!-- Back to top -->
+    <button
+      class="back-to-top"
+      id="back-to-top"
+      title="Back to top"
+      aria-label="Back to top"
+    >
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path d="M18 15l-6-6-6 6" />
+      </svg>
+    </button>
+
+    <!-- Markdown source -->
+    <textarea id="md-src" style="display: none">___V2_DOC_CONTENT___</textarea>
+
+    <!-- Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+    <script>
+      (function () {
+        "use strict";
+
+        // ── Theme ────────────────────────────────────────────
+        function getPreferredTheme() {
+          try {
+            var s = localStorage.getItem("v2-docs-theme");
+            if (s) return s;
+          } catch (e) {}
+          return window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light"
+            : "dark";
+        }
+        function setTheme(t) {
+          document.documentElement.setAttribute("data-theme", t);
+          try {
+            localStorage.setItem("v2-docs-theme", t);
+          } catch (e) {}
+        }
+        setTheme(getPreferredTheme());
+        document
+          .getElementById("theme-toggle")
+          .addEventListener("click", function () {
+            setTheme(
+              document.documentElement.getAttribute("data-theme") === "dark"
+                ? "light"
+                : "dark",
+            );
+          });
+
+        // ── Register V2 language ─────────────────────────────
+        if (typeof hljs !== "undefined") {
+          hljs.registerLanguage("v2", function (hljs) {
+            return {
+              name: "V2",
+              aliases: ["v2"],
+              keywords: {
+                keyword:
+                  "func let const if else for while match case return break continue import from " +
+                  "class struct enum trait impl self super new null true false try catch throw async await " +
+                  "yield defer goto label unsafe comptime test bench pub internal fixed data sealed cow " +
+                  "actor agent isolate using in not and or is as type_alias newtype union never pure effect " +
+                  "where with do lambda mut ref move channel select spawn",
+                type:
+                  "int float str bool list dict tuple set Option Result Some None Ok Err Range Deque " +
+                  "Sendable Clone Display Default Hash Eq Ord",
+                built_in:
+                  "print println input len type_of to_string to_int to_float range abs min max " +
+                  "push pop keys values contains remove split join trim replace starts_with ends_with " +
+                  "map filter reduce sort reverse assert assert_eq panic exit freeze is_frozen callable " +
+                  "chr ord hex bin oct round floor ceil sqrt pow log sin cos tan",
+                literal: "true false null",
+              },
+              contains: [
+                hljs.COMMENT("/\\*", "\\*/"),
+                hljs.COMMENT("//", "$"),
+                {
+                  className: "string",
+                  begin: 'f"',
+                  end: '"',
+                  contains: [
+                    {
+                      begin: "\\$\\{",
+                      end: "\\}",
+                      className: "subst",
+                      contains: [hljs.NUMBER_MODE],
+                    },
+                    hljs.BACKSLASH_ESCAPE,
+                  ],
+                },
+                hljs.QUOTE_STRING_MODE,
+                hljs.NUMBER_MODE,
+                {
+                  className: "function",
+                  beginKeywords: "func",
+                  end: "[\\{(]",
+                  excludeEnd: true,
+                  contains: [{ className: "title", begin: hljs.IDENT_RE }],
+                },
+                {
+                  className: "class",
+                  beginKeywords: "class struct enum trait actor agent",
+                  end: "[\\{]",
+                  excludeEnd: true,
+                  contains: [{ className: "title", begin: hljs.IDENT_RE }],
+                },
+                { className: "meta", begin: "@\\w+" },
+                { className: "symbol", begin: "#\\w+" },
+                { className: "operator", begin: "\\|>" },
+              ],
+            };
+          });
+        }
+
+        // ── Render Markdown ──────────────────────────────────
+        var mdSrc = document.getElementById("md-src").value;
+        var contentEl = document.getElementById("content");
+
+        function renderMarkdown() {
+          if (typeof marked === "undefined") {
+            // Fallback: show raw markdown
+            var pre = document.createElement("pre");
+            pre.style.whiteSpace = "pre-wrap";
+            pre.style.wordBreak = "break-word";
+            pre.style.padding = "20px";
+            pre.textContent = mdSrc;
+            contentEl.innerHTML = "";
+            contentEl.appendChild(pre);
+            return;
+          }
+
+          // Generate heading IDs
+          var headingCount = {};
+          var renderer = new marked.Renderer();
+          renderer.heading = function (text, level) {
+            // marked v12: text might be an object with .text property
+            var raw =
+              typeof text === "object" && text.text ? text.text : String(text);
+            var depth =
+              typeof text === "object" && text.depth ? text.depth : level;
+            var clean = raw.replace(/<[^>]+>/g, "");
+            var slug = clean
+              .toLowerCase()
+              .replace(/[^\w\s-]/g, "")
+              .replace(/\s+/g, "-")
+              .replace(/-+/g, "-")
+              .replace(/^-|-$/g, "");
+            if (!slug) slug = "section";
+            if (headingCount[slug]) {
+              slug += "-" + headingCount[slug];
+              headingCount[slug]++;
+            } else {
+              headingCount[slug] = 1;
+            }
+            return (
+              "<h" +
+              depth +
+              ' id="' +
+              slug +
+              '">' +
+              raw +
+              '<a class="heading-anchor" href="#' +
+              slug +
+              '" aria-hidden="true">#</a></h' +
+              depth +
+              ">"
+            );
+          };
+
+          marked.setOptions({ renderer: renderer, gfm: true, breaks: false });
+
+          contentEl.innerHTML = marked.parse(mdSrc);
+
+          // Highlight code blocks
+          if (typeof hljs !== "undefined") {
+            contentEl.querySelectorAll("pre code").forEach(function (block) {
+              hljs.highlightElement(block);
+            });
+          }
+
+          // Add copy buttons and language labels to code blocks
+          contentEl.querySelectorAll("pre").forEach(function (pre) {
+            var code = pre.querySelector("code");
+            if (!code) return;
+            var lang = "";
+            (code.className || "").split(/\s+/).forEach(function (cls) {
+              if (cls.startsWith("language-"))
+                lang = cls.replace("language-", "");
+            });
+            if (lang) {
+              var label = document.createElement("span");
+              label.className = "code-lang";
+              label.textContent = lang;
+              pre.appendChild(label);
+            }
+            var btn = document.createElement("button");
+            btn.className = "copy-btn";
+            btn.innerHTML =
+              '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy';
+            btn.addEventListener("click", function () {
+              navigator.clipboard.writeText(code.textContent).then(function () {
+                btn.innerHTML =
+                  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>Copied!';
+                btn.classList.add("copied");
+                setTimeout(function () {
+                  btn.innerHTML =
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy';
+                  btn.classList.remove("copied");
+                }, 2000);
+              });
+            });
+            pre.appendChild(btn);
+          });
+        }
+
+        renderMarkdown();
+
+        // ── Build TOC ────────────────────────────────────────
+        var tocEl = document.getElementById("toc");
+        function buildTOC() {
+          var headings = contentEl.querySelectorAll("h2, h3");
+          var currentSection = null;
+          var currentChildren = null;
+          headings.forEach(function (h) {
+            if (h.tagName === "H2") {
+              var section = document.createElement("div");
+              section.className = "toc-section";
+              var link = document.createElement("a");
+              link.className = "toc-h2";
+              link.href = "#" + h.id;
+              link.innerHTML =
+                '<svg class="toc-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg>' +
+                "<span>" +
+                h.textContent.replace(/#$/, "").trim() +
+                "</span>";
+              section.appendChild(link);
+              var children = document.createElement("div");
+              children.className = "toc-children";
+              section.appendChild(children);
+              tocEl.appendChild(section);
+              currentSection = section;
+              currentChildren = children;
+
+              // Toggle collapse
+              link.addEventListener("click", function (e) {
+                e.preventDefault();
+                section.classList.toggle("open");
+                document
+                  .getElementById(h.id)
+                  .scrollIntoView({ behavior: "smooth", block: "start" });
+              });
+            } else if (h.tagName === "H3" && currentChildren) {
+              var link3 = document.createElement("a");
+              link3.className = "toc-h3";
+              link3.href = "#" + h.id;
+              link3.textContent = h.textContent.replace(/#$/, "").trim();
+              link3.addEventListener("click", function (e) {
+                e.preventDefault();
+                document
+                  .getElementById(h.id)
+                  .scrollIntoView({ behavior: "smooth", block: "start" });
+              });
+              currentChildren.appendChild(link3);
+            }
+          });
+        }
+        buildTOC();
+
+        // ── Scroll Spy ───────────────────────────────────────
+        var mainEl = document.getElementById("main");
+        function updateScrollSpy() {
+          var headings = contentEl.querySelectorAll("h2, h3");
+          var active = null;
+          var scrollTop = mainEl.scrollTop + 80;
+          headings.forEach(function (h) {
+            if (h.offsetTop <= scrollTop) active = h;
+          });
+          if (!active) return;
+          // Clear active states
+          tocEl.querySelectorAll(".toc-h2, .toc-h3").forEach(function (a) {
+            a.classList.remove("active");
+          });
+          // Set active
+          var target = tocEl.querySelector(
+            'a[href="#' + CSS.escape(active.id) + '"]',
+          );
+          if (target) {
+            target.classList.add("active");
+            // Open parent section
+            var section = target.closest(".toc-section");
+            if (section && !section.classList.contains("open"))
+              section.classList.add("open");
+            // Scroll TOC to show active item
+            target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          }
+        }
+        var spyTimer;
+        mainEl.addEventListener("scroll", function () {
+          clearTimeout(spyTimer);
+          spyTimer = setTimeout(updateScrollSpy, 60);
+        });
+        setTimeout(updateScrollSpy, 100);
+
+        // ── Search ───────────────────────────────────────────
+        var searchInput = document.getElementById("search-input");
+        var searchResults = document.getElementById("search-results");
+        var searchOverlay = document.getElementById("search-overlay");
+        var searchIndex = [];
+        var selectedResult = -1;
+
+        // Build search index
+        function buildSearchIndex() {
+          var sections = [];
+          var headings = contentEl.querySelectorAll("h1, h2, h3, h4");
+          headings.forEach(function (h, i) {
+            var text = "";
+            var el = h.nextElementSibling;
+            var nextHeading = headings[i + 1];
+            while (el && el !== nextHeading) {
+              text += " " + el.textContent;
+              el = el.nextElementSibling;
+            }
+            sections.push({
+              title: h.textContent.replace(/#$/, "").trim(),
+              text: text.trim(),
+              id: h.id,
+              level: parseInt(h.tagName[1]),
+            });
+          });
+          searchIndex = sections;
+        }
+        buildSearchIndex();
+
+        function escapeHtml(s) {
+          return s
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+        }
+
+        function getSnippet(text, query, len) {
+          var lower = text.toLowerCase();
+          var idx = lower.indexOf(query.toLowerCase());
+          if (idx === -1)
+            return text.slice(0, len) + (text.length > len ? "..." : "");
+          var start = Math.max(0, idx - 40);
+          var end = Math.min(text.length, idx + query.length + 60);
+          var snippet =
+            (start > 0 ? "..." : "") +
+            text.slice(start, end) +
+            (end < text.length ? "..." : "");
+          // Highlight match
+          var re = new RegExp(
+            "(" + query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")",
+            "gi",
+          );
+          return escapeHtml(snippet).replace(re, "<mark>$1</mark>");
+        }
+
+        function doSearch(query) {
+          if (!query || query.length < 2) {
+            searchResults.classList.remove("active");
+            searchOverlay.classList.remove("active");
+            return;
+          }
+          var q = query.toLowerCase();
+          var results = searchIndex
+            .filter(function (s) {
+              return (
+                s.title.toLowerCase().indexOf(q) !== -1 ||
+                s.text.toLowerCase().indexOf(q) !== -1
+              );
+            })
+            .slice(0, 25);
+
+          if (results.length === 0) {
+            searchResults.innerHTML =
+              '<div class="sr-empty">No results for "' +
+              escapeHtml(query) +
+              '"</div>';
+          } else {
+            searchResults.innerHTML = results
+              .map(function (r, i) {
+                var snippet =
+                  r.title.toLowerCase().indexOf(q) !== -1
+                    ? getSnippet(r.text, query, 100)
+                    : getSnippet(r.text, query, 100);
+                return (
+                  '<div class="sr-item' +
+                  (i === 0 ? " selected" : "") +
+                  '" data-id="' +
+                  r.id +
+                  '">' +
+                  '<div class="sr-item-title">' +
+                  escapeHtml(r.title) +
+                  "</div>" +
+                  '<div class="sr-item-context">' +
+                  snippet +
+                  "</div></div>"
+                );
+              })
+              .join("");
+          }
+          selectedResult = 0;
+          searchResults.classList.add("active");
+          searchOverlay.classList.add("active");
+        }
+
+        var searchTimer;
+        searchInput.addEventListener("input", function () {
+          clearTimeout(searchTimer);
+          searchTimer = setTimeout(function () {
+            doSearch(searchInput.value);
+          }, 120);
+        });
+
+        function closeSearch() {
+          searchResults.classList.remove("active");
+          searchOverlay.classList.remove("active");
+          searchInput.blur();
+        }
+
+        searchOverlay.addEventListener("click", closeSearch);
+
+        searchResults.addEventListener("click", function (e) {
+          var item = e.target.closest(".sr-item");
+          if (!item) return;
+          var id = item.getAttribute("data-id");
+          var target = document.getElementById(id);
+          if (target) {
+            closeSearch();
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+            target.style.transition = "background .3s";
+            target.style.background = "var(--accent-bg)";
+            setTimeout(function () {
+              target.style.background = "";
+            }, 1500);
+          }
+        });
+
+        // Keyboard nav in search results
+        searchInput.addEventListener("keydown", function (e) {
+          var items = searchResults.querySelectorAll(".sr-item");
+          if (!items.length) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            selectedResult = Math.min(selectedResult + 1, items.length - 1);
+            items.forEach(function (it, i) {
+              it.classList.toggle("selected", i === selectedResult);
+            });
+            items[selectedResult].scrollIntoView({ block: "nearest" });
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            selectedResult = Math.max(selectedResult - 1, 0);
+            items.forEach(function (it, i) {
+              it.classList.toggle("selected", i === selectedResult);
+            });
+            items[selectedResult].scrollIntoView({ block: "nearest" });
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            if (items[selectedResult]) items[selectedResult].click();
+          } else if (e.key === "Escape") {
+            closeSearch();
+          }
+        });
+
+        // ── Keyboard Shortcuts ───────────────────────────────
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "/" && document.activeElement !== searchInput) {
+            e.preventDefault();
+            searchInput.focus();
+            searchInput.select();
+          }
+          if (e.key === "Escape") closeSearch();
+        });
+
+        // ── Back to Top ──────────────────────────────────────
+        var backBtn = document.getElementById("back-to-top");
+        mainEl.addEventListener("scroll", function () {
+          backBtn.classList.toggle("visible", mainEl.scrollTop > 400);
+        });
+        backBtn.addEventListener("click", function () {
+          mainEl.scrollTo({ top: 0, behavior: "smooth" });
+        });
+
+        // ── Mobile Sidebar Toggle ────────────────────────────
+        var sidebar = document.getElementById("sidebar");
+        document
+          .getElementById("sidebar-toggle")
+          .addEventListener("click", function () {
+            sidebar.classList.toggle("open");
+          });
+        // Close sidebar on link click (mobile)
+        sidebar.addEventListener("click", function (e) {
+          if (e.target.closest("a") && window.innerWidth <= 1024) {
+            sidebar.classList.remove("open");
+          }
+        });
+
+        // ── Open first few TOC sections ──────────────────────
+        var sections = tocEl.querySelectorAll(".toc-section");
+        for (var s = 0; s < Math.min(3, sections.length); s++)
+          sections[s].classList.add("open");
+      })();
+    </script>
+  </body>
+</html>

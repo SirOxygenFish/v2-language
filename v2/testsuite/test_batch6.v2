@@ -1,0 +1,103 @@
+// ================================================
+// BATCH 6: Match expr, string methods, list methods,
+//          test block, conversion methods
+// ================================================
+
+let passed = 0
+let failed = 0
+
+func check(name, got, expected) {
+    if (got == expected) {
+        print("PASS: " + name)
+        passed = passed + 1
+    } else {
+        print("FAIL: " + name + " | got: " + str(got) + " expected: " + str(expected))
+        failed = failed + 1
+    }
+}
+
+// ---- Match expression ----
+let color = "red"
+let code = match (color) {
+    case ("red") { 1 }
+    case ("green") { 2 }
+    case ("blue") { 3 }
+    case (_) { 0 }
+}
+check("match expr basic", code, 1)
+
+let val = 42
+let desc = match (val) {
+    case (0) { "zero" }
+    case (x) if x > 0 { "positive" }
+    case (_) { "negative" }
+}
+check("match expr with guard", desc, "positive")
+
+// ---- String methods ----
+check("capitalize", "hello world".capitalize(), "Hello world")
+check("title", "hello world".title(), "Hello World")
+check("swapcase", "Hello".swapcase(), "hELLO")
+check("center", "hi".center(6), "  hi  ")
+check("center fill", "hi".center(6, "*"), "**hi**")
+
+// ---- List methods ----
+let a = [1, 2, 3]
+let b = ["a", "b", "c"]
+let zipped = a.zip(b)
+check("list.zip", zipped, [(1, "a"), (2, "b"), (3, "c")])
+check("list.copy", a.copy(), [1, 2, 3])
+check("list.to_set type", typeof(a.to_set()), "set")
+check("list.to_tuple", a.to_tuple(), (1, 2, 3))
+
+// ---- Pipe operator ----
+let result = [3, 1, 2] |> sort |> reverse |> first
+check("pipe chain", result, 3)
+
+// ---- Null coalescing ----
+let x = null
+let y = x ?? 42
+check("null coalescing", y, 42)
+
+let z = Some(5)
+let w = z ?? 99
+check("null coalescing Some", w, 5)
+
+// ---- Spread operator ----
+let base = [1, 2, 3]
+let extended = [...base, 4, 5]
+check("spread in list", extended, [1, 2, 3, 4, 5])
+
+// ---- Optional chaining ----
+let obj = null
+let safe = obj?.name
+check("optional chaining null", safe, null)
+
+// ---- ++ / -- operators ----
+let counter = 0
+counter++
+counter++
+counter--
+check("++/-- operators", counter, 1)
+
+// ---- Test block (should not run in normal mode) ----
+test "should not run" {
+    assert(false, "This test block should not execute in normal mode")
+}
+check("test block skipped", true, true)
+
+// ---- Tuple methods ----
+let t = (10, 20, 30)
+check("tuple.len", t.len(), 3)
+check("tuple.first", t.first(), 10)
+check("tuple.last", t.last(), 30)
+check("tuple.contains", t.contains(20), true)
+check("tuple.to_list", t.to_list(), [10, 20, 30])
+
+print("")
+print("=== Batch 6 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+if (failed == 0) {
+    print("All batch 6 tests passed!")
+} else {
+    print("Some tests failed!")
+}

@@ -1,0 +1,4 @@
+# registry entry for std.markdown
+name = "std.markdown"
+path = "packages/std-markdown"
+version = "0.1.0"

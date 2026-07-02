@@ -1,0 +1,90 @@
+// std.pdf — reference package.
+//
+// This is the community/package home for std.pdf. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func new(...args) {
+    // TODO: implement std.pdf.new
+    return null
+}
+
+func add_page(...args) {
+    // TODO: implement std.pdf.add_page
+    return null
+}
+
+func text(...args) {
+    // TODO: implement std.pdf.text
+    return null
+}
+
+func heading(...args) {
+    // TODO: implement std.pdf.heading
+    return null
+}
+
+func paragraph(...args) {
+    // TODO: implement std.pdf.paragraph
+    return null
+}
+
+func table(...args) {
+    // TODO: implement std.pdf.table
+    return null
+}
+
+func rect(...args) {
+    // TODO: implement std.pdf.rect
+    return null
+}
+
+func circle(...args) {
+    // TODO: implement std.pdf.circle
+    return null
+}
+
+func line(...args) {
+    // TODO: implement std.pdf.line
+    return null
+}
+
+func image(...args) {
+    // TODO: implement std.pdf.image
+    return null
+}
+
+func save(...args) {
+    // TODO: implement std.pdf.save
+    return null
+}
+
+func open(...args) {
+    // TODO: implement std.pdf.open
+    return null
+}
+
+func page_count(...args) {
+    // TODO: implement std.pdf.page_count
+    return null
+}
+
+func metadata(...args) {
+    // TODO: implement std.pdf.metadata
+    return null
+}
+
+func extract_text(...args) {
+    // TODO: implement std.pdf.extract_text
+    return null
+}
+
+func page(...args) {
+    // TODO: implement std.pdf.page
+    return null
+}
+
+func search(...args) {
+    // TODO: implement std.pdf.search
+    return null
+}

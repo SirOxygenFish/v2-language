@@ -1,0 +1,40 @@
+// ── Batch 16 Tests ─────────────────────────────────────
+let passed = 0
+let failed = 0
+
+func assert_eq(a, b, msg) {
+    if (a == b) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg} | expected ${b}, got ${a}")
+        failed += 1
+    }
+}
+
+func assert_true(a, msg) {
+    if (a) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg}")
+        failed += 1
+    }
+}
+
+// ── 1. Global math module object ───────────────────────
+assert_true(math.PI > 3, "std.math: PI constant available on math module")
+assert_eq(math.sqrt(9), 3.0, "std.math: sqrt available on math module")
+assert_eq(math.pow(2, 5), 32, "std.math: pow available on math module")
+
+// ── 2. Statistics helpers ──────────────────────────────
+let stats = [1, 2, 3, 4]
+assert_eq(math.mean(stats), 2.5, "std.math: mean works")
+assert_eq(math.median(stats), 2.5, "std.math: median works")
+assert_true(math.stddev(stats) > 1.11, "std.math: stddev returns reasonable value")
+
+// ── 3. Import std.math ─────────────────────────────────
+import "std.math" as m
+assert_eq(m.sqrt(16), 4.0, "std.math: import alias exposes module functions")
+assert_true(m.PI > 3, "std.math: import alias exposes constants")
+
+// ── Summary ────────────────────────────────────────────
+println(f"Batch 16: ${passed} passed, ${failed} failed")

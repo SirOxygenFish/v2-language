@@ -1,0 +1,80 @@
+// std.video — reference package.
+//
+// This is the community/package home for std.video. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func open(...args) {
+    // TODO: implement std.video.open
+    return null
+}
+
+func frame_at(...args) {
+    // TODO: implement std.video.frame_at
+    return null
+}
+
+func frames(...args) {
+    // TODO: implement std.video.frames
+    return null
+}
+
+func iter_frames(...args) {
+    // TODO: implement std.video.iter_frames
+    return null
+}
+
+func seek(...args) {
+    // TODO: implement std.video.seek
+    return null
+}
+
+func next_frame(...args) {
+    // TODO: implement std.video.next_frame
+    return null
+}
+
+func writer(...args) {
+    // TODO: implement std.video.writer
+    return null
+}
+
+func write_frame(...args) {
+    // TODO: implement std.video.write_frame
+    return null
+}
+
+func trim(...args) {
+    // TODO: implement std.video.trim
+    return null
+}
+
+func concat(...args) {
+    // TODO: implement std.video.concat
+    return null
+}
+
+func extract_audio(...args) {
+    // TODO: implement std.video.extract_audio
+    return null
+}
+
+func replace_audio(...args) {
+    // TODO: implement std.video.replace_audio
+    return null
+}
+
+func mute(...args) {
+    // TODO: implement std.video.mute
+    return null
+}
+
+func thumbnail(...args) {
+    // TODO: implement std.video.thumbnail
+    return null
+}
+
+func to_gif(...args) {
+    // TODO: implement std.video.to_gif
+    return null
+}

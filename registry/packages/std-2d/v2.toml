@@ -1,0 +1,8 @@
+[project]
+name       = "std.2d"
+version    = "0.1.0"
+entry      = "src/lib.v2"
+description = "Reference package for std.2d (community-maintainable)."
+license    = "MIT"
+
+[dependencies]

@@ -1,0 +1,30 @@
+// ── Batch 14 Tests ─────────────────────────────────────
+let passed = 0
+let failed = 0
+
+func assert_eq(a, b, msg) {
+    if (a == b) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg} | expected ${b}, got ${a}")
+        failed += 1
+    }
+}
+
+// ── 1. Generic function syntax erasure ─────────────────
+func identity<T>(value: T) -> T {
+    return value
+}
+
+assert_eq(identity(42), 42, "generics: generic function returns int")
+assert_eq(identity("hello"), "hello", "generics: generic function returns string")
+
+// ── 2. Complex type annotations + where clause ─────────
+func take_numbers<T>(items: list<int>) -> int where T: Comparable {
+    return len(items)
+}
+
+assert_eq(take_numbers([1, 2, 3]), 3, "generics: complex type annotation and where clause parse")
+
+// ── Summary ────────────────────────────────────────────
+println(f"Batch 14: ${passed} passed, ${failed} failed")

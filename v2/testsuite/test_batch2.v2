@@ -1,0 +1,185 @@
+// ========================================
+// Tests for batch 2 features
+// ========================================
+
+let passed = 0
+let failed = 0
+
+func check(cond, msg) {
+    if (cond) {
+        println("PASS: " + msg)
+        passed = passed + 1
+    } else {
+        println("FAIL: " + msg)
+        failed = failed + 1
+    }
+}
+
+// --- Test 1: elif keyword ---
+func test_elif() {
+    let x = 15
+    let result = ""
+    if (x > 20) {
+        result = "big"
+    } elif (x > 10) {
+        result = "medium"
+    } elif (x > 5) {
+        result = "small"
+    } else {
+        result = "tiny"
+    }
+    check(result == "medium", "elif keyword works")
+}
+test_elif()
+
+// --- Test 2: super() calls ---
+class Animal {
+    func init(name) {
+        self.name = name
+        self.kind = "animal"
+    }
+}
+
+class Dog extends Animal {
+    func init(name, breed) {
+        super(name)
+        self.breed = breed
+    }
+}
+
+let dog = new Dog("Rex", "Lab")
+check(dog.name == "Rex", "super() passes parent init args")
+check(dog.breed == "Lab", "super() preserves child fields")
+
+// --- Test 3: constructor alias ---
+class Widget {
+    func constructor(lbl) {
+        self.lbl = lbl
+    }
+}
+
+let w = new Widget("ok")
+check(w.lbl == "ok", "constructor alias works")
+
+// --- Test 4: range with step ---
+let r3 = range(0, 10, 2)
+check(r3 == [0, 2, 4, 6, 8], "range(start, end, step) works")
+
+let r_neg = range(10, 0, -2)
+check(r_neg == [10, 8, 6, 4, 2], "range with negative step works")
+
+// --- Test 5: raw strings ---
+let raw = r"hello\nworld"
+check(raw == "hello\\nworld", "raw strings preserve backslashes")
+
+// --- Test 6: triple-quoted strings ---
+let triple = """hello
+world"""
+check(triple.contains("\n"), "triple-quoted strings support newlines")
+
+// --- Test 7: enumerate ---
+let items = ["a", "b", "c"]
+let enumerated = enumerate(items)
+check(enumerated[0] == (0, "a"), "enumerate() returns (index, value) tuples")
+check(enumerated[2] == (2, "c"), "enumerate() correct index")
+
+// --- Test 8: zip ---
+let znames = ["Alice", "Bob"]
+let zages = [30, 25]
+let zipped = zip(znames, zages)
+check(zipped[0] == ("Alice", 30), "zip() pairs elements")
+check(zipped[1] == ("Bob", 25), "zip() correct pairing")
+
+// --- Test 9: sum ---
+check(sum([1, 2, 3, 4]) == 10, "sum() works on int list")
+check(sum([1.5, 2.5]) == 4.0, "sum() works on float list")
+
+// --- Test 10: any/all ---
+check(any([false, true, false]) == true, "any() returns true when one is true")
+check(any([false, false]) == false, "any() returns false when all false")
+check(all([true, true, true]) == true, "all() returns true when all true")
+check(all([true, false]) == false, "all() returns false when one is false")
+
+// --- Test 11: dir/hasattr/getattr ---
+class Foo {
+    func init() {
+        self.x = 10
+        self.y = 20
+    }
+}
+
+let foo = new Foo()
+let d = dir(foo)
+check(d.contains("x"), "dir() lists fields")
+check(hasattr(foo, "x") == true, "hasattr() returns true for existing field")
+check(hasattr(foo, "z") == false, "hasattr() returns false for missing field")
+check(getattr(foo, "x") == 10, "getattr() returns field value")
+check(getattr(foo, "z", 99) == 99, "getattr() returns default for missing")
+
+// --- Test 12: __str__ support ---
+class Point {
+    func init(x, y) {
+        self.x = x
+        self.y = y
+    }
+    func __str__() {
+        return "Point(" + str(self.x) + ", " + str(self.y) + ")"
+    }
+}
+
+let p = new Point(3, 4)
+check(str(p) == "Point(3, 4)", "__str__ called by str()")
+
+// --- Test 13: Result type (Ok/Err) ---
+let ok_val = Ok(42)
+check(ok_val.unwrap() == 42, "Ok.unwrap() returns value")
+check(ok_val.is_ok() == true, "Ok.is_ok() is true")
+check(ok_val.is_err() == false, "Ok.is_err() is false")
+check(ok_val.unwrap_or(0) == 42, "Ok.unwrap_or() returns Ok value")
+
+let err_val = Err("not found")
+check(err_val.is_ok() == false, "Err.is_ok() is false")
+check(err_val.is_err() == true, "Err.is_err() is true")
+check(err_val.unwrap_or(0) == 0, "Err.unwrap_or() returns default")
+
+// --- Test 14: Option type (Some/None) ---
+let some_val = Some(10)
+check(some_val.unwrap() == 10, "Some.unwrap() returns value")
+check(some_val.is_some() == true, "Some.is_some() is true")
+check(some_val.is_none() == false, "Some.is_none() is false")
+check(some_val.unwrap_or(0) == 10, "Some.unwrap_or() returns Some value")
+
+check(None == null, "None equals null")
+check(None.is_some() == false, "None.is_some() is false")
+check(None.is_none() == true, "None.is_none() is true")
+check(None.unwrap_or(99) == 99, "None.unwrap_or() returns default")
+
+// --- Test 15: Result/Option .map() ---
+let doubled = Ok(5).map(lambda(x) => x * 2)
+check(doubled.unwrap() == 10, "Ok.map() transforms value")
+
+let err_mapped = Err("fail").map(lambda(x) => x * 2)
+check(err_mapped.is_err() == true, "Err.map() stays Err")
+
+let some_mapped = Some(3).map(lambda(x) => x + 1)
+check(some_mapped.unwrap() == 4, "Some.map() transforms value")
+
+let none_mapped = None.map(lambda(x) => x + 1)
+check(none_mapped == null, "None.map() stays None")
+
+// --- Test 16: eval/exec ---
+let eval_result = eval("1 + 2 + 3")
+check(eval_result == 6, "eval() evaluates expression strings")
+
+exec("let exec_var = 42")
+check(exec_var == 42, "exec() executes statement strings")
+
+// --- Summary ---
+println("")
+println("=== Batch 2 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+
+if (failed > 0) {
+    println("SOME TESTS FAILED!")
+} else {
+    println("All batch 2 tests passed!")
+}

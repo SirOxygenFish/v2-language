@@ -1,0 +1,4 @@
+# registry entry for std.camera
+name = "std.camera"
+path = "packages/std-camera"
+version = "0.1.0"

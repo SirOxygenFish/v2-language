@@ -1,0 +1,93 @@
+// ================================================
+// BATCH 4: if let, while let, let else,
+//          min/max/abs, chars, pop_opt
+// ================================================
+
+let passed = 0
+let failed = 0
+
+func check(name, got, expected) {
+    if (got == expected) {
+        print("PASS: " + name)
+        passed = passed + 1
+    } else {
+        print("FAIL: " + name + " | got: " + str(got) + " expected: " + str(expected))
+        failed = failed + 1
+    }
+}
+
+// ---- if let with Some ----
+let maybe = Some(42)
+let if_let_result = 0
+if let Some(val) = maybe {
+    if_let_result = val
+}
+check("if let Some matches", if_let_result, 42)
+
+// ---- if let with None ----
+let nothing = None
+let else_ran = false
+if let Some(val) = nothing {
+    // should not run
+} else {
+    else_ran = true
+}
+check("if let None goes to else", else_ran, true)
+
+// ---- if let with Ok ----
+let ok_val = Ok("data")
+let ok_result = ""
+if let Ok(d) = ok_val {
+    ok_result = d
+}
+check("if let Ok matches", ok_result, "data")
+
+// ---- if let with Err ----
+let err_val = Err("oops")
+let err_result = ""
+if let Err(e) = err_val {
+    err_result = e
+}
+check("if let Err matches", err_result, "oops")
+
+// ---- while let ----
+let items = [Some(1), Some(2), Some(3), None, Some(5)]
+let collected = []
+let idx = 0
+while let Some(v) = items[idx] {
+    collected = collected + [v]
+    idx = idx + 1
+}
+check("while let collects until None", str(collected), "[1, 2, 3]")
+
+// ---- let else ----
+func try_parse(val) {
+    let Ok(data) = val else {
+        return "failed"
+    }
+    return "got: " + str(data)
+}
+check("let else success path", try_parse(Ok(42)), "got: 42")
+check("let else failure path", try_parse(Err("bad")), "failed")
+
+// ---- min / max ----
+check("min two ints", min(3, 7), 3)
+check("max two ints", max(3, 7), 7)
+check("min list", min([5, 2, 8, 1, 3]), 1)
+check("max list", max([5, 2, 8, 1, 3]), 8)
+
+// ---- abs ----
+check("abs positive", abs(5), 5)
+check("abs negative", abs(-5), 5)
+check("abs float", abs(-3.14), 3.14)
+
+// ---- chars ----
+check("chars splits string", chars("abc"), ["a", "b", "c"])
+
+print("")
+print("=== Batch 4 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+if (failed == 0) {
+    print("All batch 4 tests passed!")
+} else {
+    print("Some tests failed!")
+}

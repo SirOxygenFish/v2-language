@@ -1,0 +1,4 @@
+# registry entry for std.oauth2
+name = "std.oauth2"
+path = "packages/std-oauth2"
+version = "0.1.0"

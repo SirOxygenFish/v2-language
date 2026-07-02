@@ -1,0 +1,4 @@
+# registry entry for std.proc
+name = "std.proc"
+path = "packages/std-proc"
+version = "0.1.0"

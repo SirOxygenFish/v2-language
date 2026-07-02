@@ -1,0 +1,4 @@
+# registry entry for std.clipboard
+name = "std.clipboard"
+path = "packages/std-clipboard"
+version = "0.1.0"

@@ -1,0 +1,4 @@
+# registry entry for std.http
+name = "std.http"
+path = "packages/std-http"
+version = "0.1.0"

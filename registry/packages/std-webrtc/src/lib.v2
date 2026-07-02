@@ -1,0 +1,45 @@
+// std.webrtc — reference package.
+//
+// This is the community/package home for std.webrtc. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func peer(...args) {
+    // TODO: implement std.webrtc.peer
+    return null
+}
+
+func offer(...args) {
+    // TODO: implement std.webrtc.offer
+    return null
+}
+
+func answer(...args) {
+    // TODO: implement std.webrtc.answer
+    return null
+}
+
+func ice_candidate(...args) {
+    // TODO: implement std.webrtc.ice_candidate
+    return null
+}
+
+func data_channel(...args) {
+    // TODO: implement std.webrtc.data_channel
+    return null
+}
+
+func send(...args) {
+    // TODO: implement std.webrtc.send
+    return null
+}
+
+func on_message(...args) {
+    // TODO: implement std.webrtc.on_message
+    return null
+}
+
+func close(...args) {
+    // TODO: implement std.webrtc.close
+    return null
+}

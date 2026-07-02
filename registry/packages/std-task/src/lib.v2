@@ -1,0 +1,45 @@
+// std.task — reference package.
+//
+// This is the community/package home for std.task. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func queue(...args) {
+    // TODO: implement std.task.queue
+    return null
+}
+
+func enqueue(...args) {
+    // TODO: implement std.task.enqueue
+    return null
+}
+
+func dequeue(...args) {
+    // TODO: implement std.task.dequeue
+    return null
+}
+
+func process(...args) {
+    // TODO: implement std.task.process
+    return null
+}
+
+func schedule(...args) {
+    // TODO: implement std.task.schedule
+    return null
+}
+
+func retry(...args) {
+    // TODO: implement std.task.retry
+    return null
+}
+
+func status(...args) {
+    // TODO: implement std.task.status
+    return null
+}
+
+func cancel(...args) {
+    // TODO: implement std.task.cancel
+    return null
+}

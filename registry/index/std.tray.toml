@@ -1,0 +1,4 @@
+# registry entry for std.tray
+name = "std.tray"
+path = "packages/std-tray"
+version = "0.1.0"

@@ -1,0 +1,4 @@
+# registry entry for std.iot
+name = "std.iot"
+path = "packages/std-iot"
+version = "0.1.0"

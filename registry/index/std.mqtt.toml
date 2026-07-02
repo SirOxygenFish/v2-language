@@ -1,0 +1,4 @@
+# registry entry for std.mqtt
+name = "std.mqtt"
+path = "packages/std-mqtt"
+version = "0.1.0"

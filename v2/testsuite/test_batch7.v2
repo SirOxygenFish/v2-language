@@ -1,0 +1,182 @@
+// ================================================
+// BATCH 7: Final features & integration tests
+// ================================================
+
+let passed = 0
+let failed = 0
+
+func check(name, got, expected) {
+    if (got == expected) {
+        print("PASS: " + name)
+        passed = passed + 1
+    } else {
+        print("FAIL: " + name + " | got: " + str(got) + " expected: " + str(expected))
+        failed = failed + 1
+    }
+}
+
+// ---- Dict.pop mutation ----
+let d = {"a": 1, "b": 2, "c": 3}
+let popped = d.pop("b")
+check("dict.pop returns value", popped, 2)
+check("dict.pop removes key", d.has("b"), false)
+check("dict.pop missing returns null", d.pop("z"), null)
+check("dict.pop missing with default", d.pop("z", 99), 99)
+
+// ---- List.fill ----
+check("list.fill", [0, 0, 0, 0].fill(5), [5, 5, 5, 5])
+
+// ---- List.reversed ----
+check("list.reversed", [1, 2, 3].reversed(), [3, 2, 1])
+
+// ---- Conversion builtins ----
+check("bool(0)", bool(0), false)
+check("bool(1)", bool(1), true)
+check("bool empty str", bool(""), false)
+check("bool non-empty str", bool("x"), true)
+
+check("list from tuple", list((1, 2, 3)), [1, 2, 3])
+check("tuple from list", tuple([1, 2, 3]), (1, 2, 3))
+
+// ---- callable ----
+check("callable func", callable(check), true)
+check("callable int", callable(42), false)
+
+// ---- Ternary ----
+let x = 10
+let result = x > 5 ? "big" : "small"
+check("ternary true", result, "big")
+let result2 = x > 20 ? "big" : "small"
+check("ternary false", result2, "small")
+
+// ---- Integration: FizzBuzz ----
+func fizzbuzz(n) {
+    let result = []
+    for (let i = 1; i <= n; i += 1) {
+        if (i % 15 == 0) {
+            result.push("FizzBuzz")
+        } elif (i % 3 == 0) {
+            result.push("Fizz")
+        } elif (i % 5 == 0) {
+            result.push("Buzz")
+        } else {
+            result.push(str(i))
+        }
+    }
+    return result
+}
+let fb = fizzbuzz(15)
+check("fizzbuzz[0]", fb[0], "1")
+check("fizzbuzz[2]", fb[2], "Fizz")
+check("fizzbuzz[4]", fb[4], "Buzz")
+check("fizzbuzz[14]", fb[14], "FizzBuzz")
+
+// ---- Integration: Linked list with classes ----
+class Node {
+    func init(val, next) {
+        self.val = val
+        self.next = next
+    }
+}
+
+func list_to_array(node) {
+    let result = []
+    let current = node
+    while (current != null) {
+        result.push(current.val)
+        current = current.next
+    }
+    return result
+}
+
+let linked = Node(1, Node(2, Node(3, null)))
+check("linked list", list_to_array(linked), [1, 2, 3])
+
+// ---- Integration: Result error handling chain ----
+func parse_int_safe(s) {
+    if (s.is_digit()) {
+        return Ok(to_int(s))
+    }
+    return Err("not a number: " + s)
+}
+
+let r = parse_int_safe("42").map(lambda(n) => n * 2)
+check("Result chain Ok", r.unwrap(), 84)
+
+let r2 = parse_int_safe("abc").map(lambda(n) => n * 2)
+check("Result chain Err", r2.is_err(), true)
+
+// ---- Integration: Higher-order programming ----
+let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let result = nums.filter(lambda(x) => x % 2 == 0)
+                 .map(lambda(x) => x * x)
+                 .sum()
+check("HOF chain", result, 220)
+
+// ---- Integration: Pattern matching ----
+func describe(val) {
+    return match (val) {
+        case (0) { "zero" }
+        case (n) if n < 0 { "negative" }
+        case (n) if n > 100 { "big" }
+        case (_) { "normal" }
+    }
+}
+check("describe 0", describe(0), "zero")
+check("describe -5", describe(-5), "negative")
+check("describe 200", describe(200), "big")
+check("describe 42", describe(42), "normal")
+
+// ---- Integration: Generators ----
+func* counter(max) {
+    let i = 0
+    while (i < max) {
+        yield i
+        i += 1
+    }
+}
+let gen = counter(5)
+check("generator", gen.collect(), [0, 1, 2, 3, 4])
+
+// ---- Integration: Try/catch ----
+func safe_divide(a, b) {
+    try {
+        if (b == 0) { throw "division by zero" }
+        return a / b
+    } catch (e) {
+        return Err(e)
+    }
+}
+check("try/catch ok", safe_divide(10, 2), 5)
+check("try/catch err", safe_divide(10, 0).is_err(), true)
+
+// ---- Integration: Pipe with lambda ----
+func double(x) { return x * 2 }
+func inc(x) { return x + 1 }
+let piped = 5 |> double |> inc |> str
+check("pipe with funcs", piped, "11")
+
+// ---- Spread in function call ----
+func add3(a, b, c) { return a + b + c }
+let args = [1, 2, 3]
+check("spread in call", add3(...args), 6)
+
+// ---- Defer ----
+let log = []
+func with_defer() {
+    defer {
+        log.push("deferred")
+    }
+    log.push("first")
+    return "done"
+}
+with_defer()
+check("defer runs after return", log, ["first", "deferred"])
+
+print("")
+print("=== Batch 7 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+if (failed == 0) {
+    print("All batch 7 tests passed!")
+} else {
+    print("Some tests failed!")
+}

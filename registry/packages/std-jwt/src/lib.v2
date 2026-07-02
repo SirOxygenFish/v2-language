@@ -1,0 +1,20 @@
+// std.jwt — reference package.
+//
+// This is the community/package home for std.jwt. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func sign(...args) {
+    // TODO: implement std.jwt.sign
+    return null
+}
+
+func verify(...args) {
+    // TODO: implement std.jwt.verify
+    return null
+}
+
+func decode_unverified(...args) {
+    // TODO: implement std.jwt.decode_unverified
+    return null
+}

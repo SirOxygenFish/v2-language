@@ -1,0 +1,53 @@
+// ── Batch 11 Tests ─────────────────────────────────────
+let passed = 0
+let failed = 0
+
+func assert_eq(a, b, msg) {
+    if (a == b) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg} | expected ${b}, got ${a}")
+        failed += 1
+    }
+}
+
+func assert_true(a, msg) {
+    if (a) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg}")
+        failed += 1
+    }
+}
+
+// ── 1. Sealed Classes ──────────────────────────────────
+sealed class Shape {
+}
+
+class Circle extends Shape {
+    func init(radius) {
+        self.radius = radius
+    }
+
+    func area() {
+        return self.radius * self.radius
+    }
+}
+
+let c = new Circle(5)
+assert_eq(c.radius, 5, "sealed class: subclass instance initializes")
+assert_eq(c.area(), 25, "sealed class: subclass methods work")
+
+// ── 2. Tail-Call Optimization ──────────────────────────
+func sum_tail(n, acc = 0) {
+    if (n == 0) {
+        return acc
+    }
+    return sum_tail(n - 1, acc + n)
+}
+
+assert_eq(sum_tail(1000), 500500, "tco: tail recursion returns correct result")
+assert_eq(sum_tail(10000), 50005000, "tco: deep tail recursion completes")
+
+// ── Summary ────────────────────────────────────────────
+println(f"Batch 11: ${passed} passed, ${failed} failed")

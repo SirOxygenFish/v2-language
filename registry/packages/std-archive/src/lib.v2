@@ -1,0 +1,40 @@
+// std.archive — reference package.
+//
+// This is the community/package home for std.archive. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func zip_create(...args) {
+    // TODO: implement std.archive.zip_create
+    return null
+}
+
+func zip_extract(...args) {
+    // TODO: implement std.archive.zip_extract
+    return null
+}
+
+func zip_list(...args) {
+    // TODO: implement std.archive.zip_list
+    return null
+}
+
+func zip_add(...args) {
+    // TODO: implement std.archive.zip_add
+    return null
+}
+
+func tar_create(...args) {
+    // TODO: implement std.archive.tar_create
+    return null
+}
+
+func tar_extract(...args) {
+    // TODO: implement std.archive.tar_extract
+    return null
+}
+
+func tar_list(...args) {
+    // TODO: implement std.archive.tar_list
+    return null
+}

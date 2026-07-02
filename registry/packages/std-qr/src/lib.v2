@@ -1,0 +1,25 @@
+// std.qr — reference package.
+//
+// This is the community/package home for std.qr. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func generate(...args) {
+    // TODO: implement std.qr.generate
+    return null
+}
+
+func generate_svg(...args) {
+    // TODO: implement std.qr.generate_svg
+    return null
+}
+
+func generate_png(...args) {
+    // TODO: implement std.qr.generate_png
+    return null
+}
+
+func read(...args) {
+    // TODO: implement std.qr.read
+    return null
+}

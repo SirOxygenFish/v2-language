@@ -1,0 +1,4 @@
+# registry entry for std.audio
+name = "std.audio"
+path = "packages/std-audio"
+version = "0.1.0"

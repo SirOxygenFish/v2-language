@@ -1,0 +1,4 @@
+# registry entry for std.ai
+name = "std.ai"
+path = "packages/std-ai"
+version = "0.1.0"

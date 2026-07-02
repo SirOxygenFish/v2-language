@@ -1,0 +1,45 @@
+// std.map — reference package.
+//
+// This is the community/package home for std.map. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func new(...args) {
+    // TODO: implement std.map.new
+    return null
+}
+
+func add_marker(...args) {
+    // TODO: implement std.map.add_marker
+    return null
+}
+
+func add_line(...args) {
+    // TODO: implement std.map.add_line
+    return null
+}
+
+func add_polygon(...args) {
+    // TODO: implement std.map.add_polygon
+    return null
+}
+
+func set_center(...args) {
+    // TODO: implement std.map.set_center
+    return null
+}
+
+func set_zoom(...args) {
+    // TODO: implement std.map.set_zoom
+    return null
+}
+
+func render(...args) {
+    // TODO: implement std.map.render
+    return null
+}
+
+func save(...args) {
+    // TODO: implement std.map.save
+    return null
+}

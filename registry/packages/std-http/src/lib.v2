@@ -1,0 +1,90 @@
+// std.http — reference package.
+//
+// This is the community/package home for std.http. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func server(...args) {
+    // TODO: implement std.http.server
+    return null
+}
+
+func client(...args) {
+    // TODO: implement std.http.client
+    return null
+}
+
+func get(...args) {
+    // TODO: implement std.http.get
+    return null
+}
+
+func post(...args) {
+    // TODO: implement std.http.post
+    return null
+}
+
+func put(...args) {
+    // TODO: implement std.http.put
+    return null
+}
+
+func delete(...args) {
+    // TODO: implement std.http.delete
+    return null
+}
+
+func patch(...args) {
+    // TODO: implement std.http.patch
+    return null
+}
+
+func ws(...args) {
+    // TODO: implement std.http.ws
+    return null
+}
+
+func use_middleware(...args) {
+    // TODO: implement std.http.use_middleware
+    return null
+}
+
+func group(...args) {
+    // TODO: implement std.http.group
+    return null
+}
+
+func static_files(...args) {
+    // TODO: implement std.http.static_files
+    return null
+}
+
+func start(...args) {
+    // TODO: implement std.http.start
+    return null
+}
+
+func start_async(...args) {
+    // TODO: implement std.http.start_async
+    return null
+}
+
+func stop(...args) {
+    // TODO: implement std.http.stop
+    return null
+}
+
+func rate_limiter(...args) {
+    // TODO: implement std.http.rate_limiter
+    return null
+}
+
+func sse_connect(...args) {
+    // TODO: implement std.http.sse_connect
+    return null
+}
+
+func ws_connect(...args) {
+    // TODO: implement std.http.ws_connect
+    return null
+}

@@ -1,0 +1,4 @@
+# registry entry for std.geo
+name = "std.geo"
+path = "packages/std-geo"
+version = "0.1.0"

@@ -1,0 +1,25 @@
+// std.hotkey — reference package.
+//
+// This is the community/package home for std.hotkey. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func register(...args) {
+    // TODO: implement std.hotkey.register
+    return null
+}
+
+func unregister(...args) {
+    // TODO: implement std.hotkey.unregister
+    return null
+}
+
+func listen(...args) {
+    // TODO: implement std.hotkey.listen
+    return null
+}
+
+func stop(...args) {
+    // TODO: implement std.hotkey.stop
+    return null
+}

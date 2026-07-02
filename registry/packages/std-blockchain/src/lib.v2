@@ -1,0 +1,40 @@
+// std.blockchain — reference package.
+//
+// This is the community/package home for std.blockchain. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func connect(...args) {
+    // TODO: implement std.blockchain.connect
+    return null
+}
+
+func get_balance(...args) {
+    // TODO: implement std.blockchain.get_balance
+    return null
+}
+
+func send_tx(...args) {
+    // TODO: implement std.blockchain.send_tx
+    return null
+}
+
+func sign_tx(...args) {
+    // TODO: implement std.blockchain.sign_tx
+    return null
+}
+
+func deploy_contract(...args) {
+    // TODO: implement std.blockchain.deploy_contract
+    return null
+}
+
+func call_contract(...args) {
+    // TODO: implement std.blockchain.call_contract
+    return null
+}
+
+func listen_events(...args) {
+    // TODO: implement std.blockchain.listen_events
+    return null
+}

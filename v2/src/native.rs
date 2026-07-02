@@ -1,0 +1,893 @@
+/// Native code generation for V2.
+///
+/// Strategy: Transpile V2 AST → C source, then invoke the system C compiler.
+/// This gives us portable native executables without needing to implement
+/// a full x86-64/ARM64 code generator.
+
+use std::collections::HashMap;
+use std::fs;
+use std::process::Command;
+
+use crate::ast::*;
+
+/// Find a C compiler on the system.
+fn find_cc() -> Result<String, String> {
+    let candidates = if cfg!(windows) {
+        vec!["gcc", "cc", "clang", "tcc"]
+    } else {
+        vec!["cc", "gcc", "clang", "tcc"]
+    };
+    for cc in &candidates {
+        let result = Command::new(cc).arg("--version").output();
+        if result.is_ok() {
+            return Ok(cc.to_string());
+        }
+    }
+    if cfg!(windows) {
+        if Command::new("cl").output().is_ok() {
+            return Ok("cl".to_string());
+        }
+    }
+    Err("No C compiler found. Install gcc, clang, or MSVC and ensure it's in PATH.\n\
+         Windows: `winget install -e --id GnuWin32.Gcc` or install Visual Studio Build Tools.\n\
+         Linux/macOS: `apt install gcc` / `brew install gcc`".to_string())
+}
+
+/// Compile a V2 program to a native executable.
+pub fn compile_to_native(program: &Program, out_path: &str) -> Result<(), String> {
+    let cc = find_cc()?;
+    let c_source = transpile_to_c(program)?;
+
+    let c_path = format!("{}.c", out_path.trim_end_matches(".exe"));
+    fs::write(&c_path, &c_source)
+        .map_err(|e| format!("Cannot write C source '{}': {}", c_path, e))?;
+
+    let output = if cc == "cl" {
+        Command::new(&cc)
+            .args(&[&c_path, &format!("/Fe:{}", out_path), "/O2", "/nologo"])
+            .output()
+    } else {
+        Command::new(&cc)
+            .args(&[&c_path, "-o", out_path, "-O2", "-lm"])
+            .output()
+    };
+
+    let output = output.map_err(|e| format!("Failed to run C compiler '{}': {}", cc, e))?;
+
+    let _ = fs::remove_file(&c_path);
+    if cc == "cl" {
+        let obj = format!("{}.obj", out_path.trim_end_matches(".exe"));
+        let _ = fs::remove_file(&obj);
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("C compiler error:\n{}", stderr));
+    }
+
+    Ok(())
+}
+
+/// Transpile a V2 program to C source code.
+fn transpile_to_c(program: &Program) -> Result<String, String> {
+    let mut ctx = CGen::new();
+    ctx.emit_prelude();
+
+    for stmt in &program.stmts {
+        if let Stmt::FuncDecl { name, params, .. } = stmt {
+            ctx.forward_declare_func(name, params);
+        }
+    }
+
+    let mut top_stmts = Vec::new();
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::FuncDecl { .. } => ctx.emit_func(stmt)?,
+            _ => top_stmts.push(stmt),
+        }
+    }
+
+    ctx.out.push_str("\nint main(int argc, char** argv) {\n");
+    ctx.indent += 1;
+    for stmt in &top_stmts {
+        ctx.emit_stmt(stmt)?;
+    }
+    ctx.emit_indented("return 0;\n");
+    ctx.out.push_str("}\n");
+    Ok(ctx.out)
+}
+
+struct CGen {
+    out: String,
+    indent: usize,
+    temp_counter: usize,
+    declared_vars: Vec<HashMap<String, bool>>,
+}
+
+impl CGen {
+    fn new() -> Self {
+        CGen {
+            out: String::new(),
+            indent: 0,
+            temp_counter: 0,
+            declared_vars: vec![HashMap::new()],
+        }
+    }
+
+    fn emit_indented(&mut self, s: &str) {
+        for _ in 0..self.indent {
+            self.out.push_str("    ");
+        }
+        self.out.push_str(s);
+    }
+
+    fn new_temp(&mut self) -> String {
+        self.temp_counter += 1;
+        format!("_t{}", self.temp_counter)
+    }
+
+    fn push_scope(&mut self) {
+        self.declared_vars.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.declared_vars.pop();
+    }
+
+    fn is_declared(&self, name: &str) -> bool {
+        for scope in self.declared_vars.iter().rev() {
+            if scope.contains_key(name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn declare_var(&mut self, name: &str) {
+        if let Some(scope) = self.declared_vars.last_mut() {
+            scope.insert(name.to_string(), true);
+        }
+    }
+
+    fn mangle(&self, name: &str) -> String {
+        match name {
+            "int" | "float" | "double" | "char" | "void" | "return" | "if" | "else" |
+            "while" | "for" | "break" | "continue" | "switch" | "case" | "default" |
+            "struct" | "enum" | "union" | "typedef" | "static" | "extern" | "const" |
+            "auto" | "register" | "volatile" | "goto" | "do" | "sizeof" | "signed" |
+            "unsigned" | "long" | "short" | "main" | "type" | "match" =>
+                format!("v2_{}", name),
+            _ => name.replace('.', "_").replace("::", "__")
+        }
+    }
+
+    fn emit_prelude(&mut self) {
+        self.out.push_str(r#"/* Generated by V2 native compiler */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdarg.h>
+
+typedef enum { V2_NULL=0, V2_INT, V2_FLOAT, V2_BOOL, V2_STR, V2_LIST } V2Type;
+
+typedef struct V2Val {
+    V2Type type;
+    union {
+        int64_t i;
+        double f;
+        bool b;
+        char* s;
+        struct { struct V2Val* items; int len; int cap; } list;
+    };
+} V2Val;
+
+static V2Val v2_null(void) { V2Val v = {0}; v.type = V2_NULL; return v; }
+static V2Val v2_int(int64_t n) { V2Val v = {0}; v.type = V2_INT; v.i = n; return v; }
+static V2Val v2_float(double n) { V2Val v = {0}; v.type = V2_FLOAT; v.f = n; return v; }
+static V2Val v2_bool(bool b) { V2Val v = {0}; v.type = V2_BOOL; v.b = b; return v; }
+static V2Val v2_str(const char* s) {
+    V2Val v = {0}; v.type = V2_STR;
+    v.s = (char*)malloc(strlen(s) + 1);
+    strcpy(v.s, s);
+    return v;
+}
+static V2Val v2_list_new(void) {
+    V2Val v = {0}; v.type = V2_LIST;
+    v.list.cap = 8; v.list.len = 0;
+    v.list.items = (V2Val*)malloc(sizeof(V2Val) * 8);
+    return v;
+}
+static void v2_list_push(V2Val* l, V2Val item) {
+    if (l->list.len >= l->list.cap) {
+        l->list.cap *= 2;
+        l->list.items = (V2Val*)realloc(l->list.items, sizeof(V2Val) * l->list.cap);
+    }
+    l->list.items[l->list.len++] = item;
+}
+static V2Val v2_list_get(V2Val* l, int64_t idx) {
+    if (idx < 0) idx += l->list.len;
+    if (idx < 0 || idx >= l->list.len) { fprintf(stderr, "Index out of bounds: %lld\n", (long long)idx); exit(1); }
+    return l->list.items[idx];
+}
+static int64_t v2_len(V2Val v) {
+    if (v.type == V2_LIST) return v.list.len;
+    if (v.type == V2_STR) return (int64_t)strlen(v.s);
+    return 0;
+}
+
+static V2Val v2_add(V2Val a, V2Val b) {
+    if (a.type == V2_INT && b.type == V2_INT) return v2_int(a.i + b.i);
+    if ((a.type == V2_FLOAT || a.type == V2_INT) && (b.type == V2_FLOAT || b.type == V2_INT)) {
+        double fa = a.type == V2_INT ? (double)a.i : a.f;
+        double fb = b.type == V2_INT ? (double)b.i : b.f;
+        return v2_float(fa + fb);
+    }
+    if (a.type == V2_STR && b.type == V2_STR) {
+        size_t la = strlen(a.s), lb = strlen(b.s);
+        char* r = (char*)malloc(la + lb + 1);
+        memcpy(r, a.s, la); memcpy(r + la, b.s, lb + 1);
+        V2Val v = {0}; v.type = V2_STR; v.s = r; return v;
+    }
+    fprintf(stderr, "Cannot add these types\n"); exit(1);
+}
+static V2Val v2_sub(V2Val a, V2Val b) {
+    if (a.type == V2_INT && b.type == V2_INT) return v2_int(a.i - b.i);
+    double fa = a.type == V2_INT ? (double)a.i : a.f;
+    double fb = b.type == V2_INT ? (double)b.i : b.f;
+    return v2_float(fa - fb);
+}
+static V2Val v2_mul(V2Val a, V2Val b) {
+    if (a.type == V2_INT && b.type == V2_INT) return v2_int(a.i * b.i);
+    double fa = a.type == V2_INT ? (double)a.i : a.f;
+    double fb = b.type == V2_INT ? (double)b.i : b.f;
+    return v2_float(fa * fb);
+}
+static V2Val v2_div(V2Val a, V2Val b) {
+    double fa = a.type == V2_INT ? (double)a.i : a.f;
+    double fb = b.type == V2_INT ? (double)b.i : b.f;
+    if (fb == 0.0) { fprintf(stderr, "Division by zero\n"); exit(1); }
+    return v2_float(fa / fb);
+}
+static V2Val v2_mod(V2Val a, V2Val b) {
+    if (a.type == V2_INT && b.type == V2_INT) { if (b.i==0){fprintf(stderr,"Modulo by zero\n");exit(1);} return v2_int(a.i % b.i); }
+    fprintf(stderr, "Cannot modulo these types\n"); exit(1);
+}
+static V2Val v2_pow(V2Val a, V2Val b) {
+    double fa = a.type == V2_INT ? (double)a.i : a.f;
+    double fb = b.type == V2_INT ? (double)b.i : b.f;
+    double r = pow(fa, fb);
+    if (a.type == V2_INT && b.type == V2_INT && fb >= 0) return v2_int((int64_t)r);
+    return v2_float(r);
+}
+static V2Val v2_intdiv(V2Val a, V2Val b) {
+    double fa = a.type == V2_INT ? (double)a.i : a.f;
+    double fb = b.type == V2_INT ? (double)b.i : b.f;
+    if (fb == 0.0) { fprintf(stderr, "Division by zero\n"); exit(1); }
+    return v2_int((int64_t)(fa / fb));
+}
+static V2Val v2_neg(V2Val a) {
+    if (a.type == V2_INT) return v2_int(-a.i);
+    if (a.type == V2_FLOAT) return v2_float(-a.f);
+    fprintf(stderr, "Cannot negate\n"); exit(1);
+}
+static bool v2_eq(V2Val a, V2Val b) {
+    if (a.type != b.type) return false;
+    switch (a.type) {
+        case V2_NULL: return true;
+        case V2_INT: return a.i == b.i;
+        case V2_FLOAT: return a.f == b.f;
+        case V2_BOOL: return a.b == b.b;
+        case V2_STR: return strcmp(a.s, b.s) == 0;
+        default: return false;
+    }
+}
+static bool v2_lt(V2Val a, V2Val b) {
+    if (a.type == V2_INT && b.type == V2_INT) return a.i < b.i;
+    double fa = a.type == V2_INT ? (double)a.i : a.f;
+    double fb = b.type == V2_INT ? (double)b.i : b.f;
+    return fa < fb;
+}
+static bool v2_truthy(V2Val v) {
+    switch (v.type) {
+        case V2_NULL: return false;
+        case V2_BOOL: return v.b;
+        case V2_INT: return v.i != 0;
+        case V2_FLOAT: return v.f != 0.0;
+        case V2_STR: return v.s[0] != '\0';
+        case V2_LIST: return v.list.len > 0;
+        default: return false;
+    }
+}
+static void v2_print_val(V2Val v) {
+    switch (v.type) {
+        case V2_NULL: printf("null"); break;
+        case V2_INT: printf("%lld", (long long)v.i); break;
+        case V2_FLOAT:
+            if (v.f == (double)(int64_t)v.f && v.f < 1e15 && v.f > -1e15) printf("%.1f", v.f);
+            else printf("%g", v.f);
+            break;
+        case V2_BOOL: printf("%s", v.b ? "true" : "false"); break;
+        case V2_STR: printf("%s", v.s); break;
+        case V2_LIST:
+            printf("[");
+            for (int j = 0; j < v.list.len; j++) {
+                if (j > 0) printf(", ");
+                if (v.list.items[j].type == V2_STR) printf("\"");
+                v2_print_val(v.list.items[j]);
+                if (v.list.items[j].type == V2_STR) printf("\"");
+            }
+            printf("]");
+            break;
+        default: printf("<value>"); break;
+    }
+}
+static void v2_print(V2Val v) { v2_print_val(v); printf("\n"); }
+static V2Val v2_to_str(V2Val v) {
+    char buf[256];
+    switch (v.type) {
+        case V2_NULL: return v2_str("null");
+        case V2_INT: snprintf(buf,sizeof(buf),"%lld",(long long)v.i); return v2_str(buf);
+        case V2_FLOAT:
+            if (v.f==(double)(int64_t)v.f && v.f<1e15 && v.f>-1e15) snprintf(buf,sizeof(buf),"%.1f",v.f);
+            else snprintf(buf,sizeof(buf),"%g",v.f);
+            return v2_str(buf);
+        case V2_BOOL: return v2_str(v.b ? "true" : "false");
+        case V2_STR: return v2_str(v.s);
+        default: return v2_str("<value>");
+    }
+}
+static int64_t v2_to_int(V2Val v) {
+    if (v.type==V2_INT) return v.i;
+    if (v.type==V2_FLOAT) return (int64_t)v.f;
+    if (v.type==V2_BOOL) return v.b?1:0;
+    if (v.type==V2_STR) return atoll(v.s);
+    return 0;
+}
+static double v2_to_float(V2Val v) {
+    if (v.type==V2_INT) return (double)v.i;
+    if (v.type==V2_FLOAT) return v.f;
+    if (v.type==V2_BOOL) return v.b?1.0:0.0;
+    if (v.type==V2_STR) return atof(v.s);
+    return 0.0;
+}
+static V2Val v2_str_cat(V2Val a, V2Val b) {
+    V2Val sa = v2_to_str(a), sb = v2_to_str(b);
+    return v2_add(sa, sb);
+}
+
+"#);
+    }
+
+    fn forward_declare_func(&mut self, name: &str, params: &[Param]) {
+        let mname = self.mangle(name);
+        self.out.push_str(&format!("static V2Val {}(", mname));
+        if params.is_empty() {
+            self.out.push_str("void");
+        } else {
+            for (i, _) in params.iter().enumerate() {
+                if i > 0 { self.out.push_str(", "); }
+                self.out.push_str("V2Val");
+            }
+        }
+        self.out.push_str(");\n");
+    }
+
+    fn emit_func(&mut self, stmt: &Stmt) -> Result<(), String> {
+        if let Stmt::FuncDecl { name, params, body, .. } = stmt {
+            let mname = self.mangle(name);
+            self.out.push_str(&format!("\nstatic V2Val {}(", mname));
+            self.push_scope();
+            if params.is_empty() {
+                self.out.push_str("void");
+            } else {
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 { self.out.push_str(", "); }
+                    let pname = self.mangle(&p.name);
+                    self.out.push_str(&format!("V2Val {}", pname));
+                    self.declare_var(&p.name);
+                }
+            }
+            self.out.push_str(") {\n");
+            self.indent += 1;
+            for s in body {
+                self.emit_stmt(s)?;
+            }
+            self.emit_indented("return v2_null();\n");
+            self.indent -= 1;
+            self.out.push_str("}\n");
+            self.pop_scope();
+        }
+        Ok(())
+    }
+
+    fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
+        match stmt {
+            Stmt::Expr(expr) => {
+                let val = self.emit_expr(expr)?;
+                self.emit_indented(&format!("(void){};\n", val));
+            }
+            Stmt::Let { name, value, .. } => {
+                let mname = self.mangle(name);
+                if let Some(val_expr) = value {
+                    let val = self.emit_expr(val_expr)?;
+                    if self.is_declared(name) {
+                        self.emit_indented(&format!("{} = {};\n", mname, val));
+                    } else {
+                        self.emit_indented(&format!("V2Val {} = {};\n", mname, val));
+                        self.declare_var(name);
+                    }
+                } else {
+                    self.emit_indented(&format!("V2Val {} = v2_null();\n", mname));
+                    self.declare_var(name);
+                }
+            }
+            Stmt::Const { name, value, .. } => {
+                let mname = self.mangle(name);
+                let val = self.emit_expr(value)?;
+                self.emit_indented(&format!("const V2Val {} = {};\n", mname, val));
+                self.declare_var(name);
+            }
+            Stmt::Assign { target, value, op } => {
+                let val = self.emit_expr(value)?;
+                let tgt = self.emit_lvalue(target)?;
+                match op {
+                    AssignOp::Assign => {
+                        self.emit_indented(&format!("{} = {};\n", tgt, val));
+                    }
+                    AssignOp::PlusAssign => {
+                        self.emit_indented(&format!("{} = v2_add({}, {});\n", tgt, tgt, val));
+                    }
+                    AssignOp::MinusAssign => {
+                        self.emit_indented(&format!("{} = v2_sub({}, {});\n", tgt, tgt, val));
+                    }
+                    AssignOp::StarAssign => {
+                        self.emit_indented(&format!("{} = v2_mul({}, {});\n", tgt, tgt, val));
+                    }
+                    AssignOp::SlashAssign => {
+                        self.emit_indented(&format!("{} = v2_div({}, {});\n", tgt, tgt, val));
+                    }
+                    _ => {
+                        self.emit_indented(&format!("{} = {};\n", tgt, val));
+                    }
+                }
+            }
+            Stmt::If { condition, body, else_ifs, else_body } => {
+                let cond = self.emit_expr(condition)?;
+                self.emit_indented(&format!("if (v2_truthy({})) {{\n", cond));
+                self.indent += 1;
+                self.push_scope();
+                for s in body { self.emit_stmt(s)?; }
+                self.pop_scope();
+                self.indent -= 1;
+                for (elif_cond, elif_body) in else_ifs {
+                    let ec = self.emit_expr(elif_cond)?;
+                    self.emit_indented(&format!("}} else if (v2_truthy({})) {{\n", ec));
+                    self.indent += 1;
+                    self.push_scope();
+                    for s in elif_body { self.emit_stmt(s)?; }
+                    self.pop_scope();
+                    self.indent -= 1;
+                }
+                if let Some(else_stmts) = else_body {
+                    self.emit_indented("} else {\n");
+                    self.indent += 1;
+                    self.push_scope();
+                    for s in else_stmts { self.emit_stmt(s)?; }
+                    self.pop_scope();
+                    self.indent -= 1;
+                }
+                self.emit_indented("}\n");
+            }
+            Stmt::While { condition, body } => {
+                self.emit_indented("while (1) {\n");
+                self.indent += 1;
+                self.push_scope();
+                let cond = self.emit_expr(condition)?;
+                self.emit_indented(&format!("if (!v2_truthy({})) break;\n", cond));
+                for s in body { self.emit_stmt(s)?; }
+                self.pop_scope();
+                self.indent -= 1;
+                self.emit_indented("}\n");
+            }
+            Stmt::ForIn { var, iter, body } => {
+                let iter_val = self.emit_expr(iter)?;
+                let iter_var = self.new_temp();
+                let idx = self.new_temp();
+                self.emit_indented(&format!("V2Val {} = {};\n", iter_var, iter_val));
+                self.emit_indented(&format!("for (int64_t {}=0; {} < v2_len({}); {}++) {{\n",
+                    idx, idx, iter_var, idx));
+                self.indent += 1;
+                self.push_scope();
+                let mvar = self.mangle(var);
+                self.emit_indented(&format!("V2Val {} = v2_list_get(&{}, {});\n", mvar, iter_var, idx));
+                self.declare_var(var);
+                for s in body { self.emit_stmt(s)?; }
+                self.pop_scope();
+                self.indent -= 1;
+                self.emit_indented("}\n");
+            }
+            Stmt::Return(Some(expr)) => {
+                let val = self.emit_expr(expr)?;
+                self.emit_indented(&format!("return {};\n", val));
+            }
+            Stmt::Return(None) => {
+                self.emit_indented("return v2_null();\n");
+            }
+            Stmt::Block(stmts) => {
+                self.emit_indented("{\n");
+                self.indent += 1;
+                self.push_scope();
+                for s in stmts { self.emit_stmt(s)?; }
+                self.pop_scope();
+                self.indent -= 1;
+                self.emit_indented("}\n");
+            }
+            Stmt::Break => self.emit_indented("break;\n"),
+            Stmt::Continue => self.emit_indented("continue;\n"),
+            Stmt::FuncDecl { .. } => self.emit_func(stmt)?,
+            Stmt::Multi(stmts) => {
+                for s in stmts { self.emit_stmt(s)?; }
+            }
+            _ => {
+                self.emit_indented("/* unsupported stmt */\n");
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_expr(&mut self, expr: &Expr) -> Result<String, String> {
+        match expr {
+            Expr::Int(n) => Ok(format!("v2_int({}LL)", n)),
+            Expr::Float(f) => Ok(format!("v2_float({})", format_float(*f))),
+            Expr::Str(s) => Ok(format!("v2_str(\"{}\")", escape_c_str(s))),
+            Expr::Bool(b) => Ok(format!("v2_bool({})", if *b { "true" } else { "false" })),
+            Expr::Null => Ok("v2_null()".to_string()),
+            Expr::Ident(name) => Ok(self.mangle(name)),
+            Expr::BinOp { left, op, right } => {
+                let l = self.emit_expr(left)?;
+                let r = self.emit_expr(right)?;
+                Ok(match op {
+                    BinOp::Add => format!("v2_add({}, {})", l, r),
+                    BinOp::Sub => format!("v2_sub({}, {})", l, r),
+                    BinOp::Mul => format!("v2_mul({}, {})", l, r),
+                    BinOp::Div => format!("v2_div({}, {})", l, r),
+                    BinOp::Mod => format!("v2_mod({}, {})", l, r),
+                    BinOp::Pow => format!("v2_pow({}, {})", l, r),
+                    BinOp::IntDiv => format!("v2_intdiv({}, {})", l, r),
+                    BinOp::Eq => format!("v2_bool(v2_eq({}, {}))", l, r),
+                    BinOp::NotEq => format!("v2_bool(!v2_eq({}, {}))", l, r),
+                    BinOp::Lt => format!("v2_bool(v2_lt({}, {}))", l, r),
+                    BinOp::Gt => format!("v2_bool(v2_lt({}, {}))", r, l),
+                    BinOp::LtEq => format!("v2_bool(!v2_lt({}, {}))", r, l),
+                    BinOp::GtEq => format!("v2_bool(!v2_lt({}, {}))", l, r),
+                    BinOp::And => format!("(v2_truthy({}) ? {} : {})", l, r, l),
+                    BinOp::Or => format!("(v2_truthy({}) ? {} : {})", l, l, r),
+                    _ => format!("v2_null() /* unsupported binop */"),
+                })
+            }
+            Expr::UnaryOp { op, expr: inner } => {
+                let val = self.emit_expr(inner)?;
+                Ok(match op {
+                    UnaryOp::Neg => format!("v2_neg({})", val),
+                    UnaryOp::Not => format!("v2_bool(!v2_truthy({}))", val),
+                    UnaryOp::BitNot => format!("v2_int(~v2_to_int({}))", val),
+                })
+            }
+            Expr::Call { callee, args } => {
+                // Check builtins
+                if let Expr::Ident(name) = callee.as_ref() {
+                    match name.as_str() {
+                        "print" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                return Ok(format!("(v2_print({}), v2_null())", val));
+                            }
+                            return Ok("(printf(\"\\n\"), v2_null())".to_string());
+                        }
+                        "str" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                return Ok(format!("v2_to_str({})", val));
+                            }
+                            return Ok("v2_str(\"\")".to_string());
+                        }
+                        "int" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                return Ok(format!("v2_int(v2_to_int({}))", val));
+                            }
+                            return Ok("v2_int(0)".to_string());
+                        }
+                        "float" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                return Ok(format!("v2_float(v2_to_float({}))", val));
+                            }
+                            return Ok("v2_float(0.0)".to_string());
+                        }
+                        "len" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                return Ok(format!("v2_int(v2_len({}))", val));
+                            }
+                            return Ok("v2_int(0)".to_string());
+                        }
+                        "range" => {
+                            return self.emit_range_call(args);
+                        }
+                        "type" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                let tmp = self.new_temp();
+                                self.emit_indented(&format!("V2Val {} = {};\n", tmp, val));
+                                return Ok(format!(
+                                    "({t}.type==V2_INT?v2_str(\"int\"):{t}.type==V2_FLOAT?v2_str(\"float\"):\
+                                     {t}.type==V2_STR?v2_str(\"str\"):{t}.type==V2_BOOL?v2_str(\"bool\"):\
+                                     {t}.type==V2_LIST?v2_str(\"list\"):{t}.type==V2_NULL?v2_str(\"null\"):v2_str(\"unknown\"))",
+                                    t = tmp));
+                            }
+                            return Ok("v2_str(\"null\")".to_string());
+                        }
+                        "abs" => {
+                            if let Some(arg) = args.first() {
+                                let val = self.emit_expr(&arg.value)?;
+                                let tmp = self.new_temp();
+                                self.emit_indented(&format!("V2Val {} = {};\n", tmp, val));
+                                return Ok(format!(
+                                    "({t}.type==V2_INT?v2_int({t}.i<0?-{t}.i:{t}.i):v2_float(fabs({t}.f)))", t=tmp));
+                            }
+                            return Ok("v2_int(0)".to_string());
+                        }
+                        "max" => {
+                            if args.len() >= 2 {
+                                let a = self.emit_expr(&args[0].value)?;
+                                let b = self.emit_expr(&args[1].value)?;
+                                return Ok(format!("(v2_lt({a},{b})?{b}:{a})", a=a, b=b));
+                            }
+                        }
+                        "min" => {
+                            if args.len() >= 2 {
+                                let a = self.emit_expr(&args[0].value)?;
+                                let b = self.emit_expr(&args[1].value)?;
+                                return Ok(format!("(v2_lt({a},{b})?{a}:{b})", a=a, b=b));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // User function call
+                let func = self.emit_expr(callee)?;
+                let mut arg_strs = Vec::new();
+                for a in args {
+                    arg_strs.push(self.emit_expr(&a.value)?);
+                }
+                Ok(format!("{}({})", func, arg_strs.join(", ")))
+            }
+            Expr::MethodCall { object, method, args, .. } => {
+                // Handle common method calls
+                let obj = self.emit_expr(object)?;
+                match method.as_str() {
+                    "push" => {
+                        if let Some(arg) = args.first() {
+                            let val = self.emit_expr(&arg.value)?;
+                            let tmp = self.new_temp();
+                            // Need a pointer to the list
+                            self.emit_indented(&format!("/* .push() */\n"));
+                            return Ok(format!("(v2_list_push(&{}, {}), v2_null())", obj, val));
+                        }
+                    }
+                    "len" | "length" => {
+                        return Ok(format!("v2_int(v2_len({}))", obj));
+                    }
+                    _ => {}
+                }
+                // Generic: emit as comment + null
+                Ok(format!("v2_null() /* .{}() unsupported */", method))
+            }
+            Expr::Index { object, index } => {
+                let obj = self.emit_expr(object)?;
+                let idx = self.emit_expr(index)?;
+                let tmp = self.new_temp();
+                self.emit_indented(&format!("V2Val {} = {};\n", tmp, obj));
+                Ok(format!("v2_list_get(&{}, v2_to_int({}))", tmp, idx))
+            }
+            Expr::List(items) => {
+                let lv = self.new_temp();
+                self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                for item in items {
+                    let val = self.emit_expr(item)?;
+                    self.emit_indented(&format!("v2_list_push(&{}, {});\n", lv, val));
+                }
+                Ok(lv)
+            }
+            Expr::FStr(s) => {
+                // Parse f-string at codegen time
+                self.emit_fstring(s)
+            }
+            Expr::Ternary { condition, then_expr, else_expr } => {
+                let c = self.emit_expr(condition)?;
+                let t = self.emit_expr(then_expr)?;
+                let e = self.emit_expr(else_expr)?;
+                Ok(format!("(v2_truthy({}) ? {} : {})", c, t, e))
+            }
+            Expr::Range { start, end, inclusive } => {
+                let s = self.emit_expr(start)?;
+                let e = self.emit_expr(end)?;
+                let lv = self.new_temp();
+                let idx = self.new_temp();
+                let sv = self.new_temp();
+                let ev = self.new_temp();
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", sv, s));
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", ev, e));
+                if *inclusive {
+                    self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                    self.emit_indented(&format!("for(int64_t {}={}; {}<={}; {}++) v2_list_push(&{}, v2_int({}));\n",
+                        idx, sv, idx, ev, idx, lv, idx));
+                } else {
+                    self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                    self.emit_indented(&format!("for(int64_t {}={}; {}<{}; {}++) v2_list_push(&{}, v2_int({}));\n",
+                        idx, sv, idx, ev, idx, lv, idx));
+                }
+                Ok(lv)
+            }
+            Expr::Grouped(inner) => self.emit_expr(inner),
+            Expr::Tuple(items) => {
+                // Emit as list for now
+                let lv = self.new_temp();
+                self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                for item in items {
+                    let val = self.emit_expr(item)?;
+                    self.emit_indented(&format!("v2_list_push(&{}, {});\n", lv, val));
+                }
+                Ok(lv)
+            }
+            _ => Ok("v2_null()".to_string()),
+        }
+    }
+
+    fn emit_lvalue(&mut self, expr: &Expr) -> Result<String, String> {
+        match expr {
+            Expr::Ident(name) => Ok(self.mangle(name)),
+            _ => self.emit_expr(expr),
+        }
+    }
+
+    fn emit_range_call(&mut self, args: &[CallArg]) -> Result<String, String> {
+        let lv = self.new_temp();
+        let idx = self.new_temp();
+        match args.len() {
+            1 => {
+                let end = self.emit_expr(&args[0].value)?;
+                let ev = self.new_temp();
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", ev, end));
+                self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                self.emit_indented(&format!("for(int64_t {}=0; {}<{}; {}++) v2_list_push(&{}, v2_int({}));\n",
+                    idx, idx, ev, idx, lv, idx));
+            }
+            2 => {
+                let start = self.emit_expr(&args[0].value)?;
+                let end = self.emit_expr(&args[1].value)?;
+                let sv = self.new_temp();
+                let ev = self.new_temp();
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", sv, start));
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", ev, end));
+                self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                self.emit_indented(&format!("for(int64_t {}={}; {}<{}; {}++) v2_list_push(&{}, v2_int({}));\n",
+                    idx, sv, idx, ev, idx, lv, idx));
+            }
+            3 => {
+                let start = self.emit_expr(&args[0].value)?;
+                let end = self.emit_expr(&args[1].value)?;
+                let step = self.emit_expr(&args[2].value)?;
+                let sv = self.new_temp();
+                let ev = self.new_temp();
+                let stv = self.new_temp();
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", sv, start));
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", ev, end));
+                self.emit_indented(&format!("int64_t {} = v2_to_int({});\n", stv, step));
+                self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+                self.emit_indented(&format!("if({st}>0) {{ for(int64_t {i}={s}; {i}<{e}; {i}+={st}) v2_list_push(&{l}, v2_int({i})); }}\n",
+                    st=stv, i=idx, s=sv, e=ev, l=lv));
+                self.emit_indented(&format!("else if({st}<0) {{ for(int64_t {i}={s}; {i}>{e}; {i}+={st}) v2_list_push(&{l}, v2_int({i})); }}\n",
+                    st=stv, i=idx, s=sv, e=ev, l=lv));
+            }
+            _ => {
+                self.emit_indented(&format!("V2Val {} = v2_list_new();\n", lv));
+            }
+        }
+        Ok(lv)
+    }
+
+    fn emit_fstring(&mut self, s: &str) -> Result<String, String> {
+        // Parse ${expr} and {expr} placeholders, concatenate parts
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        let chars: Vec<char> = s.chars().collect();
+        let mut literal = String::new();
+
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i] == '$' && chars[i + 1] == '{' {
+                // Flush literal
+                if !literal.is_empty() {
+                    parts.push(format!("v2_str(\"{}\")", escape_c_str(&literal)));
+                    literal.clear();
+                }
+                // Find matching }
+                i += 2;
+                let mut depth = 1;
+                let mut expr_str = String::new();
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' { depth += 1; }
+                    if chars[i] == '}' { depth -= 1; if depth == 0 { break; } }
+                    expr_str.push(chars[i]);
+                    i += 1;
+                }
+                i += 1; // skip closing }
+                // For simple identifiers, emit directly
+                parts.push(format!("v2_to_str({})", self.mangle(&expr_str)));
+            } else if chars[i] == '{' && (i == 0 || chars[i-1] != '$') {
+                // Also handle bare {expr}
+                if !literal.is_empty() {
+                    parts.push(format!("v2_str(\"{}\")", escape_c_str(&literal)));
+                    literal.clear();
+                }
+                i += 1;
+                let mut depth = 1;
+                let mut expr_str = String::new();
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' { depth += 1; }
+                    if chars[i] == '}' { depth -= 1; if depth == 0 { break; } }
+                    expr_str.push(chars[i]);
+                    i += 1;
+                }
+                i += 1;
+                parts.push(format!("v2_to_str({})", self.mangle(&expr_str)));
+            } else {
+                literal.push(chars[i]);
+                i += 1;
+            }
+        }
+        if !literal.is_empty() {
+            parts.push(format!("v2_str(\"{}\")", escape_c_str(&literal)));
+        }
+
+        if parts.is_empty() {
+            return Ok("v2_str(\"\")".to_string());
+        }
+        if parts.len() == 1 {
+            return Ok(parts[0].clone());
+        }
+        // Chain with v2_add
+        let mut result = parts[0].clone();
+        for p in &parts[1..] {
+            result = format!("v2_add({}, {})", result, p);
+        }
+        Ok(result)
+    }
+}
+
+fn escape_c_str(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn format_float(f: f64) -> String {
+    if f.is_infinite() {
+        if f > 0.0 { "INFINITY".to_string() } else { "-INFINITY".to_string() }
+    } else if f.is_nan() {
+        "NAN".to_string()
+    } else {
+        let s = format!("{}", f);
+        if s.contains('.') || s.contains('e') || s.contains('E') {
+            s
+        } else {
+            format!("{}.0", s)
+        }
+    }
+}

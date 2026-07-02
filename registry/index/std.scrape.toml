@@ -1,0 +1,4 @@
+# registry entry for std.scrape
+name = "std.scrape"
+path = "packages/std-scrape"
+version = "0.1.0"

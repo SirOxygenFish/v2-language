@@ -1,0 +1,180 @@
+// std.game — reference package.
+//
+// This is the community/package home for std.game. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func game_init(...args) {
+    // TODO: implement std.game.game_init
+    return null
+}
+
+func game_run(...args) {
+    // TODO: implement std.game.game_run
+    return null
+}
+
+func game_quit(...args) {
+    // TODO: implement std.game.game_quit
+    return null
+}
+
+func game_delta(...args) {
+    // TODO: implement std.game.game_delta
+    return null
+}
+
+func game_fps(...args) {
+    // TODO: implement std.game.game_fps
+    return null
+}
+
+func entity_new(...args) {
+    // TODO: implement std.game.entity_new
+    return null
+}
+
+func entity_add_component(...args) {
+    // TODO: implement std.game.entity_add_component
+    return null
+}
+
+func entity_get_component(...args) {
+    // TODO: implement std.game.entity_get_component
+    return null
+}
+
+func entity_destroy(...args) {
+    // TODO: implement std.game.entity_destroy
+    return null
+}
+
+func entity_find(...args) {
+    // TODO: implement std.game.entity_find
+    return null
+}
+
+func world_entities(...args) {
+    // TODO: implement std.game.world_entities
+    return null
+}
+
+func input_key_down(...args) {
+    // TODO: implement std.game.input_key_down
+    return null
+}
+
+func input_key_pressed(...args) {
+    // TODO: implement std.game.input_key_pressed
+    return null
+}
+
+func input_key_released(...args) {
+    // TODO: implement std.game.input_key_released
+    return null
+}
+
+func input_mouse_pos(...args) {
+    // TODO: implement std.game.input_mouse_pos
+    return null
+}
+
+func input_mouse_delta(...args) {
+    // TODO: implement std.game.input_mouse_delta
+    return null
+}
+
+func input_mouse_button(...args) {
+    // TODO: implement std.game.input_mouse_button
+    return null
+}
+
+func input_gamepad_axis(...args) {
+    // TODO: implement std.game.input_gamepad_axis
+    return null
+}
+
+func input_gamepad_button(...args) {
+    // TODO: implement std.game.input_gamepad_button
+    return null
+}
+
+func physics_init(...args) {
+    // TODO: implement std.game.physics_init
+    return null
+}
+
+func body_new(...args) {
+    // TODO: implement std.game.body_new
+    return null
+}
+
+func body_set_pos(...args) {
+    // TODO: implement std.game.body_set_pos
+    return null
+}
+
+func body_apply_force(...args) {
+    // TODO: implement std.game.body_apply_force
+    return null
+}
+
+func collider_box(...args) {
+    // TODO: implement std.game.collider_box
+    return null
+}
+
+func collider_sphere(...args) {
+    // TODO: implement std.game.collider_sphere
+    return null
+}
+
+func collider_capsule(...args) {
+    // TODO: implement std.game.collider_capsule
+    return null
+}
+
+func raycast(...args) {
+    // TODO: implement std.game.raycast
+    return null
+}
+
+func audio_load(...args) {
+    // TODO: implement std.game.audio_load
+    return null
+}
+
+func audio_play(...args) {
+    // TODO: implement std.game.audio_play
+    return null
+}
+
+func audio_stop(...args) {
+    // TODO: implement std.game.audio_stop
+    return null
+}
+
+func sprite_new(...args) {
+    // TODO: implement std.game.sprite_new
+    return null
+}
+
+func sprite_draw(...args) {
+    // TODO: implement std.game.sprite_draw
+    return null
+}
+
+func sprite_animate(...args) {
+    // TODO: implement std.game.sprite_animate
+    return null
+}
+
+func tilemap_load(...args) {
+    // TODO: implement std.game.tilemap_load
+    return null
+}
+
+func tilemap_draw(...args) {
+    // TODO: implement std.game.tilemap_draw
+    return null
+}

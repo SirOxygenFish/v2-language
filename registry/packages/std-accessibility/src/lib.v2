@@ -1,0 +1,35 @@
+// std.accessibility — reference package.
+//
+// This is the community/package home for std.accessibility. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func announce(...args) {
+    // TODO: implement std.accessibility.announce
+    return null
+}
+
+func set_role(...args) {
+    // TODO: implement std.accessibility.set_role
+    return null
+}
+
+func set_label(...args) {
+    // TODO: implement std.accessibility.set_label
+    return null
+}
+
+func focus(...args) {
+    // TODO: implement std.accessibility.focus
+    return null
+}
+
+func screen_reader_active(...args) {
+    // TODO: implement std.accessibility.screen_reader_active
+    return null
+}
+
+func high_contrast(...args) {
+    // TODO: implement std.accessibility.high_contrast
+    return null
+}

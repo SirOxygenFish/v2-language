@@ -1,0 +1,40 @@
+// std.gpu — reference package.
+//
+// This is the community/package home for std.gpu. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func device(...args) {
+    // TODO: implement std.gpu.device
+    return null
+}
+
+func buffer(...args) {
+    // TODO: implement std.gpu.buffer
+    return null
+}
+
+func shader(...args) {
+    // TODO: implement std.gpu.shader
+    return null
+}
+
+func pipeline(...args) {
+    // TODO: implement std.gpu.pipeline
+    return null
+}
+
+func dispatch(...args) {
+    // TODO: implement std.gpu.dispatch
+    return null
+}
+
+func read_buffer(...args) {
+    // TODO: implement std.gpu.read_buffer
+    return null
+}
+
+func write_buffer(...args) {
+    // TODO: implement std.gpu.write_buffer
+    return null
+}

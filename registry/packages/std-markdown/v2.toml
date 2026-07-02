@@ -1,0 +1,8 @@
+[project]
+name       = "std.markdown"
+version    = "0.1.0"
+entry      = "src/lib.v2"
+description = "Reference package for std.markdown (community-maintainable)."
+license    = "MIT"
+
+[dependencies]

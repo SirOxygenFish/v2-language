@@ -1,0 +1,30 @@
+// std.tray — reference package.
+//
+// This is the community/package home for std.tray. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func create(...args) {
+    // TODO: implement std.tray.create
+    return null
+}
+
+func set_icon(...args) {
+    // TODO: implement std.tray.set_icon
+    return null
+}
+
+func set_menu(...args) {
+    // TODO: implement std.tray.set_menu
+    return null
+}
+
+func set_tooltip(...args) {
+    // TODO: implement std.tray.set_tooltip
+    return null
+}
+
+func remove(...args) {
+    // TODO: implement std.tray.remove
+    return null
+}

@@ -1,0 +1,40 @@
+// std.bluetooth — reference package.
+//
+// This is the community/package home for std.bluetooth. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func scan(...args) {
+    // TODO: implement std.bluetooth.scan
+    return null
+}
+
+func connect(...args) {
+    // TODO: implement std.bluetooth.connect
+    return null
+}
+
+func disconnect(...args) {
+    // TODO: implement std.bluetooth.disconnect
+    return null
+}
+
+func send(...args) {
+    // TODO: implement std.bluetooth.send
+    return null
+}
+
+func receive(...args) {
+    // TODO: implement std.bluetooth.receive
+    return null
+}
+
+func list_services(...args) {
+    // TODO: implement std.bluetooth.list_services
+    return null
+}
+
+func subscribe(...args) {
+    // TODO: implement std.bluetooth.subscribe
+    return null
+}

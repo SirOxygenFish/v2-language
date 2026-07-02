@@ -1,0 +1,150 @@
+// std.gfx3d — reference package.
+//
+// This is the community/package home for std.gfx3d. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func gfx_init(...args) {
+    // TODO: implement std.gfx3d.gfx_init
+    return null
+}
+
+func gfx_close(...args) {
+    // TODO: implement std.gfx3d.gfx_close
+    return null
+}
+
+func gfx_begin_frame(...args) {
+    // TODO: implement std.gfx3d.gfx_begin_frame
+    return null
+}
+
+func gfx_end_frame(...args) {
+    // TODO: implement std.gfx3d.gfx_end_frame
+    return null
+}
+
+func gfx_clear(...args) {
+    // TODO: implement std.gfx3d.gfx_clear
+    return null
+}
+
+func scene_new(...args) {
+    // TODO: implement std.gfx3d.scene_new
+    return null
+}
+
+func scene_add(...args) {
+    // TODO: implement std.gfx3d.scene_add
+    return null
+}
+
+func scene_remove(...args) {
+    // TODO: implement std.gfx3d.scene_remove
+    return null
+}
+
+func node_new(...args) {
+    // TODO: implement std.gfx3d.node_new
+    return null
+}
+
+func node_set_pos(...args) {
+    // TODO: implement std.gfx3d.node_set_pos
+    return null
+}
+
+func node_set_rot(...args) {
+    // TODO: implement std.gfx3d.node_set_rot
+    return null
+}
+
+func node_set_scale(...args) {
+    // TODO: implement std.gfx3d.node_set_scale
+    return null
+}
+
+func node_translate(...args) {
+    // TODO: implement std.gfx3d.node_translate
+    return null
+}
+
+func node_rotate(...args) {
+    // TODO: implement std.gfx3d.node_rotate
+    return null
+}
+
+func mesh_load(...args) {
+    // TODO: implement std.gfx3d.mesh_load
+    return null
+}
+
+func mesh_cube(...args) {
+    // TODO: implement std.gfx3d.mesh_cube
+    return null
+}
+
+func mesh_sphere(...args) {
+    // TODO: implement std.gfx3d.mesh_sphere
+    return null
+}
+
+func mesh_plane(...args) {
+    // TODO: implement std.gfx3d.mesh_plane
+    return null
+}
+
+func mesh_custom(...args) {
+    // TODO: implement std.gfx3d.mesh_custom
+    return null
+}
+
+func material_new(...args) {
+    // TODO: implement std.gfx3d.material_new
+    return null
+}
+
+func shader_load(...args) {
+    // TODO: implement std.gfx3d.shader_load
+    return null
+}
+
+func camera_new(...args) {
+    // TODO: implement std.gfx3d.camera_new
+    return null
+}
+
+func camera_set_pos(...args) {
+    // TODO: implement std.gfx3d.camera_set_pos
+    return null
+}
+
+func camera_look_at(...args) {
+    // TODO: implement std.gfx3d.camera_look_at
+    return null
+}
+
+func camera_set_ortho(...args) {
+    // TODO: implement std.gfx3d.camera_set_ortho
+    return null
+}
+
+func light_directional(...args) {
+    // TODO: implement std.gfx3d.light_directional
+    return null
+}
+
+func light_point(...args) {
+    // TODO: implement std.gfx3d.light_point
+    return null
+}
+
+func light_spot(...args) {
+    // TODO: implement std.gfx3d.light_spot
+    return null
+}
+
+func light_ambient(...args) {
+    // TODO: implement std.gfx3d.light_ambient
+    return null
+}

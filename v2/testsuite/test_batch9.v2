@@ -1,0 +1,350 @@
+// Batch 9 tests: try_wrap, Option/Result methods, match patterns,
+// //= operator, tuple destructure, decorators, generators, vars, memo, bench
+
+let passed = 0
+let failed = 0
+
+// === 9a: try_wrap returns Ok/Err ===
+
+func safe_div(a, b) {
+    if (b == 0) { throw "division by zero" }
+    return a / b
+}
+
+let r1 = try_wrap(safe_div, 10, 2)
+test "try_wrap Ok" {
+    assert(is_ok(r1))
+    assert_eq(unwrap(r1), 5)
+    passed += 1
+}
+
+let r2 = try_wrap(safe_div, 10, 0)
+test "try_wrap Err" {
+    assert(is_err(r2))
+    passed += 1
+}
+
+// === 9a: Option methods ===
+
+let s = Some(42)
+test "Some.unwrap_or_default" {
+    assert_eq(s.unwrap_or_default(), 42)
+    passed += 1
+}
+
+test "None.unwrap_or_default" {
+    let n = null
+    assert_eq(n.unwrap_or_default(), 0)
+    passed += 1
+}
+
+test "Some.filter true" {
+    let result = s.filter(lambda(x) => x > 10)
+    assert(is_some(result))
+    passed += 1
+}
+
+test "Some.filter false" {
+    let result = s.filter(lambda(x) => x > 100)
+    assert_eq(result, null)
+    passed += 1
+}
+
+test "Some.ok_or" {
+    let result = s.ok_or("err")
+    assert(is_ok(result))
+    assert_eq(unwrap(result), 42)
+    passed += 1
+}
+
+test "None.ok_or" {
+    let n = null
+    let result = n.ok_or("missing")
+    assert(is_err(result))
+    passed += 1
+}
+
+test "Some.flatten" {
+    let nested = Some(Some(5))
+    let result = nested.flatten()
+    assert(is_some(result))
+    assert_eq(unwrap(result), 5)
+    passed += 1
+}
+
+// === 9a: Result methods ===
+
+test "Ok.ok" {
+    let r = Ok(10)
+    let result = r.ok()
+    assert(is_some(result))
+    assert_eq(unwrap(result), 10)
+    passed += 1
+}
+
+test "Err.ok" {
+    let r = Err("fail")
+    let result = r.ok()
+    assert_eq(result, null)
+    passed += 1
+}
+
+test "Ok.unwrap_or_default" {
+    let r = Ok(99)
+    assert_eq(r.unwrap_or_default(), 99)
+    passed += 1
+}
+
+test "Err.unwrap_or_default" {
+    let r = Err("err")
+    assert_eq(r.unwrap_or_default(), 0)
+    passed += 1
+}
+
+test "Ok.flatten" {
+    let r = Ok(Ok(7))
+    let result = r.flatten()
+    assert(is_ok(result))
+    assert_eq(unwrap(result), 7)
+    passed += 1
+}
+
+// === 9b: Match patterns ===
+
+test "match tuple pattern" {
+    let val = (1, 2)
+    let result = match (val) {
+        case ((1, 2)) { "pair" }
+        case (_) { "other" }
+    }
+    assert_eq(result, "pair")
+    passed += 1
+}
+
+test "match Ok pattern" {
+    let val = Ok(42)
+    let result = match (val) {
+        case (Ok(x)) { x }
+        case (Err(e)) { -1 }
+    }
+    assert_eq(result, 42)
+    passed += 1
+}
+
+test "match Err pattern" {
+    let val = Err("fail")
+    let result = match (val) {
+        case (Ok(x)) { x }
+        case (Err(e)) { e }
+    }
+    assert_eq(result, "fail")
+    passed += 1
+}
+
+test "match Some pattern" {
+    let val = Some(10)
+    let result = match (val) {
+        case (Some(x)) { x }
+        case (None) { -1 }
+    }
+    assert_eq(result, 10)
+    passed += 1
+}
+
+test "match None pattern" {
+    let val = null
+    let result = match (val) {
+        case (Some(x)) { x }
+        case (None) { -1 }
+    }
+    assert_eq(result, -1)
+    passed += 1
+}
+
+test "match range pattern" {
+    let val = 5
+    let result = match (val) {
+        case (0..10) { "in range" }
+        case (_) { "out" }
+    }
+    assert_eq(result, "in range")
+    passed += 1
+}
+
+test "match range pattern out" {
+    let val = 15
+    let result = match (val) {
+        case (0..10) { "in range" }
+        case (_) { "out" }
+    }
+    assert_eq(result, "out")
+    passed += 1
+}
+
+test "match range inclusive" {
+    let val = 10
+    let result = match (val) {
+        case (0..=10) { "in range" }
+        case (_) { "out" }
+    }
+    assert_eq(result, "in range")
+    passed += 1
+}
+
+// === 9c: //= operator ===
+
+test "int div assign" {
+    let x = 17
+    x //= 5
+    assert_eq(x, 3)
+    passed += 1
+}
+
+// === 9c: let (a, b) = tuple ===
+
+test "tuple destructure let" {
+    let (a, b) = (10, 20)
+    assert_eq(a, 10)
+    assert_eq(b, 20)
+    passed += 1
+}
+
+test "tuple destructure let 3" {
+    let (x, y, z) = (1, 2, 3)
+    assert_eq(x + y + z, 6)
+    passed += 1
+}
+
+// === 9d: @memo decorator ===
+
+let call_count = 0
+@memo
+func expensive(n) {
+    call_count += 1
+    return n * n
+}
+
+test "memo basic" {
+    let r1 = expensive(5)
+    let r2 = expensive(5)
+    assert_eq(r1, 25)
+    assert_eq(r2, 25)
+    assert_eq(call_count, 1)
+    passed += 1
+}
+
+test "memo different args" {
+    let r3 = expensive(3)
+    assert_eq(r3, 9)
+    assert_eq(call_count, 2)
+    passed += 1
+}
+
+// === 9d: @deprecated decorator ===
+
+@deprecated
+func old_func() {
+    return 42
+}
+
+test "deprecated still works" {
+    let r = old_func()
+    assert_eq(r, 42)
+    passed += 1
+}
+
+// === 9e: Generators ===
+
+func* countdown(n) {
+    while (n > 0) {
+        yield n
+        n -= 1
+    }
+}
+
+test "generator next" {
+    let gen = countdown(3)
+    let r1 = gen.next()
+    assert_eq(r1["value"], 3)
+    assert_eq(r1["done"], false)
+    let r2 = gen.next()
+    assert_eq(r2["value"], 2)
+    let r3 = gen.next()
+    assert_eq(r3["value"], 1)
+    let r4 = gen.next()
+    assert_eq(r4["done"], true)
+    assert_eq(r4["value"], null)
+    passed += 1
+}
+
+test "generator collect" {
+    let gen = countdown(5)
+    let all = gen.collect()
+    assert_eq(all, [5, 4, 3, 2, 1])
+    passed += 1
+}
+
+test "generator is_done" {
+    let gen = countdown(1)
+    assert_eq(gen.is_done(), false)
+    gen.next()
+    assert_eq(gen.is_done(), true)
+    passed += 1
+}
+
+test "generator for-in" {
+    let items = []
+    for (n in countdown(3)) {
+        items = push(items, n)
+    }
+    assert_eq(items, [3, 2, 1])
+    passed += 1
+}
+
+test "generator to_list" {
+    let gen = countdown(4)
+    let lst = gen.to_list()
+    assert_eq(lst, [4, 3, 2, 1])
+    passed += 1
+}
+
+// === 9f: vars() ===
+
+test "vars returns dict" {
+    let x = 42
+    let y = "hello"
+    let scope = vars()
+    assert_eq(scope["x"], 42)
+    assert_eq(scope["y"], "hello")
+    passed += 1
+}
+
+// === 9f: memo() builtin ===
+
+let memo_calls = 0
+func square(n) {
+    memo_calls += 1
+    return n * n
+}
+let square_memo = memo(square)
+
+test "memo builtin" {
+    let r1 = square_memo(4)
+    let r2 = square_memo(4)
+    assert_eq(r1, 16)
+    assert_eq(r2, 16)
+    assert_eq(memo_calls, 1)
+    passed += 1
+}
+
+// === 9f: bench block ===
+
+bench "simple add" {
+    let x = 1 + 2
+}
+
+// === Summary ===
+print(f"=== Batch 9 Results: ${passed} passed, ${failed} failed ===")
+if (failed == 0) {
+    print("All batch 9 tests passed!")
+}

@@ -1,0 +1,4 @@
+# registry entry for std.game
+name = "std.game"
+path = "packages/std-game"
+version = "0.1.0"

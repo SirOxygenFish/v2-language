@@ -1,0 +1,35 @@
+// std.iot — reference package.
+//
+// This is the community/package home for std.iot. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func device(...args) {
+    // TODO: implement std.iot.device
+    return null
+}
+
+func sensor_read(...args) {
+    // TODO: implement std.iot.sensor_read
+    return null
+}
+
+func actuator_write(...args) {
+    // TODO: implement std.iot.actuator_write
+    return null
+}
+
+func mqtt_connect(...args) {
+    // TODO: implement std.iot.mqtt_connect
+    return null
+}
+
+func coap_request(...args) {
+    // TODO: implement std.iot.coap_request
+    return null
+}
+
+func modbus_read(...args) {
+    // TODO: implement std.iot.modbus_read
+    return null
+}

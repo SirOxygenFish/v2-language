@@ -1,0 +1,4 @@
+# registry entry for std.ssh
+name = "std.ssh"
+path = "packages/std-ssh"
+version = "0.1.0"

@@ -1,0 +1,25 @@
+// std.embed — reference package.
+//
+// This is the community/package home for std.embed. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func file(...args) {
+    // TODO: implement std.embed.file
+    return null
+}
+
+func dir(...args) {
+    // TODO: implement std.embed.dir
+    return null
+}
+
+func str(...args) {
+    // TODO: implement std.embed.str
+    return null
+}
+
+func bytes(...args) {
+    // TODO: implement std.embed.bytes
+    return null
+}

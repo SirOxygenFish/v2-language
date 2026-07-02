@@ -1,0 +1,4 @@
+# registry entry for std.office
+name = "std.office"
+path = "packages/std-office"
+version = "0.1.0"

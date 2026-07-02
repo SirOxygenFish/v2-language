@@ -1,0 +1,25 @@
+// std.clipboard — reference package.
+//
+// This is the community/package home for std.clipboard. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func read(...args) {
+    // TODO: implement std.clipboard.read
+    return null
+}
+
+func write(...args) {
+    // TODO: implement std.clipboard.write
+    return null
+}
+
+func has_text(...args) {
+    // TODO: implement std.clipboard.has_text
+    return null
+}
+
+func clear(...args) {
+    // TODO: implement std.clipboard.clear
+    return null
+}

@@ -1,0 +1,4 @@
+# registry entry for std.yaml
+name = "std.yaml"
+path = "packages/std-yaml"
+version = "0.1.0"

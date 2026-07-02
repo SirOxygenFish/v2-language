@@ -1,0 +1,30 @@
+// std.template — reference package.
+//
+// This is the community/package home for std.template. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func new(...args) {
+    // TODO: implement std.template.new
+    return null
+}
+
+func render(...args) {
+    // TODO: implement std.template.render
+    return null
+}
+
+func compile(...args) {
+    // TODO: implement std.template.compile
+    return null
+}
+
+func register_filter(...args) {
+    // TODO: implement std.template.register_filter
+    return null
+}
+
+func register_helper(...args) {
+    // TODO: implement std.template.register_helper
+    return null
+}

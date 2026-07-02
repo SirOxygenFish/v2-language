@@ -1,0 +1,130 @@
+// std.compress — reference package.
+//
+// This is the community/package home for std.compress. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func gzip_compress(...args) {
+    // TODO: implement std.compress.gzip_compress
+    return null
+}
+
+func gzip_decompress(...args) {
+    // TODO: implement std.compress.gzip_decompress
+    return null
+}
+
+func gzip_compress_file(...args) {
+    // TODO: implement std.compress.gzip_compress_file
+    return null
+}
+
+func gzip_decompress_file(...args) {
+    // TODO: implement std.compress.gzip_decompress_file
+    return null
+}
+
+func zstd_compress(...args) {
+    // TODO: implement std.compress.zstd_compress
+    return null
+}
+
+func zstd_decompress(...args) {
+    // TODO: implement std.compress.zstd_decompress
+    return null
+}
+
+func zstd_compress_file(...args) {
+    // TODO: implement std.compress.zstd_compress_file
+    return null
+}
+
+func zstd_decompress_file(...args) {
+    // TODO: implement std.compress.zstd_decompress_file
+    return null
+}
+
+func brotli_compress(...args) {
+    // TODO: implement std.compress.brotli_compress
+    return null
+}
+
+func brotli_decompress(...args) {
+    // TODO: implement std.compress.brotli_decompress
+    return null
+}
+
+func lz4_compress(...args) {
+    // TODO: implement std.compress.lz4_compress
+    return null
+}
+
+func lz4_decompress(...args) {
+    // TODO: implement std.compress.lz4_decompress
+    return null
+}
+
+func lz4_compress_file(...args) {
+    // TODO: implement std.compress.lz4_compress_file
+    return null
+}
+
+func lz4_decompress_file(...args) {
+    // TODO: implement std.compress.lz4_decompress_file
+    return null
+}
+
+func zip_create(...args) {
+    // TODO: implement std.compress.zip_create
+    return null
+}
+
+func zip_add_file(...args) {
+    // TODO: implement std.compress.zip_add_file
+    return null
+}
+
+func zip_add_dir(...args) {
+    // TODO: implement std.compress.zip_add_dir
+    return null
+}
+
+func zip_close(...args) {
+    // TODO: implement std.compress.zip_close
+    return null
+}
+
+func zip_list(...args) {
+    // TODO: implement std.compress.zip_list
+    return null
+}
+
+func zip_read(...args) {
+    // TODO: implement std.compress.zip_read
+    return null
+}
+
+func zip_read_bytes(...args) {
+    // TODO: implement std.compress.zip_read_bytes
+    return null
+}
+
+func zip_extract(...args) {
+    // TODO: implement std.compress.zip_extract
+    return null
+}
+
+func tar_create(...args) {
+    // TODO: implement std.compress.tar_create
+    return null
+}
+
+func tar_list(...args) {
+    // TODO: implement std.compress.tar_list
+    return null
+}
+
+func tar_extract(...args) {
+    // TODO: implement std.compress.tar_extract
+    return null
+}

@@ -1,0 +1,35 @@
+// std.grpc — reference package.
+//
+// This is the community/package home for std.grpc. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func server(...args) {
+    // TODO: implement std.grpc.server
+    return null
+}
+
+func register(...args) {
+    // TODO: implement std.grpc.register
+    return null
+}
+
+func start(...args) {
+    // TODO: implement std.grpc.start
+    return null
+}
+
+func await_(...args) {
+    // TODO: implement std.grpc.await_
+    return null
+}
+
+func channel(...args) {
+    // TODO: implement std.grpc.channel
+    return null
+}
+
+func stub(...args) {
+    // TODO: implement std.grpc.stub
+    return null
+}

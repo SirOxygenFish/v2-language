@@ -1,0 +1,12 @@
+/target
+/v2_modules
+v2.lock
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# scratch test outputs
+*.tmp
+fs_*.txt

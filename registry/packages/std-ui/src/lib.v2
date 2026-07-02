@@ -1,0 +1,115 @@
+// std.ui — reference package.
+//
+// This is the community/package home for std.ui. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func ui_app(...args) {
+    // TODO: implement std.ui.ui_app
+    return null
+}
+
+func ui_set_layout(...args) {
+    // TODO: implement std.ui.ui_set_layout
+    return null
+}
+
+func ui_render(...args) {
+    // TODO: implement std.ui.ui_render
+    return null
+}
+
+func ui_label(...args) {
+    // TODO: implement std.ui.ui_label
+    return null
+}
+
+func ui_button(...args) {
+    // TODO: implement std.ui.ui_button
+    return null
+}
+
+func ui_input(...args) {
+    // TODO: implement std.ui.ui_input
+    return null
+}
+
+func ui_textarea(...args) {
+    // TODO: implement std.ui.ui_textarea
+    return null
+}
+
+func ui_checkbox(...args) {
+    // TODO: implement std.ui.ui_checkbox
+    return null
+}
+
+func ui_radio(...args) {
+    // TODO: implement std.ui.ui_radio
+    return null
+}
+
+func ui_slider(...args) {
+    // TODO: implement std.ui.ui_slider
+    return null
+}
+
+func ui_dropdown(...args) {
+    // TODO: implement std.ui.ui_dropdown
+    return null
+}
+
+func ui_image(...args) {
+    // TODO: implement std.ui.ui_image
+    return null
+}
+
+func ui_divider(...args) {
+    // TODO: implement std.ui.ui_divider
+    return null
+}
+
+func ui_container(...args) {
+    // TODO: implement std.ui.ui_container
+    return null
+}
+
+func ui_scroll(...args) {
+    // TODO: implement std.ui.ui_scroll
+    return null
+}
+
+func ui_tabs(...args) {
+    // TODO: implement std.ui.ui_tabs
+    return null
+}
+
+func ui_table(...args) {
+    // TODO: implement std.ui.ui_table
+    return null
+}
+
+func ui_progress(...args) {
+    // TODO: implement std.ui.ui_progress
+    return null
+}
+
+func ui_modal(...args) {
+    // TODO: implement std.ui.ui_modal
+    return null
+}
+
+func ui_tooltip(...args) {
+    // TODO: implement std.ui.ui_tooltip
+    return null
+}
+
+func ui_menu(...args) {
+    // TODO: implement std.ui.ui_menu
+    return null
+}
+
+func ui_spacer(...args) {
+    // TODO: implement std.ui.ui_spacer
+    return null
+}

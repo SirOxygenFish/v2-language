@@ -1,0 +1,130 @@
+// std.image — reference package.
+//
+// This is the community/package home for std.image. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func load(...args) {
+    // TODO: implement std.image.load
+    return null
+}
+
+func load_bytes(...args) {
+    // TODO: implement std.image.load_bytes
+    return null
+}
+
+func save(...args) {
+    // TODO: implement std.image.save
+    return null
+}
+
+func save_bytes(...args) {
+    // TODO: implement std.image.save_bytes
+    return null
+}
+
+func resize(...args) {
+    // TODO: implement std.image.resize
+    return null
+}
+
+func crop(...args) {
+    // TODO: implement std.image.crop
+    return null
+}
+
+func smart_crop(...args) {
+    // TODO: implement std.image.smart_crop
+    return null
+}
+
+func flip_h(...args) {
+    // TODO: implement std.image.flip_h
+    return null
+}
+
+func flip_v(...args) {
+    // TODO: implement std.image.flip_v
+    return null
+}
+
+func rotate(...args) {
+    // TODO: implement std.image.rotate
+    return null
+}
+
+func grayscale(...args) {
+    // TODO: implement std.image.grayscale
+    return null
+}
+
+func blur(...args) {
+    // TODO: implement std.image.blur
+    return null
+}
+
+func sharpen(...args) {
+    // TODO: implement std.image.sharpen
+    return null
+}
+
+func brightness(...args) {
+    // TODO: implement std.image.brightness
+    return null
+}
+
+func contrast(...args) {
+    // TODO: implement std.image.contrast
+    return null
+}
+
+func invert(...args) {
+    // TODO: implement std.image.invert
+    return null
+}
+
+func opacity(...args) {
+    // TODO: implement std.image.opacity
+    return null
+}
+
+func composite(...args) {
+    // TODO: implement std.image.composite
+    return null
+}
+
+func draw_text(...args) {
+    // TODO: implement std.image.draw_text
+    return null
+}
+
+func draw_rect(...args) {
+    // TODO: implement std.image.draw_rect
+    return null
+}
+
+func get_pixel(...args) {
+    // TODO: implement std.image.get_pixel
+    return null
+}
+
+func set_pixel(...args) {
+    // TODO: implement std.image.set_pixel
+    return null
+}
+
+func to_rgba(...args) {
+    // TODO: implement std.image.to_rgba
+    return null
+}
+
+func to_rgb(...args) {
+    // TODO: implement std.image.to_rgb
+    return null
+}
+
+func thumbnail(...args) {
+    // TODO: implement std.image.thumbnail
+    return null
+}

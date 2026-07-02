@@ -1,0 +1,4 @@
+# registry entry for std.webrtc
+name = "std.webrtc"
+path = "packages/std-webrtc"
+version = "0.1.0"

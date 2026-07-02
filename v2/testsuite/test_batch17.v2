@@ -1,0 +1,47 @@
+// ── Batch 17 Tests ─────────────────────────────────────
+let passed = 0
+let failed = 0
+
+func assert_eq(a, b, msg) {
+    if (a == b) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg} | expected ${b}, got ${a}")
+        failed += 1
+    }
+}
+
+func assert_true(a, msg) {
+    if (a) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg}")
+        failed += 1
+    }
+}
+
+let tmp_path = "_tmp_batch17.txt"
+
+// ── 1. Global io module object ─────────────────────────
+io.stdout.write("std.io")
+io.stdout.write_line(" ok")
+io.stdout.flush()
+assert_eq(io.file_exists(tmp_path), false, "std.io: temp file starts absent")
+
+// ── 2. File helpers through global module ──────────────
+io.write_file(tmp_path, "hello")
+assert_true(io.file_exists(tmp_path), "std.io: write_file creates file")
+io.append_file(tmp_path, " world")
+assert_eq(io.read_file(tmp_path), "hello world", "std.io: read/append helpers work")
+
+// ── 3. Import std.io ───────────────────────────────────
+import "std.io" as io_mod
+io_mod.stdout.write_line("alias ok")
+assert_eq(io_mod.read_file(tmp_path), "hello world", "std.io: alias import exposes helpers")
+
+// cleanup
+io_mod.delete_file(tmp_path)
+assert_eq(io.file_exists(tmp_path), false, "std.io: delete_file removes file")
+
+// ── Summary ────────────────────────────────────────────
+println(f"Batch 17: ${passed} passed, ${failed} failed")

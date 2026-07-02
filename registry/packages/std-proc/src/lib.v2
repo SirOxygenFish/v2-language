@@ -1,0 +1,80 @@
+// std.proc — reference package.
+//
+// This is the community/package home for std.proc. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func run(...args) {
+    // TODO: implement std.proc.run
+    return null
+}
+
+func spawn(...args) {
+    // TODO: implement std.proc.spawn
+    return null
+}
+
+func pipe(...args) {
+    // TODO: implement std.proc.pipe
+    return null
+}
+
+func shell(...args) {
+    // TODO: implement std.proc.shell
+    return null
+}
+
+func write(...args) {
+    // TODO: implement std.proc.write
+    return null
+}
+
+func read_line(...args) {
+    // TODO: implement std.proc.read_line
+    return null
+}
+
+func wait(...args) {
+    // TODO: implement std.proc.wait
+    return null
+}
+
+func kill(...args) {
+    // TODO: implement std.proc.kill
+    return null
+}
+
+func getenv(...args) {
+    // TODO: implement std.proc.getenv
+    return null
+}
+
+func setenv(...args) {
+    // TODO: implement std.proc.setenv
+    return null
+}
+
+func unsetenv(...args) {
+    // TODO: implement std.proc.unsetenv
+    return null
+}
+
+func environ(...args) {
+    // TODO: implement std.proc.environ
+    return null
+}
+
+func args(...args) {
+    // TODO: implement std.proc.args
+    return null
+}
+
+func pid(...args) {
+    // TODO: implement std.proc.pid
+    return null
+}
+
+func exit(...args) {
+    // TODO: implement std.proc.exit
+    return null
+}

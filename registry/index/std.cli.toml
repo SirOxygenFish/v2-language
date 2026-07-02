@@ -1,0 +1,4 @@
+# registry entry for std.cli
+name = "std.cli"
+path = "packages/std-cli"
+version = "0.1.0"

@@ -1,0 +1,19 @@
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Rust build artifacts
+/v2/target/
+/v2/v2_modules
+v2.lock
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# scratch test outputs
+*.tmp
+fs_*.txt

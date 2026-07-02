@@ -1,0 +1,30 @@
+// std.yaml — reference package.
+//
+// This is the community/package home for std.yaml. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func parse(...args) {
+    // TODO: implement std.yaml.parse
+    return null
+}
+
+func parse_all(...args) {
+    // TODO: implement std.yaml.parse_all
+    return null
+}
+
+func read(...args) {
+    // TODO: implement std.yaml.read
+    return null
+}
+
+func stringify(...args) {
+    // TODO: implement std.yaml.stringify
+    return null
+}
+
+func write(...args) {
+    // TODO: implement std.yaml.write
+    return null
+}

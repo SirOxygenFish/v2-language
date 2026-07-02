@@ -1,0 +1,4 @@
+# registry entry for std.graphql
+name = "std.graphql"
+path = "packages/std-graphql"
+version = "0.1.0"

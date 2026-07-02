@@ -1,0 +1,4 @@
+# registry entry for std.map
+name = "std.map"
+path = "packages/std-map"
+version = "0.1.0"

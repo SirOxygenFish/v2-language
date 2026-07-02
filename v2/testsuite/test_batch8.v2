@@ -1,0 +1,77 @@
+let passed = 0
+let failed = 0
+
+func check(name, got, expected) {
+    if (got == expected) {
+        print("PASS: " + name)
+        passed = passed + 1
+    } else {
+        print("FAIL: " + name + " | got: " + str(got) + " expected: " + str(expected))
+        failed = failed + 1
+    }
+}
+
+// ---- Standalone builtins ----
+check("is_some Some", is_some(Some(5)), true)
+check("is_some null", is_some(null), false)
+check("is_none null", is_none(null), true)
+check("is_none Some", is_none(Some(5)), false)
+check("is_ok Ok", is_ok(Ok(1)), true)
+check("is_ok Err", is_ok(Err("e")), false)
+check("is_err Err", is_err(Err("e")), true)
+check("is_err Ok", is_err(Ok(1)), false)
+check("is_func func", is_func(check), true)
+check("is_func int", is_func(42), false)
+check("unwrap Some", unwrap(Some(5)), 5)
+check("unwrap Ok", unwrap(Ok(10)), 10)
+check("unwrap_or null", unwrap_or(null, 99), 99)
+check("unwrap_or Some", unwrap_or(Some(5), 99), 5)
+check("unwrap_or Err", unwrap_or(Err("e"), 99), 99)
+
+// ---- items() builtin ----
+let d = {"a": 1, "b": 2}
+let it = items(d)
+check("items length", len(it), 2)
+
+// ---- str_from_bytes ----
+check("str_from_bytes", str_from_bytes([72, 105]), "Hi")
+
+// ---- in/not in range ----
+check("5 in 0..10", 5 in range(0, 10), true)
+check("10 not in 0..10", 10 in range(0, 10), false)
+check("not in range", 15 not in range(0, 10), true)
+
+// ---- in tuple ----
+check("in tuple", 2 in (1, 2, 3), true)
+check("not in tuple", 5 in (1, 2, 3), false)
+
+// ---- Set operators ----
+let s1 = #{1, 2, 3}
+let s2 = #{2, 3, 4}
+check("set union", s1 | s2, #{1, 2, 3, 4})
+check("set intersect", s1 & s2, #{2, 3})
+check("set diff", s1 - s2, #{1})
+check("set xor", s1 ^ s2, #{1, 4})
+
+// ---- String split with limit ----
+check("split limit", "a-b-c-d".split("-", 2), ["a", "b-c-d"])
+
+// ---- String to_bytes / byte_len ----
+check("to_bytes", "Hi".to_bytes(), [72, 105])
+check("byte_len", "Hi".byte_len(), 2)
+
+// ---- Dict aliases ----
+let d2 = {"x": 1, "y": 2}
+check("contains_key true", d2.contains_key("x"), true)
+check("contains_key false", d2.contains_key("z"), false)
+
+// ---- Set intersect alias ----
+check("set.intersect", #{1, 2, 3}.intersect(#{2, 3, 4}), #{2, 3})
+
+print("")
+print("=== Batch 8 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+if (failed == 0) {
+    print("All batch 8 tests passed!")
+} else {
+    print("Some tests failed!")
+}

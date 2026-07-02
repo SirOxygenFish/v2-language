@@ -1,0 +1,50 @@
+// std.cli — reference package.
+//
+// This is the community/package home for std.cli. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func app(...args) {
+    // TODO: implement std.cli.app
+    return null
+}
+
+func flag(...args) {
+    // TODO: implement std.cli.flag
+    return null
+}
+
+func option(...args) {
+    // TODO: implement std.cli.option
+    return null
+}
+
+func arg(...args) {
+    // TODO: implement std.cli.arg
+    return null
+}
+
+func multi_arg(...args) {
+    // TODO: implement std.cli.multi_arg
+    return null
+}
+
+func subcommand(...args) {
+    // TODO: implement std.cli.subcommand
+    return null
+}
+
+func parse(...args) {
+    // TODO: implement std.cli.parse
+    return null
+}
+
+func print_help(...args) {
+    // TODO: implement std.cli.print_help
+    return null
+}
+
+func print_usage(...args) {
+    // TODO: implement std.cli.print_usage
+    return null
+}

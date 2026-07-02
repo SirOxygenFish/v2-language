@@ -1,0 +1,35 @@
+// std.graphql — reference package.
+//
+// This is the community/package home for std.graphql. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func schema(...args) {
+    // TODO: implement std.graphql.schema
+    return null
+}
+
+func query(...args) {
+    // TODO: implement std.graphql.query
+    return null
+}
+
+func mutation(...args) {
+    // TODO: implement std.graphql.mutation
+    return null
+}
+
+func subscribe(...args) {
+    // TODO: implement std.graphql.subscribe
+    return null
+}
+
+func execute(...args) {
+    // TODO: implement std.graphql.execute
+    return null
+}
+
+func serve(...args) {
+    // TODO: implement std.graphql.serve
+    return null
+}

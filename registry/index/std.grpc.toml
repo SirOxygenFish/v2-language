@@ -1,0 +1,4 @@
+# registry entry for std.grpc
+name = "std.grpc"
+path = "packages/std-grpc"
+version = "0.1.0"

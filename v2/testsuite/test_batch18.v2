@@ -1,0 +1,34 @@
+// ── Batch 18 Tests ─────────────────────────────────────
+let passed = 0
+let failed = 0
+
+func assert_eq(a, b, msg) {
+    if (a == b) {
+        passed += 1
+    } else {
+        println(f"FAIL: ${msg} | expected ${b}, got ${a}")
+        failed += 1
+    }
+}
+
+// ── 1. Global collections module object ────────────────
+let lst = collections.list((1, 2, 3))
+assert_eq(lst, [1, 2, 3], "std.collections: list constructor exported")
+let st = collections.set([1, 2, 2, 3])
+assert_eq(len(st), 3, "std.collections: set constructor exported")
+
+// ── 2. Deque helpers ───────────────────────────────────
+let dq = collections.deque_new(1, 2)
+collections.deque_push_front(dq, 0)
+collections.deque_push_back(dq, 3)
+assert_eq(collections.deque_len(dq), 4, "std.collections: deque helpers exported")
+assert_eq(collections.deque_pop_front(dq), 0, "std.collections: deque_pop_front works")
+assert_eq(collections.deque_pop_back(dq), 3, "std.collections: deque_pop_back works")
+
+// ── 3. Import std.collections ──────────────────────────
+import "std.collections" as coll
+let dict_val = coll.dict([(1, "one")])
+assert_eq(dict_val[1], "one", "std.collections: alias import exposes constructors")
+
+// ── Summary ────────────────────────────────────────────
+println(f"Batch 18: ${passed} passed, ${failed} failed")

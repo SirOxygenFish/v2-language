@@ -1,0 +1,4 @@
+# registry entry for std.bluetooth
+name = "std.bluetooth"
+path = "packages/std-bluetooth"
+version = "0.1.0"

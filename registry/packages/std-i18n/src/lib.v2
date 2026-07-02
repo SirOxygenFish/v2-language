@@ -1,0 +1,40 @@
+// std.i18n — reference package.
+//
+// This is the community/package home for std.i18n. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func load_dir(...args) {
+    // TODO: implement std.i18n.load_dir
+    return null
+}
+
+func set_locale(...args) {
+    // TODO: implement std.i18n.set_locale
+    return null
+}
+
+func t(...args) {
+    // TODO: implement std.i18n.t
+    return null
+}
+
+func format_number(...args) {
+    // TODO: implement std.i18n.format_number
+    return null
+}
+
+func format_currency(...args) {
+    // TODO: implement std.i18n.format_currency
+    return null
+}
+
+func format_date(...args) {
+    // TODO: implement std.i18n.format_date
+    return null
+}
+
+func relative_time(...args) {
+    // TODO: implement std.i18n.relative_time
+    return null
+}

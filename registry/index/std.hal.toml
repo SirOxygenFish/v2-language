@@ -1,0 +1,4 @@
+# registry entry for std.hal
+name = "std.hal"
+path = "packages/std-hal"
+version = "0.1.0"

@@ -1,0 +1,4 @@
+# registry entry for std.compress
+name = "std.compress"
+path = "packages/std-compress"
+version = "0.1.0"

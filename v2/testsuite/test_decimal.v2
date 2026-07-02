@@ -1,0 +1,61 @@
+// Exact decimal arithmetic (std.decimal) — no floating-point rounding error.
+import "std.decimal"
+
+let passed = 0
+let failed = 0
+func check(name, got, want) {
+    if (str(got) == str(want)) {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        println(f"FAIL: ${name}: got ${got} want ${want}")
+    }
+}
+
+// ---- the canonical 0.1 + 0.2 == 0.3 ----
+let c = decimal.new("0.1") + decimal.new("0.2")
+check("0.1+0.2", c, "0.3")
+check("== 0.3", c == decimal.new("0.3"), true)
+
+// ---- operator overloading with mixed int ----
+check("dec + int", decimal.new("1.5") + 2, "3.5")
+check("dec * int", decimal.new("0.25") * 4, "1")
+
+// ---- documented tax example ----
+let price = decimal.new("19.99")
+let tax = decimal.new("0.21")
+check("tax total", price * (decimal.new("1") + tax), "24.1879")
+
+// ---- subtraction / negatives ----
+check("sub", decimal.new("0.3") - decimal.new("0.1"), "0.2")
+check("negative", decimal.new("1") - decimal.new("5"), "-4")
+check("unary neg", -decimal.new("5.5"), "-5.5")
+check("abs", abs(decimal.new("-3.14")), "3.14")
+
+// ---- division to precision ----
+check("div exact", decimal.new("1") / decimal.new("4"), "0.25")
+check("div whole", decimal.new("10") / decimal.new("2"), "5")
+
+// ---- rounding (half-up) ----
+check("round up", decimal.round(decimal.new("2.345"), 2), "2.35")
+check("round down", decimal.round(decimal.new("2.344"), 2), "2.34")
+check("round neg", decimal.round(decimal.new("-2.345"), 2), "-2.35")
+
+// ---- comparison across scales ----
+check("cross-scale eq", decimal.new("0.30") == decimal.new("0.3"), true)
+check("less than", decimal.new("0.1") < decimal.new("0.2"), true)
+check("greater than", decimal.new("1.5") > decimal.new("1.49"), true)
+
+// ---- module functions ----
+check("mod add", decimal.add(decimal.new("0.1"), decimal.new("0.2")), "0.3")
+check("mod compare", decimal.compare(decimal.new("1"), decimal.new("2")), -1)
+check("from_int", decimal.from_int(42), "42")
+
+// ---- type ----
+check("type", typeof(decimal.new("1.0")), "decimal")
+
+// ---- contrast: raw floats are NOT exact ----
+check("float imprecise", 0.1 + 0.2 == 0.3, false)
+
+println(f"decimal: ${passed} passed, ${failed} failed")
+assert_eq(failed, 0)

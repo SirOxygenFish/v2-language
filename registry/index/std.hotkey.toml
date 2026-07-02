@@ -1,0 +1,4 @@
+# registry entry for std.hotkey
+name = "std.hotkey"
+path = "packages/std-hotkey"
+version = "0.1.0"

@@ -1,0 +1,66 @@
+// Arbitrary-precision integer coverage. Per DOCS.md: "Unsized `int` is
+// arbitrary-precision and never overflows."
+let passed = 0
+let failed = 0
+func check(name, got, want) {
+    if (str(got) == str(want)) {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        println(f"FAIL: ${name}: got ${got} want ${want}")
+    }
+}
+
+// ---- powers beyond i64 ----
+check("2**63", 2 ** 63, "9223372036854775808")
+check("2**100", 2 ** 100, "1267650600228229401496703205376")
+check("2**128", 2 ** 128, "340282366920938463463374607431768211456")
+check("10**30", 10 ** 30, "1000000000000000000000000000000")
+
+// ---- overflow promotion on + - * ----
+check("i64 max + 1", 9223372036854775807 + 1, "9223372036854775808")
+check("big + big", (2 ** 100) + (2 ** 100), "2535301200456458802993406410752")
+check("big - big", (2 ** 100) - (2 ** 99), "633825300114114700748351602688")
+check("big * 2", (2 ** 99) * 2, "1267650600228229401496703205376")
+
+// ---- large integer literals ----
+check("literal", 123456789012345678901234567890, "123456789012345678901234567890")
+check("literal + 1", 123456789012345678901234567890 + 1, "123456789012345678901234567891")
+
+// ---- factorial (loop accumulation) ----
+func fact(n) {
+    let r = 1
+    for (i in 2..n+1) {
+        r = r * i
+    }
+    return r
+}
+check("30!", fact(30), "265252859812191058636308480000000")
+check("50!", fact(50), "30414093201713378043612608166064768844377641568960512000000000000")
+
+// ---- division and modulo on bigints ----
+check("big // 3", (2 ** 100) // 3, "422550200076076467165567735125")
+check("big % 7", (2 ** 100) % 7, "2")
+
+// ---- negation and abs ----
+check("negate", -(2 ** 100), "-1267650600228229401496703205376")
+check("abs", abs(-(2 ** 100)), "1267650600228229401496703205376")
+
+// ---- comparisons ----
+check("big > big", (2 ** 100) > (2 ** 99), true)
+check("big == big", (2 ** 100) == (2 ** 100), true)
+check("big < small", (2 ** 100) < 5, false)
+check("demote to int", typeof((2 ** 100) / (2 ** 100)), "float")
+
+// ---- conversions ----
+check("str(big)", str(2 ** 100), "1267650600228229401496703205376")
+check("float(big) type", typeof(float(2 ** 70)), "float")
+check("int(bigstr)", int("999999999999999999999999999999"), "999999999999999999999999999999")
+check("typeof big", typeof(2 ** 100), "int")
+
+// ---- result that fits back in i64 stays usable ----
+check("big minus big = small", (2 ** 64) - (2 ** 64), 0)
+check("small stays int", typeof((2 ** 64) - (2 ** 64)), "int")
+
+println(f"bigint: ${passed} passed, ${failed} failed")
+assert_eq(failed, 0)

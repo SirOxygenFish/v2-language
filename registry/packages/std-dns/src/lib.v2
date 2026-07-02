@@ -1,0 +1,35 @@
+// std.dns — reference package.
+//
+// This is the community/package home for std.dns. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func resolve(...args) {
+    // TODO: implement std.dns.resolve
+    return null
+}
+
+func resolve_ipv4(...args) {
+    // TODO: implement std.dns.resolve_ipv4
+    return null
+}
+
+func resolve_ipv6(...args) {
+    // TODO: implement std.dns.resolve_ipv6
+    return null
+}
+
+func reverse(...args) {
+    // TODO: implement std.dns.reverse
+    return null
+}
+
+func lookup_mx(...args) {
+    // TODO: implement std.dns.lookup_mx
+    return null
+}
+
+func lookup_txt(...args) {
+    // TODO: implement std.dns.lookup_txt
+    return null
+}

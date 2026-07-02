@@ -1,0 +1,35 @@
+// std.ml.audio — reference package.
+//
+// This is the community/package home for std.ml.audio. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func transcribe(...args) {
+    // TODO: implement std.ml.audio.transcribe
+    return null
+}
+
+func classify(...args) {
+    // TODO: implement std.ml.audio.classify
+    return null
+}
+
+func denoise(...args) {
+    // TODO: implement std.ml.audio.denoise
+    return null
+}
+
+func speaker_id(...args) {
+    // TODO: implement std.ml.audio.speaker_id
+    return null
+}
+
+func emotion(...args) {
+    // TODO: implement std.ml.audio.emotion
+    return null
+}
+
+func load_model(...args) {
+    // TODO: implement std.ml.audio.load_model
+    return null
+}

@@ -1,0 +1,4 @@
+# registry entry for std.blockchain
+name = "std.blockchain"
+path = "packages/std-blockchain"
+version = "0.1.0"

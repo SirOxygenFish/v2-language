@@ -1,0 +1,4 @@
+# registry entry for std.xml
+name = "std.xml"
+path = "packages/std-xml"
+version = "0.1.0"

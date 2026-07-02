@@ -1,0 +1,110 @@
+// std.ai — reference package.
+//
+// This is the community/package home for std.ai. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func nn_model(...args) {
+    // TODO: implement std.ai.nn_model
+    return null
+}
+
+func nn_layer(...args) {
+    // TODO: implement std.ai.nn_layer
+    return null
+}
+
+func nn_train(...args) {
+    // TODO: implement std.ai.nn_train
+    return null
+}
+
+func nn_predict(...args) {
+    // TODO: implement std.ai.nn_predict
+    return null
+}
+
+func nn_save(...args) {
+    // TODO: implement std.ai.nn_save
+    return null
+}
+
+func nn_load(...args) {
+    // TODO: implement std.ai.nn_load
+    return null
+}
+
+func nn_loss(...args) {
+    // TODO: implement std.ai.nn_loss
+    return null
+}
+
+func ai_tokenize(...args) {
+    // TODO: implement std.ai.ai_tokenize
+    return null
+}
+
+func ai_embed(...args) {
+    // TODO: implement std.ai.ai_embed
+    return null
+}
+
+func ai_cosine_sim(...args) {
+    // TODO: implement std.ai.ai_cosine_sim
+    return null
+}
+
+func ai_top_k(...args) {
+    // TODO: implement std.ai.ai_top_k
+    return null
+}
+
+func ai_llm_load(...args) {
+    // TODO: implement std.ai.ai_llm_load
+    return null
+}
+
+func ai_llm_generate(...args) {
+    // TODO: implement std.ai.ai_llm_generate
+    return null
+}
+
+func ai_llm_chat(...args) {
+    // TODO: implement std.ai.ai_llm_chat
+    return null
+}
+
+func ai_llm_embed(...args) {
+    // TODO: implement std.ai.ai_llm_embed
+    return null
+}
+
+func ai_llm_unload(...args) {
+    // TODO: implement std.ai.ai_llm_unload
+    return null
+}
+
+func ai_dataset(...args) {
+    // TODO: implement std.ai.ai_dataset
+    return null
+}
+
+func ai_split(...args) {
+    // TODO: implement std.ai.ai_split
+    return null
+}
+
+func ai_normalize(...args) {
+    // TODO: implement std.ai.ai_normalize
+    return null
+}
+
+func ai_shuffle(...args) {
+    // TODO: implement std.ai.ai_shuffle
+    return null
+}
+
+func ai_batch(...args) {
+    // TODO: implement std.ai.ai_batch
+    return null
+}

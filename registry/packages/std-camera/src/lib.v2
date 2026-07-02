@@ -1,0 +1,40 @@
+// std.camera — reference package.
+//
+// This is the community/package home for std.camera. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func list(...args) {
+    // TODO: implement std.camera.list
+    return null
+}
+
+func open(...args) {
+    // TODO: implement std.camera.open
+    return null
+}
+
+func close(...args) {
+    // TODO: implement std.camera.close
+    return null
+}
+
+func capture(...args) {
+    // TODO: implement std.camera.capture
+    return null
+}
+
+func stream(...args) {
+    // TODO: implement std.camera.stream
+    return null
+}
+
+func stop(...args) {
+    // TODO: implement std.camera.stop
+    return null
+}
+
+func set_resolution(...args) {
+    // TODO: implement std.camera.set_resolution
+    return null
+}

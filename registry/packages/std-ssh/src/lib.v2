@@ -1,0 +1,45 @@
+// std.ssh — reference package.
+//
+// This is the community/package home for std.ssh. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func connect(...args) {
+    // TODO: implement std.ssh.connect
+    return null
+}
+
+func exec(...args) {
+    // TODO: implement std.ssh.exec
+    return null
+}
+
+func upload(...args) {
+    // TODO: implement std.ssh.upload
+    return null
+}
+
+func download(...args) {
+    // TODO: implement std.ssh.download
+    return null
+}
+
+func disconnect(...args) {
+    // TODO: implement std.ssh.disconnect
+    return null
+}
+
+func sftp_ls(...args) {
+    // TODO: implement std.ssh.sftp_ls
+    return null
+}
+
+func sftp_mkdir(...args) {
+    // TODO: implement std.ssh.sftp_mkdir
+    return null
+}
+
+func sftp_rm(...args) {
+    // TODO: implement std.ssh.sftp_rm
+    return null
+}

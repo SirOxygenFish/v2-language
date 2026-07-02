@@ -1,0 +1,35 @@
+// std.mail — reference package.
+//
+// This is the community/package home for std.mail. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func connect(...args) {
+    // TODO: implement std.mail.connect
+    return null
+}
+
+func send(...args) {
+    // TODO: implement std.mail.send
+    return null
+}
+
+func send_raw(...args) {
+    // TODO: implement std.mail.send_raw
+    return null
+}
+
+func disconnect(...args) {
+    // TODO: implement std.mail.disconnect
+    return null
+}
+
+func template(...args) {
+    // TODO: implement std.mail.template
+    return null
+}
+
+func render(...args) {
+    // TODO: implement std.mail.render
+    return null
+}

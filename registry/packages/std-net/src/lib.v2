@@ -1,0 +1,140 @@
+// std.net — reference package.
+//
+// This is the community/package home for std.net. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func http_get(...args) {
+    // TODO: implement std.net.http_get
+    return null
+}
+
+func http_post(...args) {
+    // TODO: implement std.net.http_post
+    return null
+}
+
+func http_put(...args) {
+    // TODO: implement std.net.http_put
+    return null
+}
+
+func http_delete(...args) {
+    // TODO: implement std.net.http_delete
+    return null
+}
+
+func http_patch(...args) {
+    // TODO: implement std.net.http_patch
+    return null
+}
+
+func http_request(...args) {
+    // TODO: implement std.net.http_request
+    return null
+}
+
+func http_router(...args) {
+    // TODO: implement std.net.http_router
+    return null
+}
+
+func http_serve(...args) {
+    // TODO: implement std.net.http_serve
+    return null
+}
+
+func http_serve_tls(...args) {
+    // TODO: implement std.net.http_serve_tls
+    return null
+}
+
+func ws_connect(...args) {
+    // TODO: implement std.net.ws_connect
+    return null
+}
+
+func ws_send(...args) {
+    // TODO: implement std.net.ws_send
+    return null
+}
+
+func ws_recv(...args) {
+    // TODO: implement std.net.ws_recv
+    return null
+}
+
+func ws_close(...args) {
+    // TODO: implement std.net.ws_close
+    return null
+}
+
+func ws_serve(...args) {
+    // TODO: implement std.net.ws_serve
+    return null
+}
+
+func tcp_connect(...args) {
+    // TODO: implement std.net.tcp_connect
+    return null
+}
+
+func tcp_listen(...args) {
+    // TODO: implement std.net.tcp_listen
+    return null
+}
+
+func tcp_send(...args) {
+    // TODO: implement std.net.tcp_send
+    return null
+}
+
+func tcp_recv(...args) {
+    // TODO: implement std.net.tcp_recv
+    return null
+}
+
+func udp_socket(...args) {
+    // TODO: implement std.net.udp_socket
+    return null
+}
+
+func udp_send(...args) {
+    // TODO: implement std.net.udp_send
+    return null
+}
+
+func udp_recv(...args) {
+    // TODO: implement std.net.udp_recv
+    return null
+}
+
+func dns_resolve(...args) {
+    // TODO: implement std.net.dns_resolve
+    return null
+}
+
+func dns_resolve_ipv4(...args) {
+    // TODO: implement std.net.dns_resolve_ipv4
+    return null
+}
+
+func dns_resolve_ipv6(...args) {
+    // TODO: implement std.net.dns_resolve_ipv6
+    return null
+}
+
+func dns_reverse(...args) {
+    // TODO: implement std.net.dns_reverse
+    return null
+}
+
+func dns_lookup_mx(...args) {
+    // TODO: implement std.net.dns_lookup_mx
+    return null
+}
+
+func dns_lookup_txt(...args) {
+    // TODO: implement std.net.dns_lookup_txt
+    return null
+}

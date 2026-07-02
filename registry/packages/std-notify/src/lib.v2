@@ -1,0 +1,25 @@
+// std.notify — reference package.
+//
+// This is the community/package home for std.notify. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func send(...args) {
+    // TODO: implement std.notify.send
+    return null
+}
+
+func with_icon(...args) {
+    // TODO: implement std.notify.with_icon
+    return null
+}
+
+func with_action(...args) {
+    // TODO: implement std.notify.with_action
+    return null
+}
+
+func clear(...args) {
+    // TODO: implement std.notify.clear
+    return null
+}

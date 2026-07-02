@@ -1,0 +1,55 @@
+// std.hal — reference package.
+//
+// This is the community/package home for std.hal. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func gpio_init(...args) {
+    // TODO: implement std.hal.gpio_init
+    return null
+}
+
+func gpio_read(...args) {
+    // TODO: implement std.hal.gpio_read
+    return null
+}
+
+func gpio_write(...args) {
+    // TODO: implement std.hal.gpio_write
+    return null
+}
+
+func spi_init(...args) {
+    // TODO: implement std.hal.spi_init
+    return null
+}
+
+func spi_transfer(...args) {
+    // TODO: implement std.hal.spi_transfer
+    return null
+}
+
+func i2c_init(...args) {
+    // TODO: implement std.hal.i2c_init
+    return null
+}
+
+func i2c_read(...args) {
+    // TODO: implement std.hal.i2c_read
+    return null
+}
+
+func i2c_write(...args) {
+    // TODO: implement std.hal.i2c_write
+    return null
+}
+
+func pwm_init(...args) {
+    // TODO: implement std.hal.pwm_init
+    return null
+}
+
+func pwm_set_duty(...args) {
+    // TODO: implement std.hal.pwm_set_duty
+    return null
+}

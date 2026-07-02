@@ -1,0 +1,30 @@
+// std.markdown — reference package.
+//
+// This is the community/package home for std.markdown. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func parse(...args) {
+    // TODO: implement std.markdown.parse
+    return null
+}
+
+func to_html(...args) {
+    // TODO: implement std.markdown.to_html
+    return null
+}
+
+func to_text(...args) {
+    // TODO: implement std.markdown.to_text
+    return null
+}
+
+func render(...args) {
+    // TODO: implement std.markdown.render
+    return null
+}
+
+func highlight_code(...args) {
+    // TODO: implement std.markdown.highlight_code
+    return null
+}

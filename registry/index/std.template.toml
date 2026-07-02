@@ -1,0 +1,4 @@
+# registry entry for std.template
+name = "std.template"
+path = "packages/std-template"
+version = "0.1.0"

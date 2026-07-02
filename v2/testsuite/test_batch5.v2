@@ -1,0 +1,151 @@
+// ================================================
+// BATCH 5: Result/Option methods, dict methods,
+//          assert_eq/assert_ne, from_pairs,
+//          test blocks, conversion builtins
+// ================================================
+
+let passed = 0
+let failed = 0
+
+func check(name, got, expected) {
+    if (got == expected) {
+        print("PASS: " + name)
+        passed = passed + 1
+    } else {
+        print("FAIL: " + name + " | got: " + str(got) + " expected: " + str(expected))
+        failed = failed + 1
+    }
+}
+
+// ---- Result methods ----
+let ok = Ok(42)
+let err = Err("bad")
+
+check("Ok.unwrap", ok.unwrap(), 42)
+check("Ok.unwrap_or", ok.unwrap_or(0), 42)
+check("Ok.is_ok", ok.is_ok(), true)
+check("Ok.is_err", ok.is_err(), false)
+check("Ok.map", ok.map(lambda(x) => x * 2).unwrap(), 84)
+check("Ok.map_err identity", ok.map_err(lambda(e) => e + "!").unwrap(), 42)
+check("Ok.and_then", ok.and_then(lambda(x) => Ok(x + 1)).unwrap(), 43)
+
+check("Err.unwrap_or", err.unwrap_or(99), 99)
+check("Err.is_ok", err.is_ok(), false)
+check("Err.is_err", err.is_err(), true)
+check("Err.map identity", err.map(lambda(x) => x * 2).is_err(), true)
+check("Err.map_err", err.map_err(lambda(e) => e + "!").unwrap_err(), "bad!")
+check("Err.unwrap_err", err.unwrap_err(), "bad")
+check("Err.or_else", err.or_else(lambda(e) => Ok(0)).unwrap(), 0)
+
+// ---- Option methods ----
+let some = Some(10)
+check("Some.unwrap", some.unwrap(), 10)
+check("Some.unwrap_or", some.unwrap_or(0), 10)
+check("Some.is_some", some.is_some(), true)
+check("Some.is_none", some.is_none(), false)
+check("Some.map", some.map(lambda(x) => x + 5).unwrap(), 15)
+check("Some.and_then", some.and_then(lambda(x) => Some(x * 3)).unwrap(), 30)
+
+check("None.unwrap_or", None.unwrap_or(7), 7)
+check("None.is_some", None.is_some(), false)
+check("None.is_none", None.is_none(), true)
+check("None.map", None.map(lambda(x) => x + 1), null)
+check("None.and_then", None.and_then(lambda(x) => Some(x)), null)
+check("None.or_else", None.or_else(lambda() => Some(42)).unwrap(), 42)
+
+// ---- Dict methods ----
+let d = {"a": 1, "b": 2, "c": 3}
+check("dict.get existing", d.get("a"), 1)
+check("dict.get missing default", d.get("z", 99), 99)
+check("dict.has", d.has("b"), true)
+check("dict.has missing", d.has("z"), false)
+check("dict.items length", len(d.items()), 3)
+check("dict.entries length", len(d.entries()), 3)
+check("dict.merge", d.merge({"d": 4}).get("d"), 4)
+check("dict.copy", d.copy().get("a"), 1)
+check("dict.pick", len(d.pick(["a", "c"])), 2)
+check("dict.omit", len(d.omit(["b"])), 2)
+
+let inv = {"x": 1, "y": 2}
+let inverted = inv.invert()
+check("dict.invert", inverted.get(1), "x")
+
+let mv = {"a": 1, "b": 2}
+let doubled = mv.map_values(lambda(v) => v * 2)
+check("dict.map_values", doubled.get("a"), 2)
+
+let filtered = d.filter(lambda(k, v) => v > 1)
+check("dict.filter", len(filtered), 2)
+
+// ---- from_pairs ----
+let pairs = [(1, "a"), (2, "b")]
+let dict_from = from_pairs(pairs)
+check("from_pairs", dict_from.get(1), "a")
+
+// ---- assert_eq / assert_ne ----
+assert_eq(1, 1)
+assert_ne(1, 2)
+check("assert_eq no error", true, true)
+
+// ---- chr / ord ----
+check("chr", chr(65), "A")
+check("ord", ord("A"), 65)
+
+// ---- hex / bin / oct ----
+check("hex", hex(255), "0xff")
+check("bin", bin(10), "0b1010")
+check("oct", oct(8), "0o10")
+
+// ---- String methods ----
+check("str.repeat", "ab".repeat(3), "ababab")
+check("str.pad_start", "hi".pad_start(5), "   hi")
+check("str.pad_end", "hi".pad_end(5), "hi   ")
+check("str.is_alpha", "abc".is_alpha(), true)
+check("str.is_digit", "123".is_digit(), true)
+check("str.is_alnum", "abc123".is_alnum(), true)
+check("str.is_space", "  ".is_space(), true)
+check("str.chars", "hi".chars(), ["h", "i"])
+check("str.bytes type", typeof("hi".bytes()), "list")
+
+// ---- List methods ----
+check("list.unique", [1, 2, 2, 3, 1].unique(), [1, 2, 3])
+check("list.flatten", [[1, 2], [3, 4]].flatten(), [1, 2, 3, 4])
+check("list.take", [1, 2, 3, 4].take(2), [1, 2])
+check("list.drop", [1, 2, 3, 4].drop(2), [3, 4])
+check("list.product", [2, 3, 4].product(), 24)
+
+let parts = [1, 2, 3, 4, 5].partition(lambda(x) => x > 3)
+check("list.partition true", parts[0], [4, 5])
+check("list.partition false", parts[1], [1, 2, 3])
+
+let grouped = [1, 2, 3, 4].group_by(lambda(x) => x % 2)
+check("list.group_by even count", len(grouped.get(0)), 2)
+
+check("list.min", [5, 1, 9].min(), 1)
+check("list.max", [5, 1, 9].max(), 9)
+
+let sorted_by = [3, 1, 2].sort_by(lambda(x) => x)
+check("list.sort_by", sorted_by, [1, 2, 3])
+
+// ---- Set methods ----
+let a = #{1, 2, 3}
+let b = #{2, 3, 4}
+check("set.sym_difference", a.sym_difference(b).to_list().sort(), [1, 4])
+check("set.is_subset", #{1, 2}.is_subset(#{1, 2, 3}), true)
+check("set.is_superset", #{1, 2, 3}.is_superset(#{1, 2}), true)
+
+// ---- pop_opt ----
+let stack = [10, 20, 30]
+let top = pop_opt(stack)
+check("pop_opt Some", top.unwrap(), 30)
+let empty_stack = []
+let nothing = pop_opt(empty_stack)
+check("pop_opt None", nothing, null)
+
+print("")
+print("=== Batch 5 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+if (failed == 0) {
+    print("All batch 5 tests passed!")
+} else {
+    print("Some tests failed!")
+}

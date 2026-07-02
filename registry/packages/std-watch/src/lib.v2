@@ -1,0 +1,40 @@
+// std.watch — reference package.
+//
+// This is the community/package home for std.watch. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func new(...args) {
+    // TODO: implement std.watch.new
+    return null
+}
+
+func on_change(...args) {
+    // TODO: implement std.watch.on_change
+    return null
+}
+
+func add(...args) {
+    // TODO: implement std.watch.add
+    return null
+}
+
+func remove(...args) {
+    // TODO: implement std.watch.remove
+    return null
+}
+
+func start(...args) {
+    // TODO: implement std.watch.start
+    return null
+}
+
+func stop(...args) {
+    // TODO: implement std.watch.stop
+    return null
+}
+
+func wait_for(...args) {
+    // TODO: implement std.watch.wait_for
+    return null
+}

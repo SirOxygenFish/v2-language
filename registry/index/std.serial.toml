@@ -1,0 +1,4 @@
+# registry entry for std.serial
+name = "std.serial"
+path = "packages/std-serial"
+version = "0.1.0"

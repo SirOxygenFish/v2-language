@@ -1,0 +1,4 @@
+# registry entry for std.archive
+name = "std.archive"
+path = "packages/std-archive"
+version = "0.1.0"

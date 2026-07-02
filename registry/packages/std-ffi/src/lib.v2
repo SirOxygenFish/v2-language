@@ -1,0 +1,55 @@
+// std.ffi — reference package.
+//
+// This is the community/package home for std.ffi. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func load(...args) {
+    // TODO: implement std.ffi.load
+    return null
+}
+
+func load_lib(...args) {
+    // TODO: implement std.ffi.load_lib
+    return null
+}
+
+func func(...args) {
+    // TODO: implement std.ffi.func
+    return null
+}
+
+func struct_def(...args) {
+    // TODO: implement std.ffi.struct_def
+    return null
+}
+
+func callback(...args) {
+    // TODO: implement std.ffi.callback
+    return null
+}
+
+func alloc(...args) {
+    // TODO: implement std.ffi.alloc
+    return null
+}
+
+func alloc_zeroed(...args) {
+    // TODO: implement std.ffi.alloc_zeroed
+    return null
+}
+
+func free(...args) {
+    // TODO: implement std.ffi.free
+    return null
+}
+
+func cstring(...args) {
+    // TODO: implement std.ffi.cstring
+    return null
+}
+
+func read_cstring(...args) {
+    // TODO: implement std.ffi.read_cstring
+    return null
+}

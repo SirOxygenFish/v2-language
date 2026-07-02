@@ -1,0 +1,8 @@
+[project]
+name       = "std.hal"
+version    = "0.1.0"
+entry      = "src/lib.v2"
+description = "Reference package for std.hal (community-maintainable)."
+license    = "MIT"
+
+[dependencies]

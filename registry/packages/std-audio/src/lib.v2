@@ -1,0 +1,130 @@
+// std.audio — reference package.
+//
+// This is the community/package home for std.audio. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func open(...args) {
+    // TODO: implement std.audio.open
+    return null
+}
+
+func play(...args) {
+    // TODO: implement std.audio.play
+    return null
+}
+
+func pause(...args) {
+    // TODO: implement std.audio.pause
+    return null
+}
+
+func stop(...args) {
+    // TODO: implement std.audio.stop
+    return null
+}
+
+func seek(...args) {
+    // TODO: implement std.audio.seek
+    return null
+}
+
+func volume(...args) {
+    // TODO: implement std.audio.volume
+    return null
+}
+
+func speed(...args) {
+    // TODO: implement std.audio.speed
+    return null
+}
+
+func duration(...args) {
+    // TODO: implement std.audio.duration
+    return null
+}
+
+func position(...args) {
+    // TODO: implement std.audio.position
+    return null
+}
+
+func on_end(...args) {
+    // TODO: implement std.audio.on_end
+    return null
+}
+
+func recorder(...args) {
+    // TODO: implement std.audio.recorder
+    return null
+}
+
+func start(...args) {
+    // TODO: implement std.audio.start
+    return null
+}
+
+func save(...args) {
+    // TODO: implement std.audio.save
+    return null
+}
+
+func on_chunk(...args) {
+    // TODO: implement std.audio.on_chunk
+    return null
+}
+
+func load_buffer(...args) {
+    // TODO: implement std.audio.load_buffer
+    return null
+}
+
+func gain(...args) {
+    // TODO: implement std.audio.gain
+    return null
+}
+
+func low_pass(...args) {
+    // TODO: implement std.audio.low_pass
+    return null
+}
+
+func high_pass(...args) {
+    // TODO: implement std.audio.high_pass
+    return null
+}
+
+func band_pass(...args) {
+    // TODO: implement std.audio.band_pass
+    return null
+}
+
+func reverb(...args) {
+    // TODO: implement std.audio.reverb
+    return null
+}
+
+func normalize(...args) {
+    // TODO: implement std.audio.normalize
+    return null
+}
+
+func to_mono(...args) {
+    // TODO: implement std.audio.to_mono
+    return null
+}
+
+func trim_silence(...args) {
+    // TODO: implement std.audio.trim_silence
+    return null
+}
+
+func concat(...args) {
+    // TODO: implement std.audio.concat
+    return null
+}
+
+func mix(...args) {
+    // TODO: implement std.audio.mix
+    return null
+}

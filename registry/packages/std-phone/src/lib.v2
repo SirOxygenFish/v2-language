@@ -1,0 +1,35 @@
+// std.phone — reference package.
+//
+// This is the community/package home for std.phone. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func send_sms(...args) {
+    // TODO: implement std.phone.send_sms
+    return null
+}
+
+func make_call(...args) {
+    // TODO: implement std.phone.make_call
+    return null
+}
+
+func end_call(...args) {
+    // TODO: implement std.phone.end_call
+    return null
+}
+
+func parse_number(...args) {
+    // TODO: implement std.phone.parse_number
+    return null
+}
+
+func format_number(...args) {
+    // TODO: implement std.phone.format_number
+    return null
+}
+
+func validate(...args) {
+    // TODO: implement std.phone.validate
+    return null
+}

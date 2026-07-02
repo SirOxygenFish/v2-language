@@ -1,0 +1,4 @@
+# registry entry for std.term
+name = "std.term"
+path = "packages/std-term"
+version = "0.1.0"

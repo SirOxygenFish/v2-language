@@ -1,0 +1,40 @@
+// std.oauth2 — reference package.
+//
+// This is the community/package home for std.oauth2. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func client(...args) {
+    // TODO: implement std.oauth2.client
+    return null
+}
+
+func auth_url(...args) {
+    // TODO: implement std.oauth2.auth_url
+    return null
+}
+
+func exchange_code(...args) {
+    // TODO: implement std.oauth2.exchange_code
+    return null
+}
+
+func client_credentials(...args) {
+    // TODO: implement std.oauth2.client_credentials
+    return null
+}
+
+func refresh(...args) {
+    // TODO: implement std.oauth2.refresh
+    return null
+}
+
+func get(...args) {
+    // TODO: implement std.oauth2.get
+    return null
+}
+
+func post(...args) {
+    // TODO: implement std.oauth2.post
+    return null
+}

@@ -1,0 +1,40 @@
+// std.ml.vision — reference package.
+//
+// This is the community/package home for std.ml.vision. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func classify(...args) {
+    // TODO: implement std.ml.vision.classify
+    return null
+}
+
+func detect(...args) {
+    // TODO: implement std.ml.vision.detect
+    return null
+}
+
+func segment(...args) {
+    // TODO: implement std.ml.vision.segment
+    return null
+}
+
+func ocr(...args) {
+    // TODO: implement std.ml.vision.ocr
+    return null
+}
+
+func face_detect(...args) {
+    // TODO: implement std.ml.vision.face_detect
+    return null
+}
+
+func pose_estimate(...args) {
+    // TODO: implement std.ml.vision.pose_estimate
+    return null
+}
+
+func load_model(...args) {
+    // TODO: implement std.ml.vision.load_model
+    return null
+}

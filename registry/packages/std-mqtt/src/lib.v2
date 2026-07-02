@@ -1,0 +1,30 @@
+// std.mqtt — reference package.
+//
+// This is the community/package home for std.mqtt. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func connect(...args) {
+    // TODO: implement std.mqtt.connect
+    return null
+}
+
+func publish(...args) {
+    // TODO: implement std.mqtt.publish
+    return null
+}
+
+func subscribe(...args) {
+    // TODO: implement std.mqtt.subscribe
+    return null
+}
+
+func unsubscribe(...args) {
+    // TODO: implement std.mqtt.unsubscribe
+    return null
+}
+
+func disconnect(...args) {
+    // TODO: implement std.mqtt.disconnect
+    return null
+}

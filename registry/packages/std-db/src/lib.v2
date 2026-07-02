@@ -1,0 +1,90 @@
+// std.db — reference package.
+//
+// This is the community/package home for std.db. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func db_connect(...args) {
+    // TODO: implement std.db.db_connect
+    return null
+}
+
+func db_query(...args) {
+    // TODO: implement std.db.db_query
+    return null
+}
+
+func db_exec(...args) {
+    // TODO: implement std.db.db_exec
+    return null
+}
+
+func db_transaction(...args) {
+    // TODO: implement std.db.db_transaction
+    return null
+}
+
+func db_prepare(...args) {
+    // TODO: implement std.db.db_prepare
+    return null
+}
+
+func db_run(...args) {
+    // TODO: implement std.db.db_run
+    return null
+}
+
+func db_close(...args) {
+    // TODO: implement std.db.db_close
+    return null
+}
+
+func db_migrate(...args) {
+    // TODO: implement std.db.db_migrate
+    return null
+}
+
+func db_migrate_up(...args) {
+    // TODO: implement std.db.db_migrate_up
+    return null
+}
+
+func db_migrate_down(...args) {
+    // TODO: implement std.db.db_migrate_down
+    return null
+}
+
+func db_migrate_status(...args) {
+    // TODO: implement std.db.db_migrate_status
+    return null
+}
+
+func kv_open(...args) {
+    // TODO: implement std.db.kv_open
+    return null
+}
+
+func kv_set(...args) {
+    // TODO: implement std.db.kv_set
+    return null
+}
+
+func kv_get(...args) {
+    // TODO: implement std.db.kv_get
+    return null
+}
+
+func kv_delete(...args) {
+    // TODO: implement std.db.kv_delete
+    return null
+}
+
+func kv_keys(...args) {
+    // TODO: implement std.db.kv_keys
+    return null
+}
+
+func kv_close(...args) {
+    // TODO: implement std.db.kv_close
+    return null
+}

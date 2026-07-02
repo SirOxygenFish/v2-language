@@ -1,0 +1,4 @@
+# registry entry for std.diag
+name = "std.diag"
+path = "packages/std-diag"
+version = "0.1.0"

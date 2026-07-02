@@ -1,0 +1,4 @@
+# registry entry for std.mail
+name = "std.mail"
+path = "packages/std-mail"
+version = "0.1.0"

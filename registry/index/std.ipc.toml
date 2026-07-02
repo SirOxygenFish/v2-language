@@ -1,0 +1,4 @@
+# registry entry for std.ipc
+name = "std.ipc"
+path = "packages/std-ipc"
+version = "0.1.0"

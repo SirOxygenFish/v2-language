@@ -1,0 +1,158 @@
+// ================================================
+// BATCH 3: Dict/Set Comprehensions, Do-Block, For-In Destructure,
+//          freeze/is_frozen, typeof, Labeled Break/Continue,
+//          Byte Strings, Set Literals
+// ================================================
+
+let passed = 0
+let failed = 0
+let total = 0
+
+func check(name, got, expected) {
+    total = total + 1
+    if (got == expected) {
+        print("PASS: " + name)
+        passed = passed + 1
+    } else {
+        print("FAIL: " + name + " | got: " + str(got) + " expected: " + str(expected))
+        failed = failed + 1
+    }
+}
+
+// ---- Dict Comprehensions ----
+let squares = {x: x * x for x in [1, 2, 3, 4]}
+check("Dict comprehension basic", str(squares), "{1: 1, 2: 4, 3: 9, 4: 16}")
+
+let evens = {x: x * 2 for x in [1, 2, 3, 4, 5] if x > 2}
+check("Dict comprehension with filter", str(evens), "{3: 6, 4: 8, 5: 10}")
+
+// ---- Set Literals ----
+let s = #{1, 2, 3}
+check("Set literal type", typeof(s), "set")
+
+// ---- Set Comprehensions ----
+let sq_set = #{x * x for x in [1, 2, 3, 2, 1]}
+check("Set comprehension deduplication", str(sq_set), "#{1, 4, 9}")
+
+let filtered_set = #{x for x in [1, 2, 3, 4, 5] if x > 3}
+check("Set comprehension with filter", str(filtered_set), "#{4, 5}")
+
+// ---- Do Block Expression ----
+let val = do {
+    let a = 10
+    let b = 20
+    a + b
+}
+check("Do block expression", val, 30)
+
+let result = do {
+    let x = "hello"
+    x + " world"
+}
+check("Do block string", result, "hello world")
+
+// ---- For-In Destructuring ----
+let pairs = [[1, 2], [3, 4], [5, 6]]
+let sums = []
+for ([a, b] in pairs) {
+    sums = sums + [a + b]
+}
+check("For-in destructuring list", str(sums), "[3, 7, 11]")
+
+let tuples = [(10, 20), (30, 40)]
+let products = []
+for ((x, y) in tuples) {
+    products = products + [x * y]
+}
+check("For-in destructuring tuples", str(products), "[200, 1200]")
+
+// ---- typeof ----
+check("typeof int", typeof 42, "int")
+check("typeof str", typeof "hello", "str")
+check("typeof null", typeof null, "null")
+check("typeof list", typeof [1, 2], "list")
+check("typeof bool", typeof true, "bool")
+check("typeof float", typeof 3.14, "float")
+
+// typeof as builtin function
+check("typeof() builtin", typeof(42), "int")
+
+// ---- freeze / is_frozen ----
+class Box {
+    func init(v) {
+        self.value = v
+    }
+}
+
+let b = new Box(42)
+check("is_frozen before freeze", is_frozen(b), false)
+
+let fb = freeze(b)
+check("is_frozen after freeze", is_frozen(fb), true)
+check("frozen obj value preserved", fb.value, 42)
+
+// ---- Labeled Break/Continue ----
+let outer_count = 0
+outer: for (let i = 0; i < 5; i = i + 1) {
+    for (let j = 0; j < 5; j = j + 1) {
+        if (j == 2) {
+            break outer
+        }
+        outer_count = outer_count + 1
+    }
+}
+check("Labeled break exits outer loop", outer_count, 2)
+
+let skip_count = 0
+outer2: for (let i = 0; i < 3; i = i + 1) {
+    for (let j = 0; j < 3; j = j + 1) {
+        if (j == 1) {
+            continue outer2
+        }
+        skip_count = skip_count + 1
+    }
+}
+check("Labeled continue skips to outer", skip_count, 3)
+
+// ---- Byte Strings ----
+let bs = b"hello"
+check("Byte string type", typeof(bs), "bytes")
+
+// ---- Empty set ----
+let empty = #{}
+check("Empty set", typeof(empty), "set")
+
+// ---- Dict comprehension from range ----
+let rng_dict = {i: i * 10 for i in range(1, 4)}
+check("Dict comp from range", str(rng_dict), "{1: 10, 2: 20, 3: 30}")
+
+// ---- Set comprehension from range ----
+let rng_set = #{i * i for i in range(1, 5)}
+check("Set comp from range", str(rng_set), "#{1, 4, 9, 16}")
+
+// ---- Do block as argument ----
+func double(x) {
+    return x * 2
+}
+let dbl = double(do { 5 + 5 })
+check("Do block as function arg", dbl, 20)
+
+// ---- Nested for-in destructure ----
+let data = [[1, 2, 3], [4, 5, 6]]
+let firsts = []
+for ([a, b, c] in data) {
+    firsts = firsts + [a]
+}
+check("For-in destructure 3 vars", str(firsts), "[1, 4]")
+
+// ---- typeof on compound types ----
+check("typeof dict", typeof({}), "dict")
+check("typeof tuple", typeof((1, 2)), "tuple")
+
+print("")
+print("=== Batch 3 Results: " + str(passed) + " passed, " + str(failed) + " failed ===")
+if (failed == 0) {
+    print("All batch 3 tests passed!")
+} else {
+    print("Some tests failed!")
+}

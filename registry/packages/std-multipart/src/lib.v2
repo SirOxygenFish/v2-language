@@ -1,0 +1,35 @@
+// std.multipart — reference package.
+//
+// This is the community/package home for std.multipart. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func new(...args) {
+    // TODO: implement std.multipart.new
+    return null
+}
+
+func add_field(...args) {
+    // TODO: implement std.multipart.add_field
+    return null
+}
+
+func add_file(...args) {
+    // TODO: implement std.multipart.add_file
+    return null
+}
+
+func boundary(...args) {
+    // TODO: implement std.multipart.boundary
+    return null
+}
+
+func to_bytes(...args) {
+    // TODO: implement std.multipart.to_bytes
+    return null
+}
+
+func parse(...args) {
+    // TODO: implement std.multipart.parse
+    return null
+}

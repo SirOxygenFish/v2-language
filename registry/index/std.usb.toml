@@ -1,0 +1,4 @@
+# registry entry for std.usb
+name = "std.usb"
+path = "packages/std-usb"
+version = "0.1.0"

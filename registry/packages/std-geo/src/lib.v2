@@ -1,0 +1,40 @@
+// std.geo — reference package.
+//
+// This is the community/package home for std.geo. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func distance(...args) {
+    // TODO: implement std.geo.distance
+    return null
+}
+
+func bearing(...args) {
+    // TODO: implement std.geo.bearing
+    return null
+}
+
+func midpoint(...args) {
+    // TODO: implement std.geo.midpoint
+    return null
+}
+
+func bbox(...args) {
+    // TODO: implement std.geo.bbox
+    return null
+}
+
+func point_in_polygon(...args) {
+    // TODO: implement std.geo.point_in_polygon
+    return null
+}
+
+func geojson_parse(...args) {
+    // TODO: implement std.geo.geojson_parse
+    return null
+}
+
+func wkt_parse(...args) {
+    // TODO: implement std.geo.wkt_parse
+    return null
+}

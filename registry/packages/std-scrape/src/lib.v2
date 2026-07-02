@@ -1,0 +1,65 @@
+// std.scrape — reference package.
+//
+// This is the community/package home for std.scrape. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func fetch(...args) {
+    // TODO: implement std.scrape.fetch
+    return null
+}
+
+func parse(...args) {
+    // TODO: implement std.scrape.parse
+    return null
+}
+
+func select(...args) {
+    // TODO: implement std.scrape.select
+    return null
+}
+
+func select_all(...args) {
+    // TODO: implement std.scrape.select_all
+    return null
+}
+
+func text(...args) {
+    // TODO: implement std.scrape.text
+    return null
+}
+
+func attr(...args) {
+    // TODO: implement std.scrape.attr
+    return null
+}
+
+func links(...args) {
+    // TODO: implement std.scrape.links
+    return null
+}
+
+func browser(...args) {
+    // TODO: implement std.scrape.browser
+    return null
+}
+
+func click(...args) {
+    // TODO: implement std.scrape.click
+    return null
+}
+
+func type_text(...args) {
+    // TODO: implement std.scrape.type_text
+    return null
+}
+
+func screenshot(...args) {
+    // TODO: implement std.scrape.screenshot
+    return null
+}
+
+func wait_for(...args) {
+    // TODO: implement std.scrape.wait_for
+    return null
+}

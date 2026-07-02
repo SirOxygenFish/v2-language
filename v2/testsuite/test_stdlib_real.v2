@@ -1,0 +1,136 @@
+// Regression coverage for the real (non-stub) pure-computation stdlib:
+// crypto digests/encoding, non-cryptographic hashes, UUIDs, semver, CSV, regex.
+import "std.crypto"
+import "std.hash"
+import "std.uuid"
+import "std.semver"
+import "std.csv"
+import "std.regex"
+
+let passed = 0
+let failed = 0
+func check(name, got, want) {
+    if (got == want) {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        println(f"FAIL: ${name}: got ${got} want ${want}")
+    }
+}
+
+// ---- crypto: cryptographic digests (known vectors) ----
+check("sha256 abc", crypto.sha256("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+check("sha256 empty", crypto.sha256(""),
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+check("sha1 abc", crypto.sha1("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+check("md5 abc", crypto.md5("abc"), "900150983cd24fb0d6963f7d28e17f72")
+check("sha512 abc", crypto.sha512("abc"),
+      "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+
+// ---- crypto: encoding ----
+check("base64 encode", crypto.base64_encode("hello"), "aGVsbG8=")
+check("base64 encode Man", crypto.base64_encode("Man"), "TWFu")
+check("hex encode", crypto.hex_encode("hi"), "6869")
+check("bare base64", base64_encode("hello"), "aGVsbG8=")
+check("bare sha256", sha256("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+// ---- hash: non-cryptographic (doc-stated values) ----
+check("fnv1a hello", hash.fnv1a("hello"), 1335831723)
+check("crc32 hello", hash.crc32("hello"), 907060870)
+check("adler32 hello", hash.adler32("hello"), 103547413)
+
+// ---- uuid ----
+let id1 = uuid.v4()
+let id2 = uuid.v4()
+check("uuid length", id1.len(), 36)
+check("uuid valid", uuid.is_valid(id1), true)
+check("uuid unique", id1 == id2, false)
+check("uuid invalid", uuid.is_valid("nope"), false)
+check("uuid nil", uuid.nil(), "00000000-0000-0000-0000-000000000000")
+
+// ---- semver ----
+let sv = semver.parse("2.3.1-beta+build5")
+check("semver major", sv["major"], 2)
+check("semver minor", sv["minor"], 3)
+check("semver patch", sv["patch"], 1)
+check("semver prerelease", sv["prerelease"], "beta")
+check("semver cmp lt", semver.compare("1.2.0", "1.3.0"), -1)
+check("semver cmp eq", semver.compare("2.0.0", "2.0.0"), 0)
+check("semver cmp gt", semver.compare("1.3.0", "1.2.9"), 1)
+check("semver caret ok", semver.satisfies("1.4.2", "^1.2.0"), true)
+check("semver caret no", semver.satisfies("2.0.0", "^1.2.0"), false)
+check("semver tilde ok", semver.satisfies("1.2.9", "~1.2.0"), true)
+check("semver tilde no", semver.satisfies("1.3.0", "~1.2.0"), false)
+check("semver increment", semver.increment("1.2.3", "minor"), "1.3.0")
+check("semver valid", semver.is_valid("1.0.0"), true)
+check("semver invalid", semver.is_valid("x.y.z"), false)
+
+// ---- csv ----
+let rows = csv.parse("a,b,c\n1,\"x,y\",3")
+check("csv rows", rows.len(), 2)
+check("csv quoted field", rows[1][1], "x,y")
+check("csv plain field", rows[0][0], "a")
+check("csv stringify", csv.stringify([["n", "v"], ["a,b", "2"]]), "n,v\n\"a,b\",2\n")
+
+// ---- fmt.sprintf (printf-style) ----
+import "std.fmt"
+check("sprintf s+d", fmt.sprintf("%s is %d", "Al", 30), "Al is 30")
+check("sprintf float", fmt.sprintf("%.2f", 3.14159), "3.14")
+check("sprintf hex pad", fmt.sprintf("%08x", 255), "000000ff")
+check("sprintf width", fmt.sprintf("[%5d]", 42), "[   42]")
+check("sprintf left", fmt.sprintf("[%-5d]", 42), "[42   ]")
+check("sprintf percent", fmt.sprintf("100%%"), "100%")
+
+// ---- regex (docs order: text first, then pattern) ----
+check("regex match", regex.match("abc123", "\\d+"), true)
+check("regex no match", regex.match("abcdef", "\\d+"), false)
+check("regex find_all", regex.find_all("a1b22c333", "\\d+").len(), 3)
+check("regex find", regex.find("hello world", "\\w+"), "hello")
+check("regex replace", regex.replace("a1b2", "\\d", "x"), "axb2")
+check("regex replace_all", regex.replace_all("a1b2c3", "\\d", "X"), "aXbXcX")
+
+
+// ---- std.fs path manipulation (pure) ----
+import std.fs
+check("fs.join", fs.join("/home", "alice", "docs"), "/home/alice/docs")
+check("fs.basename", fs.basename("/home/alice/file.v2"), "file.v2")
+check("fs.dirname", fs.dirname("/home/alice/file.v2"), "/home/alice")
+check("fs.ext", fs.ext("readme.md"), ".md")
+check("fs.stem", fs.stem("readme.md"), "readme")
+check("fs.normalize", fs.normalize("/a/b/../c/./d"), "/a/c/d")
+check("fs.is_abs true", fs.is_abs("/x"), true)
+check("fs.is_abs false", fs.is_abs("rel"), false)
+
+// ---- std.fs local file I/O ----
+fs.write("fs_test_tmp.txt", "roundtrip")
+check("fs.exists", fs.exists("fs_test_tmp.txt"), true)
+check("fs.read", fs.read("fs_test_tmp.txt"), "roundtrip")
+check("fs.size", fs.size("fs_test_tmp.txt"), 9)
+fs.delete("fs_test_tmp.txt")
+check("fs.deleted", fs.exists("fs_test_tmp.txt"), false)
+
+// ---- std.toml ----
+import std.toml
+let tc = toml.parse("name = \"app\"\nport = 8080\n[db]\nhost = \"localhost\"\nenabled = true")
+check("toml scalar str", tc["name"], "app")
+check("toml scalar int", tc["port"], 8080)
+check("toml nested table", tc["db"]["host"], "localhost")
+check("toml nested bool", tc["db"]["enabled"], true)
+check("toml array", str(toml.parse("ports = [80, 443]")["ports"]), "[80, 443]")
+let tr = toml.parse(toml.stringify({"a": 1, "srv": {"port": 9090}}))
+check("toml roundtrip", tr["srv"]["port"], 9090)
+
+// ---- std.dotenv ----
+import std.dotenv
+let de = dotenv.parse("PORT=8080\nHOST=\"localhost\"\n# c\nexport DEBUG=true")
+check("dotenv value", de["PORT"], "8080")
+check("dotenv quoted", de["HOST"], "localhost")
+check("dotenv export", de["DEBUG"], "true")
+dotenv.set("V2_TEST_VAR", "xyz")
+check("dotenv set/get", dotenv.get("V2_TEST_VAR"), "xyz")
+check("dotenv get_or", dotenv.get_or("V2_NOPE", "def"), "def")
+
+println(f"stdlib_real: ${passed} passed, ${failed} failed")
+assert_eq(failed, 0)

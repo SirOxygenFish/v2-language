@@ -1,0 +1,30 @@
+// std.barcode — reference package.
+//
+// This is the community/package home for std.barcode. The functions below
+// declare the documented API surface; replace the bodies with a real
+// implementation (or a native binding) and publish a new version.
+
+func generate(...args) {
+    // TODO: implement std.barcode.generate
+    return null
+}
+
+func generate_png(...args) {
+    // TODO: implement std.barcode.generate_png
+    return null
+}
+
+func generate_svg(...args) {
+    // TODO: implement std.barcode.generate_svg
+    return null
+}
+
+func scan(...args) {
+    // TODO: implement std.barcode.scan
+    return null
+}
+
+func decode(...args) {
+    // TODO: implement std.barcode.decode
+    return null
+}

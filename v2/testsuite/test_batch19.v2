@@ -1,0 +1,219 @@
+// Batch 19: New builtins - math extensions, comptime, memory, vectors, tensors, stdlib modules
+
+// ── Extended math ──
+import "std.math" as math
+
+test "math.asin/acos/atan" {
+    assert(math.asin(1.0) > 1.57)
+    assert(math.asin(1.0) < 1.58)
+    assert(math.acos(1.0) == 0.0)
+    assert(math.atan(0.0) == 0.0)
+}
+
+test "math.atan2" {
+    assert(math.atan2(1.0, 1.0) > 0.78)
+    assert(math.atan2(1.0, 1.0) < 0.79)
+}
+
+test "math.sinh/cosh/tanh" {
+    assert(math.sinh(0.0) == 0.0)
+    assert(math.cosh(0.0) == 1.0)
+    assert(math.tanh(0.0) == 0.0)
+}
+
+test "math.deg/rad" {
+    assert(math.deg(math.PI) > 179.9)
+    assert(math.deg(math.PI) < 180.1)
+    assert(math.rad(180.0) > 3.14)
+    assert(math.rad(180.0) < 3.15)
+}
+
+test "math.exp/exp2/log2/log10/cbrt" {
+    assert(math.exp(0.0) == 1.0)
+    assert(math.exp2(3.0) == 8.0)
+    assert(math.log2(8.0) == 3.0)
+    assert(math.log10(100.0) == 2.0)
+    assert(math.cbrt(27.0) == 3.0)
+}
+
+test "math.hypot/trunc/clamp/lerp/sign" {
+    assert(math.hypot(3.0, 4.0) == 5.0)
+    assert(math.trunc(3.7) == 3.0)
+    assert(math.clamp(5.0, 0.0, 3.0) == 3.0)
+    assert(math.clamp(-1.0, 0.0, 3.0) == 0.0)
+    assert(math.lerp(0.0, 10.0, 0.5) == 5.0)
+    assert(math.sign(42.0) == 1)
+    assert(math.sign(-5.0) == -1)
+    assert(math.sign(0.0) == 0)
+}
+
+test "math.is_nan/is_inf/is_finite" {
+    assert(math.is_finite(1.0) == true)
+    assert(math.is_nan(1.0) == false)
+    assert(math.is_inf(1.0) == false)
+    assert(math.is_inf(math.INF) == true)
+    assert(math.is_nan(math.NAN) == true)
+}
+
+test "math.gcd/lcm/factorial/is_prime" {
+    assert(math.gcd(12, 8) == 4)
+    assert(math.lcm(4, 6) == 12)
+    assert(math.factorial(5) == 120)
+    assert(math.is_prime(7) == true)
+    assert(math.is_prime(4) == false)
+}
+
+test "math.TAU/INF/NAN" {
+    assert(math.TAU > 6.28)
+    assert(math.TAU < 6.29)
+}
+
+test "math.variance" {
+    let v = math.variance([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+    assert(v > 3.9)
+    assert(v < 4.1)
+}
+
+// ── Compile-time intrinsics ──
+test "ct_platform returns a string" {
+    let p = ct_platform()
+    assert(typeof(p) == "string")
+}
+
+test "ct_arch returns a string" {
+    let a = ct_arch()
+    assert(typeof(a) == "string")
+}
+
+test "ct_word_exists" {
+    let x = 42
+    assert(ct_word_exists("x") == true)
+    assert(ct_word_exists("nonexistent_xyz") == false)
+}
+
+test "ct_emit executes code" {
+    ct_emit("let __ct_test_var = 99")
+    assert(__ct_test_var == 99)
+}
+
+// ── Memory operations ──
+test "mem_alloc and mem_read/write" {
+    let buf = mem_alloc(10)
+    assert(len(buf) == 10)
+    let buf2 = mem_write(buf, 3, 42)
+    assert(mem_read(buf2, 3) == 42)
+}
+
+test "mem_size_of" {
+    assert(mem_size_of("i32") == 4)
+    assert(mem_size_of("f64") == 8)
+    assert(mem_size_of("pointer") == 8)
+}
+
+// ── Vector operations ──
+test "vec_new/vec_from/vec_len" {
+    let v = vec_new(3)
+    assert(vec_len(v) == 3)
+    let v2 = vec_from([1.0, 2.0, 3.0])
+    assert(vec_len(v2) == 3)
+}
+
+test "vec_add/sub/mul/div" {
+    let a = vec_from([1.0, 2.0, 3.0])
+    let b = vec_from([4.0, 5.0, 6.0])
+    let c = vec_add(a, b)
+    assert(vec_get(c, 0) == 5.0)
+    assert(vec_get(c, 1) == 7.0)
+}
+
+test "vec_dot/norm/scale" {
+    let a = vec_from([3.0, 4.0])
+    assert(vec_dot(a, a) == 25.0)
+    assert(vec_norm(a) == 5.0)
+    let b = vec_scale(a, 2.0)
+    assert(vec_get(b, 0) == 6.0)
+}
+
+test "vec_sum/min/max" {
+    let v = vec_from([1.0, 5.0, 3.0])
+    assert(vec_sum(v) == 9.0)
+    assert(vec_min(v) == 1.0)
+    assert(vec_max(v) == 5.0)
+}
+
+// ── Tensor operations ──
+test "tensor_new/from/shape/rank/size" {
+    let t = tensor_new([2, 3])
+    assert(tensor_size(t) == 6)
+    assert(tensor_rank(t) == 2)
+    let s = tensor_shape(t)
+    assert(len(s) == 2)
+}
+
+test "tensor_add/scale/sum" {
+    let a = tensor_from([1.0, 2.0, 3.0, 4.0], [2, 2])
+    let b = tensor_from([5.0, 6.0, 7.0, 8.0], [2, 2])
+    let c = tensor_add(a, b)
+    assert(tensor_sum(c) == 36.0)
+    let d = tensor_scale(a, 2.0)
+    assert(tensor_sum(d) == 20.0)
+}
+
+test "tensor_relu" {
+    let t = tensor_from([-1.0, 2.0, -3.0, 4.0], [4])
+    let r = tensor_relu(t)
+    assert(tensor_sum(r) == 6.0)
+}
+
+// ── Newtype ──
+newtype UserId = int
+
+test "newtype declaration" {
+    assert(true)
+}
+
+// ── Comptime block ──
+comptime {
+    let __comptime_val = 777
+}
+
+test "comptime block executes immediately" {
+    assert(__comptime_val == 777)
+}
+
+// ── Unsafe block ──
+test "unsafe block executes normally" {
+    let result = 0
+    unsafe {
+        result = 42
+    }
+    assert(result == 42)
+}
+
+// ── Stdlib module imports ──
+test "std.fs module loads" {
+    import "std.fs" as fs
+    assert(fs != null)
+}
+
+test "std.fmt module loads" {
+    import "std.fmt" as fmt
+    assert(fmt != null)
+}
+
+test "std.time module loads" {
+    import "std.time" as time
+    assert(time != null)
+}
+
+test "std.rand module loads" {
+    import "std.rand" as rand
+    assert(rand != null)
+}
+
+test "std.hash module loads" {
+    import "std.hash" as hash
+    assert(hash != null)
+}
+
+print("All batch 19 tests passed!")

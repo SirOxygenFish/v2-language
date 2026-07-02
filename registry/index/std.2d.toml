@@ -1,0 +1,4 @@
+# registry entry for std.2d
+name = "std.2d"
+path = "packages/std-2d"
+version = "0.1.0"
