@@ -425,14 +425,8 @@ impl Chunk {
             x if x == Op::Closure as u8 => {
                 let idx = self.read_u16(offset + 1);
                 print!("{:<20} {:4} '{}'", "OP_CLOSURE", idx, self.constants[idx as usize]);
-                let mut o = offset + 3;
-                // Read upvalue descriptors
-                if let Value::Func(ref fv) = self.constants[idx as usize] {
-                    let upvalue_count = fv.params.len(); // store upvalue_count in a field…
-                    // For now just print the constant
-                }
                 println!();
-                o
+                offset + 3
             }
             x if x == Op::BuildList as u8 => {
                 let count = self.read_u16(offset + 1);

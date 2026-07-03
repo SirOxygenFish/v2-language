@@ -616,6 +616,17 @@ fn main() {
             i += 1;
         }
 
+        // Accepted-but-unwired flags (their backends are pending — see
+        // NOT_YET_IMPLEMENTED.md). Consumed here so each stays parseable
+        // without dead-assignment warnings.
+        let _ = (
+            &verbose_mode, &profile_flame, &incremental, &embed_engines,
+            &no_tco, &test_update_snapshots, &arch, &target_os, &wasm_cap,
+            &cache_dir, &async_workers, &build_script, &lsp_port,
+            &overflow_mode, &dump_cfg, &test_tag, &test_skip_tag, &doc_out,
+            &doc_format, &coverage_out, &coverage_format,
+        );
+
         let safety = RuntimeSafetyOptions {
             strict_unsafe,
             sanitizer: sanitizer.clone(),

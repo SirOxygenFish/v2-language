@@ -1089,7 +1089,7 @@ impl Parser {
                 "inline" => {
                     // @inline struct
                     if self.check(&TokenKind::Struct) {
-                        let mut stmt = self.parse_struct_decl()?;
+                        let stmt = self.parse_struct_decl()?;
                         if let Stmt::StructDecl { name, fields, doc_comment, .. } = stmt {
                             return Ok(Stmt::InlineStructDecl { name, fields, doc_comment });
                         }

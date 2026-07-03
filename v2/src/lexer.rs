@@ -37,7 +37,7 @@ impl Lexer {
         let save_line = self.line;
         let save_col = self.col;
 
-        let mut read_word = |lexer: &mut Self| -> String {
+        let read_word = |lexer: &mut Self| -> String {
             let mut w = String::new();
             while lexer.pos < lexer.source.len()
                 && (lexer.peek().is_alphanumeric() || lexer.peek() == '_')

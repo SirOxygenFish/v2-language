@@ -2705,11 +2705,9 @@ impl Interpreter {
             format!("{}.v2", path),
         ];
         let mut source: Option<String> = None;
-        let mut file_path = String::new();
         for cand in &candidates {
             if let Ok(s) = fs::read_to_string(cand) {
                 source = Some(s);
-                file_path = cand.clone();
                 break;
             }
         }
@@ -2720,7 +2718,6 @@ impl Interpreter {
             if let Some(entry) = crate::pkg::resolve_installed_entry(pkg_name) {
                 if let Ok(s) = fs::read_to_string(&entry) {
                     source = Some(s);
-                    file_path = entry.to_string_lossy().to_string();
                 }
             }
         }
@@ -11451,7 +11448,7 @@ impl Interpreter {
                 let pattern = arg_vals.get(1).and_then(|v| v.as_str()).unwrap_or_default();
                 // Replacement may be a string template or a lambda(match) -> str.
                 if matches!(arg_vals.get(2), Some(Value::Func(_)) | Some(Value::BuiltinFunc(_))) {
-                    let func = arg_vals.get(2).unwrap().clone();
+                    let func = (*arg_vals.get(2).unwrap()).clone();
                     return self.regex_replace_with_fn(&text, &pattern, &func, false);
                 }
                 let replacement = arg_vals.get(2).and_then(|v| v.as_str()).unwrap_or_default();
@@ -11461,7 +11458,7 @@ impl Interpreter {
                 let text = arg_vals.first().and_then(|v| v.as_str()).unwrap_or_default();
                 let pattern = arg_vals.get(1).and_then(|v| v.as_str()).unwrap_or_default();
                 if matches!(arg_vals.get(2), Some(Value::Func(_)) | Some(Value::BuiltinFunc(_))) {
-                    let func = arg_vals.get(2).unwrap().clone();
+                    let func = (*arg_vals.get(2).unwrap()).clone();
                     return self.regex_replace_with_fn(&text, &pattern, &func, true);
                 }
                 let replacement = arg_vals.get(2).and_then(|v| v.as_str()).unwrap_or_default();
