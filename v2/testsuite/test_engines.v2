@@ -1,0 +1,111 @@
+// Embedded language engine tests (@py blocks + @export/@import bridge).
+// Needs `python` on PATH; every check degrades to SKIP when it's missing.
+
+var passed = 0
+var failed = 0
+var skipped = false
+func check(name, actual, expected) {
+    if actual == expected {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        print(f"FAIL: ${name} — got ${actual}, expected ${expected}")
+    }
+}
+
+// Probe for a working python bridge first.
+try {
+    @py probe {
+        def v2_probe():
+            return 1
+        @export { v2_probe }
+    }
+} catch (e) {
+    skipped = true
+    print("engines: SKIPPED (python not available):", e)
+}
+
+if !skipped {
+    @import { v2_probe } from probe
+    check("probe call", v2_probe(), 1)
+
+    // Exports + selectors
+    @py {
+        def square(x):
+            return x * x
+
+        def add3(a, b, c):
+            return a + b + c
+
+        @export { square, add3 }
+    }
+    @import { square, add3 as sum3 } from @py
+    check("py square", square(12), 144)
+    check("py alias + multi-arg", sum3(1, 2, 3), 6)
+
+    // Named block selector
+    @py calc {
+        def cube(x):
+            return x ** 3
+        @export { cube }
+    }
+    @import { cube } from calc
+    @import { cube as cube2 } from @py.calc
+    check("named block", cube(3), 27)
+    check("lang.block selector", cube2(4), 64)
+
+    // Values round-trip: list/dict/str/bool/null
+    @py rt {
+        def echo(v):
+            return v
+
+        def stats(nums):
+            return {"total": sum(nums), "n": len(nums)}
+
+        @export { echo, stats }
+    }
+    @import { echo, stats } from rt
+    check("roundtrip list", echo([1, 2, 3]), [1, 2, 3])
+    check("roundtrip dict", echo({"a": 1}), {"a": 1})
+    check("roundtrip str", echo("héllo"), "héllo")
+    check("roundtrip bool/null", echo([true, null]), [true, null])
+    check("py dict result", stats([1, 2, 3, 4]), {"total": 10, "n": 4})
+
+    // Python stdlib module import
+    @import { mean } from py.statistics
+    check("py.module import", mean([10, 20, 30]), 20)
+
+    // Python state persists between calls (worker model)
+    @py counter_block {
+        _count = 0
+        def bump():
+            global _count
+            _count = _count + 1
+            return _count
+        @export { bump }
+    }
+    @import { bump } from counter_block
+    bump()
+    bump()
+    check("py state persists", bump(), 3)
+
+    // Python exceptions become catchable V2 errors
+    @py errs {
+        def explode():
+            raise ValueError("boom from python")
+        @export { explode }
+    }
+    @import { explode } from errs
+    var caught = ""
+    try { explode() } catch (e) { caught = str(e) }
+    check("py error catchable", caught.contains("boom from python"), true)
+
+    // Missing export gives a clear error
+    var import_err = false
+    try {
+        @import { nonexistent } from @py
+    } catch (e) { import_err = true }
+    check("missing export errors", import_err, true)
+}
+
+print(f"engines: ${passed} passed, ${failed} failed")

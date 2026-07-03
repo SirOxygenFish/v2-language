@@ -21,6 +21,83 @@ impl Lexer {
         }
     }
 
+    /// Language tags that open a raw embedded block after `@`.
+    const ENGINE_TAGS: &'static [&'static str] = &[
+        "py", "python", "js", "javascript", "lua", "go", "c", "cpp", "cxx",
+        "ts", "typescript", "java", "cs", "csharp", "rust", "rs", "bash",
+        "sh", "ps", "powershell", "os", "shell", "asm", "assembly", "mal",
+        "malbolge", "sql", "wasm",
+    ];
+
+    /// After a consumed `@`, try to lex `tag [name] { raw... }` as one token.
+    /// Restores position and returns None when it isn't an engine block, so
+    /// decorators (`@memo`, `@fixed`) keep working.
+    fn try_lex_embedded_block(&mut self, line: usize, col: usize) -> Option<Token> {
+        let save_pos = self.pos;
+        let save_line = self.line;
+        let save_col = self.col;
+
+        let mut read_word = |lexer: &mut Self| -> String {
+            let mut w = String::new();
+            while lexer.pos < lexer.source.len()
+                && (lexer.peek().is_alphanumeric() || lexer.peek() == '_')
+            {
+                w.push(lexer.advance());
+            }
+            w
+        };
+
+        let tag = read_word(self);
+        if !Self::ENGINE_TAGS.contains(&tag.as_str()) {
+            self.pos = save_pos;
+            self.line = save_line;
+            self.col = save_col;
+            return None;
+        }
+        // Optional label, then `{` (spaces/tabs allowed; no newline before `{`)
+        while self.peek() == ' ' || self.peek() == '\t' {
+            self.advance();
+        }
+        let mut label = String::new();
+        if self.peek().is_alphabetic() || self.peek() == '_' {
+            label = read_word(self);
+            while self.peek() == ' ' || self.peek() == '\t' {
+                self.advance();
+            }
+        }
+        if self.peek() != '{' {
+            self.pos = save_pos;
+            self.line = save_line;
+            self.col = save_col;
+            return None;
+        }
+        self.advance(); // consume '{'
+
+        // Raw capture until the matching close brace (brace counting; braces
+        // inside the foreign code must balance, which they do in practice).
+        let mut depth = 1usize;
+        let mut code = String::new();
+        while self.pos < self.source.len() {
+            let ch = self.advance();
+            match ch {
+                '{' => {
+                    depth += 1;
+                    code.push(ch);
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    code.push(ch);
+                }
+                _ => code.push(ch),
+            }
+        }
+        let label = if label.is_empty() { None } else { Some(label) };
+        Some(Token::new(TokenKind::EmbeddedBlock(tag, label, code), line, col))
+    }
+
     pub fn tokenize(&mut self) -> Result<Vec<Token>, String> {
         let mut tokens = Vec::new();
         loop {
@@ -858,7 +935,15 @@ impl Lexer {
                     Ok(Token::new(TokenKind::Question, line, col))
                 }
             }
-            '@' => Ok(Token::new(TokenKind::At, line, col)),
+            '@' => {
+                // Embedded engine block: @py { ... } / @py name { ... }.
+                // Captured RAW at lex time so the foreign source survives
+                // untouched (foreign code is not V2-tokenizable).
+                if let Some(tok) = self.try_lex_embedded_block(line, col) {
+                    return Ok(tok);
+                }
+                Ok(Token::new(TokenKind::At, line, col))
+            }
             '#' => Ok(Token::new(TokenKind::Hash, line, col)),
             _ => Err(format!(
                 "[line {}] Error: Unexpected character '{}'",

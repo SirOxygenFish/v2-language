@@ -85,6 +85,9 @@ pub enum TokenKind {
     QuestionDot, // ?. (optional chaining)
     QuestionQuestion, // ?? (null coalescing)
     At,          // @
+    /// Raw embedded engine block captured at lex time: @py [name] { code }
+    /// (tag, optional block name, raw foreign source)
+    EmbeddedBlock(String, Option<String>, String),
     Hash,        // #
     Ellipsis,    // ...
     Pipe,        // |> (pipe operator)

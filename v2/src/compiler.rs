@@ -605,9 +605,10 @@ impl Compiler {
             // Stubs for features that don't need bytecode emission
             Stmt::EnableLangs { .. }
             | Stmt::EmbeddedLangBlock { .. }
+            | Stmt::EngineImport { .. }
             | Stmt::AsmBlock { .. }
             | Stmt::SourceDirective { .. } => {
-                // No-ops in compiled mode
+                // No-ops in compiled mode (engine blocks run in the interpreter)
             }
         }
         Ok(())

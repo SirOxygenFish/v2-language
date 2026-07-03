@@ -38,10 +38,27 @@ Last reconciled: 2026-07-02.
   objects). Not supported: in-pattern backreferences (`\1`) and lookaround (`(?=...)`).
 - Concurrency: `thread_spawn`/`thread_join` and channels run on a **single-threaded** model
   (threads execute eagerly; channels are synchronous buffers). Actors/agents/isolates are modeled,
-  not truly parallel. `--async-workers > 1` is accepted but not parallel.
+  not truly parallel — `actor_spawn`/`agent_create` return handle objects, but
+  `actor_send`/`actor_receive`/`actor_call` are no-op stubs returning null.
+  `--async-workers > 1` is accepted but not parallel.
 - Macros are runtime-expanded, not hygienic compile-time expansion.
 - Bytecode backend (`-c -r`) supports the core language incl. bignum, but not every newer feature
   (e.g. tagged templates) — use the interpreter (default) for full coverage.
+- **Embedded language engines**: `@py` and `@js` blocks fully execute (run-in-place, `@export`,
+  `@import { ... } from @lang / block / @lang.block`, `py.module` imports, JSON value round-trip,
+  persistent worker state, foreign exceptions as catchable V2 errors) via `python`/`node` on PATH.
+  `@bash`/`@sh`/`@os`/`@ps`/`@lua` blocks run in place (no exports). Not yet: compiled-language
+  blocks (`@c`, `@rust`, `@go`, …) which need a build-toolchain bridge, `@import` *inside* embedded
+  blocks (cross-engine calls), JS module imports (`js.lodash`), managed engine bundles
+  (`v2 install --engines`), and `register_engine()` (accepted, but custom tags don't execute).
+- **Native FFI (`extern` / `cimport` / `std.ffi`)**: `extern func` declarations **parse only** —
+  calling one returns `null`; `cimport` is a no-op; `std.ffi` is a reference-spec stub. There is
+  no dlopen/libffi bridge yet. To reach another language today, use the embedded engine bridge
+  (`@py`/`@js`) — native C/Rust calls need a real FFI backend.
+- **WASM backend**: the entire WASM chapter (`--target wasm`, `--wasm-cap`, `extern wasm_host`,
+  component-model host adapters) is design-only; `v2 -c --target wasm` reports it as unavailable.
+- Soft signal handlers (`signal.on/once/off/reset/ignore/raise/alarm`) are stubs; the hardware
+  fault-classification APIs in `std.signal` are real.
 
 ## Reference specification only (typed stubs; need a native backend or a package)
 

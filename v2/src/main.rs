@@ -5,6 +5,7 @@ mod ast;
 mod parser;
 mod value;
 mod regex_engine;
+mod engines;
 mod environment;
 mod fault;
 mod interpreter;
@@ -373,7 +374,7 @@ fn print_help() {
     println!("  -D, --docs                Open language documentation in your browser");
     println!("  -I, --internals           Open internals documentation in your browser");
     println!("  -P, --packages            Open the packages/package-manager guide in your browser");
-    println!("  --target <t>              Compile target: native, wasm, bytecode, exe");
+    println!("  --target <t>              Compile target: native, bytecode, exe (wasm: not yet)");
     println!("  --arch <a>                Target architecture: x86_64, arm64, wasm32");
     println!("  --os <os>                 Target OS: linux, windows, macos, android, ios, none");
     println!("  --wasm-cap <caps>         WASM host capabilities (comma-separated)");
@@ -667,7 +668,15 @@ fn main() {
                 let result = match target.as_deref() {
                     Some("exe") => bundle_exe(path, out_path.as_deref()),
                     Some("native") => compile_native(path, out_path.as_deref()),
-                    Some(t) => Err(format!("Unknown target '{}'. Supported: exe, native, bytecode, wasm", t)),
+                    Some("wasm") => Err(
+                        "The WASM backend is not implemented yet (see NOT_YET_IMPLEMENTED.md). \
+                         Supported targets: exe, native, bytecode (default)."
+                            .to_string(),
+                    ),
+                    Some(t) => Err(format!(
+                        "Unknown target '{}'. Supported: exe, native, bytecode (default)",
+                        t
+                    )),
                     None => compile_file(path, out_path.as_deref(), disasm_mode, run_mode, safety.clone()),
                 };
                 if let Err(e) = result {

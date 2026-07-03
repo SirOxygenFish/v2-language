@@ -73,6 +73,13 @@ pub struct Interpreter {
     /// runaway recursion into a catchable error before the native stack blows.
     call_depth: usize,
     recursion_limit: usize,
+    /// Live embedded-engine workers (index = worker id in __engine_call names).
+    engine_workers: Vec<crate::engines::EngineWorker>,
+    /// Engine export registry: selector key ("@py", "block_name",
+    /// "@py.block_name") -> exported (function, worker id) pairs.
+    engine_exports: HashMap<String, Vec<(String, usize)>>,
+    /// Foreign-module workers keyed by selector ("py.statistics").
+    engine_module_workers: HashMap<String, usize>,
     /// Channel buffers keyed by channel id (synchronous queue semantics).
     channels: HashMap<i64, std::collections::VecDeque<Value>>,
     /// Whether a channel id has been closed.
@@ -127,6 +134,9 @@ impl Interpreter {
             trait_impls: HashMap::new(),
             call_depth: 0,
             recursion_limit: 15_000,
+            engine_workers: Vec::new(),
+            engine_exports: HashMap::new(),
+            engine_module_workers: HashMap::new(),
             channels: HashMap::new(),
             channels_closed: HashMap::new(),
             thread_results: HashMap::new(),
@@ -2539,15 +2549,17 @@ impl Interpreter {
                 Ok(Value::Null)
             }
             Stmt::EmbeddedLangBlock { lang, label, code } => {
-                // In tree-walk interpreter, embedded language blocks are no-ops
-                // Store the code for potential later use
+                // Keep the raw source reachable for introspection/tools.
                 let key = if let Some(l) = label {
                     format!("__embed_{}_{}", lang, l)
                 } else {
                     format!("__embed_{}", lang)
                 };
                 self.env.define(&key, Value::Str(code.clone()));
-                Ok(Value::Null)
+                self.exec_embedded_block(lang, label.as_deref(), code)
+            }
+            Stmt::EngineImport { names, wildcard, selector } => {
+                self.exec_engine_import(names, *wildcard, selector)
             }
             Stmt::AsmBlock { code } => {
                 // In tree-walk interpreter, asm blocks are no-ops
@@ -4575,6 +4587,208 @@ impl Interpreter {
             if hops > 64 { break; } // guard against parent cycles
         }
         false
+    }
+
+    /// Execute an embedded engine block: run-only blocks execute in place;
+    /// blocks with `@export` start a persistent worker whose functions become
+    /// importable via `@import { ... } from @lang` selectors.
+    fn exec_embedded_block(
+        &mut self,
+        lang_tag: &str,
+        label: Option<&str>,
+        code: &str,
+    ) -> Result<Value, String> {
+        let lang = crate::engines::normalize_lang(lang_tag);
+        let (clean_code, mut exports, wildcard) = crate::engines::extract_directives(code);
+
+        match lang {
+            "python" | "node" => {
+                if exports.is_empty() && !wildcard {
+                    crate::engines::run_block(lang, &clean_code)?;
+                    return Ok(Value::Null);
+                }
+                let worker = crate::engines::EngineWorker::start(lang, &clean_code)?;
+                if wildcard {
+                    if worker.announced_exports.is_empty() {
+                        return Err(format!(
+                            "@export {{ * }} needs enumerable globals; list names explicitly in @{} blocks",
+                            lang_tag
+                        ));
+                    }
+                    for name in &worker.announced_exports {
+                        if !exports.contains(name) {
+                            exports.push(name.clone());
+                        }
+                    }
+                }
+                let wid = self.engine_workers.len();
+                self.engine_workers.push(worker);
+
+                let tag = crate::engines::canonical_tag(lang_tag).to_string();
+                let mut keys = vec![format!("@{}", tag)];
+                if let Some(l) = label {
+                    keys.push(l.to_string());
+                    keys.push(format!("@{}.{}", tag, l));
+                }
+                for k in keys {
+                    let entry = self.engine_exports.entry(k).or_default();
+                    for name in &exports {
+                        entry.push((name.clone(), wid));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "bash" | "sh" | "shell" | "powershell" | "lua" => {
+                if !exports.is_empty() || wildcard {
+                    return Err(format!(
+                        "@export is only supported in @py and @js blocks (got @{})",
+                        lang_tag
+                    ));
+                }
+                crate::engines::run_block(lang, &clean_code)?;
+                Ok(Value::Null)
+            }
+            other => {
+                eprintln!(
+                    "[warning] @{} block skipped — the {} toolchain bridge is not implemented yet",
+                    lang_tag, other
+                );
+                Ok(Value::Null)
+            }
+        }
+    }
+
+    /// `@import { a, b as c } from <selector>` — define V2 proxies for
+    /// functions exported by engine blocks or foreign modules.
+    fn exec_engine_import(
+        &mut self,
+        names: &[(String, Option<String>)],
+        wildcard: bool,
+        selector: &str,
+    ) -> Result<Value, String> {
+        // Normalize the selector to registry form.
+        let key = if let Some(rest) = selector.strip_prefix('@') {
+            let (tag, block) = match rest.split_once('.') {
+                Some((t, b)) => (crate::engines::canonical_tag(t), Some(b)),
+                None => (crate::engines::canonical_tag(rest), None),
+            };
+            match block {
+                Some(b) => format!("@{}.{}", tag, b),
+                None => format!("@{}", tag),
+            }
+        } else if let Some((lang, module)) = selector.split_once('.') {
+            // Foreign module import: py.statistics, py.math_ops, ...
+            return self.engine_import_module(lang, module, names, wildcard);
+        } else {
+            selector.to_string() // bare block name
+        };
+
+        let entries = self
+            .engine_exports
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| format!("No engine exports found for selector '{}'", selector))?;
+
+        let mut to_define: Vec<(String, String, usize)> = Vec::new(); // (bind_as, fn, wid)
+        if wildcard {
+            for (fnname, wid) in &entries {
+                let dup = entries
+                    .iter()
+                    .any(|(f, w)| f == fnname && w != wid);
+                if dup {
+                    return Err(format!(
+                        "Ambiguous wildcard import of '{}' from '{}' — use a named block selector",
+                        fnname, selector
+                    ));
+                }
+                to_define.push((fnname.clone(), fnname.clone(), *wid));
+            }
+        }
+        for (name, alias) in names {
+            let matches: Vec<usize> = entries
+                .iter()
+                .filter(|(f, _)| f == name)
+                .map(|(_, w)| *w)
+                .collect();
+            match matches.as_slice() {
+                [] => {
+                    return Err(format!(
+                        "'{}' is not exported by '{}' (did the block @export it?)",
+                        name, selector
+                    ))
+                }
+                [wid] => to_define.push((
+                    alias.clone().unwrap_or_else(|| name.clone()),
+                    name.clone(),
+                    *wid,
+                )),
+                _ if matches.windows(2).all(|w| w[0] == w[1]) => to_define.push((
+                    alias.clone().unwrap_or_else(|| name.clone()),
+                    name.clone(),
+                    matches[0],
+                )),
+                _ => {
+                    return Err(format!(
+                        "Import of '{}' from '{}' is ambiguous (exported by multiple blocks) — use @lang.block_name",
+                        name, selector
+                    ))
+                }
+            }
+        }
+        for (bind_as, fnname, wid) in to_define {
+            self.env.define(
+                &bind_as,
+                Value::BuiltinFunc(format!("__engine_call:{}:{}", wid, fnname)),
+            );
+        }
+        Ok(Value::Null)
+    }
+
+    /// `@import { mean } from py.statistics` — spin up (or reuse) a worker
+    /// that imports the foreign module, then proxy the requested names.
+    fn engine_import_module(
+        &mut self,
+        lang: &str,
+        module: &str,
+        names: &[(String, Option<String>)],
+        wildcard: bool,
+    ) -> Result<Value, String> {
+        let norm = crate::engines::normalize_lang(lang);
+        if norm != "python" {
+            return Err(format!(
+                "Module imports are currently supported for Python only (got '{}.{}')",
+                lang, module
+            ));
+        }
+        let cache_key = format!("{}.{}", lang, module);
+        let wid = match self.engine_module_workers.get(&cache_key) {
+            Some(w) => *w,
+            None => {
+                let bridge = format!("from {} import *", module);
+                let worker = crate::engines::EngineWorker::start(norm, &bridge)?;
+                let wid = self.engine_workers.len();
+                self.engine_workers.push(worker);
+                self.engine_module_workers.insert(cache_key, wid);
+                wid
+            }
+        };
+        if wildcard {
+            let announced = self.engine_workers[wid].announced_exports.clone();
+            for name in announced {
+                self.env.define(
+                    &name,
+                    Value::BuiltinFunc(format!("__engine_call:{}:{}", wid, name)),
+                );
+            }
+        }
+        for (name, alias) in names {
+            let bind_as = alias.clone().unwrap_or_else(|| name.clone());
+            self.env.define(
+                &bind_as,
+                Value::BuiltinFunc(format!("__engine_call:{}:{}", wid, name)),
+            );
+        }
+        Ok(Value::Null)
     }
 
     /// regex.replace / replace_all with a lambda: each match is passed to the
@@ -6723,6 +6937,66 @@ fn simple_regex_split(pattern: &str, text: &str) -> Vec<String> {
 
 // ── JSON helpers ─────────────────────────────────────────
 
+/// Decode a JSON string body: standard escapes plus \uXXXX (with surrogate pairs).
+fn json_unescape(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            match chars[i + 1] {
+                '"' => { out.push('"'); i += 2; }
+                '\\' => { out.push('\\'); i += 2; }
+                '/' => { out.push('/'); i += 2; }
+                'n' => { out.push('\n'); i += 2; }
+                't' => { out.push('\t'); i += 2; }
+                'r' => { out.push('\r'); i += 2; }
+                'b' => { out.push('\u{8}'); i += 2; }
+                'f' => { out.push('\u{c}'); i += 2; }
+                'u' if i + 5 < chars.len() => {
+                    let hex: String = chars[i + 2..i + 6].iter().collect();
+                    if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                        // Surrogate pair: \uD800-\uDBFF followed by \uDC00-\uDFFF
+                        if (0xD800..0xDC00).contains(&cp)
+                            && i + 11 < chars.len()
+                            && chars[i + 6] == '\\'
+                            && chars[i + 7] == 'u'
+                        {
+                            let hex2: String = chars[i + 8..i + 12].iter().collect();
+                            if let Ok(lo) = u32::from_str_radix(&hex2, 16) {
+                                if (0xDC00..0xE000).contains(&lo) {
+                                    let combined =
+                                        0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                    if let Some(c) = char::from_u32(combined) {
+                                        out.push(c);
+                                        i += 12;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(c) = char::from_u32(cp) {
+                            out.push(c);
+                        }
+                        i += 6;
+                    } else {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                other => {
+                    out.push(other);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn parse_json_value(s: &str) -> Result<Value, String> {
     let s = s.trim();
     if s == "null" { return Ok(Value::Null); }
@@ -6731,7 +7005,7 @@ fn parse_json_value(s: &str) -> Result<Value, String> {
     if let Ok(n) = s.parse::<i64>() { return Ok(Value::Int(n)); }
     if let Ok(f) = s.parse::<f64>() { return Ok(Value::Float(f)); }
     if s.starts_with('"') && s.ends_with('"') {
-        return Ok(Value::Str(s[1..s.len()-1].replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")));
+        return Ok(Value::Str(json_unescape(&s[1..s.len() - 1])));
     }
     if s.starts_with('[') && s.ends_with(']') {
         let inner = &s[1..s.len()-1];
@@ -11111,6 +11385,43 @@ impl Interpreter {
                 let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(1);
                 let token: String = (0..n).map(|_| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); charset[(seed >> 32) as usize % charset.len()] as char }).collect();
                 Ok(Value::Str(token))
+            }
+
+            // ── Embedded engine calls: proxies created by @import ──
+            name if name.starts_with("__engine_call:") => {
+                let rest = &name["__engine_call:".len()..];
+                let (wid_str, fn_name) = rest
+                    .split_once(':')
+                    .ok_or("malformed engine call name")?;
+                let wid: usize = wid_str.parse().map_err(|_| "bad engine worker id")?;
+                let args_json = format!(
+                    "[{}]",
+                    arg_vals
+                        .iter()
+                        .map(|v| value_to_json(v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let worker = self
+                    .engine_workers
+                    .get_mut(wid)
+                    .ok_or("engine worker is no longer running")?;
+                let response = worker.call_json(fn_name, &args_json)?;
+                let parsed = parse_json_value(&response)
+                    .map_err(|e| format!("bad engine response: {}", e))?;
+                if let Value::Dict(pairs) = &parsed {
+                    for (k, v) in pairs {
+                        if matches!(k, Value::Str(s) if s == "error") {
+                            return Err(format!("{}", v));
+                        }
+                    }
+                    for (k, v) in pairs {
+                        if matches!(k, Value::Str(s) if s == "ok") {
+                            return Ok(v.clone());
+                        }
+                    }
+                }
+                Err("bad engine response shape".into())
             }
 
             // ── Real regex implementations (simple pattern matching) ──

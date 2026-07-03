@@ -260,6 +260,13 @@ pub enum Stmt {
         label: Option<String>,
         code: String,
     },
+    /// `@import { a, b as c } from <selector>` — import symbols exported by
+    /// embedded engine blocks or foreign modules (e.g. `py.statistics`).
+    EngineImport {
+        names: Vec<(Ident, Option<Ident>)>,
+        wildcard: bool,
+        selector: String,
+    },
     /// `asm! { code }`
     AsmBlock {
         code: String,

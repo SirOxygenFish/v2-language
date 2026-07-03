@@ -78,29 +78,46 @@ v2-new/
 - [`IMPLEMENTATION.md`](IMPLEMENTATION.md) — implementation checklists per language feature
 - [`PACKAGES.md`](PACKAGES.md) — packages & package manager (`v2 --packages`)
 - [`LIST.md`](LIST.md) — chapter-by-chapter status map of every documented feature
-- [`NOT_YET_IMPLEMENTED.md`](NOT_YET_IMPLEMENTED.md) — authoritative implementation status
-- [`AUDIT.md`](AUDIT.md) — feature-by-feature audit against the actual source
+- [`NOT_YET_IMPLEMENTED.md`](NOT_YET_IMPLEMENTED.md) — **authoritative implementation status;
+  read this before assuming a documented feature works**
+- [`AUDIT.md`](AUDIT.md) — feature-by-feature audit (historical snapshot, Apr 2026; superseded
+  by `NOT_YET_IMPLEMENTED.md`)
 - [`FAULT_HANDLING_DESIGN.md`](FAULT_HANDLING_DESIGN.md) — design for signal/fault recovery (not yet implemented)
 
 ## Testing
 
 ```bash
 cd v2
-cargo test                              # Rust unit/integration tests
+cargo test                              # Rust unit tests (lexer/parser/bigint/decimal/regex/engines)
+./target/release/v2 testsuite/ch_test.v2         # chapter tests (and every other testsuite/*.v2)
+./target/release/v2 testsuite/test_hardening.v2  # regression suite pinning past bug fixes
+./target/release/v2 testsuite/test_engines.v2    # @py/@js bridge tests (needs python on PATH)
 cd ..
-python test_docs_compliance.py          # runs every DOCS.md example against v2/target/debug/v2.exe
+python test_docs_compliance.py          # runs curated DOCS.md examples against the binary
 ```
 
-`test_docs_compliance.py` builds its checks straight from the documented examples in `DOCS.md`,
-so it's the fastest way to see whether the docs still match the implementation.
+A note on what the suites prove: `test_docs_compliance.py` checks that documented examples
+*parse and run* — it does not prove every documented behavior end-to-end. The `testsuite/*.v2`
+files assert actual values and are the stronger signal. For any feature not covered by a test,
+treat [`NOT_YET_IMPLEMENTED.md`](NOT_YET_IMPLEMENTED.md) as the source of truth.
 
 ## What's implemented
 
-The core language (arbitrary-precision `int`, exact `decimal`, classes/traits/enums, pattern
-matching, generators, async, error handling, Turing-complete macros) and the pure-computation
-standard library (`std.math/io/collections/fmt/fs/regex/crypto/hash/uuid/semver/csv/decimal/
-money/diff/serialize/log/toml/dotenv`, …) are fully implemented and tested. The 62 larger I/O-,
-network-, and hardware-bound modules (`std.http`, `std.db`, `std.ui`, `std.gpu`, `std.image`, …)
-ship as installable [`registry/`](registry/) packages rather than being baked into the binary —
-see [`NOT_YET_IMPLEMENTED.md`](NOT_YET_IMPLEMENTED.md) for the authoritative implemented/partial/
-stub status of every module.
+**Working and tested:** the core language (arbitrary-precision `int`, exact `decimal`,
+classes/traits/enums, pattern matching with dict/list/range patterns, generators, async,
+error handling with `?` propagation, Turing-complete macros, catchable recursion limits), the
+pure-computation standard library (`std.math/io/collections/fmt/fs/regex/crypto/hash/uuid/
+semver/csv/decimal/money/diff/serialize/log/toml/dotenv`, …, with a full backtracking regex
+engine incl. named capture groups), and polyglot `@py`/`@js` blocks — `@export`ed Python/JS
+functions become callable V2 functions (worker state persists between calls), and
+`@import { mean } from py.statistics` pulls Python libraries straight into V2 (see "Embedded
+Language Engines" in [`DOCS.md`](DOCS.md)).
+
+**Documented but NOT implemented yet** (the docs double as a design spec — these parse but
+don't execute): native FFI (`extern`/`cimport`/`std.ffi` return `null`), the WASM backend,
+compiled-language blocks (`@c`/`@rust`/`@go`), real parallelism (threads/actors run on a
+single-threaded model), pattern macros, and sized-int overflow modes. The 62 larger I/O-,
+network-, and hardware-bound modules (`std.http`, `std.db`, `std.ui`, `std.gpu`, …) ship as
+installable [`registry/`](registry/) packages rather than being baked into the binary.
+[`NOT_YET_IMPLEMENTED.md`](NOT_YET_IMPLEMENTED.md) is the authoritative list — when in doubt,
+trust it over any other doc (including this one).

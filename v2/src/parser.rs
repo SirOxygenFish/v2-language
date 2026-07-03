@@ -579,6 +579,14 @@ impl Parser {
             TokenKind::TestBlock => self.parse_test_block(),
             TokenKind::BenchBlock => self.parse_bench_block(),
             TokenKind::At => self.parse_decorated_func(),
+            TokenKind::EmbeddedBlock(_, _, _) => {
+                if let TokenKind::EmbeddedBlock(lang, label, code) = self.peek().clone() {
+                    self.advance();
+                    Ok(Stmt::EmbeddedLangBlock { lang, label, code })
+                } else {
+                    unreachable!()
+                }
+            }
             TokenKind::Type => self.parse_type_alias(),
             TokenKind::Using => self.parse_using(),
             TokenKind::StaticAssert => self.parse_static_assert(),
@@ -950,6 +958,44 @@ impl Parser {
         })
     }
 
+    /// `@import { a, b as c } from <selector>` — bring exported symbols from
+    /// embedded engine blocks (or foreign modules like `py.statistics`) into
+    /// V2 scope. `@import` itself has already been consumed.
+    fn parse_engine_import(&mut self) -> Result<Stmt, String> {
+        self.expect(&TokenKind::LBrace)?;
+        let mut names: Vec<(String, Option<String>)> = Vec::new();
+        let mut wildcard = false;
+        while !self.check(&TokenKind::RBrace) && !self.is_at_end() {
+            if self.match_tok(&TokenKind::Star) {
+                wildcard = true;
+            } else {
+                let n = self.expect_ident()?;
+                let alias = if self.match_tok(&TokenKind::As) {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                names.push((n, alias));
+            }
+            if !self.match_tok(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        self.expect(&TokenKind::From)?;
+        // Selector: `@lang`, `@lang.block`, `block_name`, or `lang.module`.
+        let mut selector = String::new();
+        if self.match_tok(&TokenKind::At) {
+            selector.push('@');
+        }
+        selector.push_str(&self.expect_ident()?);
+        while self.match_tok(&TokenKind::Dot) {
+            selector.push('.');
+            selector.push_str(&self.expect_ident()?);
+        }
+        Ok(Stmt::EngineImport { names, wildcard, selector })
+    }
+
     /// Recursively scan statements (but not nested function declarations)
     /// for a `yield`, so plain `func` generators work like `func*`.
     fn stmts_contain_yield(stmts: &[Stmt]) -> bool {
@@ -987,6 +1033,11 @@ impl Parser {
     fn parse_decorated_func(&mut self) -> Result<Stmt, String> {
         let mut decorators = Vec::new();
         while self.match_tok(&TokenKind::At) {
+            // ── Engine import: @import { a, b as c } from <selector> ──
+            if self.check(&TokenKind::Import) {
+                self.advance();
+                return self.parse_engine_import();
+            }
             let name = self.expect_decorator_name()?;
 
             // ── Source directives ──

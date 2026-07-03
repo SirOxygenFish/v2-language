@@ -733,6 +733,10 @@ v2 --profile --flame app.v2            # Generate flamegraph SVG
 
 V2 can compile to WebAssembly for use in browsers, Node.js, and WASI runtimes.
 
+> **Implementation status:** this chapter is the design specification. The
+> WASM backend is **not implemented yet** — `v2 -c --target wasm` reports it
+> as unavailable. See `NOT_YET_IMPLEMENTED.md`.
+
 ### Compiling to WASM
 
 ```bash
@@ -8127,6 +8131,16 @@ V2 can embed code from other programming languages using `@lang { ... }` blocks.
 | `@asm`, `@assembly`  | Assembly   | `nasm` + `ld`             |
 | `@mal`, `@malbolge`  | Malbolge   | runtime-simulated backend |
 
+> **Implementation status:** `@py` and `@js` blocks are fully bridged — they
+> execute in place, `@export`ed functions become callable V2 functions (a
+> persistent worker keeps the block's state alive between calls; values cross
+> as JSON), `@import { x } from py.module` imports Python stdlib/local modules
+> directly, and foreign exceptions surface as catchable V2 errors.
+> `@bash`/`@sh`/`@os`/`@ps`/`@lua` blocks run in place (no exports). Blocks for
+> compiled languages (`@c`, `@rust`, `@go`, …) parse but still need a
+> build-toolchain bridge; `@import` *inside* embedded blocks is not wired yet.
+> Runtimes are found on `PATH` (`python`, `node`, …).
+
 ### Managed Engine Bundles
 
 When reproducibility is required, configure embedded language toolchains in `v2.toml` and install them with `v2 install --engines`.
@@ -14508,6 +14522,12 @@ for (id in user_ids) {
 ## std.ffi — Foreign Function Interface
 
 Comprehensive FFI beyond `extern c` for loading shared libraries at runtime, defining function signatures, mapping complex C types, and calling platform APIs.
+
+> **Implementation status:** native FFI is **not wired yet** — `extern func`
+> declarations parse but return `null` when called, and `std.ffi` is a
+> reference-spec stub. To call into another language today, use the working
+> embedded engine bridge (`@py`/`@js` blocks + `@export`/`@import`). See
+> `NOT_YET_IMPLEMENTED.md`.
 
 ```v2
 import "std.ffi"
