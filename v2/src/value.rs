@@ -86,7 +86,11 @@ impl fmt::Display for Value {
             Value::BigInt(n) => write!(f, "{}", n.to_string()),
             Value::Decimal(d) => write!(f, "{}", d.to_string()),
             Value::Float(n) => {
-                if n.fract() == 0.0 {
+                if n.is_finite() && *n != 0.0 && (n.abs() >= 1e16 || n.abs() < 1e-4) {
+                    // Very large/small magnitudes read better in scientific
+                    // notation than as hundreds of expanded digits.
+                    write!(f, "{:e}", n)
+                } else if n.fract() == 0.0 {
                     write!(f, "{:.1}", n)
                 } else {
                     write!(f, "{}", n)
@@ -294,7 +298,12 @@ impl PartialEq for Value {
                     b.iter().any(|(bk, bv)| k == bk && v == bv)
                 })
             }
-            (Value::Set(a), Value::Set(b)) => a == b,
+            (Value::Set(a), Value::Set(b)) => {
+                // Sets compare as sets: order-insensitive membership equality.
+                a.len() == b.len()
+                    && a.iter().all(|x| b.contains(x))
+                    && b.iter().all(|x| a.contains(x))
+            }
             (Value::Instance(c1, f1), Value::Instance(c2, f2)) => c1 == c2 && f1 == f2,
             (Value::StructInstance(c1, f1), Value::StructInstance(c2, f2)) => c1 == c2 && f1 == f2,
             (Value::CowInstance(c1, f1), Value::CowInstance(c2, f2)) => {

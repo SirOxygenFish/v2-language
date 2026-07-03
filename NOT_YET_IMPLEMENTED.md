@@ -16,7 +16,7 @@ Last reconciled: 2026-07-02.
   infinite, `yield*` delegation), async/await + `for await` (synchronous model), defer,
   decorators, macros (runtime), destructuring (incl. `{a, b ?? default}`).
 - **Stdlib (real)**: `std.math`, `std.io`, `std.collections`, `std.fmt` (printf/`sprintf`),
-  `std.fs` (paths + local file I/O), `std.regex` (subset), `std.crypto` (SHA-1/256/512, MD5,
+  `std.fs` (paths + local file I/O), `std.regex` (full engine with capture groups), `std.crypto` (SHA-1/256/512, MD5,
   HMAC, base64, hex), `std.hash`, `std.uuid`, `std.semver`, `std.csv`, `std.decimal`, `std.money`,
   `std.diff`, `std.serialize`/JSON, `std.log` (leveled structured logging), `std.toml` (parse/
   stringify), `std.dotenv` (parse/load/env).
@@ -32,8 +32,10 @@ Last reconciled: 2026-07-02.
 - `std.os` (getenv, platform, arch work; process/user APIs partial), `std.time` (now/timestamp/
   parse partial; full tz/formatting incomplete), `std.rand` (basic PRNG; not cryptographic),
   `std.jwt`/`std.oauth2` (encode/verify shapes present; crypto-signature paths incomplete).
-- `std.regex` supports `. \d \w \s [..] [^..] ? * +` but **not** anchors `^`/`$`, alternation `|`,
-  capture groups `()`, or `{n,m}` quantifiers.
+- `std.regex` is a full backtracking engine (anchors `^`/`$`, alternation `|`, numbered + named
+  `(?P<name>...)` capture groups, non-capturing `(?:...)`, `{n}`/`{n,}`/`{n,m}` with lazy `?`
+  variants, `\b`/`\B`, `$1`-`$9` replacement backrefs, lambda replacements, `regex.compile`
+  objects). Not supported: in-pattern backreferences (`\1`) and lookaround (`(?=...)`).
 - Concurrency: `thread_spawn`/`thread_join` and channels run on a **single-threaded** model
   (threads execute eagerly; channels are synchronous buffers). Actors/agents/isolates are modeled,
   not truly parallel. `--async-workers > 1` is accepted but not parallel.

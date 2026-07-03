@@ -975,6 +975,13 @@ let active = true
 let nothing = null
 ```
 
+`var` is accepted as an alias for `let` (bindings are mutable either way):
+
+```v2
+var counter = 0
+counter += 1
+```
+
 ### Constants
 
 ```v2
@@ -2033,6 +2040,17 @@ s[::-1]       // "!dlroW ,olleH"  — reversed
 // Negative indices count from the end
 ```
 
+Ranges also work as slice indexes, and out-of-range bounds clamp instead of
+erroring. `*` repeats a string (negative counts give `""`):
+
+```v2
+s[1..4]          // "ell"  — same as s[1:4]
+s[7..=11]        // "World" — inclusive range
+"abcdef"[2..99]  // "cdef" — clamped, never errors
+"ab" * 3         // "ababab"
+[0] * 4          // [0, 0, 0, 0] — lists repeat the same way
+```
+
 String slices are read-only — you cannot assign to a string slice (`s[1:3] = "xy"` is a type error; strings are immutable). To modify, convert to a list of chars and back:
 
 ```v2
@@ -2220,6 +2238,8 @@ nums[1] = 99  // assignment
 | `.for_each(lambda)`     | Iterate (side effects)                              | `list.for_each(lambda(x) => print(x))`                       |
 | `.slice(s, e)`          | Extract sub-list                                    | `[1,2,3,4].slice(1,3)` ? `[2,3]`                             |
 | `.flatten()`            | Flatten one level of nesting                        | `[[1,2],[3,[4]]].flatten()` ? `[1,2,3,[4]]`                  |
+| `.chunk(n)`             | Non-overlapping chunks of size n                    | `[1,2,3,4,5].chunk(2)` ? `[[1,2],[3,4],[5]]`                 |
+| `.windows(n)`           | Sliding windows of size n                           | `[1,2,3].windows(2)` ? `[[1,2],[2,3]]`                       |
 | `.partition(pred)`      | Split into two lists: `[matching, non_matching]`    | `[1,2,3,4].partition(lambda(x) => x%2==0)` ? `[[2,4],[1,3]]` |
 | `.group_by(fn)`         | Group elements by key fn ? dict of lists            | `items.group_by(lambda(x) => x["dept"])`                     |
 | `.zip(other)`           | Pair elements with another list ? list of tuples    | `[1,2].zip([3,4])` ? `[(1,3),(2,4)]`                         |
@@ -2346,6 +2366,9 @@ let from_list = set([1, 2, 2, 3])   // #{1, 2, 3}
 
 `set(list)` is the canonical constructor. `to_set(list)` remains available as a legacy alias.
 
+Set literals deduplicate (`#{1, 1, 2}` is `#{1, 2}`), and set equality is
+membership-based — `#{1, 2} == #{2, 1}` is `true`.
+
 ### Set Methods
 
 | Method                   | Description                        | Example                                    |
@@ -2470,7 +2493,16 @@ if (x > 0) {
 }
 ```
 
-Parentheses around the condition are required.
+Parentheses around the condition are optional — `if x > 0 { ... }` and
+`if (x > 0) { ... }` are both valid. The same applies to `while`, `elif`, and
+`for ... in` heads (C-style `for (init; cond; step)` keeps its parentheses):
+
+```v2
+if x > 0 { print("positive") }
+while queue.len() > 0 { process(queue.pop()) }
+for item in items { print(item) }
+for k, v in scores { print(f"${k}: ${v}") }
+```
 
 ### Ternary Operator
 
@@ -6375,6 +6407,10 @@ func* countdown(n) {
 }
 ```
 
+The `*` is optional: any plain `func` whose body contains a `yield` is
+automatically treated as a generator (nested function bodies don't count —
+they yield for themselves).
+
 ### Manual Iteration
 
 ```v2
@@ -9844,6 +9880,25 @@ print()                            // empty line
 | `freeze(val)`    | Make immutable  |
 | `is_frozen(val)` | Check if frozen |
 
+### Recursion Depth
+
+Runaway recursion raises a catchable error instead of crashing the process.
+Tail calls are optimized away (see Tail-Call Optimization) and don't count
+toward the limit.
+
+| Function                  | Description                                        |
+| ------------------------- | -------------------------------------------------- |
+| `get_recursion_limit()`   | Current maximum call depth (default 15000)         |
+| `set_recursion_limit(n)`  | Set the maximum call depth (clamped to 64–20000)   |
+
+```v2
+try {
+    deep_recursive_thing()
+} catch (e) {
+    print(e)    // "Maximum recursion depth of 15000 exceeded ..."
+}
+```
+
 ---
 
 ## Method Reference
@@ -10561,6 +10616,9 @@ m2["month"]    // "04"
 ```v2
 regex.replace("hello world", r"\bworld\b", "V2")     // "hello V2"
 regex.replace_all("a1b2c3", r"\d", "X")              // "aXbXcX"
+
+// $1-$9 in the replacement refer to capture groups ($0 = whole match)
+regex.replace_all("john smith", r"(\w+) (\w+)", "$2 $1")   // "smith john"
 
 // Replace with lambda
 regex.replace_all("hello world", r"\w+", lambda(m) => m.upper())

@@ -452,6 +452,8 @@ impl Lexer {
             "false" => TokenKind::Bool(false),
             "null" => TokenKind::Null,
             "let" => TokenKind::Let,
+            // `var` is an alias for `let` (bindings are mutable either way).
+            "var" => TokenKind::Let,
             "const" => TokenKind::Const,
             "func" => TokenKind::Func,
             "return" => TokenKind::Return,

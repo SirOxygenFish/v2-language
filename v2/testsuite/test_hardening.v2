@@ -1,0 +1,204 @@
+// Regression tests for the 2026-07-03 hardening session.
+// Every check here pins a bug fix or upgrade made while stress-testing.
+
+import std.math
+
+var passed = 0
+var failed = 0
+func check(name, actual, expected) {
+    if actual == expected {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        print(f"FAIL: ${name} — got ${actual}, expected ${expected}")
+    }
+}
+
+// ── Paren-less control-flow heads ────────────────────────
+let flag = true
+var plc = 0
+if flag { plc = plc + 1 }
+if plc == 1 and flag { plc = plc + 1 } else { plc = 100 }
+while plc < 4 { plc = plc + 1 }
+for x in [10, 20] { plc = plc + x }
+for a, b in [(1, 2), (3, 4)] { plc = plc + a + b }
+for [c, d] in [[5, 5]] { plc = plc + c + d }
+check("paren-less if/while/for", plc, 54)
+
+// `var` is an alias for `let`
+var via_var = [1]
+via_var.push(2)
+check("var alias", via_var, [1, 2])
+
+// ── BigInt mixed-type ops ────────────────────────────────
+check("bigint > float", 2 ** 63 > 9.0e18, true)
+check("bigint + float", (2 ** 100 + 0.5) is float, true)
+check("float * bigint", (0.5 * 2 ** 100) > 0.0, true)
+check("min(bigint, int)", min(2 ** 70, 5), 5)
+check("max(float, bigint)", max(1.5, 2 ** 70), 2 ** 70)
+check("shl promotes", 1 << 63, 2 ** 63)
+check("shl keeps small", 1 << 10, 1024)
+check("shr big count", 5 >> 70, 0)
+check("mod int/float", 7 % 2.5, 2.0)
+check("factorial exact", math.factorial(25), 15511210043330985984000000)
+
+// ── String upgrades ──────────────────────────────────────
+check("str range index", "héllo"[1..3], "él")
+check("str range clamp", "abcdef"[2..99], "cdef")
+check("str backward range", "abcdef"[4..2], "")
+check("repeat negative", "x".repeat(-1), "")
+check("str * int", "ab" * 3, "ababab")
+check("str * negative", "ab" * -2, "")
+check("list * int", [1, 2] * 2, [1, 2, 1, 2])
+check("pad_start negative", "hi".pad_start(-5), "hi")
+check("pad unicode width", "é".pad_start(3, "-"), "--é")
+check("str find alias", "abc".find("z"), -1)
+check("str index alias", "abcabc".index("b"), 1)
+check("tuple slice", (1, 2, 3, 4)[1..3], (2, 3))
+check("universal to_string", (2 ** 100).to_string(), "1267650600228229401496703205376")
+check("float to_string", (1.5).to_string(), "1.5")
+
+// Float display: scientific for extreme magnitudes
+check("float sci large", str(1.5e300 * 10.0), "1.5e301")
+check("float sci small", str(0.00001), "1e-5")
+check("float plain", str(100.0), "100.0")
+
+// ── Collections ──────────────────────────────────────────
+check("set literal dedup", #{1, 1, 2}, #{1, 2})
+check("set order-insensitive eq", #{1, 2} == #{2, 1}, true)
+check("list to_list", [1, 2].to_list(), [1, 2])
+check("list chunk", [1, 2, 3, 4, 5].chunk(2), [[1, 2], [3, 4], [5]])
+check("list windows", [1, 2, 3].windows(2), [[1, 2], [2, 3]])
+check("list slice clamps", [1, 2, 3].slice(5, 2), [])
+check("list slice negative", [1, 2, 3, 4].slice(-2), [3, 4])
+check("take negative", [1, 2].take(-1), [])
+check("product promotes", [10 ** 10, 10 ** 10].product(), 10 ** 20)
+
+// ── Mutation through chains ──────────────────────────────
+let db = {"rows": [1]}
+db["rows"].push(2)
+check("dict[k].push", db["rows"], [1, 2])
+let grid = [[0, 0], [0, 0]]
+grid[1][0] = 7
+grid[0].push(9)
+check("nested index assign", grid, [[0, 0, 9], [7, 0]])
+class Holder {
+    func init() { self.cells = {} }
+    func put(k, v) { self.cells[k] = v }
+}
+let h = Holder()
+h.put("a", 1)
+h.cells["b"] = 2
+check("self.field[k] assign", h.cells, {"a": 1, "b": 2})
+let objs = {"x": {"y": [1]}}
+objs["x"]["y"].push(2)
+check("deep chain push", objs["x"]["y"], [1, 2])
+
+// ── `?` early return ─────────────────────────────────────
+func may(ok) {
+    if ok { return Ok(1) }
+    return Err("nope")
+}
+func chain_ok() {
+    let v = may(true)?
+    return Ok(v + 1)
+}
+func chain_err() {
+    let v = may(false)?
+    return Ok(v + 1)
+}
+check("? on Ok", chain_ok(), Ok(2))
+check("? on Err propagates", chain_err(), Err("nope"))
+
+// ── Dict patterns in match ───────────────────────────────
+let event = {"type": "click", "x": 10, "y": 20}
+var dict_pat = ""
+match event {
+    case ({type: "key", key}) { dict_pat = "key" }
+    case ({type: "click", x, y}) { dict_pat = f"click ${x},${y}" }
+    default { dict_pat = "none" }
+}
+check("dict pattern", dict_pat, "click 10,20")
+
+// ── OOP: is-hierarchy, statics, computed props, __setitem__ ──
+class Animal {
+    func init(name) { self.name = name }
+}
+class Dog extends Animal {
+}
+trait Talker {
+    func talk() { return "hi from " + self.name }
+}
+impl Talker for Dog {
+}
+let rex = Dog("Rex")
+check("is own class", rex is Dog, true)
+check("is parent class", rex is Animal, true)
+check("is trait", rex is Talker, true)
+check("is unrelated", rex is str, false)
+check("trait default method", rex.talk(), "hi from Rex")
+
+class Counter {
+    static var count = 0
+    static func bump() { Counter.count = Counter.count + 1 return Counter.count }
+}
+Counter.bump()
+Counter.bump()
+check("static field", Counter.count, 2)
+
+class Temp {
+    func init() { self.c = 100 }
+    get f -> float {
+        return self.c * 9 / 5 + 32
+    }
+}
+check("computed property", Temp().f, 212.0)
+
+class Boxy {
+    func init() { self.items = {} }
+    func __getitem__(k) { return self.items.get(k, null) }
+    func __setitem__(k, v) { self.items[k] = v }
+}
+let bx = Boxy()
+bx["k"] = 42
+check("__setitem__/__getitem__", bx["k"], 42)
+
+// ── Generators without func* ─────────────────────────────
+func plain_gen(n) {
+    for (i in 0..n) {
+        yield i * 2
+    }
+}
+check("auto generator", plain_gen(3).to_list(), [0, 2, 4])
+
+// ── Recursion guard is catchable ─────────────────────────
+func runaway(n) {
+    return runaway(n + 1) + 1
+}
+var guarded = false
+try { runaway(0) } catch (e) { guarded = true }
+check("recursion guard catchable", guarded, true)
+check("get_recursion_limit", get_recursion_limit() > 1000, true)
+
+// ── Regex engine with groups ─────────────────────────────
+import std.regex
+check("regex group find", regex.find("hello world", r"o\s(w\w+)"), "o world")
+let cap = regex.capture("2025-04-11", r"(\d{4})-(\d{2})-(\d{2})")
+check("regex capture full", cap[0], "2025-04-11")
+check("regex capture g1", cap[1], "2025")
+check("regex capture g3", cap[3], "11")
+let named = regex.capture("2025-04", r"(?P<year>\d{4})-(?P<month>\d{2})")
+check("regex named group", named["year"], "2025")
+check("regex alternation", regex.find("my dog", r"cat|dog"), "dog")
+check("regex lazy", regex.find("<a><b>", r"<.+?>"), "<a>")
+check("regex counted", regex.match("aaa", r"^a{3}$"), true)
+check("regex boundary", regex.replace("ho world", r"\bworld\b", "V2"), "ho V2")
+check("regex backref replace", regex.replace_all("john smith", r"(\w+) (\w+)", "$2 $1"), "smith john")
+check("regex lambda replace", regex.replace_all("a b", r"\w+", lambda(w) => w.upper()), "A B")
+let cpat = regex.compile(r"^\d+$")
+check("compiled match", cpat.match("123"), true)
+check("compiled no-match", cpat.match("12a"), false)
+check("compiled find_all", regex.compile(r"\d+").find_all("a1 b22"), ["1", "22"])
+check("regex nomatch capture", regex.capture("abc", r"\d+"), null)
+
+print(f"hardening: ${passed} passed, ${failed} failed")

@@ -63,6 +63,16 @@ pub struct Interpreter {
     /// The most recently thrown value, preserved so `catch (e)` can bind the
     /// original object (errors otherwise propagate as a plain Rust String).
     pending_throw: Option<Value>,
+    /// Value carried by a `?` early return between the raising expression and
+    /// the enclosing function boundary (see Expr::TryUnwrap).
+    pending_try_return: Option<Value>,
+    /// Trait membership: target type name -> traits it implements
+    /// (recorded by `impl Trait for Type`; used by the `is` operator).
+    trait_impls: HashMap<String, Vec<String>>,
+    /// Current user-call nesting depth and its ceiling — a guard that turns
+    /// runaway recursion into a catchable error before the native stack blows.
+    call_depth: usize,
+    recursion_limit: usize,
     /// Channel buffers keyed by channel id (synchronous queue semantics).
     channels: HashMap<i64, std::collections::VecDeque<Value>>,
     /// Whether a channel id has been closed.
@@ -113,6 +123,10 @@ impl Interpreter {
             registered_tests: Vec::new(),
             registered_test_fns: Vec::new(),
             pending_throw: None,
+            pending_try_return: None,
+            trait_impls: HashMap::new(),
+            call_depth: 0,
+            recursion_limit: 15_000,
             channels: HashMap::new(),
             channels_closed: HashMap::new(),
             thread_results: HashMap::new(),
@@ -243,6 +257,8 @@ impl Interpreter {
             "Ok", "Err", "Some",
             // Freeze / typeof
             "freeze", "is_frozen", "typeof",
+            // Recursion depth control
+            "set_recursion_limit", "get_recursion_limit",
             // chars/bytes
             "chars",
             // Assert helpers
@@ -1760,6 +1776,29 @@ impl Interpreter {
                         return Ok(Value::Null);
                     }
                 }
+                // Ranges iterate lazily — don't materialize millions of values.
+                if let Value::Range(s, e, inclusive) = &iterable {
+                    let (start, end_v) = (*s, if *inclusive { *e + 1 } else { *e });
+                    let mut i = start;
+                    while i < end_v {
+                        self.env.push_scope();
+                        self.env.define(var, Value::Int(i));
+                        let result = self.exec_block_no_scope(body)?;
+                        self.env.pop_scope();
+                        match result {
+                            Value::Break => break,
+                            Value::Continue => { i += 1; continue; }
+                            Value::BreakLabel(ref l) if my_label.as_deref() == Some(l) => break,
+                            Value::ContinueLabel(ref l) if my_label.as_deref() == Some(l) => { i += 1; continue; }
+                            Value::BreakLabel(_) | Value::ContinueLabel(_) | Value::Return(_) => {
+                                return Ok(result)
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    return Ok(Value::Null);
+                }
                 // Check for custom iterator protocol on instances
                 let items = match &iterable {
                     Value::Instance(cls_name, _) | Value::StructInstance(cls_name, _) => {
@@ -2311,6 +2350,11 @@ impl Interpreter {
                 }
                 // Auto-inherit default trait methods that weren't explicitly implemented
                 if let Some(trait_name) = trait_name {
+                    // Record trait membership for the `is` operator.
+                    let impls = self.trait_impls.entry(target.clone()).or_default();
+                    if !impls.contains(trait_name) {
+                        impls.push(trait_name.clone());
+                    }
                     if let Some(Value::Class(trait_cls)) = self.env.get(trait_name) {
                         let default_methods: Vec<(String, FuncValue)> = trait_cls.methods.iter()
                             .filter(|(name, func)| !implemented_names.contains(name) && !func.body.is_empty())
@@ -2583,7 +2627,16 @@ impl Interpreter {
                 }
                 continue;
             }
-            result = self.exec_stmt(stmt)?;
+            result = match self.exec_stmt(stmt) {
+                Ok(v) => v,
+                // `expr?` hit an Err/None: unwind to the enclosing function and
+                // make that value its return value (see Expr::TryUnwrap).
+                Err(e) if e == "__try_return__" => {
+                    let v = self.pending_try_return.take().unwrap_or(Value::Null);
+                    return Ok(Value::Return(Box::new(v)));
+                }
+                Err(e) => return Err(e),
+            };
             match &result {
                 Value::Return(_) | Value::Break | Value::Continue
                 | Value::BreakLabel(_) | Value::ContinueLabel(_) => return Ok(result),
@@ -2749,145 +2802,97 @@ impl Interpreter {
             }
             Expr::Index { object, index } => {
                 let idx = self.eval_expr(index)?;
-                if let Expr::Ident(name) = object.as_ref() {
-                    // Read old value for compound assignment
-                    let old_val = if !matches!(op, AssignOp::Assign) {
-                        let container = self.env.get(name).ok_or_else(|| {
-                            format!("Undefined variable '{}'", name)
-                        })?;
-                        match (&container, &idx) {
-                            (Value::List(items), Value::Int(i)) => {
-                                let i = if *i < 0 { (items.len() as i64 + i) as usize } else { *i as usize };
-                                items.get(i).cloned()
-                            }
-                            (Value::Dict(pairs), key) => {
-                                pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    let final_val = match op {
-                        AssignOp::Assign => new_val,
-                        _ => {
-                            let old = old_val.ok_or_else(|| "Cannot read old value for compound assignment".to_string())?;
-                            self.apply_assign_op(op, &old, &new_val)?
-                        }
-                    };
-                    let container = self.env.get_mut(name).ok_or_else(|| {
-                        format!("Undefined variable '{}'", name)
-                    })?;
-                    match container {
-                        Value::List(ref mut list) => {
-                            if let Value::Int(i) = idx {
-                                let i = if i < 0 { (list.len() as i64 + i) as usize } else { i as usize };
-                                if i < list.len() {
-                                    list[i] = final_val;
-                                } else {
-                                    return Err(format!("Index {} out of bounds", i));
-                                }
-                            }
-                        }
-                        Value::Dict(ref mut pairs) => {
-                            for (k, v) in pairs.iter_mut() {
-                                if *k == idx {
-                                    *v = final_val;
-                                    return Ok(Value::Null);
-                                }
-                            }
-                            pairs.push((idx, final_val));
-                        }
-                        _ => return Err("Cannot index-assign to this value".into()),
-                    }
-                    Ok(Value::Null)
-                } else {
-                    // Nested index: a[i][j] = val — collect index chain, resolve root
-                    let mut indices = vec![idx];
-                    let mut cur = object.as_ref();
-                    while let Expr::Index { object: inner, index: inner_idx } = cur {
-                        indices.push(self.eval_expr(inner_idx)?);
-                        cur = inner.as_ref();
-                    }
-                    indices.reverse();
-                    if let Expr::Ident(name) = cur {
-                        let container = self.env.get_mut(name).ok_or_else(|| {
-                            format!("Undefined variable '{}'", name)
-                        })?;
-                        // Walk to the nested container
-                        let depth = indices.len();
-                        let mut ptr = container as *mut Value;
-                        for idx_val in &indices[..depth - 1] {
-                            unsafe {
-                                match &mut *ptr {
-                                    Value::List(ref mut list) => {
-                                        if let Value::Int(i) = idx_val {
-                                            let i = if *i < 0 { (list.len() as i64 + i) as usize } else { *i as usize };
-                                            ptr = &mut list[i] as *mut Value;
-                                        } else {
-                                            return Err("List index must be integer".into());
-                                        }
-                                    }
-                                    Value::Dict(ref mut pairs) => {
-                                        let entry = pairs.iter_mut().find(|(k, _)| k == idx_val);
-                                        if let Some((_, v)) = entry {
-                                            ptr = v as *mut Value;
-                                        } else {
-                                            return Err(format!("Key not found: {}", idx_val));
-                                        }
-                                    }
-                                    _ => return Err("Cannot index into this value".into()),
-                                }
-                            }
-                        }
-                        let last_idx = &indices[depth - 1];
-                        let final_val = match op {
-                            AssignOp::Assign => new_val,
-                            _ => {
-                                let old = unsafe {
-                                    match &*ptr {
-                                        Value::List(list) => {
-                                            if let Value::Int(i) = last_idx {
-                                                let i = if *i < 0 { (list.len() as i64 + i) as usize } else { *i as usize };
-                                                list.get(i).cloned()
-                                            } else { None }
-                                        }
-                                        Value::Dict(pairs) => pairs.iter().find(|(k, _)| k == last_idx).map(|(_, v)| v.clone()),
-                                        _ => None,
-                                    }
-                                }.ok_or("Cannot read old value for compound assignment")?;
-                                self.apply_assign_op(op, &old, &new_val)?
-                            }
-                        };
-                        unsafe {
-                            match &mut *ptr {
-                                Value::List(ref mut list) => {
-                                    if let Value::Int(i) = last_idx {
-                                        let i = if *i < 0 { (list.len() as i64 + i) as usize } else { *i as usize };
-                                        if i < list.len() {
-                                            list[i] = final_val;
-                                        } else {
-                                            return Err(format!("Index {} out of bounds", i));
-                                        }
-                                    }
-                                }
-                                Value::Dict(ref mut pairs) => {
-                                    for (k, v) in pairs.iter_mut() {
-                                        if *k == *last_idx {
-                                            *v = final_val;
-                                            return Ok(Value::Null);
-                                        }
-                                    }
-                                    pairs.push((last_idx.clone(), final_val));
-                                }
-                                _ => return Err("Cannot index-assign to this value".into()),
-                            }
-                        }
-                        Ok(Value::Null)
-                    } else {
-                        Err("Complex index assignment target not supported".into())
-                    }
+
+                // Resolve the container as an lvalue path — handles any mix of
+                // fields and indexes: lst[0], self.cells[k], grid[i][j], a.b[0].c[x].
+                let mut accesses = Vec::new();
+                let root = self.collect_lvalue_path(object, &mut accesses).map_err(|_| {
+                    "Complex index assignment target not supported".to_string()
+                })?;
+                if self.frozen_vars.contains(&root) {
+                    return Err(format!("Cannot mutate frozen value '{}'", root));
                 }
+                self.ensure_cow_binding_unique(&root)?;
+
+                // Snapshot the container for compound reads and __setitem__ dispatch.
+                let root_snapshot = self.env.get(&root).ok_or_else(|| {
+                    format!("Undefined variable '{}'", root)
+                })?;
+                let container_snapshot = Self::value_at_path(&root_snapshot, &accesses)?;
+
+                let final_val = match op {
+                    AssignOp::Assign => new_val,
+                    _ => {
+                        let old = self.index_value(&container_snapshot, &idx)?;
+                        self.apply_assign_op(op, &old, &new_val)?
+                    }
+                };
+
+                // __setitem__ dispatch for class instances: a[key] = val.
+                let inst_cls = match &container_snapshot {
+                    Value::Instance(n, _)
+                    | Value::StructInstance(n, _)
+                    | Value::CowInstance(n, _) => Some(n.clone()),
+                    _ => None,
+                };
+                if let Some(cn) = inst_cls {
+                    let has_setitem = matches!(
+                        self.env.get(&cn),
+                        Some(Value::Class(cv)) if cv.methods.contains_key("__setitem__")
+                    );
+                    if !has_setitem {
+                        return Err(format!("No '__setitem__' method on class {}", cn));
+                    }
+                    let (_, updated) = self.call_method(
+                        &container_snapshot,
+                        "__setitem__",
+                        &[(None, idx), (None, final_val)],
+                    )?;
+                    if let Some(new_self) = updated {
+                        let root_val = self.env.get_mut(&root).ok_or_else(|| {
+                            format!("Undefined variable '{}'", root)
+                        })?;
+                        Self::mutate_at_path(root_val, &accesses, |target| {
+                            *target = new_self;
+                            Ok(Value::Null)
+                        })?;
+                    }
+                    return Ok(Value::Null);
+                }
+
+                let root_val = self.env.get_mut(&root).ok_or_else(|| {
+                    format!("Undefined variable '{}'", root)
+                })?;
+                Self::mutate_at_path(root_val, &accesses, move |container| {
+                    match container {
+                        Value::List(list) => {
+                            if let Value::Int(i) = &idx {
+                                let i = if *i < 0 { list.len() as i64 + i } else { *i };
+                                if i >= 0 && (i as usize) < list.len() {
+                                    list[i as usize] = final_val;
+                                    Ok(Value::Null)
+                                } else {
+                                    Err(format!("Index {} out of bounds", i))
+                                }
+                            } else {
+                                Err("List index must be an integer".into())
+                            }
+                        }
+                        Value::Dict(pairs) => {
+                            if let Some(pos) = pairs.iter().position(|(k, _)| *k == idx) {
+                                pairs[pos].1 = final_val;
+                            } else {
+                                pairs.push((idx, final_val));
+                            }
+                            Ok(Value::Null)
+                        }
+                        other => Err(format!(
+                            "Cannot index-assign to {}",
+                            other.type_name()
+                        )),
+                    }
+                })?;
+                Ok(Value::Null)
             }
             Expr::FieldAccess { object, field, .. } => {
                 // Resolve the root variable name and the chain of field accesses
@@ -3039,6 +3044,20 @@ impl Interpreter {
                     fields.borrow_mut().insert(chain[0].clone(), new_val);
                     Ok(())
                 }
+                // Static (class-level) fields: Counter.count = ...
+                Value::Class(cls) => {
+                    cls.fields.insert(chain[0].clone(), new_val);
+                    Ok(())
+                }
+                Value::Dict(pairs) => {
+                    let key = Value::Str(chain[0].clone());
+                    if let Some((_, v)) = pairs.iter_mut().find(|(k, _)| *k == key) {
+                        *v = new_val;
+                    } else {
+                        pairs.push((key, new_val));
+                    }
+                    Ok(())
+                }
                 _ => Err(format!("Cannot set field on {}", val.type_name())),
             }
         } else {
@@ -3047,6 +3066,21 @@ impl Interpreter {
                     let inner = fields.get_mut(&chain[0]).ok_or_else(|| {
                         format!("No field '{}'", chain[0])
                     })?;
+                    Self::set_field_chain(inner, &chain[1..], new_val)
+                }
+                Value::Class(cls) => {
+                    let inner = cls.fields.get_mut(&chain[0]).ok_or_else(|| {
+                        format!("No field '{}'", chain[0])
+                    })?;
+                    Self::set_field_chain(inner, &chain[1..], new_val)
+                }
+                Value::Dict(pairs) => {
+                    let key = Value::Str(chain[0].clone());
+                    let inner = pairs
+                        .iter_mut()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, v)| v)
+                        .ok_or_else(|| format!("No field '{}'", chain[0]))?;
                     Self::set_field_chain(inner, &chain[1..], new_val)
                 }
                 Value::CowInstance(_, fields) => {
@@ -3640,6 +3674,14 @@ impl Interpreter {
                             Err(format!("Cannot access field '{}' on tuple", field))
                         }
                     }
+                    // Static (class-level) fields: Counter.count
+                    Value::Class(cls) => cls
+                        .fields
+                        .get(field)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!("No static field '{}' on class {}", field, cls.name)
+                        }),
                     _ => Err(format!("Cannot access field '{}' on {}", field, obj.type_name())),
                 }
             }
@@ -3834,9 +3876,13 @@ impl Interpreter {
                 Ok(Value::Tuple(items))
             }
             Expr::Set(elements) => {
-                let mut items = Vec::new();
+                let mut items: Vec<Value> = Vec::new();
                 for e in elements {
-                    items.push(self.eval_expr(e)?);
+                    let v = self.eval_expr(e)?;
+                    // Sets hold unique elements — duplicates collapse.
+                    if !items.contains(&v) {
+                        items.push(v);
+                    }
                 }
                 Ok(Value::Set(items))
             }
@@ -4070,8 +4116,17 @@ impl Interpreter {
                 match val {
                     Value::Ok(v) => Ok(*v),
                     Value::Some(v) => Ok(*v),
-                    Value::Err(_) => Err(format!("__try_return__:{}", val)),
-                    Value::Null => Err("__try_return__:None".to_string()),
+                    // Early-return the Err/None from the enclosing function.
+                    // The value travels in pending_try_return; exec_block_no_scope
+                    // converts the sentinel into a normal Value::Return.
+                    Value::Err(_) => {
+                        self.pending_try_return = Some(val);
+                        Err("__try_return__".to_string())
+                    }
+                    Value::Null => {
+                        self.pending_try_return = Some(Value::Null);
+                        Err("__try_return__".to_string())
+                    }
                     other => Ok(other), // non-Result/Option passes through
                 }
             }
@@ -4134,6 +4189,42 @@ impl Interpreter {
         }
         // Mixed Int/BigInt (or BigInt/BigInt) integer arithmetic — arbitrary precision.
         if matches!(left, Value::BigInt(_)) || matches!(right, Value::BigInt(_)) {
+            // BigInt mixed with Float: promote the BigInt to f64 (may lose
+            // precision, same as int/float mixing) and use float arithmetic.
+            if matches!(left, Value::Float(_)) || matches!(right, Value::Float(_)) {
+                let to_f = |v: &Value| -> Option<f64> {
+                    match v {
+                        Value::Float(f) => Some(*f),
+                        Value::Int(i) => Some(*i as f64),
+                        Value::BigInt(b) => Some(b.to_f64()),
+                        _ => None,
+                    }
+                };
+                if let (Some(a), Some(b)) = (to_f(left), to_f(right)) {
+                    match op {
+                        BinOp::Add => return Ok(Value::Float(a + b)),
+                        BinOp::Sub => return Ok(Value::Float(a - b)),
+                        BinOp::Mul => return Ok(Value::Float(a * b)),
+                        BinOp::Div => {
+                            if b == 0.0 { return Err("Division by zero".into()); }
+                            return Ok(Value::Float(a / b));
+                        }
+                        BinOp::IntDiv => {
+                            if b == 0.0 { return Err("Division by zero".into()); }
+                            return Ok(Value::Float((a / b).floor()));
+                        }
+                        BinOp::Mod => return Ok(Value::Float(a % b)),
+                        BinOp::Pow => return Ok(Value::Float(a.powf(b))),
+                        BinOp::Eq => return Ok(Value::Bool(a == b)),
+                        BinOp::NotEq => return Ok(Value::Bool(a != b)),
+                        BinOp::Lt => return Ok(Value::Bool(a < b)),
+                        BinOp::Gt => return Ok(Value::Bool(a > b)),
+                        BinOp::LtEq => return Ok(Value::Bool(a <= b)),
+                        BinOp::GtEq => return Ok(Value::Bool(a >= b)),
+                        _ => {}
+                    }
+                }
+            }
             if let (Some(a), Some(b)) = (Self::as_bigint(left), Self::as_bigint(right)) {
                 match op {
                     BinOp::Add => return Ok(Self::norm_bigint(a.add(&b))),
@@ -4219,7 +4310,17 @@ impl Interpreter {
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
                 (Value::Str(s), Value::Int(n)) | (Value::Int(n), Value::Str(s)) => {
-                    Ok(Value::Str(s.repeat(*n as usize)))
+                    Ok(Value::Str(Self::repeat_str(s, *n)?))
+                }
+                (Value::List(items), Value::Int(n)) | (Value::Int(n), Value::List(items)) => {
+                    // list * n replicates like Python; negative counts give [].
+                    let n = (*n).max(0) as usize;
+                    if items.len().saturating_mul(n) > 100_000_000 {
+                        return Err("List repeat result too large".into());
+                    }
+                    let mut out = Vec::with_capacity(items.len() * n);
+                    for _ in 0..n { out.extend(items.iter().cloned()); }
+                    Ok(Value::List(out))
                 }
                 _ => Err(format!(
                     "Cannot multiply {} and {}",
@@ -4249,6 +4350,8 @@ impl Interpreter {
                     }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 % b)),
+                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a % *b as f64)),
                 _ => Err(format!(
                     "Cannot modulo {} by {}",
                     left.type_name(),
@@ -4339,11 +4442,24 @@ impl Interpreter {
                 _ => Err("Bitwise XOR requires integers or sets".into()),
             },
             BinOp::Shl => match (left, right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a << b)),
+                (Value::Int(a), Value::Int(b)) => {
+                    if *b < 0 { return Err("Shift count cannot be negative".into()); }
+                    if *b > 1_000_000 { return Err("Shift count too large".into()); }
+                    // Promote to BigInt on overflow — ints are arbitrary precision.
+                    match (*b < 64).then(|| a.checked_shl(*b as u32)).flatten() {
+                        Some(v) if (v >> b) == *a => Ok(Value::Int(v)),
+                        _ => Ok(Self::norm_bigint(
+                            BigInt::from_i64(*a).mul(&BigInt::from_i64(2).pow(*b as u64)),
+                        )),
+                    }
+                }
                 _ => Err("Shift requires integers".into()),
             },
             BinOp::Shr => match (left, right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a >> b)),
+                (Value::Int(a), Value::Int(b)) => {
+                    if *b < 0 { return Err("Shift count cannot be negative".into()); }
+                    Ok(Value::Int(if *b >= 64 { if *a < 0 { -1 } else { 0 } } else { a >> b }))
+                }
                 _ => Err("Shift requires integers".into()),
             },
             BinOp::In => match right {
@@ -4401,10 +4517,27 @@ impl Interpreter {
                 let type_name = match right {
                     Value::Str(s) => s.clone(),
                     Value::BuiltinFunc(s) => s.clone(), // bare type names: int, str, float, etc.
-                    Value::Class(cv) => cv.name.clone(), // user-defined class names
+                    // User-defined class names; traits are stored as classes
+                    // named "<trait X>", so unwrap to the bare trait name.
+                    Value::Class(cv) => cv
+                        .name
+                        .strip_prefix("<trait ")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or(&cv.name)
+                        .to_string(),
                     _ => right.type_name().to_string(),
                 };
-                Ok(Value::Bool(left.type_name() == type_name))
+                // Instances match their class, any ancestor class, and any
+                // trait the class (or an ancestor) implements.
+                let matches = match left {
+                    Value::Instance(cn, _)
+                    | Value::CowInstance(cn, _)
+                    | Value::StructInstance(cn, _) => {
+                        self.class_is_a(cn, &type_name) || left.type_name() == type_name
+                    }
+                    _ => left.type_name() == type_name,
+                };
+                Ok(Value::Bool(matches))
             },
             BinOp::NullCoalesce => {
                 // Already handled in eval_expr for short-circuit, but as fallback:
@@ -4415,6 +4548,62 @@ impl Interpreter {
                 }
             },
         }
+    }
+
+    /// True when `class_name` equals `target`, inherits from it, or implements
+    /// it as a trait (directly or via an ancestor). Used by the `is` operator.
+    fn class_is_a(&self, class_name: &str, target: &str) -> bool {
+        let mut cur = Some(class_name.to_string());
+        let mut hops = 0;
+        while let Some(cn) = cur {
+            if cn == target {
+                return true;
+            }
+            if self
+                .trait_impls
+                .get(&cn)
+                .map(|ts| ts.iter().any(|t| t == target))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            cur = match self.env.get(&cn) {
+                Some(Value::Class(cv)) => cv.parent.clone(),
+                _ => None,
+            };
+            hops += 1;
+            if hops > 64 { break; } // guard against parent cycles
+        }
+        false
+    }
+
+    /// regex.replace / replace_all with a lambda: each match is passed to the
+    /// function and its (stringified) result is spliced into the output.
+    fn regex_replace_with_fn(
+        &mut self,
+        text: &str,
+        pattern: &str,
+        func: &Value,
+        all: bool,
+    ) -> Result<Value, String> {
+        let re = crate::regex_engine::compile(pattern)?;
+        let chars: Vec<char> = text.chars().collect();
+        let matches = if all {
+            re.find_iter(&chars)
+        } else {
+            re.search(&chars, 0).into_iter().collect()
+        };
+        let mut out = String::new();
+        let mut last = 0usize;
+        for m in matches {
+            out.extend(chars[last..m.start].iter());
+            let matched: String = chars[m.start..m.end].iter().collect();
+            let replaced = self.call_value(func, &[(None, Value::Str(matched))])?;
+            out.push_str(&format!("{}", replaced));
+            last = m.end.max(m.start);
+        }
+        out.extend(chars[last..].iter());
+        Ok(Value::Str(out))
     }
 
     fn compare_values<F>(&self, left: &Value, right: &Value, cmp: F) -> Result<Value, String>
@@ -4429,11 +4618,26 @@ impl Interpreter {
             (Value::Str(a), Value::Str(b)) => {
                 // Lexicographic comparison via f64 casting won't work for strings.
                 // Use string ordering directly.
-                match (left, right) {
-                    _ => Ok(Value::Bool(cmp(
-                        a.cmp(b) as i8 as f64,
-                        0.0,
-                    ))),
+                Ok(Value::Bool(cmp(a.cmp(b) as i8 as f64, 0.0)))
+            }
+            // BigInt vs Int/BigInt: exact comparison via BigInt ordering.
+            (Value::BigInt(_), Value::Int(_) | Value::BigInt(_))
+            | (Value::Int(_), Value::BigInt(_)) => {
+                let (a, b) = (Self::as_bigint(left).unwrap(), Self::as_bigint(right).unwrap());
+                Ok(Value::Bool(cmp(a.cmp(&b) as i8 as f64, 0.0)))
+            }
+            // BigInt vs Float: promote the BigInt to f64.
+            (Value::BigInt(a), Value::Float(b)) => Ok(Value::Bool(cmp(a.to_f64(), *b))),
+            (Value::Float(a), Value::BigInt(b)) => Ok(Value::Bool(cmp(*a, b.to_f64()))),
+            // Decimal vs any numeric: exact decimal ordering.
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                match (Self::as_decimal(left), Self::as_decimal(right)) {
+                    (Some(a), Some(b)) => Ok(Value::Bool(cmp(a.cmp(&b) as i8 as f64, 0.0))),
+                    _ => Err(format!(
+                        "Cannot compare {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    )),
                 }
             }
             _ => Err(format!(
@@ -4467,6 +4671,26 @@ impl Interpreter {
     // ── Function Calls ───────────────────────────────────
 
     pub fn call_value(
+        &mut self,
+        func: &Value,
+        args: &[(Option<String>, Value)],
+    ) -> Result<Value, String> {
+        // Depth guard: turn runaway recursion into a catchable error instead
+        // of overflowing the native stack and killing the process.
+        self.call_depth += 1;
+        if self.call_depth > self.recursion_limit {
+            self.call_depth -= 1;
+            return Err(format!(
+                "Maximum recursion depth of {} exceeded (raise it with set_recursion_limit)",
+                self.recursion_limit
+            ));
+        }
+        let result = self.call_value_inner(func, args);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn call_value_inner(
         &mut self,
         func: &Value,
         args: &[(Option<String>, Value)],
@@ -4660,6 +4884,26 @@ impl Interpreter {
     }
 
     fn call_method(
+        &mut self,
+        obj: &Value,
+        method: &str,
+        args: &[(Option<String>, Value)],
+    ) -> Result<(Value, Option<Value>), String> {
+        // Same depth guard as call_value (methods can recurse too).
+        self.call_depth += 1;
+        if self.call_depth > self.recursion_limit {
+            self.call_depth -= 1;
+            return Err(format!(
+                "Maximum recursion depth of {} exceeded (raise it with set_recursion_limit)",
+                self.recursion_limit
+            ));
+        }
+        let result = self.call_method_inner(obj, method, args);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn call_method_inner(
         &mut self,
         obj: &Value,
         method: &str,
@@ -5026,7 +5270,8 @@ impl Interpreter {
                     Err("count() requires a string argument".into())
                 }
             }
-            (Value::Str(s), "index_of") | (Value::Str(s), "indexOf") => {
+            (Value::Str(s), "index_of") | (Value::Str(s), "indexOf")
+            | (Value::Str(s), "find") | (Value::Str(s), "index") => {
                 if let Some(Value::Str(sub)) = arg_vals.first() {
                     Ok(s.find(sub.as_str()).map(|i| Value::Int(i as i64)).unwrap_or(Value::Int(-1)))
                 } else {
@@ -5041,14 +5286,19 @@ impl Interpreter {
                 }
             }
             (Value::Str(s), "slice") => {
-                let start = arg_vals.first().and_then(|v| if let Value::Int(n) = v { Some(*n as usize) } else { None }).unwrap_or(0);
-                let end = arg_vals.get(1).and_then(|v| if let Value::Int(n) = v { Some(*n as usize) } else { None }).unwrap_or(s.len());
+                // Char-based with negative-index support, clamped (never panics).
+                let len = s.chars().count() as i64;
+                let resolve = |n: i64| -> usize {
+                    (if n < 0 { (len + n).max(0) } else { n.min(len) }) as usize
+                };
+                let start = arg_vals.first().and_then(|v| if let Value::Int(n) = v { Some(resolve(*n)) } else { None }).unwrap_or(0);
+                let end = arg_vals.get(1).and_then(|v| if let Value::Int(n) = v { Some(resolve(*n)) } else { None }).unwrap_or(len as usize);
                 let result: String = s.chars().skip(start).take(end.saturating_sub(start)).collect();
                 Ok(Value::Str(result))
             }
             (Value::Str(s), "repeat") => {
                 if let Some(Value::Int(n)) = arg_vals.first() {
-                    Ok(Value::Str(s.repeat(*n as usize)))
+                    Ok(Value::Str(Self::repeat_str(s, *n)?))
                 } else {
                     Err("repeat() requires an integer argument".into())
                 }
@@ -5056,10 +5306,13 @@ impl Interpreter {
             (Value::Str(s), "pad_start") => {
                 if let Some(Value::Int(width)) = arg_vals.first() {
                     let fill = arg_vals.get(1).and_then(|v| if let Value::Str(c) = v { Some(c.clone()) } else { None }).unwrap_or_else(|| " ".to_string());
-                    let w = *width as usize;
-                    if s.len() >= w { Ok(Value::Str(s.clone())) }
+                    if *width > 1_000_000_000 { return Err("pad_start() width too large".into()); }
+                    // Width counts characters, not bytes; negative widths are no-ops.
+                    let w = (*width).max(0) as usize;
+                    let n = s.chars().count();
+                    if n >= w || fill.is_empty() { Ok(Value::Str(s.clone())) }
                     else {
-                        let padding: String = fill.chars().cycle().take(w - s.len()).collect();
+                        let padding: String = fill.chars().cycle().take(w - n).collect();
                         Ok(Value::Str(format!("{}{}", padding, s)))
                     }
                 } else {
@@ -5069,10 +5322,12 @@ impl Interpreter {
             (Value::Str(s), "pad_end") => {
                 if let Some(Value::Int(width)) = arg_vals.first() {
                     let fill = arg_vals.get(1).and_then(|v| if let Value::Str(c) = v { Some(c.clone()) } else { None }).unwrap_or_else(|| " ".to_string());
-                    let w = *width as usize;
-                    if s.len() >= w { Ok(Value::Str(s.clone())) }
+                    if *width > 1_000_000_000 { return Err("pad_end() width too large".into()); }
+                    let w = (*width).max(0) as usize;
+                    let n = s.chars().count();
+                    if n >= w || fill.is_empty() { Ok(Value::Str(s.clone())) }
                     else {
-                        let padding: String = fill.chars().cycle().take(w - s.len()).collect();
+                        let padding: String = fill.chars().cycle().take(w - n).collect();
                         Ok(Value::Str(format!("{}{}", s, padding)))
                     }
                 } else {
@@ -5152,11 +5407,12 @@ impl Interpreter {
             }
             (Value::Str(s), "center") => {
                 if let Some(Value::Int(width)) = arg_vals.first() {
-                    let w = *width as usize;
+                    if *width > 1_000_000_000 { return Err("center() width too large".into()); }
+                    let w = (*width).max(0) as usize;
                     let fill = arg_vals.get(1).and_then(|v| if let Value::Str(c) = v { c.chars().next() } else { None }).unwrap_or(' ');
-                    if s.len() >= w { Ok(Value::Str(s.clone())) }
+                    if s.chars().count() >= w { Ok(Value::Str(s.clone())) }
                     else {
-                        let total_pad = w - s.len();
+                        let total_pad = w - s.chars().count();
                         let left_pad = total_pad / 2;
                         let right_pad = total_pad - left_pad;
                         let result = format!("{}{}{}", std::iter::repeat(fill).take(left_pad).collect::<String>(), s, std::iter::repeat(fill).take(right_pad).collect::<String>());
@@ -5324,9 +5580,16 @@ impl Interpreter {
                 ))
             }
             (Value::List(items), "slice") => {
-                let start = arg_vals.first().and_then(|v| if let Value::Int(n) = v { Some(*n as usize) } else { None }).unwrap_or(0);
-                let end = arg_vals.get(1).and_then(|v| if let Value::Int(n) = v { Some(*n as usize) } else { None }).unwrap_or(items.len());
-                Ok(Value::List(items[start..end.min(items.len())].to_vec()))
+                // Negative indices count from the end; bounds are clamped so a
+                // wild range can never panic.
+                let len = items.len() as i64;
+                let resolve = |n: i64| -> usize {
+                    (if n < 0 { (len + n).max(0) } else { n.min(len) }) as usize
+                };
+                let start = arg_vals.first().and_then(|v| if let Value::Int(n) = v { Some(resolve(*n)) } else { None }).unwrap_or(0);
+                let end = arg_vals.get(1).and_then(|v| if let Value::Int(n) = v { Some(resolve(*n)) } else { None }).unwrap_or(items.len());
+                if start >= end { return Ok(Value::List(Vec::new())); }
+                Ok(Value::List(items[start..end].to_vec()))
             }
             (Value::List(items), "flat_map") => {
                 if let Some(func) = arg_vals.first() {
@@ -5390,30 +5653,46 @@ impl Interpreter {
             }
             (Value::List(items), "take") => {
                 if let Some(Value::Int(n)) = arg_vals.first() {
-                    Ok(Value::List(items.iter().take(*n as usize).cloned().collect()))
+                    Ok(Value::List(items.iter().take((*n).max(0) as usize).cloned().collect()))
                 } else {
                     Err("take() requires an integer argument".into())
                 }
             }
             (Value::List(items), "drop") => {
                 if let Some(Value::Int(n)) = arg_vals.first() {
-                    Ok(Value::List(items.iter().skip(*n as usize).cloned().collect()))
+                    Ok(Value::List(items.iter().skip((*n).max(0) as usize).cloned().collect()))
                 } else {
                     Err("drop() requires an integer argument".into())
                 }
             }
             (Value::List(items), "product") => {
-                let mut result = 1i64;
+                use crate::bigint::BigInt;
+                let mut result: Value = Value::Int(1);
                 let mut is_float = false;
                 let mut fresult = 1.0f64;
                 for v in items {
                     match v {
-                        Value::Int(n) => { result *= n; fresult *= *n as f64; }
+                        Value::Int(n) => {
+                            fresult *= *n as f64;
+                            result = match &result {
+                                // Ints are arbitrary precision: promote instead of wrapping.
+                                Value::Int(acc) => match acc.checked_mul(*n) {
+                                    Some(p) => Value::Int(p),
+                                    None => Self::norm_bigint(
+                                        BigInt::from_i64(*acc).mul(&BigInt::from_i64(*n)),
+                                    ),
+                                },
+                                Value::BigInt(acc) => {
+                                    Self::norm_bigint(acc.mul(&BigInt::from_i64(*n)))
+                                }
+                                _ => result.clone(),
+                            };
+                        }
                         Value::Float(f) => { fresult *= f; is_float = true; }
                         _ => return Err("product() requires numeric list".into()),
                     }
                 }
-                if is_float { Ok(Value::Float(fresult)) } else { Ok(Value::Int(result)) }
+                if is_float { Ok(Value::Float(fresult)) } else { Ok(result) }
             }
             (Value::List(items), "sort_by") => {
                 if let Some(func) = arg_vals.first() {
@@ -5535,8 +5814,71 @@ impl Interpreter {
                 r.reverse();
                 Ok(Value::List(r))
             }
+            // Identity conversions so range/iter pipelines compose freely.
+            (Value::List(items), "to_list") | (Value::List(items), "collect") => {
+                Ok(Value::List(items.clone()))
+            }
+            (Value::List(items), "chunk") | (Value::List(items), "chunks") => {
+                match arg_vals.first() {
+                    Some(Value::Int(n)) if *n > 0 => Ok(Value::List(
+                        items.chunks(*n as usize).map(|c| Value::List(c.to_vec())).collect(),
+                    )),
+                    _ => Err("chunk() requires a positive integer size".into()),
+                }
+            }
+            (Value::List(items), "window") | (Value::List(items), "windows") => {
+                match arg_vals.first() {
+                    Some(Value::Int(n)) if *n > 0 => {
+                        let n = *n as usize;
+                        if n > items.len() {
+                            return Ok(Value::List(Vec::new()));
+                        }
+                        Ok(Value::List(
+                            items.windows(n).map(|c| Value::List(c.to_vec())).collect(),
+                        ))
+                    }
+                    _ => Err("window() requires a positive integer size".into()),
+                }
+            }
 
             // Dict methods
+            // Compiled regex object (regex.compile): methods delegate to the
+            // __regex_* builtins with the stored pattern as second argument.
+            (Value::Dict(pairs), m)
+                if matches!(
+                    m,
+                    "match" | "test" | "is_match" | "find" | "find_all" | "capture"
+                        | "replace" | "replace_all" | "split"
+                ) && pairs.iter().any(|(k, v)| {
+                    matches!((k, v), (Value::Str(kk), Value::Str(vv)) if kk == "type" && vv == "regex")
+                }) =>
+            {
+                let pattern = pairs
+                    .iter()
+                    .find_map(|(k, v)| match (k, v) {
+                        (Value::Str(kk), Value::Str(vv)) if kk == "pattern" => Some(vv.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let mut new_args: Vec<(Option<String>, Value)> = Vec::new();
+                if let Some(first) = args.first() {
+                    new_args.push(first.clone());
+                }
+                new_args.push((None, Value::Str(pattern)));
+                for extra in args.iter().skip(1) {
+                    new_args.push(extra.clone());
+                }
+                let builtin = match m {
+                    "match" | "test" | "is_match" => "__regex_match",
+                    "find" => "__regex_find",
+                    "find_all" => "__regex_find_all",
+                    "capture" => "__regex_capture",
+                    "replace" => "__regex_replace",
+                    "replace_all" => "__regex_replace_all",
+                    _ => "__regex_split",
+                };
+                return self.call_builtin(builtin, &new_args);
+            }
             (Value::Dict(pairs), "keys") => {
                 Ok(Value::List(pairs.iter().map(|(k, _)| k.clone()).collect()))
             }
@@ -6000,6 +6342,9 @@ impl Interpreter {
                 }
             }
 
+            // Universal conversion: every value can render itself to a string.
+            (v, "to_string") | (v, "to_str") => Ok(Value::Str(format!("{}", v))),
+
             // A builtin function name that is ALSO a stdlib module (e.g. `hash` —
             // both `hash(v)` value-hashing and `hash.fnv1a(v)` module access).
             // Dispatch the method through the module of the same name.
@@ -6029,6 +6374,151 @@ impl Interpreter {
         }
     }
 
+    // Collect the lvalue path of a mutation target: the root variable name plus
+    // the field/index accessors leading to the value. Index expressions are
+    // evaluated here, BEFORE any mutable borrow of the environment is taken.
+    fn collect_lvalue_path(
+        &mut self,
+        expr: &Expr,
+        accesses: &mut Vec<LvalueAccess>,
+    ) -> Result<String, String> {
+        match expr {
+            Expr::Ident(name) => Ok(name.clone()),
+            Expr::Self_ => Ok("self".to_string()),
+            Expr::FieldAccess { object, field, .. } => {
+                let root = self.collect_lvalue_path(object, accesses)?;
+                accesses.push(LvalueAccess::Field(field.clone()));
+                Ok(root)
+            }
+            Expr::Index { object, index } => {
+                let root = self.collect_lvalue_path(object, accesses)?;
+                let idx = self.eval_expr(index)?;
+                accesses.push(LvalueAccess::Index(idx));
+                Ok(root)
+            }
+            _ => Err("Mutation target must start at a variable".to_string()),
+        }
+    }
+
+    // Apply `f` to the value at the given lvalue path, mutating in place.
+    // Recursive so CowInstance RefCell borrows stay alive during the walk.
+    fn mutate_at_path<F>(val: &mut Value, accesses: &[LvalueAccess], f: F) -> Result<Value, String>
+    where
+        F: FnOnce(&mut Value) -> Result<Value, String>,
+    {
+        let Some((first, rest)) = accesses.split_first() else {
+            return f(val);
+        };
+        match (first, val) {
+            (LvalueAccess::Field(name), Value::Instance(_, fields))
+            | (LvalueAccess::Field(name), Value::StructInstance(_, fields)) => {
+                let inner = fields
+                    .get_mut(name)
+                    .ok_or_else(|| format!("No field '{}' on instance", name))?;
+                Self::mutate_at_path(inner, rest, f)
+            }
+            (LvalueAccess::Field(name), Value::CowInstance(_, fields)) => {
+                let mut borrowed = fields.borrow_mut();
+                let inner = borrowed
+                    .get_mut(name)
+                    .ok_or_else(|| format!("No field '{}' on instance", name))?;
+                Self::mutate_at_path(inner, rest, f)
+            }
+            (LvalueAccess::Field(name), Value::Dict(pairs)) => {
+                let key = Value::Str(name.clone());
+                let inner = pairs
+                    .iter_mut()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| format!("Key {} not found", name))?;
+                Self::mutate_at_path(inner, rest, f)
+            }
+            (LvalueAccess::Field(name), Value::Class(cls)) => {
+                let inner = cls
+                    .fields
+                    .get_mut(name)
+                    .ok_or_else(|| format!("No static field '{}' on class", name))?;
+                Self::mutate_at_path(inner, rest, f)
+            }
+            (LvalueAccess::Index(idx), Value::List(items)) => {
+                if let Value::Int(i) = idx {
+                    let i = if *i < 0 { items.len() as i64 + i } else { *i };
+                    if i < 0 || i as usize >= items.len() {
+                        return Err(format!("Index {} out of bounds", i));
+                    }
+                    Self::mutate_at_path(&mut items[i as usize], rest, f)
+                } else {
+                    Err(format!("Cannot index list with {}", idx.type_name()))
+                }
+            }
+            (LvalueAccess::Index(idx), Value::Dict(pairs)) => {
+                let inner = pairs
+                    .iter_mut()
+                    .find(|(k, _)| k == idx)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| format!("Key {} not found", idx))?;
+                Self::mutate_at_path(inner, rest, f)
+            }
+            (LvalueAccess::Index(_), Value::Tuple(_)) => Err("Tuples are immutable".to_string()),
+            (_, other) => Err(format!(
+                "Cannot navigate into {} while assigning",
+                other.type_name()
+            )),
+        }
+    }
+
+    // Clone the value at an lvalue path (for compound-op reads and dispatch checks).
+    fn value_at_path(root: &Value, accesses: &[LvalueAccess]) -> Result<Value, String> {
+        let mut cur = root.clone();
+        for acc in accesses {
+            cur = match (acc, &cur) {
+                (LvalueAccess::Field(name), Value::Instance(_, fields))
+                | (LvalueAccess::Field(name), Value::StructInstance(_, fields)) => fields
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("No field '{}' on instance", name))?,
+                (LvalueAccess::Field(name), Value::CowInstance(_, fields)) => fields
+                    .borrow()
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("No field '{}' on instance", name))?,
+                (LvalueAccess::Field(name), Value::Dict(pairs)) => {
+                    let key = Value::Str(name.clone());
+                    pairs
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, v)| v.clone())
+                        .ok_or_else(|| format!("Key {} not found", name))?
+                }
+                (LvalueAccess::Field(name), Value::Class(cls)) => cls
+                    .fields
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("No static field '{}' on class", name))?,
+                (LvalueAccess::Index(idx), Value::List(items)) => {
+                    if let Value::Int(i) = idx {
+                        let i = if *i < 0 { items.len() as i64 + i } else { *i };
+                        items
+                            .get(i.max(0) as usize)
+                            .cloned()
+                            .ok_or_else(|| format!("Index {} out of bounds", i))?
+                    } else {
+                        return Err(format!("Cannot index list with {}", idx.type_name()));
+                    }
+                }
+                (LvalueAccess::Index(idx), Value::Dict(pairs)) => pairs
+                    .iter()
+                    .find(|(k, _)| k == idx)
+                    .map(|(_, v)| v.clone())
+                    .ok_or_else(|| format!("Key {} not found", idx))?,
+                (_, other) => {
+                    return Err(format!("Cannot navigate into {}", other.type_name()))
+                }
+            };
+        }
+        Ok(cur)
+    }
+
     fn call_mutation_method(
         &mut self,
         object: &Expr,
@@ -6036,6 +6526,38 @@ impl Interpreter {
         args: &[(Option<String>, Value)],
     ) -> Result<Value, String> {
         let arg_vals: Vec<Value> = args.iter().map(|(_, v)| v.clone()).collect();
+
+        // Mutation through an arbitrary index/field chain, e.g. d["x"].push(2),
+        // grid[0][1].push(9), self.rows[i].sort(). The simple Ident/Self_ and
+        // one-level-field cases keep their dedicated paths below (they also
+        // handle CowInstance, which the generic walker cannot borrow through).
+        let needs_chain_walk = matches!(object, Expr::Index { .. })
+            || matches!(object, Expr::FieldAccess { object: p, .. }
+                if !matches!(p.as_ref(), Expr::Ident(_) | Expr::Self_));
+        if needs_chain_walk {
+            let mut accesses = Vec::new();
+            match self.collect_lvalue_path(object, &mut accesses) {
+                Ok(root) => {
+                    if self.frozen_vars.contains(&root) {
+                        return Err(format!("Cannot mutate frozen value '{}'", root));
+                    }
+                    self.ensure_cow_binding_unique(&root)?;
+                    let root_val = self
+                        .env
+                        .get_mut(&root)
+                        .ok_or_else(|| format!("Undefined variable '{}'", root))?;
+                    return Self::mutate_at_path(root_val, &accesses, |target| {
+                        apply_mutation(target, method, arg_vals)
+                    });
+                }
+                // Not rooted at a variable (e.g. f()[0].push(x)): mutate the
+                // temporary, like Python; the change is simply discarded.
+                Err(_) => {
+                    let mut tmp = self.eval_expr(object)?;
+                    return apply_mutation(&mut tmp, method, arg_vals);
+                }
+            }
+        }
 
         // Handle field access like self.items.push(val) or obj.field.push(val)
         if let Expr::FieldAccess { object: parent, field, .. } = object {
@@ -6070,7 +6592,12 @@ impl Interpreter {
         let var_name = match object {
             Expr::Ident(name) => name.clone(),
             Expr::Self_ => "self".to_string(),
-            _ => return Err(format!("Cannot call mutation method '{}' on complex expression", method)),
+            // Any other receiver (literal, call result, …): mutate the
+            // temporary value, like Python; the change is simply discarded.
+            _ => {
+                let mut tmp = self.eval_expr(object)?;
+                return apply_mutation(&mut tmp, method, arg_vals);
+            }
         };
 
         // Check if the variable is frozen
@@ -6093,294 +6620,105 @@ impl Drop for Interpreter {
     }
 }
 
-// ── Simple regex helpers (no external crate) ─────────────
+// ── Regex helpers (backed by src/regex_engine.rs) ───────
 
-/// Check if `text` contains a match for `pattern` (whole text anchored by ^ / $ if present).
+/// True when `text` contains a match for `pattern`.
 fn simple_regex_match(pattern: &str, text: &str) -> bool {
-    simple_regex_find(pattern, text).is_some()
+    match crate::regex_engine::compile(pattern) {
+        Ok(re) => re.is_match(text),
+        Err(_) => false,
+    }
 }
 
-/// Find the first match of `pattern` in `text`.
+/// First match of `pattern` in `text`.
 fn simple_regex_find(pattern: &str, text: &str) -> Option<String> {
-    let (anchored_start, anchored_end, core) = parse_anchors(pattern);
-    if anchored_start && anchored_end {
-        if regex_match_at(core, text, 0).map(|e| e == text.len()).unwrap_or(false) {
-            return Some(text.to_string());
-        }
-        return None;
-    }
+    let re = crate::regex_engine::compile(pattern).ok()?;
     let chars: Vec<char> = text.chars().collect();
-    let start = if anchored_start { 0 } else { 0 };
-    let end = if anchored_start { 1 } else { chars.len() + 1 };
-    for i in start..end {
-        let slice: String = chars[i..].iter().collect();
-        if let Some(match_end) = regex_match_at(core, &slice, 0) {
-            let matched: String = chars[i..i + count_chars(&slice, match_end)].iter().collect();
-            if anchored_end && i + count_chars(&slice, match_end) != chars.len() { continue; }
-            return Some(matched);
-        }
-    }
-    None
+    re.search(&chars, 0)
+        .map(|m| chars[m.start..m.end].iter().collect())
 }
 
-fn count_chars(s: &str, byte_pos: usize) -> usize {
-    s[..byte_pos].chars().count()
-}
-
-/// Find all matches of `pattern` in `text`.
+/// All non-overlapping matches.
 fn simple_regex_find_all(pattern: &str, text: &str) -> Vec<String> {
-    let (_, _, core) = parse_anchors(pattern);
-    let mut results = Vec::new();
-    let mut pos = 0;
-    while pos < text.len() {
-        let slice = &text[pos..];
-        if let Some(end) = regex_match_at(core, slice, 0) {
-            if end == 0 {
-                if let Some(ch) = slice.chars().next() {
-                    pos += ch.len_utf8();
-                } else {
-                    break;
-                }
-                continue;
-            }
-            results.push(slice[..end.min(slice.len())].to_string());
-            pos += end.min(slice.len());
-        } else {
-            pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        }
-    }
-    results
-}
-
-/// Replace (first or all) matches of `pattern` with `replacement` in `text`.
-fn simple_regex_replace(pattern: &str, replacement: &str, text: &str, all: bool) -> String {
-    let (_, _, core) = parse_anchors(pattern);
-    let mut result = String::new();
-    let mut pos = 0;
-    let mut replaced = false;
-    while pos < text.len() {
-        let slice = &text[pos..];
-        if !all && replaced { result.push_str(slice); return result; }
-        if let Some(end) = regex_match_at(core, slice, 0) {
-            if end == 0 {
-                let ch_len = slice.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-                if ch_len == 0 { break; }
-                result.push_str(&text[pos..pos + ch_len]);
-                pos += ch_len;
-                continue;
-            }
-            result.push_str(replacement);
-            pos += end;
-            replaced = true;
-        } else {
-            let ch_len = slice.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-            if ch_len == 0 { break; }
-            result.push_str(&text[pos..pos+ch_len]);
-            pos += ch_len;
-        }
-    }
-    if pos < text.len() {
-        result.push_str(&text[pos..]);
-    }
-    result
-}
-
-/// Split `text` by `pattern`.
-fn simple_regex_split(pattern: &str, text: &str) -> Vec<String> {
-    let (_, _, core) = parse_anchors(pattern);
-    let mut parts = Vec::new();
-    let mut pos = 0;
-    let mut last = 0;
-    while pos < text.len() {
-        let slice = &text[pos..];
-        if let Some(end) = regex_match_at(core, slice, 0) {
-            if end == 0 {
-                if let Some(ch) = slice.chars().next() {
-                    pos += ch.len_utf8();
-                } else {
-                    break;
-                }
-                continue;
-            }
-            parts.push(text[last..pos].to_string());
-            pos += end;
-            last = pos;
-        } else {
-            let ch_len = slice.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-            if ch_len == 0 { break; }
-            pos += ch_len;
-        }
-    }
-    parts.push(text[last..].to_string());
-    parts
-}
-
-fn parse_anchors(pattern: &str) -> (bool, bool, &str) {
-    let start = pattern.starts_with('^');
-    let p = if start { &pattern[1..] } else { pattern };
-    let end = p.ends_with('$') && !p.ends_with("\\$");
-    let core = if end { &p[..p.len()-1] } else { p };
-    (start, end, core)
-}
-
-/// Try to match `pattern` at position 0 in `text`. Returns byte length of match or None.
-fn regex_match_at(pattern: &str, text: &str, depth: usize) -> Option<usize> {
-    if depth > 100 { return None; } // safety
-    if pattern.is_empty() { return Some(0); }
-    // Parse first token + optional quantifier
-    let (token, token_len, rest) = parse_regex_token(pattern);
-    let (quant, quant_len) = parse_quantifier(rest);
-    let next_pattern = &rest[quant_len..];
-    match quant {
-        Quantifier::One => {
-            if let Some(t_len) = match_token(token, text) {
-                regex_match_at(next_pattern, &text[t_len..], depth+1).map(|r| t_len + r)
-            } else { None }
-        }
-        Quantifier::ZeroOrOne => {
-            // Try with match first
-            if let Some(t_len) = match_token(token, text) {
-                if let Some(r) = regex_match_at(next_pattern, &text[t_len..], depth+1) {
-                    return Some(t_len + r);
-                }
-            }
-            regex_match_at(next_pattern, text, depth+1)
-        }
-        Quantifier::ZeroOrMore => {
-            // Greedy
-            let mut positions = vec![0usize];
-            let mut pos = 0;
-            while let Some(t_len) = match_token(token, &text[pos..]) {
-                if t_len == 0 { break; }
-                pos += t_len;
-                positions.push(pos);
-            }
-            for &p in positions.iter().rev() {
-                if let Some(r) = regex_match_at(next_pattern, &text[p..], depth+1) {
-                    return Some(p + r);
-                }
-            }
-            None
-        }
-        Quantifier::OneOrMore => {
-            if let Some(first) = match_token(token, text) {
-                let mut pos = first;
-                let mut positions = vec![pos];
-                while let Some(t_len) = match_token(token, &text[pos..]) {
-                    if t_len == 0 { break; }
-                    pos += t_len;
-                    positions.push(pos);
-                }
-                for &p in positions.iter().rev() {
-                    if let Some(r) = regex_match_at(next_pattern, &text[p..], depth+1) {
-                        return Some(p + r);
-                    }
-                }
-            }
-            None
-        }
-    }
-    .map(|n| { let _ = token_len; n }) // suppress unused warning
-}
-
-#[derive(Copy, Clone)]
-enum RegexToken<'a> {
-    Literal(char),
-    AnyChar,           // .
-    Class(&'a str),    // [...]
-    NegClass(&'a str), // [^...]
-    Word,              // \w
-    NonWord,           // \W
-    Digit,             // \d
-    NonDigit,          // \D
-    Whitespace,        // \s
-    NonWhitespace,     // \S
-}
-
-#[derive(Copy, Clone)]
-enum Quantifier { One, ZeroOrOne, ZeroOrMore, OneOrMore }
-
-fn parse_regex_token(pattern: &str) -> (RegexToken<'_>, usize, &str) {
-    let mut chars = pattern.char_indices();
-    if let Some((_, c)) = chars.next() {
-        match c {
-            '.' => (RegexToken::AnyChar, 1, &pattern[1..]),
-            '\\' => {
-                if let Some((_, nc)) = chars.next() {
-                    match nc {
-                        'w' => (RegexToken::Word, 2, &pattern[2..]),
-                        'W' => (RegexToken::NonWord, 2, &pattern[2..]),
-                        'd' => (RegexToken::Digit, 2, &pattern[2..]),
-                        'D' => (RegexToken::NonDigit, 2, &pattern[2..]),
-                        's' => (RegexToken::Whitespace, 2, &pattern[2..]),
-                        'S' => (RegexToken::NonWhitespace, 2, &pattern[2..]),
-                        escaped => (RegexToken::Literal(escaped), 2, &pattern[2..]),
-                    }
-                } else {
-                    (RegexToken::Literal('\\'), 1, &pattern[1..])
-                }
-            }
-            '[' => {
-                let negate = pattern[1..].starts_with('^');
-                let inner_start = if negate { 2 } else { 1 };
-                if let Some(end) = pattern[inner_start..].find(']') {
-                    let inner = &pattern[inner_start..inner_start+end];
-                    let total = inner_start + end + 1;
-                    if negate {
-                        (RegexToken::NegClass(inner), total, &pattern[total..])
-                    } else {
-                        (RegexToken::Class(inner), total, &pattern[total..])
-                    }
-                } else {
-                    (RegexToken::Literal('['), 1, &pattern[1..])
-                }
-            }
-            other => (RegexToken::Literal(other), other.len_utf8(), &pattern[other.len_utf8()..])
-        }
-    } else {
-        (RegexToken::AnyChar, 0, "")
-    }
-}
-
-fn parse_quantifier(pattern: &str) -> (Quantifier, usize) {
-    match pattern.chars().next() {
-        Some('?') => (Quantifier::ZeroOrOne, 1),
-        Some('*') => (Quantifier::ZeroOrMore, 1),
-        Some('+') => (Quantifier::OneOrMore, 1),
-        _ => (Quantifier::One, 0),
-    }
-}
-
-fn match_token(token: RegexToken<'_>, text: &str) -> Option<usize> {
-    let first_char = text.chars().next()?;
-    let matches = match token {
-        RegexToken::Literal(c) => first_char == c,
-        RegexToken::AnyChar => first_char != '\n',
-        RegexToken::Word => first_char.is_alphanumeric() || first_char == '_',
-        RegexToken::NonWord => !(first_char.is_alphanumeric() || first_char == '_'),
-        RegexToken::Digit => first_char.is_ascii_digit(),
-        RegexToken::NonDigit => !first_char.is_ascii_digit(),
-        RegexToken::Whitespace => first_char.is_whitespace(),
-        RegexToken::NonWhitespace => !first_char.is_whitespace(),
-        RegexToken::Class(inner) => match_char_class(inner, first_char),
-        RegexToken::NegClass(inner) => !match_char_class(inner, first_char),
+    let Ok(re) = crate::regex_engine::compile(pattern) else {
+        return Vec::new();
     };
-    if matches { Some(first_char.len_utf8()) } else { None }
+    let chars: Vec<char> = text.chars().collect();
+    re.find_iter(&chars)
+        .into_iter()
+        .map(|m| chars[m.start..m.end].iter().collect())
+        .collect()
 }
 
-fn match_char_class(inner: &str, c: char) -> bool {
-    let chars: Vec<char> = inner.chars().collect();
+/// Replace the first (or all) matches. `$0`-`$9` in the replacement refer to
+/// the whole match / capture groups.
+fn simple_regex_replace(pattern: &str, replacement: &str, text: &str, all: bool) -> String {
+    let Ok(re) = crate::regex_engine::compile(pattern) else {
+        return text.to_string();
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let matches = if all {
+        re.find_iter(&chars)
+    } else {
+        re.search(&chars, 0).into_iter().collect()
+    };
+    let mut out = String::new();
+    let mut last = 0usize;
+    for m in matches {
+        out.extend(chars[last..m.start].iter());
+        out.push_str(&expand_regex_replacement(replacement, &chars, &m));
+        last = m.end.max(m.start);
+    }
+    out.extend(chars[last..].iter());
+    out
+}
+
+/// Expand `$0`-`$9` group references in a replacement template.
+fn expand_regex_replacement(
+    replacement: &str,
+    chars: &[char],
+    m: &crate::regex_engine::MatchResult,
+) -> String {
+    let rep: Vec<char> = replacement.chars().collect();
+    let mut out = String::new();
     let mut i = 0;
-    while i < chars.len() {
-        if i + 2 < chars.len() && chars[i+1] == '-' {
-            if c >= chars[i] && c <= chars[i+2] { return true; }
-            i += 3;
+    while i < rep.len() {
+        if rep[i] == '$' && i + 1 < rep.len() && rep[i + 1].is_ascii_digit() {
+            let g = rep[i + 1] as usize - '0' as usize;
+            let range = if g == 0 {
+                Some((m.start, m.end))
+            } else {
+                m.groups.get(g - 1).copied().flatten()
+            };
+            if let Some((s, e)) = range {
+                out.extend(chars[s..e].iter());
+            }
+            i += 2;
         } else {
-            if c == chars[i] { return true; }
+            out.push(rep[i]);
             i += 1;
         }
     }
-    false
+    out
+}
+
+/// Split `text` on every match of `pattern`.
+fn simple_regex_split(pattern: &str, text: &str) -> Vec<String> {
+    let Ok(re) = crate::regex_engine::compile(pattern) else {
+        return vec![text.to_string()];
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut last = 0usize;
+    for m in re.find_iter(&chars) {
+        if m.end == m.start && m.start == last {
+            continue; // ignore empty match at the current position
+        }
+        parts.push(chars[last..m.start].iter().collect());
+        last = m.end;
+    }
+    parts.push(chars[last..].iter().collect());
+    parts
 }
 
 // ── JSON helpers ─────────────────────────────────────────
@@ -6677,6 +7015,13 @@ fn apply_width_align(s: &str, width: usize, fill: char, align: char) -> String {
         }
         _ => format!("{}{}", std::iter::repeat(fill).take(pad).collect::<String>(), s), // > default right-align
     }
+}
+
+/// One accessor step in a mutation lvalue path (see collect_lvalue_path):
+/// `.field` or `[index]` with the index already evaluated.
+enum LvalueAccess {
+    Field(String),
+    Index(Value),
 }
 
 fn apply_mutation(val: &mut Value, method: &str, arg_vals: Vec<Value>) -> Result<Value, String> {
@@ -8281,6 +8626,17 @@ impl Interpreter {
                 }
             }
             // Introspection
+            "set_recursion_limit" => {
+                if let Some(Value::Int(n)) = arg_vals.first() {
+                    // Floor keeps the interpreter usable; the ceiling stays inside
+                    // the 512MB native stack (~21KB of Rust stack per V2 frame).
+                    self.recursion_limit = (*n).clamp(64, 20_000) as usize;
+                    Ok(Value::Int(self.recursion_limit as i64))
+                } else {
+                    Err("set_recursion_limit() requires an integer".into())
+                }
+            }
+            "get_recursion_limit" => Ok(Value::Int(self.recursion_limit as i64)),
             "callable" => {
                 if let Some(val) = arg_vals.first() {
                     Ok(Value::Bool(matches!(val, Value::Func(_) | Value::BuiltinFunc(_) | Value::Class(_))))
@@ -9772,9 +10128,14 @@ impl Interpreter {
                 match arg_vals.first() {
                     Some(Value::Int(n)) => {
                         if *n < 0 { return Err("factorial: negative input".into()); }
-                        let mut result: i64 = 1;
-                        for i in 2..=*n { result = result.checked_mul(i).ok_or("factorial: overflow")?; }
-                        Ok(Value::Int(result))
+                        if *n > 100_000 { return Err("factorial: input too large".into()); }
+                        // Exact like the rest of int arithmetic: promote to
+                        // BigInt instead of erroring on overflow.
+                        let mut result = crate::bigint::BigInt::from_i64(1);
+                        for i in 2..=*n {
+                            result = result.mul(&crate::bigint::BigInt::from_i64(i));
+                        }
+                        Ok(Self::norm_bigint(result))
                     }
                     _ => Err("factorial() requires an integer".into()),
                 }
@@ -10777,14 +11138,52 @@ impl Interpreter {
             "__regex_replace" | "__regex_sub" => {
                 let text = arg_vals.first().and_then(|v| v.as_str()).unwrap_or_default();
                 let pattern = arg_vals.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+                // Replacement may be a string template or a lambda(match) -> str.
+                if matches!(arg_vals.get(2), Some(Value::Func(_)) | Some(Value::BuiltinFunc(_))) {
+                    let func = arg_vals.get(2).unwrap().clone();
+                    return self.regex_replace_with_fn(&text, &pattern, &func, false);
+                }
                 let replacement = arg_vals.get(2).and_then(|v| v.as_str()).unwrap_or_default();
                 Ok(Value::Str(simple_regex_replace(&pattern, &replacement, &text, false)))
             }
             "__regex_replace_all" | "__regex_gsub" => {
                 let text = arg_vals.first().and_then(|v| v.as_str()).unwrap_or_default();
                 let pattern = arg_vals.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+                if matches!(arg_vals.get(2), Some(Value::Func(_)) | Some(Value::BuiltinFunc(_))) {
+                    let func = arg_vals.get(2).unwrap().clone();
+                    return self.regex_replace_with_fn(&text, &pattern, &func, true);
+                }
                 let replacement = arg_vals.get(2).and_then(|v| v.as_str()).unwrap_or_default();
                 Ok(Value::Str(simple_regex_replace(&pattern, &replacement, &text, true)))
+            }
+            "__regex_capture" | "__regex_captures" | "__regex_groups" => {
+                let text = arg_vals.first().and_then(|v| v.as_str()).unwrap_or_default();
+                let pattern = arg_vals.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+                let re = crate::regex_engine::compile(&pattern)?;
+                let chars: Vec<char> = text.chars().collect();
+                match re.search(&chars, 0) {
+                    Some(m) => {
+                        // Dict keyed by group index (0 = whole match) and, for
+                        // named groups, by name: m[1], m["year"], ...
+                        let mut pairs: Vec<(Value, Value)> = Vec::new();
+                        let full: String = chars[m.start..m.end].iter().collect();
+                        pairs.push((Value::Int(0), Value::Str(full)));
+                        for (gi, grp) in m.groups.iter().enumerate() {
+                            let val = match grp {
+                                Some((s, e)) => {
+                                    Value::Str(chars[*s..*e].iter().collect::<String>())
+                                }
+                                None => Value::Null,
+                            };
+                            pairs.push((Value::Int(gi as i64 + 1), val.clone()));
+                            if let Some(Some(name)) = re.group_names.get(gi) {
+                                pairs.push((Value::Str(name.clone()), val));
+                            }
+                        }
+                        Ok(Value::Dict(pairs))
+                    }
+                    None => Ok(Value::Null),
+                }
             }
             "__regex_split" => {
                 let text = arg_vals.first().and_then(|v| v.as_str()).unwrap_or_default();
@@ -10794,8 +11193,11 @@ impl Interpreter {
                 Ok(Value::List(parts))
             }
             "__regex_compile" | "__regex_new" => {
-                // Return a regex "object" as a dict
+                // Validate now; return a regex "object" as a dict. Method calls
+                // on it (pat.match(text), pat.find_all(text), ...) are handled
+                // by the compiled-pattern arm in call_builtin_method.
                 let pattern = arg_vals.first().and_then(|v| v.as_str()).unwrap_or_default();
+                crate::regex_engine::compile(&pattern)?;
                 Ok(Value::Dict(vec![
                     (Value::Str("pattern".into()), Value::Str(pattern.to_string())),
                     (Value::Str("type".into()), Value::Str("regex".into())),
@@ -11636,7 +12038,25 @@ impl Interpreter {
         }
     }
 
+    // Repeat a string n times; negative counts give "" (like Python's s * -1),
+    // and absurdly large results are an error instead of an allocator panic.
+    fn repeat_str(s: &str, n: i64) -> Result<String, String> {
+        if n <= 0 { return Ok(String::new()); }
+        if (s.len() as u64).saturating_mul(n as u64) > 1_000_000_000 {
+            return Err("String repeat result too large".into());
+        }
+        Ok(s.repeat(n as usize))
+    }
+
     fn index_value(&self, obj: &Value, idx: &Value) -> Result<Value, String> {
+        // Range index = slice: s[1..3], lst[2..], t[..=4] all delegate to slice_value.
+        // Dicts are excluded so a range can still be a dict key.
+        if let Value::Range(s, e, inclusive) = idx {
+            if !matches!(obj, Value::Dict(_)) {
+                let end = if *inclusive { *e + 1 } else { *e };
+                return self.slice_value(obj, Some(Value::Int(*s)), Some(Value::Int(end)), None);
+            }
+        }
         match (obj, idx) {
             (Value::List(items), Value::Int(i)) => {
                 let i = if *i < 0 {
@@ -11758,6 +12178,38 @@ impl Interpreter {
                     }
                 }
                 Ok(Value::Str(result))
+            }
+            Value::Tuple(items) => {
+                let sliced = self.slice_value(&Value::List(items.clone()), start, end, step)?;
+                match sliced {
+                    Value::List(v) => Ok(Value::Tuple(v)),
+                    other => Ok(other),
+                }
+            }
+            Value::Bytes(bytes) => {
+                let len = bytes.len() as i64;
+                let s = self.resolve_slice_index(start.as_ref(), 0, len);
+                let e = self.resolve_slice_index(end.as_ref(), len, len);
+                let mut result = Vec::new();
+                if step_n > 0 {
+                    let mut i = s;
+                    while i < e {
+                        if i >= 0 && (i as usize) < bytes.len() {
+                            result.push(bytes[i as usize]);
+                        }
+                        i += step_n;
+                    }
+                } else {
+                    let mut i = self.resolve_slice_index(start.as_ref(), len - 1, len);
+                    let e = self.resolve_slice_index(end.as_ref(), -1, len);
+                    while i > e {
+                        if i >= 0 && (i as usize) < bytes.len() {
+                            result.push(bytes[i as usize]);
+                        }
+                        i += step_n;
+                    }
+                }
+                Ok(Value::Bytes(result))
             }
             _ => Err(format!("Cannot slice {}", obj.type_name())),
         }
@@ -11910,6 +12362,22 @@ impl Interpreter {
                 Ok(matches)
             }
             Pattern::StructPat { type_name, fields } => {
+                // Anonymous { key, ... } patterns also match dicts: every named
+                // key must exist, and any nested pattern must match its value.
+                if type_name.is_none() {
+                    if let Value::Dict(pairs) = val {
+                        for (field_name, field_pat) in fields {
+                            let key = Value::Str(field_name.clone());
+                            let Some((_, fv)) = pairs.iter().find(|(k, _)| *k == key) else {
+                                return Ok(false);
+                            };
+                            if let Some(fp) = field_pat {
+                                if !self.matches_pattern(fv, fp)? { return Ok(false); }
+                            }
+                        }
+                        return Ok(true);
+                    }
+                }
                 let inst_class = match val {
                     Value::Instance(class_name, _) => Some(class_name.clone()),
                     Value::CowInstance(class_name, _) => Some(class_name.clone()),
@@ -12022,6 +12490,21 @@ impl Interpreter {
             }
             Pattern::StructPat { fields, .. } => {                // Bind field variables from instance fields
                 match val {
+                    Value::Dict(pairs) => {
+                        for (field_name, field_pat) in fields {
+                            let key = Value::Str(field_name.clone());
+                            let fv = pairs
+                                .iter()
+                                .find(|(k, _)| *k == key)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or(Value::Null);
+                            if let Some(fp) = field_pat {
+                                self.bind_pattern(&fv, fp)?;
+                            } else {
+                                self.env.define(field_name, fv);
+                            }
+                        }
+                    }
                     Value::Instance(_, inst_fields) => {
                         for (field_name, field_pat) in fields {
                             let fv = inst_fields.get(field_name).cloned().unwrap_or(Value::Null);

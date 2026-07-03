@@ -4,6 +4,7 @@ mod lexer;
 mod ast;
 mod parser;
 mod value;
+mod regex_engine;
 mod environment;
 mod fault;
 mod interpreter;
@@ -440,10 +441,11 @@ fn repl() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    // Spawn with 8MB stack to avoid stack overflow on large files
     // Generous native stack: the tree-walking interpreter recurses on the Rust
     // stack for deep user recursion and macro expansion, so give it room.
-    let builder = std::thread::Builder::new().stack_size(256 * 1024 * 1024);
+    // (Reserved, not committed — the interpreter's recursion_limit keeps
+    // real usage well inside this.)
+    let builder = std::thread::Builder::new().stack_size(512 * 1024 * 1024);
     let handler = builder.spawn(move || {
         // Check for embedded bytecode first (self-contained exe mode)
         if args.len() == 1 {

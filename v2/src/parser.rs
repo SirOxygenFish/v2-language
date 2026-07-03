@@ -932,6 +932,12 @@ impl Parser {
             vec![] // abstract method — no body
         };
 
+        // A function whose body yields is a generator even without the `func*`
+        // star (nested function bodies don't count — they yield for themselves).
+        if !is_generator && Self::stmts_contain_yield(&body) {
+            is_generator = true;
+        }
+
         Ok(Stmt::FuncDecl {
             name,
             params,
@@ -941,6 +947,40 @@ impl Parser {
             is_generator,
             decorators: Vec::new(),
             doc_comment,
+        })
+    }
+
+    /// Recursively scan statements (but not nested function declarations)
+    /// for a `yield`, so plain `func` generators work like `func*`.
+    fn stmts_contain_yield(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Yield(_) => true,
+            Stmt::If { body, else_ifs, else_body, .. } => {
+                Self::stmts_contain_yield(body)
+                    || else_ifs.iter().any(|(_, b)| Self::stmts_contain_yield(b))
+                    || else_body.as_deref().map(Self::stmts_contain_yield).unwrap_or(false)
+            }
+            Stmt::While { body, .. } => Self::stmts_contain_yield(body),
+            Stmt::IfLet { body, else_body, .. } => {
+                Self::stmts_contain_yield(body)
+                    || else_body.as_deref().map(Self::stmts_contain_yield).unwrap_or(false)
+            }
+            Stmt::WhileLet { body, .. } => Self::stmts_contain_yield(body),
+            Stmt::LetElse { else_body, .. } => Self::stmts_contain_yield(else_body),
+            Stmt::ForIn { body, .. } => Self::stmts_contain_yield(body),
+            Stmt::ForInDestructure { body, .. } => Self::stmts_contain_yield(body),
+            Stmt::ForClassic { body, .. } => Self::stmts_contain_yield(body),
+            Stmt::Match { arms, .. } => {
+                arms.iter().any(|a| Self::stmts_contain_yield(&a.body))
+            }
+            Stmt::TryCatch { body, catch_body, catch_clauses, finally_body, .. } => {
+                Self::stmts_contain_yield(body)
+                    || catch_body.as_deref().map(Self::stmts_contain_yield).unwrap_or(false)
+                    || catch_clauses.iter().any(|(_, _, b)| Self::stmts_contain_yield(b))
+                    || finally_body.as_deref().map(Self::stmts_contain_yield).unwrap_or(false)
+            }
+            Stmt::Defer(body) => Self::stmts_contain_yield(body),
+            _ => false,
         })
     }
 
@@ -1150,9 +1190,9 @@ impl Parser {
             return self.parse_if_let();
         }
 
-        self.expect(&TokenKind::LParen)?;
-        let condition = self.parse_expr()?;
-        self.expect(&TokenKind::RParen)?;
+        // Condition parens are optional: `if (x) { }` and `if x { }` both work.
+        // parse_cond_expr suppresses struct literals so the bare `{` opens the body.
+        let condition = self.parse_cond_expr()?;
         self.expect(&TokenKind::LBrace)?;
         let body = self.parse_block_body()?;
 
@@ -1161,9 +1201,7 @@ impl Parser {
 
         while self.match_tok(&TokenKind::Else) {
             if self.match_tok(&TokenKind::If) {
-                self.expect(&TokenKind::LParen)?;
-                let cond = self.parse_expr()?;
-                self.expect(&TokenKind::RParen)?;
+                let cond = self.parse_cond_expr()?;
                 self.expect(&TokenKind::LBrace)?;
                 let b = self.parse_block_body()?;
                 else_ifs.push((cond, b));
@@ -1175,9 +1213,7 @@ impl Parser {
         }
         // Also handle `elif` as standalone keyword
         while self.match_tok(&TokenKind::Elif) {
-            self.expect(&TokenKind::LParen)?;
-            let cond = self.parse_expr()?;
-            self.expect(&TokenKind::RParen)?;
+            let cond = self.parse_cond_expr()?;
             self.expect(&TokenKind::LBrace)?;
             let b = self.parse_block_body()?;
             else_ifs.push((cond, b));
@@ -1203,9 +1239,8 @@ impl Parser {
             return self.parse_while_let();
         }
 
-        self.expect(&TokenKind::LParen)?;
-        let condition = self.parse_expr()?;
-        self.expect(&TokenKind::RParen)?;
+        // Condition parens are optional, as with `if`.
+        let condition = self.parse_cond_expr()?;
         self.expect(&TokenKind::LBrace)?;
         let body = self.parse_block_body()?;
         Ok(Stmt::While { condition, body })
@@ -1295,6 +1330,39 @@ impl Parser {
         // `for await (x in asyncIterable)` — async iteration. Async runs
         // synchronously here, so it behaves like an ordinary for-in.
         self.match_tok(&TokenKind::Await);
+
+        // Head parens are optional for for-in: `for x in it { }`,
+        // `for a, b in it { }`, and `for [a, b] in it { }` all work.
+        // C-style `for (init; cond; step)` still requires parens.
+        if !self.check(&TokenKind::LParen) {
+            if self.match_tok(&TokenKind::LBracket) {
+                let mut vars = Vec::new();
+                loop {
+                    vars.push(self.expect_ident()?);
+                    if !self.match_tok(&TokenKind::Comma) { break; }
+                }
+                self.expect(&TokenKind::RBracket)?;
+                self.expect(&TokenKind::In)?;
+                let iter = self.parse_cond_expr()?;
+                self.expect(&TokenKind::LBrace)?;
+                let body = self.parse_block_body()?;
+                return Ok(Stmt::ForInDestructure { vars, iter, body });
+            }
+            let mut vars = vec![self.expect_ident()?];
+            while self.match_tok(&TokenKind::Comma) {
+                vars.push(self.expect_ident()?);
+            }
+            self.expect(&TokenKind::In)?;
+            let iter = self.parse_cond_expr()?;
+            self.expect(&TokenKind::LBrace)?;
+            let body = self.parse_block_body()?;
+            return Ok(if vars.len() == 1 {
+                Stmt::ForIn { var: vars.remove(0), iter, body }
+            } else {
+                Stmt::ForInDestructure { vars, iter, body }
+            });
+        }
+
         self.expect(&TokenKind::LParen)?;
 
         // Check for destructuring for-in: for ([a, b] in expr) or for ((a, b) in expr)
@@ -1545,6 +1613,37 @@ impl Parser {
                 }
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Pattern::List(pats))
+            }
+            TokenKind::LBrace => {
+                // Dict/struct pattern without a type name: { key: pat, shorthand }.
+                // Keys may be idents, string literals, or the `type` keyword
+                // (common in event dicts: case ({type: "click", x, y})).
+                self.advance();
+                let mut fields = Vec::new();
+                while !self.check(&TokenKind::RBrace) && !self.is_at_end() {
+                    let field_name = match self.peek().clone() {
+                        TokenKind::Ident(n) => { self.advance(); n }
+                        TokenKind::Str(s) => { self.advance(); s }
+                        TokenKind::Type => { self.advance(); "type".to_string() }
+                        other => {
+                            return Err(format!(
+                                "[line {}] Expected field name in dict pattern, found {:?}",
+                                self.current_line(), other
+                            ))
+                        }
+                    };
+                    let field_pat = if self.match_tok(&TokenKind::Colon) {
+                        Some(self.parse_pattern()?)
+                    } else {
+                        None // shorthand: binds the value at this key
+                    };
+                    fields.push((field_name, field_pat));
+                    if !self.match_tok(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace)?;
+                Ok(Pattern::StructPat { type_name: None, fields })
             }
             TokenKind::LParen => {
                 self.advance();

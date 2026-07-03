@@ -1,0 +1,284 @@
+{
+  "total": 201,
+  "passed": 201,
+  "failed": 0,
+  "pass_rate": "100.0%",
+  "sections": {
+    "Comments": {
+      "total": 4,
+      "passed": 4,
+      "failed": 0
+    },
+    "Variables": {
+      "total": 5,
+      "passed": 5,
+      "failed": 0
+    },
+    "DataTypes": {
+      "total": 8,
+      "passed": 8,
+      "failed": 0
+    },
+    "Operators": {
+      "total": 11,
+      "passed": 11,
+      "failed": 0
+    },
+    "Strings": {
+      "total": 19,
+      "passed": 19,
+      "failed": 0
+    },
+    "Lists": {
+      "total": 21,
+      "passed": 21,
+      "failed": 0
+    },
+    "Dicts": {
+      "total": 8,
+      "passed": 8,
+      "failed": 0
+    },
+    "Tuples": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Sets": {
+      "total": 5,
+      "passed": 5,
+      "failed": 0
+    },
+    "ControlFlow": {
+      "total": 13,
+      "passed": 13,
+      "failed": 0
+    },
+    "Functions": {
+      "total": 9,
+      "passed": 9,
+      "failed": 0
+    },
+    "Defer": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Decorators": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Lambdas": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "Lazy": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Classes": {
+      "total": 12,
+      "passed": 12,
+      "failed": 0
+    },
+    "Structs": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Enums": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "Traits": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Generics": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "ErrorHandling": {
+      "total": 8,
+      "passed": 8,
+      "failed": 0
+    },
+    "Generators": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Async": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Macros": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Comptime": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "PipeSpread": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "TypeAlias": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "DoBlock": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "ForDestructure": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Introspection": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Imports": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Testing": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "Builtins": {
+      "total": 13,
+      "passed": 13,
+      "failed": 0
+    },
+    "FileIO": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "COW": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "TCO": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "StdMath": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "StdCollections": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "OptionalChaining": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "Cast": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "TypeOf": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "WhileLet": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "PrintOpts": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Using": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "LabelGoto": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Isolate": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Unsafe": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Bitfield": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Embedded": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Eval": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Vars": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Compile": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Actors": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "Agents": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "CStruct": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    }
+  },
+  "failures": []
+}
