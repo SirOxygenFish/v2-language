@@ -1,0 +1,42 @@
+// Lists (DOCS 3.6, INTERNALS 5.11).
+let xs = [5, 3, 8]
+xs.push(1)
+print(xs)
+let last = xs.pop()
+print(last, xs)
+xs.sort()
+print(xs, xs[0], xs[-1], xs[0:2])
+xs.insert(0, 1)
+xs.insert(-1, 7)
+xs.insert(100, 9)
+xs.insert(-100, 0)
+print(xs)
+print(xs.remove_at(1), xs.remove_at(-1), xs)
+xs.reverse()
+print(xs, xs.len(), xs.index_of(5), xs.index_of(42), xs.index_of(5.0))
+print(xs.get(0), xs.get(10), xs.get(-1), xs.get(10, "none"), xs.get(-10, "none"))
+print([1, 2, 3].map(lambda(x) => x * 2), [1, 2, 3, 4].filter(lambda(x) => x % 2 == 0))
+print(["a", 1, null, [2], "b"].join("-"), [].join(",") == "", ["x"].join(", "))
+let mixed = [3, 1.5, -2, 2.0, 1]
+mixed.sort()
+print(mixed)
+let words = ["pear", "Apple", "fig", "apple"]
+words.sort()
+print(words)
+xs[0] = 100
+xs[-1] += 5
+print(xs)
+let nested = [[1, 2], [3]]
+nested[0].push(9)
+print(nested, nested[0][2], [[1, 2], [3]][1][0])
+let grow = [1, 2]
+for x in grow {
+    grow.push(x)
+}
+print(grow)
+let dup = [1]
+let copy = dup.copy()
+copy.push(2)
+print(dup, copy)
+let sorted = ["b", "a"]
+print(sorted.sort(), sorted.reverse(), sorted.push("c"), sorted)

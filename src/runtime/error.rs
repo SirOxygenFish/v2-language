@@ -1,25 +1,82 @@
-//! Error values, did-you-mean and rendering (INTERNALS 2.4, 2.5, 5.9).
+//! Error values, control flow, did-you-mean and rendering (INTERNALS 2.4, 2.5, 5.8, 5.9).
 
+use std::cell::OnceCell;
 use std::rc::Rc;
 
+use super::value::Value;
 use crate::syntax::span::{SourceMap, Span};
 use crate::syntax::Diag;
 
-/// A raised (or not yet raised) V2 error. Roadmap 0.2 carries kind, message, location and
-/// trace; `data`, `cause` and the foreign fields arrive with 0.7 and Phase 1.
-#[derive(Debug, Clone)]
+/// An error value (5.1, 5.9). `span` and `trace` are set by the first raise, so a rethrow keeps
+/// them. `lang` and `foreign_type` are `None` for V2 errors; engines fill them (Phase 1).
+#[derive(Debug)]
 pub struct ErrorValue {
+    /// The `type` field: `ValueError`, `KeyError`, …
     pub kind: Rc<str>,
-    pub message: String,
-    /// Where it was first raised; `None` until then (5.9).
-    pub span: Option<Span>,
+    pub message: Rc<str>,
+    pub data: Value,
+    pub lang: Option<Rc<str>>,
+    pub foreign_type: Option<Rc<str>>,
+    pub span: OnceCell<Span>,
     /// Frame strings, innermost first (2.5).
-    pub trace: Vec<String>,
+    pub trace: OnceCell<Rc<[Rc<str>]>>,
+}
+
+/// An error's `data` is freed through the same queue as containers (5.1), so a chain of
+/// errors (`e = error("E", "m", e)`, a million times) can't overflow the stack.
+impl Drop for ErrorValue {
+    fn drop(&mut self) {
+        let data = std::mem::replace(&mut self.data, Value::Null);
+        super::value::release(vec![data]);
+    }
 }
 
 impl ErrorValue {
-    pub fn new(kind: &str, message: impl Into<String>) -> ErrorValue {
-        ErrorValue { kind: kind.into(), message: message.into(), span: None, trace: Vec::new() }
+    pub fn new(kind: &str, message: impl Into<Rc<str>>) -> ErrorValue {
+        ErrorValue::with_data(kind.into(), message.into(), Value::Null)
+    }
+
+    pub fn with_data(kind: Rc<str>, message: Rc<str>, data: Value) -> ErrorValue {
+        ErrorValue {
+            kind,
+            message,
+            data,
+            lang: None,
+            foreign_type: None,
+            span: OnceCell::new(),
+            trace: OnceCell::new(),
+        }
+    }
+}
+
+/// How a statement or expression ended other than normally (5.8).
+pub enum Flow {
+    Error(Rc<ErrorValue>),
+    Return(Value),
+    Break,
+    Continue,
+}
+
+pub type Exec<T> = Result<T, Flow>;
+
+/// An unraised error as a `Flow`; the interpreter adds the location (5.9).
+pub fn fail<T>(kind: &str, message: impl Into<Rc<str>>) -> Exec<T> {
+    Err(Flow::Error(Rc::new(ErrorValue::new(kind, message))))
+}
+
+pub fn type_error<T>(message: impl Into<Rc<str>>) -> Exec<T> {
+    fail("TypeError", message)
+}
+
+pub fn value_error<T>(message: impl Into<Rc<str>>) -> Exec<T> {
+    fail("ValueError", message)
+}
+
+/// `message — did you mean 'x'?` when a candidate is close enough (5.9).
+pub fn with_suggestion<'a>(message: String, name: &str, candidates: impl IntoIterator<Item = &'a str>) -> String {
+    match did_you_mean(name, candidates) {
+        Some(s) => format!("{message} — did you mean '{s}'?"),
+        None => message,
     }
 }
 
@@ -102,7 +159,7 @@ fn split_message(message: &str) -> (&str, Vec<&str>) {
 /// An uncaught error, as printed to stderr.
 pub fn render_error(sm: &SourceMap, e: &ErrorValue) -> String {
     let (first, rest) = split_message(&e.message);
-    let mut out = match e.span {
+    let mut out = match e.span.get().copied() {
         Some(span) => {
             let display = &sm.file(span.file).display;
             let mut s = format!("{display}:{}:{}: {}: {first}\n", span.line, span.col, e.kind);
@@ -114,12 +171,14 @@ pub fn render_error(sm: &SourceMap, e: &ErrorValue) -> String {
     for line in rest {
         out.push_str(&format!("    {line}\n"));
     }
-    render_frames(&mut out, &e.trace);
+    if let Some(trace) = e.trace.get() {
+        render_frames(&mut out, trace);
+    }
     out
 }
 
 /// More than 100 frames: the first 50, `... N frames omitted`, then the last 20 (2.4).
-fn render_frames(out: &mut String, trace: &[String]) {
+fn render_frames(out: &mut String, trace: &[Rc<str>]) {
     if trace.len() > 100 {
         for f in &trace[..50] {
             out.push_str(&format!("  at {f}\n"));
@@ -180,12 +239,9 @@ mod tests {
     fn renders_runtime_error_with_excerpt_and_frames() {
         let (sm, id) = sm_with("print(\"a\")\n    nope(1)\n");
         let span = sm.span(id, 15, 19);
-        let e = ErrorValue {
-            kind: "NameError".into(),
-            message: "'nope' is not declared".into(),
-            span: Some(span),
-            trace: vec!["main.v2:2".into()],
-        };
+        let e = ErrorValue::new("NameError", "'nope' is not declared");
+        e.span.set(span).unwrap();
+        e.trace.set(vec![Rc::<str>::from("main.v2:2")].into()).unwrap();
         assert_eq!(
             render_error(&sm, &e),
             "main.v2:2:5: NameError: 'nope' is not declared\n    nope(1)\n    ^\n  at main.v2:2\n"

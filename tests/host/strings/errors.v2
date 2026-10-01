@@ -1,0 +1,30 @@
+// String and bytes errors (INTERNALS 5.4, 5.5, 5.11).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+show(lambda() => "abc"[5])
+show(lambda() => "abc"[-4])
+show(lambda() => "abc"[1.0])
+show(lambda() => "abc"["x"])
+show(lambda() => "abc".frobnicate())
+show(lambda() => "abc".uper())
+show(lambda() => "abc".len)
+show(lambda() => "a,b".split(""))
+show(lambda() => "a".replace("", "x"))
+show(lambda() => "abc".split(1))
+show(lambda() => "abc".upper(1))
+show(lambda() => b"\xff".decode())
+show(lambda() => b"ab"[2])
+show(lambda() => b"ab".len())
+show(lambda() => "abc"[1:"x"])
+show(lambda() => f"${"x":.2f}")
+let s = "abc"
+try {
+    s[0] = "z"
+} catch (e) {
+    print(e.type + ": " + e.message)
+}

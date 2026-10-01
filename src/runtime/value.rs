@@ -1,10 +1,19 @@
-//! Values (INTERNALS 5.1). Roadmap 0.2 has the scalar kinds and builtin functions; lists, dicts,
-//! closures, handles and errors arrive with 0.6-0.7.
+//! Values (INTERNALS 5.1) and their canonical text (5.10 `str`).
 
+use std::cell::{Cell, RefCell};
+use std::fmt;
+use std::ops::Deref;
 use std::rc::Rc;
 
-use super::builtins::BuiltinDef;
+use indexmap::IndexMap;
 
+use super::builtins::BuiltinDef;
+use super::env::Env;
+use super::error::ErrorValue;
+use crate::syntax::ast::FuncDecl;
+
+/// A V2 value. Cloning is O(1): lists and dicts are shared, everything else is immutable (5.1).
+/// Handles arrive with Phase 1.
 #[derive(Clone)]
 pub enum Value {
     Null,
@@ -13,11 +22,164 @@ pub enum Value {
     Float(f64),
     Str(Rc<str>),
     Bytes(Rc<[u8]>),
+    List(List),
+    Dict(Dict),
+    Func(Func),
+    Error(Rc<ErrorValue>),
+}
+
+/// Something callable (5.1). Proxies, native functions and handle methods arrive with Phases 1-2.
+pub enum Callable {
+    /// A `func` or lambda with the frame it closes over. `name` is the function's name, or
+    /// `lambda@main.v2:12` (5.7).
+    Closure { decl: Rc<FuncDecl>, env: Env, name: Rc<str> },
     Builtin(&'static BuiltinDef),
 }
 
+impl Callable {
+    pub fn name(&self) -> &str {
+        match self {
+            Callable::Closure { name, .. } => name,
+            Callable::Builtin(def) => def.name,
+        }
+    }
+}
+
+// -- Shared containers ----------------------------------------------------------------------------
+//
+// Dropping the last reference to a list, dict or closure frees what it holds iteratively: a value
+// nested a million levels deep (`for i in 0..1000000 { v = [v] }`) must not overflow the stack
+// when it goes away.
+
+macro_rules! shared {
+    ($(#[$doc:meta])* $name:ident, $target:ty) => {
+        $(#[$doc])*
+        #[derive(Clone)]
+        pub struct $name(Rc<$target>);
+
+        #[allow(dead_code)] // the same API for each container; not every one uses all of it
+        impl $name {
+            pub fn new(v: $target) -> $name {
+                $name(Rc::new(v))
+            }
+
+            pub fn ptr_eq(a: &$name, b: &$name) -> bool {
+                Rc::ptr_eq(&a.0, &b.0)
+            }
+
+            /// Identity, for cycle detection.
+            pub fn addr(&self) -> usize {
+                Rc::as_ptr(&self.0) as *const u8 as usize
+            }
+
+            pub fn strong_count(&self) -> usize {
+                Rc::strong_count(&self.0)
+            }
+        }
+
+        impl Deref for $name {
+            type Target = $target;
+            fn deref(&self) -> &$target {
+                &self.0
+            }
+        }
+    };
+}
+
+shared!(
+    /// A list: ordered, mutable, shared.
+    List,
+    RefCell<Vec<Value>>
+);
+shared!(
+    /// A dict: string keys in insertion order, mutable, shared.
+    Dict,
+    RefCell<IndexMap<Rc<str>, Value>>
+);
+shared!(
+    /// A function value.
+    Func,
+    Callable
+);
+
+impl Drop for List {
+    fn drop(&mut self) {
+        if Rc::strong_count(&self.0) == 1 {
+            if let Ok(mut items) = self.0.try_borrow_mut() {
+                let items = std::mem::take(&mut *items);
+                release(items);
+            }
+        }
+    }
+}
+
+impl Drop for Dict {
+    fn drop(&mut self) {
+        if Rc::strong_count(&self.0) == 1 {
+            if let Ok(mut map) = self.0.try_borrow_mut() {
+                let map = std::mem::take(&mut *map);
+                release(map.into_values().collect());
+            }
+        }
+    }
+}
+
+impl Drop for Func {
+    fn drop(&mut self) {
+        // The last reference to a closure whose frame nothing else holds: free the frame's
+        // values here, not through the frame's own drop.
+        if Rc::strong_count(&self.0) == 1 {
+            if let Callable::Closure { env, .. } = &*self.0 {
+                if Rc::strong_count(env) == 1 {
+                    if let Ok(mut frame) = env.try_borrow_mut() {
+                        let vars = std::mem::take(&mut frame.vars);
+                        release(vars.into_values().map(|slot| slot.value).collect());
+                    }
+                }
+            }
+        }
+    }
+}
+
+thread_local! {
+    static PENDING: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    static DRAINING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Drop `items`. Containers among them are queued and dropped one at a time by the outermost
+/// call, so nested drops never recurse more than one level.
+pub fn release(items: Vec<Value>) {
+    if !items.iter().any(|v| matches!(v, Value::List(_) | Value::Dict(_) | Value::Func(_) | Value::Error(_))) {
+        return;
+    }
+    PENDING.with(|p| p.borrow_mut().extend(items));
+    if DRAINING.with(|d| d.replace(true)) {
+        return;
+    }
+    while let Some(v) = PENDING.with(|p| p.borrow_mut().pop()) {
+        drop(v);
+    }
+    DRAINING.with(|d| d.set(false));
+}
+
 impl Value {
-    /// The name `type()` returns (DOCS 3.2).
+    pub fn str(s: &str) -> Value {
+        Value::Str(s.into())
+    }
+
+    pub fn list(items: Vec<Value>) -> Value {
+        Value::List(List::new(RefCell::new(items)))
+    }
+
+    pub fn dict(map: IndexMap<Rc<str>, Value>) -> Value {
+        Value::Dict(Dict::new(RefCell::new(map)))
+    }
+
+    pub fn func(c: Callable) -> Value {
+        Value::Func(Func::new(c))
+    }
+
+    /// The name `type()` returns (5.1).
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Null => "null",
@@ -26,21 +188,26 @@ impl Value {
             Value::Float(_) => "float",
             Value::Str(_) => "str",
             Value::Bytes(_) => "bytes",
-            Value::Builtin(_) => "func",
+            Value::List(_) => "list",
+            Value::Dict(_) => "dict",
+            Value::Func(_) => "func",
+            Value::Error(_) => "error",
         }
     }
-}
 
-/// `str(v)`: a str is returned unchanged; everything else gets its canonical form (5.10).
-pub fn to_str(v: &Value) -> String {
-    match v {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(x) => float_str(*x),
-        Value::Str(s) => s.to_string(),
-        Value::Bytes(b) => bytes_repr(b),
-        Value::Builtin(def) => format!("<builtin {}>", def.name),
+    /// Falsy: `null`, `false`, `0`, `0.0`, `-0.0` and empty str, bytes, list, dict (5.2).
+    pub fn truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Int(n) => *n != 0,
+            Value::Float(x) => *x != 0.0,
+            Value::Str(s) => !s.is_empty(),
+            Value::Bytes(b) => !b.is_empty(),
+            Value::List(l) => !l.borrow().is_empty(),
+            Value::Dict(d) => !d.borrow().is_empty(),
+            Value::Func(_) | Value::Error(_) => true,
+        }
     }
 }
 
@@ -66,25 +233,50 @@ pub fn bytes_repr(b: &[u8]) -> String {
             b'\r' => s.push_str("\\r"),
             b'\t' => s.push_str("\\t"),
             0x20..=0x7e => s.push(c as char),
-            _ => s.push_str(&format!("\\x{c:02X}")),
+            _ => s.push_str(&format!("\\x{c:02x}")),
         }
     }
     s.push('"');
     s
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A string inside a container: double-quoted, with `\" \\ \n \r \t` and `\u{..}` for other
+/// control chars (5.10).
+pub fn quoted(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
 
-    #[test]
-    fn canonical_forms() {
-        assert_eq!(to_str(&Value::Float(2.0)), "2.0");
-        assert_eq!(to_str(&Value::Float(0.1)), "0.1");
-        assert_eq!(to_str(&Value::Float(1e20)), "1e20");
-        assert_eq!(to_str(&Value::Float(f64::NAN)), "nan");
-        assert_eq!(to_str(&Value::Float(f64::NEG_INFINITY)), "-inf");
-        assert_eq!(to_str(&Value::Bytes(b"\x00A\"".to_vec().into())), "b\"\\x00A\\\"\"");
-        assert_eq!(to_str(&Value::Null), "null");
+/// Scalars as `str()` would print them inside a container; containers only by size (tests and
+/// `ErrorValue`'s `Debug`).
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Null => write!(f, "null"),
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Int(n) => write!(f, "{n}"),
+            Value::Float(x) => write!(f, "{}", float_str(*x)),
+            Value::Str(s) => {
+                let mut out = String::new();
+                quoted(s, &mut out);
+                write!(f, "{out}")
+            }
+            Value::Bytes(b) => write!(f, "{}", bytes_repr(b)),
+            Value::List(l) => write!(f, "<list of {}>", l.try_borrow().map_or(0, |l| l.len())),
+            Value::Dict(d) => write!(f, "<dict of {}>", d.try_borrow().map_or(0, |d| d.len())),
+            Value::Func(c) => write!(f, "<func {}>", c.name()),
+            Value::Error(e) => write!(f, "<error {}: {}>", e.kind, e.message),
+        }
     }
 }

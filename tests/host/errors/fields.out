@@ -1,0 +1,20 @@
+ValueError - port out of range: 99999
+at fields.v2:4:9
+["parse_port (fields.v2:4)", "fields.v2:10"]
+null null null
+done
+KeyError k null null null [] {"extra": 1}
+KeyError: k
+Error text 22 7
+TypeError: throw expects an error or a str, got int
+error has no field 'frob'
+error has no field 'mesage' — did you mean 'message'?
+error values are read-only
+29 ["inner (fields.v2:29)", "fields.v2:32"]
+true 38
+finally wins
+cleanup
+from catch: kept
+inner finally
+outer caught a
+KeyError 69 13

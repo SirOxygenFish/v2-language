@@ -1,0 +1,14 @@
+// exit: 1
+// stderr: uncaught.v2:9:9: ValueError: port out of range: 99999
+// stderr: throw error("ValueError", f"port out of range: ${port}")
+// stderr: at parse_port (uncaught.v2:9)
+// stderr: at uncaught.v2:13
+// DOCS 3.9: an uncaught error prints where it was thrown, the line, a caret and the stack.
+func parse_port(port) {
+    if port < 1 || port > 65535 {
+        throw error("ValueError", f"port out of range: ${port}")
+    }
+    return port
+}
+parse_port(99999)
+print("never printed")

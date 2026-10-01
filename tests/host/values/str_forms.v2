@@ -1,0 +1,19 @@
+// The canonical text of every value (INTERNALS 5.10 `str`), as print shows it.
+print(null, true, false, 42, -7, 2.0, 0.1, 1e20, 1e-7, 3.14, -0.0)
+print([1, "a", 'b"c', "line\nnext", null, [true]], {k: 1, "x y": "v"})
+print(b"\x00A\xff", [b"hi"], "tab\there", ["tab\there", "\u{1b}", "\\"])
+print(print, lambda(x) => x, [lambda() => 1])
+func greet() { }
+print(greet, [greet], {f: greet})
+print(error("ValueError", "bad"), [error("E", "m")])
+let cyc = [1]
+cyc.push(cyc)
+print(cyc)
+let d = {}
+d.self = d
+d.list = [d]
+print(d)
+let shared = [0]
+print([shared, shared])
+print([], {}, [[]], [{}])
+print(f"${[1, 2]} and ${{a: "b"}}")

@@ -1,0 +1,34 @@
+// Dicts (DOCS 3.6, INTERNALS 5.5, 5.11): string keys in insertion order.
+let user = {name: "Ada", "favorite number": 7}
+print(user.name)
+print(user["favorite number"])
+user.email = "ada@example.com"
+print("email" in user)
+print(user.get("phone", "none"), user.get("name"), user.get("phone"))
+print(user.keys(), user.values().len(), user.len())
+user.name = "Grace"
+print(user)
+print(user.remove("email"), user)
+let copy = user.copy()
+copy.extra = true
+print(user.len(), copy.len())
+let k = "dyn"
+let d = {[k]: 1, [k + "2"]: 2, a: 1, a: 3, "for": 4, "if": 5}
+print(d, d.for, d["if"])
+d["a"] = 0
+d.z = 26
+print(d.keys())
+// A key holding a function wins over the dict method of that name; other keys don't.
+let ns = {keys: lambda() => "my keys", len: 99, double: lambda(x) => x * 2}
+print(ns.keys(), ns.len(), ns.double(21), ns.len)
+for key, value in {a: 1, b: 2} { print(key, value) }
+for key in {x: 1} { print(key) }
+let counts = {}
+for word in ["a", "b", "a"] {
+    counts[word] = counts.get(word, 0) + 1
+}
+print(counts)
+let shared = {list: [1]}
+let alias = shared.copy()
+alias.list.push(2)
+print(shared)

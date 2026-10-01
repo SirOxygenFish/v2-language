@@ -1,0 +1,28 @@
+// R45 (INTERNALS 5.5): a `?.` that meets null ends the whole chain, arguments included.
+let a = null
+let calls = []
+func f() {
+    calls.push("f")
+    return 1
+}
+print(a?.b.c(f()))
+print(calls)
+try {
+    print((a?.b).c)
+} catch (e) {
+    print(e.type, e.message)
+}
+try {
+    print({"b": null}?.b.c)
+} catch (e) {
+    print(e.type, e.message)
+}
+try {
+    print({}?.x)
+} catch (e) {
+    print(e.type, e.message)
+}
+let user = {name: "Ada", address: null}
+print(user?.name, user.address?.city, user?.address?.city.zip)
+let nobody = null
+print(nobody?.greet("hi"), nobody?.items[0], nobody?.text[1:2])

@@ -1,0 +1,72 @@
+// Error values, throw, try/catch/finally (DOCS 3.9, INTERNALS 5.8, 5.9).
+func parse_port(port) {
+    if port < 1 || port > 65535 {
+        throw error("ValueError", f"port out of range: ${port}")
+    }
+    return port
+}
+
+try {
+    parse_port(99999)
+} catch (e) {
+    print(e.type, "-", e.message)
+    print(f"at ${e.file}:${e.line}:${e.col}")
+    print(e.trace)
+    print(e.data, e.lang, e.foreign_type)
+} finally {
+    print("done")
+}
+let made = error("KeyError", "k", {extra: 1})
+print(made.type, made.message, made.file, made.line, made.col, made.trace, made.data)
+print(made)
+try { throw "text" } catch (err) { print(err.type, err.message, err.line, err.col) }
+try { throw 5 } catch (err) { print(err.type + ": " + err.message) }
+try { made.frob } catch (err) { print(err.message) }
+try { made.mesage } catch (err) { print(err.message) }
+try { made.type = "x" } catch (err) { print(err.message) }
+// A rethrow keeps the first location and trace.
+func inner() {
+    throw error("Error", "deep")
+}
+try {
+    try { inner() } catch (x) { throw x }
+} catch (y) {
+    print(y.line, y.trace)
+}
+// The same error value is caught each time it is thrown.
+let caught = null
+try { [].pop() } catch (x) { caught = x }
+let again = null
+try { throw caught } catch (x) { again = x }
+print(caught == again, again.line)
+// finally replaces the outcome only when it doesn't complete normally.
+func f() {
+    try {
+        throw "from try"
+    } finally {
+        return "finally wins"
+    }
+}
+print(f())
+func g() {
+    try {
+        throw "kept"
+    } catch (e) {
+        throw error("Error", "from catch: " + e.message)
+    } finally {
+        print("cleanup")
+    }
+}
+try { g() } catch (e) { print(e.message) }
+try {
+    try { throw "a" } finally { print("inner finally") }
+} catch (e) {
+    print("outer caught", e.message)
+}
+// Runtime errors carry where they happened.
+try {
+    let d = {}
+    print(d.missing)
+} catch (e) {
+    print(e.type, e.line, e.col)
+}

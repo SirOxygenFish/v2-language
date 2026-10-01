@@ -82,7 +82,12 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> Token {
-        let t = self.toks[self.pos].clone();
+        // An f-string token holds the tokens of its interpolations: move them out, so nested
+        // f-strings are not copied once per level.
+        let t = match &mut self.toks[self.pos].tok {
+            Tok::FStr(parts) => Token { tok: Tok::FStr(std::mem::take(parts)), span: self.toks[self.pos].span },
+            _ => self.toks[self.pos].clone(),
+        };
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
@@ -272,7 +277,7 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self) -> Result<Stmt, Diag> {
         let start = self.span();
-        let kind = match self.peek().clone() {
+        let kind = match self.peek() {
             Tok::Kw(Kw::Let) => {
                 self.bump();
                 let name = self.expect_name("a name after `let`")?;
@@ -503,12 +508,13 @@ impl<'a> Parser<'a> {
             Tok::Op(Op::PercentEq) => Some(BinOp::Rem),
             _ => return Ok(StmtKind::Expr(target)),
         };
+        let op = op.map(|o| (o, self.span()));
         self.bump();
         let span = target.span;
         let target = match target.kind {
             ExprKind::Name(n) => Target::Name(Name { text: n, span }),
             ExprKind::Member { obj, name, optional: false } => Target::Member(obj, name),
-            ExprKind::Index { obj, index, .. } => Target::Index(obj, index),
+            ExprKind::Index { obj, index, bracket } => Target::Index(obj, index, bracket),
             ExprKind::OptChain(_) => return Err(Diag::new("cannot assign through ?.", span)),
             _ => return Err(Diag::new("cannot assign to this expression", span)),
         };

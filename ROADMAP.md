@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 0: Host core |
-| **Next task** | 0.6 Values and operators, with 0.7 (they share the interpreter core) |
-| **Last update** | 2026-10-01: 0.5 parser, AST, static checks and C declaration parser done (CI written, not yet run) |
+| **Next task** | 0.8 Modules |
+| **Last update** | 2026-10-01: 0.6 + 0.7 interpreter core done (CI written, not yet run) |
 
 ## Rules
 
@@ -108,23 +108,29 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
   with regression tests)
 
 ### 0.6 Values and operators
-- [ ] `Value` enum: null, bool, int (i64), float, str, bytes, list, dict, func, handle, error (§5.1)
-- [ ] Reference semantics for list/dict, shallow `.copy()`
-- [ ] Equality, ordering, truthiness (§5.2)
-- [ ] Arithmetic: `/` always float, floor `%`, `**`; overflow and division by zero → ValueError (§5.3)
-- [ ] Strings indexed by character; indexing, slicing and members for str, list, bytes, dict (§5.4, §5.5)
-- [ ] Method tables for str, list, dict, bytes, incl. `list.get` and the dict
+- [x] `Value` enum: null, bool, int (i64), float, str, bytes, list, dict, func, error (§5.1);
+      `handle` arrives with the engines (Phase 1). Deep values free iteratively.
+- [x] Reference semantics for list/dict, shallow `.copy()`
+- [x] Equality, ordering, truthiness (§5.2)
+- [x] Arithmetic: `/` always float, floor `%`, `**`; overflow and division by zero → ValueError (§5.3)
+- [x] Strings indexed by character (with the §5.4 char-index cache); indexing, slicing and members
+      for str, list, bytes, dict; optional chains (§5.4, §5.5)
+- [x] Method tables for str, list, dict, bytes, incl. `list.get` and the dict
       key-before-method rule (§5.11)
-- **Done when:** the `tests/host` value, operator and method tests pass
+- **Done when:** the `tests/host` value, operator and method tests pass — **passed 2026-10-01**
+  (`tests/host/{values,ops,strings,lists}`, R45 `optchain.v2`; reviewed together with 0.7)
 
 ### 0.7 Variables, functions, control flow, errors
-- [ ] Scopes and frames, `let`/`const`, closures, fresh variable per loop iteration (§5.6)
-- [ ] Functions: hoisting, defaults, named args, `...rest`, spread, ArityError, lambdas (§5.7)
-- [ ] `if`/`elif`/`else`, `while`, `for` (lists, dicts, strings, bytes, `a..b`, `i, x` form),
+- [x] Scopes and frames, `let`/`const`, closures, fresh variable per loop iteration, closure-cycle
+      trimming, read-only builtins frame (§5.6)
+- [x] Functions: hoisting, defaults, named args, `...rest`, spread, ArityError, lambdas (§5.7)
+- [x] `if`/`elif`/`else`, `while`, `for` (lists, dicts, strings, bytes, `a..b`, `i, x` form),
       `break`/`continue`, snapshot iteration (§5.8)
-- [ ] Errors: `throw`, `error()`, `try`/`catch`/`finally`, error fields, traces, rethrow keeps
-      origin; recursion limit; NameError with did-you-mean (§5.9)
-- **Done when:** R09, R45 and the `tests/host` control-flow and error tests pass
+- [x] Errors: `throw`, `error()`, `try`/`catch`/`finally`, error fields, traces, rethrow keeps
+      origin; call-depth limit and stack guard; NameError with did-you-mean (§5.9)
+- **Done when:** R09, R45 and the `tests/host` control-flow and error tests pass — **passed
+  2026-10-01** (`try_locals.v2`, `optchain.v2`, `tests/host/{control,functions,errors}`; reviewed:
+  6 distinct findings fixed with regression tests)
 
 ### 0.8 Modules
 - [ ] `import "./x.v2" as m`: resolution relative to the file, run once, dict snapshot,
@@ -333,3 +339,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-01 | 0.2 + 0.3: SourceMap, error rendering, full lexer, `print` end to end; `v2 hello.v2` runs; reviewed (6 findings fixed with regression tests) |
 | 2026-10-01 | 0.4: embedded-block syntax (scan profiles for py/js/ts/c/cpp/rust, fences, C1/C2 guards, unterminated notes), `@export`/`@import` directives, dedent, `UnitLoc`, `extern` bodies; blocks parse and raise EngineUnknown when reached; reviewed (13 findings fixed) |
 | 2026-10-01 | 0.5: full parser and AST, static checks (all violations, in source order), `ffi/cdecl` with the 16.3 messages and the C++ dialect for `@cpp` prototype strings, expression-height limit; reviewed, fixes re-reviewed (25 findings fixed with regression tests) |
+| 2026-10-01 | 0.6 + 0.7: the interpreter core: values, operators, string/list/dict/bytes methods, frames and closures, the call binder, control flow, try/catch/finally, error values with traces, the stack guard, iterative freeing of deep values; 0.5's third review round fixed (C++ prototype references, K&R, nested f-string cost); reviewed (6 findings fixed) |

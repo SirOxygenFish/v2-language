@@ -5,14 +5,17 @@ pub mod call;
 pub mod env;
 pub mod error;
 pub mod interp;
+pub mod methods;
 pub mod module;
+pub mod ops;
+pub mod strings;
 pub mod value;
 
 use std::path::Path;
 
 use crate::syntax::span::{LoadError, SourceMap};
 use crate::syntax::{check, lexer, parser};
-use error::{render_diag, render_error};
+use error::{render_diag, render_error, Flow};
 use interp::Interp;
 
 /// `v2 FILE [ARGS...]` on the interpreter thread; returns the exit code (6.1, 6.5).
@@ -44,14 +47,18 @@ pub fn run_script(path: &str, _args: Vec<String>) -> i32 {
         }
         return 1;
     }
-    let mut interp = Interp::new(&sm);
+    let mut interp = Interp::new(&sm, crate::INTERP_STACK_BYTES);
     let result = interp.run(&program);
+    // Program output comes before the error that ended it (5.10).
     interp.out.flush();
     match result {
         Ok(()) => 0,
-        Err(e) => {
+        Err(Flow::Error(e)) => {
             eprint!("{}", render_error(&sm, &e));
             1
+        }
+        Err(Flow::Return(_) | Flow::Break | Flow::Continue) => {
+            unreachable!("return, break and continue are placed statically (4.5)")
         }
     }
 }

@@ -1,0 +1,9 @@
+old f
+old g
+null
+cannot read 'x' of null (use ?.)
+list has no method 'frobnicate'
+1 none 3 0 [1, 2, 3]
+1 0 1 {}
+true true ["a", "b"] bb
+true [] []

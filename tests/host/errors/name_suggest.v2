@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: name_suggest.v2:5:7: NameError: 'cuont' is not declared — did you mean 'count'?
+// A misspelled name gets a suggestion (INTERNALS 5.6, 5.9).
+let count = 1
+print(cuont)

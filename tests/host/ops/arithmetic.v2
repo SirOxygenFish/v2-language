@@ -1,0 +1,20 @@
+// Arithmetic (DOCS 3.4, INTERNALS 5.3): `/` always gives a float, `%` takes the divisor's sign.
+print(7 / 2, 6 / 3, -7 % 3, 7 % -3, 7.5 % 2, -7.5 % 2)
+print(2 ** 10, 2 ** -1, 2 ** 3 ** 2, -2 ** 2, (-2) ** 2, 2.0 ** 0.5)
+print(1 + 2 * 3, (1 + 2) * 3, 10 - 4 - 3)
+print(1 + 2.5, 3 * 1.5, 0.1 + 0.2, 1e308 * 10, -1e308 * 10)
+print("ab" + "cd", "ab" * 3, 3 * "x", [0] * 3, [1, 2] + [3], [1] * -1)
+print(b"ab" + b"c", "é" * 2)
+print(9223372036854775807, -9223372036854775808, 0xff, 1_000_000)
+let n = 5
+n += 2
+n -= 1
+n *= 3
+n %= 5
+print(n)
+let f = 10
+f /= 4
+print(f)
+let s = "a"
+s += "b"
+print(s)

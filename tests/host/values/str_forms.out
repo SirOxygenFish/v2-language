@@ -1,0 +1,11 @@
+null true false 42 -7 2.0 0.1 1e20 1e-7 3.14 -0.0
+[1, "a", "b\"c", "line\nnext", null, [true]] {"k": 1, "x y": "v"}
+b"\x00A\xff" [b"hi"] tab	here ["tab\there", "\u{1b}", "\\"]
+<builtin print> <func lambda@str_forms.v2:5> [<func lambda@str_forms.v2:5>]
+<func greet> [<func greet>] {"f": <func greet>}
+ValueError: bad [E: m]
+[1, [...]]
+{"self": {...}, "list": [{...}]}
+[[0], [0]]
+[] {} [[]] [{}]
+[1, 2] and {"a": "b"}

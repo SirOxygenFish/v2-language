@@ -28,8 +28,8 @@ pub enum StmtKind {
     Continue,
     Return(Option<Expr>),
     Throw(Expr),
-    /// `op: None` is a plain `=`.
-    Assign { target: Target, op: Option<BinOp>, value: Expr },
+    /// `op: None` is a plain `=`; the span is the operator (the error caret, 2.2).
+    Assign { target: Target, op: Option<(BinOp, Span)>, value: Expr },
     If { arms: Vec<(Expr, Body)>, else_: Option<Body> },
     While { cond: Expr, body: Body },
     For { first: Name, second: Option<Name>, iter: ForIter, body: Body },
@@ -49,12 +49,12 @@ pub enum ForIter {
     Range(Expr, Expr),
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Target {
     Name(Name),
     Member(Box<Expr>, Name),
-    Index(Box<Expr>, Box<Expr>),
+    /// The span is the `[`.
+    Index(Box<Expr>, Box<Expr>, Span),
 }
 
 #[derive(Debug)]

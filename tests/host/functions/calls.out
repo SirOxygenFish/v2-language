@@ -1,0 +1,17 @@
+Hello, Ada!
+Welcome, Ada!
+Hi, Bob!
+6 9 0 10
+42 HEY!
+null null
+[1, 2, 3] [1, 5, 6] [1, 2, 0]
+[1] [1]
+1 2 1
+[0, 1, 2]
+2432902008176640000
+7
+5 in a list
+inner is hoisted too
+true true
+6 15
+<func greet> <func lambda@calls.v2:14> <builtin print>

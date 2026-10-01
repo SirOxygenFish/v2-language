@@ -84,7 +84,7 @@ impl Checker {
                 match target {
                     Target::Name(_) => {}
                     Target::Member(obj, _) => self.expr(obj, ctx),
-                    Target::Index(obj, index) => {
+                    Target::Index(obj, index, _) => {
                         self.expr(obj, ctx);
                         self.expr(index, ctx);
                     }

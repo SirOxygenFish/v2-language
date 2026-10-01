@@ -1,0 +1,3 @@
+RecursionError: maximum call depth (10000) exceeded
+5000
+RecursionError: value nested too deeply (or cyclic)

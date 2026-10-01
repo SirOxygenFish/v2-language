@@ -1,0 +1,22 @@
+// timeout: 60
+// Dropping values nested a million levels deep frees them without overflowing the stack (INTERNALS 5.1).
+let v = []
+for i in 0..1000000 { v = [v] }
+v = null
+let d = {}
+for i in 0..1000000 { d = {inner: d} }
+d = null
+let f = null
+for i in 0..300000 {
+    let g = f
+    f = lambda() => g
+}
+f = null
+// Errors hold their data the same way.
+let e = null
+for i in 0..1000000 { e = error("E", "m", e) }
+e = null
+let mixed = null
+for i in 0..300000 { mixed = [error("E", "m", {prev: mixed})] }
+mixed = null
+print("freed")
