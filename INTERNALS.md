@@ -32,6 +32,7 @@
 - [22. Testing and conformance](#22-testing-and-conformance)
 - [23. Build order](#23-build-order)
 - [Appendix: salvage map from old/](#appendix-salvage-map-from-old)
+- [Decision log (D1–D75)](#decision-log-d1d75)
 
 ---
 
@@ -2885,3 +2886,175 @@ All paths are under `old/v2/src/` unless they say otherwise.
 | `parser.rs:1061-1088` legacy embedded-block path; `lexer.rs:24-99` `ENGINE_TAGS` and naive brace capture | A fixed tag list and brace counting. Replaced by runtime tag lookup (7.3) and scan profiles (3.8) |
 | `engines.rs:232-279` worker suffixes; `engines.rs:121-230` temp paths, commands and run-only prelude | An id-less protocol using `eval(fn)`, predictable temp names, hard-coded commands (including `-ExecutionPolicy Bypass`), and a cwd `sys.path` insert. Replaced by the VEP/1 adapters, the private run dir and the resolver |
 | `native.rs:72-893` V2-to-C transpiler; `fault.rs` | Not polyglot, and v1 has no native crash handler (DOCS 11.7) |
+
+---
+
+## Decision log (D1–D75)
+
+The decisions that settled every open question while these documents were written. Chapters cite
+them as `Dnn`. They are a record of *why*: where a chapter refines a decision with more detail, the
+chapter is normative.
+
+### Syntax & lexing
+- D1 SyntaxError: parse/static errors are diagnostics of kind `SyntaxError` (`file:line:col: SyntaxError: msg`
+  + caret excerpt), reported before anything runs, exit 1. In an `import`ed V2 module they surface in the
+  importer as `ImportError` (message = first diagnostic, data = all). SyntaxError is listed with the error
+  kinds but cannot be caught in the file that contains it.
+- D2 An uncaught error's header location and caret point at the `throw` (first throw site; `error()` leaves the
+  span empty, `throw` fills it only if empty, rethrow keeps the origin). Diagnostics for `.v2` locations always
+  show a source excerpt, including ForeignError.
+- D3 Built-in tags get language-aware body scanning (python profile for py; c-like for c/cpp/rust/js/ts).
+  EVERY other tag (custom engines) uses the Plain profile (brace counting only). Lexing never reads config.
+  The fence form is the escape hatch. Reasons to use a fence include regex literals, preprocessor lines with
+  unbalanced braces, heredocs, unusual string forms.
+- D4 Scanner guards: in a multi-line block the closing `}` must be the first non-blank token on its line; after
+  the closing `}` only `)` `]` `}` `,` `;` or a comment may follow on that line. Violations are SyntaxErrors with
+  a fence hint.
+- D5 `@@export` and `@@import` at line start are unescaped to literal `@export`/`@import` lines.
+- D6 The body `{` of if/elif/else/while/for/func/lambda/try/catch/finally must be on the same line as its header.
+  Newlines before `elif`/`else`/`catch`/`finally` are allowed.
+- D7 Triple-quoted strings (Swift-style): text starts on the line after the opening `"""`; the closing `"""` is on
+  its own line and its indentation is removed from every line; the newline before the closing line is dropped
+  (no trailing newline). Escapes are processed (except r"""). f""" allowed.
+- D8 Integer literals: decimal (with `_`) and hex `0x` only; `0b`/`0o` and leading zeros are SyntaxErrors; a number
+  immediately followed by an identifier char is a SyntaxError; overflow of i64 is a SyntaxError. In str `\xNN`
+  is U+00NN; in bytes it is the byte.
+- D9 Block header: the `{` or fence must be on the same line as the header's LAST token (args may wrap lines).
+- D10 `@import SEL as NAME` (whole-module handle) is only valid with a package selector `lang.module`;
+  otherwise SyntaxError.
+- D11 Quoted items in `@export`: in compiled blocks a quoted item is a C prototype; in py/js/ts blocks a quoted
+  item is a name that is not a V2 identifier (e.g. JS `$x`). V2 keywords may appear bare in @export lists.
+- D14 `?.` short-circuits the whole postfix chain like JS: in `a?.b.c()` a null `a` makes the whole chain null;
+  parentheses end the chain; assigning through `?.` is a SyntaxError. Missing dict keys are still KeyError.
+- D17 A function's parameters, a for-loop's variables and a catch name are declared in the body they introduce,
+  so `let x` of the same name directly in that body is a redeclaration SyntaxError (inner blocks may shadow).
+
+### Host runtime
+- D15 Exit codes: 0 ok; 1 uncaught error or SyntaxError; 2 usage/config error; 3 uncaught EngineNotFound (also
+  `check` finding a required engine missing, and `doctor TAG` not finding it); 130 interrupt (Ctrl+C, Ctrl+Break,
+  console close, SIGINT/SIGTERM/SIGHUP — always 130, not 128+signo); 101 internal panic (bug). `exit(code)` and
+  interrupts do NOT run `finally` blocks; engines are still shut down and temp dirs removed. exit code must be
+  an int in i32 range (POSIX keeps the low 8 bits).
+- D20 `import "./m.v2" as m` binds a dict snapshot of the module's exported names (type "dict"), shared by all
+  importers; rebinding a module-level `let` after import is not visible through it.
+- D21 Calling `d.name(args)` on a dict: if key `name` exists and holds a func, that func is called; otherwise the
+  dict method. (So `ns.keys(...)` from `extern ... as ns` works when the C function is named keys.)
+- D22 `.copy()` is shallow.
+- D23 Division or `%` by zero (int or float) and zero to a negative power raise `ValueError: division by zero`.
+  Integer overflow raises `ValueError: integer overflow in '<op>'`.
+- D24 Compound assignment `x op= y` always means `x = x op y` (so `xs += [1]` makes a new list).
+- D25 `input()` returns null at end of input.
+- D26 Relative paths in read_file/write_file resolve against the process working directory; `import` and
+  `extern` library paths resolve relative to the .v2 file.
+- D28 `in`, slicing, arithmetic and ordering on handles raise TypeError with a "do it inside a block / value(h)"
+  hint. `for x in h` and `for i, x in h` work.
+- D29 `for` over a list/dict iterates a snapshot taken when the loop starts.
+- D41 `engine_available(tag)`: unknown tag -> false (no error); may run (cached) version probes; never starts a
+  session or compiles; later crashes don't change it.
+- D75 Lists get `get(i, default = null)` (negative i allowed; out of range -> default).
+
+### Blocks & imports
+- D13 V2 never inserts V2 VALUES into foreign code. Your code is passed as written (common indentation removed,
+  directive lines blanked); the only text V2 adds is generated wrappers/shims for compiled blocks.
+- D18 Compiled program-mode blocks and `run`-engine blocks: in statement position their stdout streams to V2's
+  stdout in order (host flushes first); in expression position stdout is captured as the value (one trailing
+  `\n` or `\r\n` stripped). stderr always streams live; the last 4 KiB are kept in `e.data.stderr` of
+  EngineExitError (not repeated in the message).
+- D30 Block args of a definition block are evaluated only when it loads (first reach); later reaches ignore them.
+- D31 A definition block whose load fails is marked Failed: reaching it again re-raises the same stored error
+  (no retry, no repeated side effects); `@import` from it says `block 'x' failed to load: <message>`.
+  Unlabeled blocks are named `@py block at file:line` in messages.
+- D32 Block args on built-in compiled tags (c, cpp, rust + aliases) are a SyntaxError:
+  `compiled blocks take no args — @export a function and call it with arguments`.
+- D53 V2-level `@import` must come after the block it imports from has run (else ImportError "block 'x' has not
+  run yet — move this @import below it"). `@import` INSIDE blocks resolves lazily at first call, so blocks may
+  import from each other in any order.
+- D56 Constant exports (`@export { VERSION }`) apply to py/js/ts only; compiled blocks export functions only. In
+  compiled blocks `@export { * }` exports non-static, non-inline functions except `main`, whose signatures V2 can
+  convert; others are listed by `v2 check`.
+- D57 `@import` inside a compiled program-mode block (no @export) is a BuildError. Inside compiled blocks only the
+  `{ names } from SEL` form is supported (no `*`, no module-as-handle).
+- D58 A compiled action block without `main` may contain statements only (no helper functions); to define helpers,
+  write `main` yourself.
+
+### Engines & tooling
+- D33 TypeScript needs Node 22.13+ (or 23.2+) for built-in type stripping of in-memory source
+  (`module.stripTypeScriptTypes`), or a configured transpiler. Doctor/engine_available decide ts from the probed
+  Node version.
+- D34 The deep engine test is `v2 doctor TAG` (positional), not `v2 doctor --engine TAG`. `--engine TAG=PATH`
+  remains the global override flag.
+- D35 Windows C/C++ toolchain order: MSVC `cl` (from the environment, else found via vswhere with captured vcvars
+  env) first, then gcc, then clang. Elsewhere: cc/gcc/clang (c), c++/g++/clang++ (cpp). `[engines.c] command`
+  overrides.
+- D36 `[engines.ts] transpiler`: `"node"` (built-in stripping) or a command; a string other than "node" is one
+  program path (never split), an array is an argv; TS source on stdin, JS on stdout; non-zero exit -> ForeignError.
+- D37 In v2.toml every key is optional EXCEPT that a custom `[engines.<tag>]` needs `kind` and `command` (a run
+  command must contain `{file}`). `ext` defaults to the tag.
+- D38 Relative path-like elements in an engine `command` (contain a separator, don't start with `-`, contain no
+  `{`) resolve against the folder of the config file that declares them.
+- D39 `call_timeout` applies to bridged sessions (load/module/call requests), run engines and compiled programs.
+  In-process calls (compiled exports, extern) cannot be interrupted and ignore it.
+- D40 EngineNotFound also covers: too-old versions, executables that cannot start, missing configured
+  command/venv/transpiler, Node too old for ts stripping.
+- D42 Custom tag syntax `[a-z][a-z0-9_]{0,31}`; reserved: `v2`, `export`, `import`. Registering a tag that is
+  built-in, an alias, declared in config, or already registered with a different spec -> EngineNameConflict;
+  identical re-registration is a no-op.
+- D43 PATH walking skips relative PATH entries (e.g. `.`), so a project can't shadow toolchains via the cwd.
+- D44 Processes started by a block (run engines, compiled programs, and their children) are killed as a tree when
+  the block finishes, times out, or V2 exits. Workers are killed as a tree at shutdown.
+- D45 Output caveat: language-level output (print, console.log, process.stdout.write) from py/js/ts goes through
+  `out` frames in program order. Fd-level output (C extensions, os.write(1), os.system/subprocess or
+  child_process children inheriting stdout) goes to stderr: the Python adapter points fd 1 at fd 2 after moving
+  the protocol to a private fd; the Node adapter wraps fd 1/fd 0 users instead (9.9, 14.4). Adapters buffer
+  output produced while idle and send it with their next frame.
+- D46 Callback rule: a foreign stub/callback may call into V2 only while the host has a request outstanding to
+  that engine (i.e. V2 is currently waiting on it). Calls attempted while the engine is idle (timers, threads,
+  event handlers firing later) fail inside the foreign language with an error. Stored callbacks remain valid
+  for later requests.
+- D47 Names brought in by `@import` are `func`. Foreign functions, bound methods and classes RETURNED as values
+  become callable handles (type "handle").
+- D48 Only exact tuple/list/dict convert; namedtuples and list/dict subclasses (OrderedDict, Counter, ...) come back
+  as handles.
+- D49 `value(h)`: JSON-convertible containers convert recursively; else `to_dict()` is tried first, then `tolist()`;
+  else MarshalError.
+- D52 `ts.pkg` selectors are the same as `js.pkg` (same session, same module key).
+- D54 Node resolution: `require` is created for the .v2 file's path (standard Node lookup walks up node_modules from
+  the script folder, so a project-root node_modules is found), plus `[node] modules` and `[node] paths` via
+  NODE_PATH; ESM-only packages fall back to import(). `@import { "default" as x } from js.pkg` and
+  `@import js.pkg as x` (callable module handle for CommonJS function exports) are supported.
+- D55 `process.exit()` inside a JS block throws an Error (the worker survives); Python `sys.exit()` becomes a
+  ForeignError with foreign_type SystemExit; Python blocks' `__name__` is not "__main__".
+- D60 Native library search (extern): `[ffi] search_paths`, the .v2 file's folder, the project root, then the system
+  default search. On Windows the system step includes PATH but never the current directory
+  (SetDllDirectoryW(L"") at startup; full paths via LoadLibraryExW with LOAD_WITH_ALTERED_SEARCH_PATH).
+- D61 In `extern`, a non-const `char*` is an opaque pointer; in compiled blocks a returned `char*` is a malloc'd
+  string V2 copies and frees.
+- D62 `const char*` parameters accept `null` as NULL; `std::string`, `&str`, `String` parameters reject null with
+  FFIValueError.
+- D63 Named arguments to native functions (compiled exports, extern) and to JS/TS functions -> ArityError
+  ("... take positional arguments only").
+- D64 Unsigned results above i64::MAX and returned strings that aren't valid UTF-8 -> FFIValueError.
+- D65 No `source = "stdin"` option for run engines in v1 (only `{file}`).
+- D66 Stdout captured as a block value has one trailing `\n` or `\r\n` stripped.
+- D67 Windows note for bash custom engines: bare `bash` may resolve to the WSL launcher; configure Git Bash's full
+  path. Run engines with ext bat/cmd are written with CRLF line endings.
+- D68 A bridged custom engine supports whatever capabilities its adapter declares in hello (modules, handles,
+  kwargs, reverse); missing caps give defined errors.
+- D69 `v2 doctor` runs toolchain commands (including project-configured ones); only `v2 check` executes nothing.
+- D70 NO POSIX ownership/permission refusal for v2.toml or ~/.v2 (drop that rule).
+- D71 = D18 stderr shape for EngineExitError, for both run engines and compiled programs.
+- D72 Maximum VEP frame size 64 MiB in both directions.
+- D73 = D45: Python adapter dup2(2, 1) after moving the protocol to a private non-inheritable fd; fd 0 -> devnull;
+  language-level stdin replaced with a stream that raises. Node has no dup2, so its adapter keeps the protocol on
+  fds 0/1 (saved fs.writeSync(1)/fs.readSync(0)) and wraps process.stdout/stdin, console, fs and child_process
+  (9.9, 14.4).
+- D74 Before `hello`, the host tolerates non-JSON lines on a worker's stdout (sitecustomize/.pth/--require
+  preload noise) and forwards them to stderr; after hello any non-frame line is a ProtocolError. Host drops one
+  CR before LF when reading.
+
+### DOCS example fixes (for reference)
+- D50 DOCS 8 example: `xs.map(x => square(x))`.
+- D51 DOCS 17.4: `@import js.slugify as slugify` (callable module handle).
+- D27 DOCS 3.6 comments without quotes.
+- D2 DOCS 3.9 caret under `throw`; DOCS 10 ForeignError example shows an excerpt.
+- D75 DOCS 2 hello: `args().get(0, "stranger")`.
