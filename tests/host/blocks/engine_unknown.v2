@@ -1,0 +1,9 @@
+// exit: 1
+// stderr: engine_unknown.v2:6:1: EngineUnknown: unknown engine '@nosuch'
+// stderr: at engine_unknown.v2:6
+// A block lexes and parses whatever its tag; the engine is looked up only when it is reached.
+print("before")
+@nosuch label {
+    anything { goes } here
+}
+print("never")

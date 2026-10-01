@@ -349,7 +349,7 @@ The header is `'@' TAG [LABEL] ['(' args ')'] ( '{' | FENCE )`. Outside the args
 - **Brace on the next line.** If the next non-blank line starts with `{`, the error is `the { that opens a block must be on the same line as @py`, at that `{`, with a note at the header and the hint "move { to the end of line N". Anything else there gives `expected { or a ``` fence after @py stats`.
 
 **Brace form.** The body starts after `{`, and the profile scanner (3.8) finds the matching `}`. Two guards catch a scanner that closed early on a brace hidden in a construct it does not understand. Both raise a `SyntaxError` whose hint names the fence form ("if that } belongs to the foreign code, use the fence form"):
-- **C1.** If the body spans lines, the closing `}` must be the first non-blank character of its line: `@py block closes at a } that does not start its line`.
+- **C1.** If the body spans lines, the closing `}` must be the first non-blank character of its line: `@py block closes at a } that does not start its line`. It is reported at the block's `@` (DOCS 4 Errors: "at the opening line"), with a note at the offending `}`.
 - **C2.** After the closing `}`, the rest of its line must be blank, a `//` or `/*` comment, or text starting with `)`, `]`, `}`, `,` or `;`. Otherwise the error is `unexpected text after the } that closes the @py block`. So `@py { 1 } + 2` and `c ? @py { 1 } : 2` are errors; the hint also shows `(@py { 1 }) + 2` (4.1).
 
 **Fence form.** The header ends with N ≥ 3 backticks followed by nothing but whitespace (```` ```python ```` is an error). The body is every following line up to the first line whose trimmed text is exactly N backticks; that closing line is consumed. Nothing inside a fence is scanned for its end.

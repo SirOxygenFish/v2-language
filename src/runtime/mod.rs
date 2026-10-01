@@ -29,7 +29,7 @@ pub fn run_script(path: &str, _args: Vec<String>) -> i32 {
             return 1;
         }
     };
-    let program = match lexer::lex(&sm, file).and_then(parser::parse_program) {
+    let program = match lexer::lex(&sm, file).and_then(|toks| parser::parse_program(&sm, toks)) {
         Ok(p) => p,
         Err(d) => {
             eprint!("{}", render_diag(&sm, &d));

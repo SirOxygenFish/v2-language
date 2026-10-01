@@ -1,0 +1,8 @@
+// exit: 1
+// stderr: brace_next_line.v2:6:1: SyntaxError: the { that opens a block must be on the same line as @py
+// stderr: note: the block starts here (brace_next_line.v2:5:1)
+// stderr: hint: move { to the end of line 5
+@py stats
+{
+    print("hi")
+}

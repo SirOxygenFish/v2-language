@@ -24,9 +24,41 @@ pub enum Tok {
     Op(Op),
     LBrace(#[allow(dead_code)] BraceKind), // read by the parser from roadmap 0.5
     RBrace,
+    /// `@import` / `@export` (3.6).
+    DirImport,
+    DirExport,
+    /// `@py` in a selector, after `from` or `@import` (3.6).
+    AtTag(Rc<str>),
+    /// `@tag [label]`, followed by arg tokens (if any) and a `BlockBody` (3.7).
+    BlockHead { tag: Rc<str>, label: Option<(Rc<str>, Span)> },
+    BlockBody(Box<RawBody>),
+    /// The `{ … }` of `extern "lib" [as name]` (3.9).
+    ExternBody(#[allow(dead_code)] Box<RawBody>), // parsed by `extern` support (roadmap 0.5)
     Newline,
     Semi,
     Eof,
+}
+
+/// A raw block body exactly as written between its delimiters (3.7).
+#[derive(Clone, Debug)]
+pub struct RawBody {
+    pub text: Rc<str>,
+    pub text_span: Span,
+    /// The `{` or the opening fence.
+    pub open: Span,
+    /// The `}` or the closing fence line.
+    #[allow(dead_code)] // read by static checks (roadmap 0.5)
+    pub close: Span,
+    pub delim: Delim,
+    /// For each line of `text`: does it start in code (3.8)?
+    pub starts_in_code: Vec<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Delim {
+    Brace,
+    /// A fence of this many backticks.
+    Fence(u8),
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +259,13 @@ impl fmt::Display for Tok {
             Tok::Op(o) => write!(f, "`{}`", o.as_str()),
             Tok::LBrace(_) => write!(f, "`{{`"),
             Tok::RBrace => write!(f, "`}}`"),
+            Tok::DirImport => write!(f, "`@import`"),
+            Tok::DirExport => write!(f, "`@export`"),
+            Tok::AtTag(t) => write!(f, "a selector tag `@{t}`"),
+            Tok::BlockHead { tag, label: Some((l, _)) } => write!(f, "block `@{tag} {l}`"),
+            Tok::BlockHead { tag, label: None } => write!(f, "block `@{tag}`"),
+            Tok::BlockBody(_) => write!(f, "block body"),
+            Tok::ExternBody(_) => write!(f, "extern body"),
             Tok::Newline => write!(f, "end of line"),
             Tok::Semi => write!(f, "`;`"),
             Tok::Eof => write!(f, "end of file"),

@@ -1,1 +1,766 @@
-//! Block body lines, `@export`/`@import` directives and dedent (INTERNALS 4.4).
+//! Block bodies: lines, `@export`/`@import` directives and dedent (INTERNALS 4.4).
+//!
+//! A raw body becomes what the engine receives: the code as written, with directive lines blanked
+//! (so foreign line numbers never shift) and the common indentation removed, plus a `UnitLoc` for
+//! mapping foreign positions back to the `.v2` file and the parsed directives.
+
+use std::rc::Rc;
+
+use super::ast::{Directives, EngineImport, ExportItem, Exports, ImportItem, ImportItems, Name, Selector};
+use super::span::{FileId, SourceMap, Span, UnitLoc};
+use super::token::{Delim, Kw, RawBody};
+use super::Diag;
+
+/// The processed body of one block.
+pub struct Processed {
+    pub body: Rc<str>,
+    pub loc: UnitLoc,
+    pub directives: Directives,
+}
+
+/// Tags whose quoted `@export` items are C prototypes (4.4, 15.2).
+const COMPILED_TAGS: &[&str] = &["c", "cpp", "cxx", "rust", "rs"];
+
+struct Line {
+    text: String,
+    /// File offset of `text`'s first byte.
+    offset: usize,
+    /// Starts in code (not inside a multi-line foreign string or comment, 3.8).
+    in_code: bool,
+    /// Body line 1 taken from the header line: trimmed, never dedented.
+    header_line: bool,
+}
+
+/// Turn a raw body into body text, location and directives (4.4 steps 1-3).
+pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Diag> {
+    let file = raw.text_span.file;
+    let base = raw.text_span.lo as usize;
+    let text: &str = &raw.text;
+    let mut pieces: Vec<(usize, &str)> = Vec::new();
+    let mut off = 0;
+    for piece in text.split('\n') {
+        pieces.push((off, piece));
+        off += piece.len() + 1;
+    }
+    let state = |i: usize| raw.starts_in_code.get(i).copied().unwrap_or(true);
+    let blank = |s: &str| s.chars().all(|c| c == ' ' || c == '\t');
+    let lead_of = |s: &str| s.len() - s.trim_start_matches([' ', '\t']).len();
+
+    // Step 1: lines.
+    let mut lines: Vec<Line> = Vec::new();
+    let first_line;
+    let mut header_col = None;
+    match raw.delim {
+        Delim::Brace if !text.contains('\n') => {
+            first_line = raw.open.line;
+            let lead = lead_of(text);
+            header_col = Some(raw.open.col + 1 + text[..lead].chars().count() as u32);
+            let t = text.trim_matches([' ', '\t']);
+            if !t.is_empty() {
+                lines.push(Line { text: t.into(), offset: base + lead, in_code: true, header_line: true });
+            }
+        }
+        Delim::Brace => {
+            let (o0, l1) = pieces[0];
+            if blank(l1) {
+                first_line = raw.open.line + 1;
+            } else {
+                first_line = raw.open.line;
+                let lead = lead_of(l1);
+                header_col = Some(raw.open.col + 1 + l1[..lead].chars().count() as u32);
+                let t = l1.trim_matches([' ', '\t']);
+                lines.push(Line { text: t.into(), offset: base + o0 + lead, in_code: true, header_line: true });
+            }
+            // The last piece is the (blank, C1) text before the closing `}`: dropped.
+            for (i, &(o, l)) in pieces.iter().enumerate().take(pieces.len() - 1).skip(1) {
+                lines.push(Line { text: l.into(), offset: base + o, in_code: state(i), header_line: false });
+            }
+        }
+        Delim::Fence(_) => {
+            first_line = raw.open.line + 1;
+            let n = if text.is_empty() || text.ends_with('\n') { pieces.len() - 1 } else { pieces.len() };
+            for (i, &(o, l)) in pieces.iter().enumerate().take(n) {
+                lines.push(Line { text: l.into(), offset: base + o, in_code: state(i), header_line: false });
+            }
+        }
+    }
+
+    // Step 2: directives.
+    let compiled = COMPILED_TAGS.contains(&tag);
+    let mut directives = Directives::default();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].text.trim_start_matches([' ', '\t']);
+        let lead = lines[i].text.len() - t.len();
+        if is_directive(t, "@export") || is_directive(t, "@import") {
+            let mut p = DirParser::new(sm, file, &lines, i, lead);
+            let last = p.directive(&mut directives, compiled)?;
+            for line in &mut lines[i..=last] {
+                line.text.clear();
+            }
+            i = last + 1;
+            continue;
+        }
+        if is_directive(t, "@@export") || is_directive(t, "@@import") {
+            lines[i].text.remove(lead); // the escape loses one `@`
+        }
+        i += 1;
+    }
+
+    // Step 3: dedent the code lines.
+    let code: Vec<usize> = (0..lines.len())
+        .filter(|&k| !lines[k].header_line && lines[k].in_code && !blank(&lines[k].text))
+        .collect();
+    for k in 0..lines.len() {
+        if !lines[k].header_line && lines[k].in_code && blank(&lines[k].text) {
+            lines[k].text.clear();
+        }
+    }
+    let m = code.iter().map(|&k| lead_of(&lines[k].text)).min().unwrap_or(0);
+    if let Some(&first) = code.first() {
+        let prefix = lines[first].text[..m].to_string();
+        for &k in &code[1..] {
+            if lines[k].text[..m] != prefix {
+                return Err(Diag::new("block indentation mixes tabs and spaces", sm.span(file, lines[k].offset as u32, lines[k].offset as u32 + 1))
+                    .note("the first code line of the block", sm.span(file, lines[first].offset as u32, lines[first].offset as u32 + 1)));
+            }
+        }
+        let mut kept = Vec::new();
+        for (k, line) in lines.iter_mut().enumerate() {
+            if line.header_line || line.text.is_empty() {
+                continue;
+            }
+            if line.text.starts_with(&prefix) {
+                line.text.drain(..m);
+            } else {
+                kept.push(k as u32 + 1);
+            }
+        }
+        return Ok(finish(file, lines, first_line, header_col.unwrap_or(m as u32 + 1), m as u32, kept, directives));
+    }
+    Ok(finish(file, lines, first_line, header_col.unwrap_or(1), 0, Vec::new(), directives))
+}
+
+fn finish(
+    file: FileId,
+    lines: Vec<Line>,
+    first_line: u32,
+    body_col: u32,
+    dedent_width: u32,
+    kept: Vec<u32>,
+    directives: Directives,
+) -> Processed {
+    let line_count = lines.len() as u32;
+    let body: String = if lines.iter().all(|l| l.text.is_empty()) {
+        String::new()
+    } else {
+        let mut s = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
+        s.push('\n');
+        s
+    };
+    Processed {
+        body: body.into(),
+        loc: UnitLoc { file, body_first_line: first_line, body_col, dedent_width, line_count, kept: kept.into() },
+        directives,
+    }
+}
+
+/// `@export` (or `@import`, `@@export`, …) as an exact token: followed by a space, a tab, `{`
+/// or the end of the line. `@exporter` and `@import_hook` are foreign code.
+fn is_directive(t: &str, word: &str) -> bool {
+    t.strip_prefix(word).is_some_and(|rest| matches!(rest.chars().next(), None | Some(' ' | '\t' | '{')))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Directive-mode lexing and parsing (4.4 step 2)
+
+#[derive(Clone, Debug, PartialEq)]
+enum DK {
+    Export,
+    Import,
+    LBrace,
+    RBrace,
+    Comma,
+    Star,
+    Dot,
+    At(Rc<str>),
+    Name(Rc<str>),
+    /// A V2 keyword (3.2); right after `.` it lexes as a `Name` instead.
+    Kw(Rc<str>),
+    Str(Rc<str>),
+    /// A line break outside `{ }`: the directive ends.
+    End,
+}
+
+struct DTok {
+    kind: DK,
+    span: Span,
+    /// Index of the body line the token is on.
+    line: usize,
+}
+
+struct DirParser<'a> {
+    toks: Vec<DTok>,
+    pos: usize,
+    sm: &'a SourceMap,
+    file: FileId,
+    lex_error: Option<Diag>,
+}
+
+impl<'a> DirParser<'a> {
+    /// Lex one directive starting at `lines[first]`, byte `start`. Inside `{ }` it continues over
+    /// line breaks; outside, the first line break ends it. `#` and `//` start a comment.
+    fn new(sm: &'a SourceMap, file: FileId, lines: &[Line], first: usize, start: usize) -> DirParser<'a> {
+        let mut toks = Vec::new();
+        let mut depth = 0i32;
+        let mut lex_error = None;
+        let mut li = first;
+        let mut col = start;
+        'lines: while li < lines.len() {
+            let text = &lines[li].text;
+            let base = lines[li].offset;
+            let span = |lo: usize, hi: usize| sm.span(file, (base + lo) as u32, (base + hi) as u32);
+            while col < text.len() {
+                let rest = &text[col..];
+                let c = rest.chars().next().unwrap_or(' ');
+                let len = c.len_utf8();
+                let (kind, n) = match c {
+                    ' ' | '\t' => {
+                        col += 1;
+                        continue;
+                    }
+                    '#' => break,
+                    '/' if rest.starts_with("//") => break,
+                    '{' => {
+                        depth += 1;
+                        (DK::LBrace, 1)
+                    }
+                    '}' => {
+                        depth -= 1;
+                        (DK::RBrace, 1)
+                    }
+                    ',' => (DK::Comma, 1),
+                    '*' => (DK::Star, 1),
+                    '.' => (DK::Dot, 1),
+                    '@' => {
+                        // TAG is [A-Za-z_][A-Za-z0-9_]* (3.6).
+                        let starts_ok = rest[1..].chars().next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
+                        let word: String = if starts_ok {
+                            rest[1..].chars().take_while(|c| *c == '_' || c.is_ascii_alphanumeric()).collect()
+                        } else {
+                            String::new()
+                        };
+                        match word.as_str() {
+                            "export" => (DK::Export, 7),
+                            "import" => (DK::Import, 7),
+                            "" => {
+                                lex_error.get_or_insert(Diag::new("expected an engine tag after @", span(col, col + 1)));
+                                break 'lines;
+                            }
+                            w => (DK::At(w.into()), 1 + w.len()),
+                        }
+                    }
+                    '"' | '\'' => match dir_string(rest, false) {
+                        Ok((s, n)) => (DK::Str(s.into()), n),
+                        Err((msg, at)) => {
+                            lex_error.get_or_insert(Diag::new(msg, span(col + at, col + at + 1)));
+                            break 'lines;
+                        }
+                    },
+                    'r' if matches!(rest[1..].chars().next(), Some('"' | '\'')) => match dir_string(&rest[1..], true) {
+                        Ok((s, n)) => (DK::Str(s.into()), n + 1),
+                        Err((msg, at)) => {
+                            lex_error.get_or_insert(Diag::new(msg, span(col + 1 + at, col + 2 + at)));
+                            break 'lines;
+                        }
+                    },
+                    c if c == '_' || c.is_alphabetic() => {
+                        let n: usize = rest.chars().take_while(|c| *c == '_' || c.is_alphanumeric()).map(char::len_utf8).sum();
+                        let w = &rest[..n];
+                        if matches!(rest[n..].chars().next(), Some('"' | '\'')) {
+                            lex_error.get_or_insert(
+                                Diag::new(format!("unknown string prefix `{w}` in a directive"), span(col, col + n))
+                                    .hint("directive names are plain \"…\" or raw r\"…\" strings"),
+                            );
+                            break 'lines;
+                        }
+                        let after_dot = matches!(toks.last(), Some(DTok { kind: DK::Dot, .. }));
+                        let kind = if Kw::from_word(w).is_some() && !after_dot { DK::Kw(w.into()) } else { DK::Name(w.into()) };
+                        (kind, n)
+                    }
+                    other => {
+                        lex_error.get_or_insert(Diag::new(format!("unexpected character '{other}' in a directive"), span(col, col + len)));
+                        break 'lines;
+                    }
+                };
+                toks.push(DTok { kind, span: span(col, col + n), line: li });
+                col += n;
+            }
+            if depth <= 0 {
+                let end = span(text.len(), text.len());
+                toks.push(DTok { kind: DK::End, span: end, line: li });
+                break;
+            }
+            li += 1;
+            col = 0;
+        }
+        if toks.last().is_none_or(|t| t.kind != DK::End) {
+            let (line, span) = toks.last().map(|t| (t.line, t.span)).unwrap_or((first, sm.span(file, lines[first].offset as u32, lines[first].offset as u32)));
+            toks.push(DTok { kind: DK::End, span: Span { lo: span.hi, ..span }, line });
+        }
+        DirParser { toks, pos: 0, sm, file, lex_error }
+    }
+
+    fn peek(&self) -> &DK {
+        &self.toks[self.pos].kind
+    }
+
+    fn span(&self) -> Span {
+        self.toks[self.pos].span
+    }
+
+    fn bump(&mut self) -> &DTok {
+        let i = self.pos;
+        if self.pos + 1 < self.toks.len() {
+            self.pos += 1;
+        }
+        &self.toks[i]
+    }
+
+    /// Parse one directive; returns the index of its last body line.
+    fn directive(&mut self, out: &mut Directives, compiled: bool) -> Result<usize, Diag> {
+        if let Some(d) = self.lex_error.take() {
+            return Err(d);
+        }
+        let start = self.span();
+        match self.peek().clone() {
+            DK::Export => {
+                self.bump();
+                let exports = out.exports.get_or_insert_with(Exports::default);
+                exports.at.get_or_insert(start);
+                self.export_list(exports, compiled)?;
+            }
+            _ => {
+                self.bump();
+                let import = self.import(start)?;
+                out.imports.push(import);
+            }
+        }
+        if *self.peek() != DK::End {
+            return Err(Diag::new("unexpected text after the directive", self.span())
+                .hint("only a comment (# or //) may follow a directive on its line"));
+        }
+        let _ = (self.sm, self.file);
+        Ok(self.toks[self.pos].line)
+    }
+
+    fn export_list(&mut self, exports: &mut Exports, compiled: bool) -> Result<(), Diag> {
+        if *self.peek() != DK::LBrace {
+            return Err(Diag::new("expected { after @export", self.span()));
+        }
+        let open = self.bump().span;
+        if *self.peek() == DK::RBrace {
+            return Err(Diag::new("an @export list can't be empty", open));
+        }
+        loop {
+            let t = self.bump();
+            let span = t.span;
+            match t.kind.clone() {
+                DK::Star => {
+                    exports.star.get_or_insert(span);
+                }
+                // Keywords are accepted bare here: they name foreign functions (4.4).
+                DK::Name(n) | DK::Kw(n) => push_export(exports, n, false, span)?,
+                DK::Str(s) => {
+                    let _ = compiled; // a quoted item is a C prototype in compiled blocks (15.2)
+                    push_export(exports, s, true, span)?
+                }
+                DK::End => return Err(Diag::new("unterminated @export list", open)),
+                other => return Err(Diag::new(format!("expected a name in the @export list, found {}", describe(&other)), span)),
+            }
+            match self.peek().clone() {
+                DK::Comma => {
+                    self.bump();
+                    if *self.peek() == DK::RBrace {
+                        self.bump();
+                        return Ok(());
+                    }
+                }
+                DK::RBrace => {
+                    self.bump();
+                    return Ok(());
+                }
+                DK::End => return Err(Diag::new("unterminated @export list", open)),
+                other => return Err(Diag::new(format!("expected `,` or `}}` in the @export list, found {}", describe(&other)), self.span())),
+            }
+        }
+    }
+
+    fn import(&mut self, start: Span) -> Result<EngineImport, Diag> {
+        if *self.peek() == DK::LBrace {
+            let open = self.bump().span;
+            let items = if *self.peek() == DK::Star {
+                let s = self.bump().span;
+                ImportItems::All(s)
+            } else {
+                let mut items = Vec::new();
+                loop {
+                    let t = self.bump();
+                    let span = t.span;
+                    let (name, quoted) = match t.kind.clone() {
+                        DK::Name(n) => (n, false),
+                        DK::Str(s) => (s, true),
+                        DK::Kw(k) => {
+                            return Err(Diag::new(format!("expected a name in the @import list, found keyword `{k}`"), span)
+                                .hint(format!("quote a name that is a V2 keyword: \"{k}\"")))
+                        }
+                        DK::End => return Err(Diag::new("unterminated @import list", open)),
+                        other => return Err(Diag::new(format!("expected a name in the @import list, found {}", describe(&other)), span)),
+                    };
+                    let alias = if matches!(self.peek(), DK::Kw(w) if &**w == "as") {
+                        self.bump();
+                        Some(self.name("a name after `as`")?)
+                    } else {
+                        None
+                    };
+                    items.push(ImportItem { name, quoted, alias, span });
+                    match self.peek().clone() {
+                        DK::Comma => {
+                            self.bump();
+                            if *self.peek() == DK::RBrace {
+                                break;
+                            }
+                        }
+                        DK::RBrace => break,
+                        DK::End => return Err(Diag::new("unterminated @import list", open)),
+                        other => return Err(Diag::new(format!("expected `,` or `}}` in the @import list, found {}", describe(&other)), self.span())),
+                    }
+                }
+                ImportItems::Names(items)
+            };
+            if *self.peek() != DK::RBrace {
+                return Err(Diag::new("expected `}` to close the @import list", self.span()));
+            }
+            self.bump();
+            if !matches!(self.peek(), DK::Kw(w) if &**w == "from") {
+                return Err(Diag::new("expected `from` after the @import list", self.span()));
+            }
+            self.bump();
+            let selector = self.selector()?;
+            Ok(EngineImport { items, selector, span: start.to(self.toks[self.pos.saturating_sub(1)].span) })
+        } else {
+            let selector = self.selector()?;
+            if !matches!(selector, Selector::Module { .. }) {
+                return Err(Diag::new("only a package selector (py.name, js.name) can be imported as a whole module", self.toks[self.pos.saturating_sub(1)].span));
+            }
+            if !matches!(self.peek(), DK::Kw(w) if &**w == "as") {
+                return Err(Diag::new("expected `as NAME` after the package selector", self.span()));
+            }
+            self.bump();
+            let alias = self.name("a name after `as`")?;
+            Ok(EngineImport { items: ImportItems::Module(alias), selector, span: start.to(self.toks[self.pos.saturating_sub(1)].span) })
+        }
+    }
+
+    /// `@tag`, `@tag.label`, `label`, `"label"`, `lang.seg.seg`, `v2` (4.1).
+    fn selector(&mut self) -> Result<Selector, Diag> {
+        let t = self.bump();
+        let span = t.span;
+        match t.kind.clone() {
+            DK::At(tag) => {
+                let tag = Name { text: tag, span };
+                if *self.peek() == DK::Dot {
+                    self.bump();
+                    let label = self.segment()?;
+                    Ok(Selector::Exact { tag, label })
+                } else {
+                    Ok(Selector::Union { tag })
+                }
+            }
+            DK::Name(n) => {
+                if *self.peek() == DK::Dot {
+                    let lang = Name { text: n, span };
+                    let mut path = Vec::new();
+                    while *self.peek() == DK::Dot {
+                        self.bump();
+                        path.push(self.segment()?);
+                    }
+                    Ok(Selector::Module { lang, path })
+                } else if &*n == "v2" {
+                    Ok(Selector::V2 { span })
+                } else {
+                    Ok(Selector::Label { label: Name { text: n, span } })
+                }
+            }
+            DK::Str(s) => Ok(Selector::Label { label: Name { text: s, span } }),
+            other => Err(Diag::new(format!("expected a selector (@py, a block label, or py.module), found {}", describe(&other)), span)),
+        }
+    }
+
+    fn segment(&mut self) -> Result<Name, Diag> {
+        let t = self.bump();
+        match t.kind.clone() {
+            DK::Name(n) | DK::Str(n) => Ok(Name { text: n, span: t.span }),
+            other => Err(Diag::new(format!("expected a name after `.`, found {}", describe(&other)), t.span)),
+        }
+    }
+
+    fn name(&mut self, what: &str) -> Result<Name, Diag> {
+        let t = self.bump();
+        match t.kind.clone() {
+            DK::Name(n) => Ok(Name { text: n, span: t.span }),
+            other => Err(Diag::new(format!("expected {what}, found {}", describe(&other)), t.span)),
+        }
+    }
+}
+
+fn push_export(exports: &mut Exports, text: Rc<str>, quoted: bool, span: Span) -> Result<(), Diag> {
+    if let Some(prev) = exports.items.iter().find(|e| e.text == text) {
+        return Err(Diag::new(format!("'{text}' is exported twice"), span).note("first exported here", prev.span));
+    }
+    exports.items.push(ExportItem { text, quoted, span });
+    Ok(())
+}
+
+/// A one-line string literal at the start of `rest` (which begins with its quote), with the
+/// escape rules of 3.5; `raw` strings have none. Returns (decoded text, byte length), or an
+/// error message and the byte offset it points at.
+fn dir_string(rest: &str, raw: bool) -> Result<(String, usize), (String, usize)> {
+    let quote = rest.chars().next().unwrap_or('"');
+    let mut out = String::new();
+    let mut chars = rest.char_indices().skip(1).peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == quote {
+            return Ok((out, i + 1));
+        }
+        if c != '\\' || raw {
+            out.push(c);
+            continue;
+        }
+        let bad = |what: String| Err((format!("unknown escape {what}"), i));
+        match chars.next() {
+            Some((_, 'n')) => out.push('\n'),
+            Some((_, 't')) => out.push('\t'),
+            Some((_, 'r')) => out.push('\r'),
+            Some((_, '0')) => out.push('\0'),
+            Some((_, e @ ('\\' | '"' | '\'' | '$'))) => out.push(e),
+            Some((j, 'x')) => {
+                let h = rest.get(j + 1..j + 3).unwrap_or("");
+                match u8::from_str_radix(h, 16) {
+                    Ok(b) if h.len() == 2 => {
+                        out.push(char::from(b));
+                        chars.next();
+                        chars.next();
+                    }
+                    _ => return Err(("\\x takes exactly 2 hex digits".into(), i)),
+                }
+            }
+            Some((j, 'u')) => {
+                let tail = &rest[j + 1..];
+                let close = tail.find('}');
+                let hex = match (tail.starts_with('{'), close) {
+                    (true, Some(k)) => &tail[1..k],
+                    _ => "",
+                };
+                match u32::from_str_radix(hex, 16).ok().filter(|_| (1..=6).contains(&hex.len())).and_then(char::from_u32) {
+                    Some(ch) => {
+                        out.push(ch);
+                        for _ in 0..hex.len() + 2 {
+                            chars.next();
+                        }
+                    }
+                    None => return Err(("\\u{…} must name a Unicode scalar value in 1 to 6 hex digits".into(), i)),
+                }
+            }
+            Some((_, e)) => return bad(format!("\\{e}")),
+            None => return Err(("unterminated string".into(), 0)),
+        }
+    }
+    Err(("unterminated string".into(), 0))
+}
+
+fn describe(k: &DK) -> String {
+    match k {
+        DK::Export => "`@export`".into(),
+        DK::Import => "`@import`".into(),
+        DK::LBrace => "`{`".into(),
+        DK::RBrace => "`}`".into(),
+        DK::Comma => "`,`".into(),
+        DK::Star => "`*`".into(),
+        DK::Dot => "`.`".into(),
+        DK::At(t) => format!("a selector tag `@{t}`"),
+        DK::Name(n) => format!("name `{n}`"),
+        DK::Kw(k) => format!("keyword `{k}`"),
+        DK::Str(_) => "string".into(),
+        DK::End => "end of line".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::lexer::lex;
+    use crate::syntax::token::Tok;
+    use std::path::PathBuf;
+
+    /// Lex `src`, take its first block (tag, raw body) and process it.
+    fn run(src: &str) -> Result<(Processed, SourceMap), String> {
+        let mut sm = SourceMap::new();
+        let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+        let toks = lex(&sm, id).map_err(|d| d.message)?;
+        let tag = toks
+            .iter()
+            .find_map(|t| match &t.tok {
+                Tok::BlockHead { tag, .. } => Some(tag.clone()),
+                _ => None,
+            })
+            .expect("a block head");
+        let raw = toks
+            .iter()
+            .find_map(|t| match &t.tok {
+                Tok::BlockBody(b) => Some(b.clone()),
+                _ => None,
+            })
+            .expect("a block body");
+        let p = process(&sm, &raw, &tag).map_err(|d| d.message)?;
+        Ok((p, sm))
+    }
+
+    fn err(src: &str) -> String {
+        match run(src) {
+            Ok(_) => panic!("expected an error for {src:?}"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn docs_example_from_4_4() {
+        let src = "\n\n\n\n\n\n\n\n\n@py stats {\n    def spread(xs):\n        return max(xs) - min(xs)\n    @export { spread }\n}\n";
+        let (p, _) = run(src).unwrap();
+        assert_eq!(&*p.body, "def spread(xs):\n    return max(xs) - min(xs)\n\n");
+        assert_eq!(p.loc.body_first_line, 11);
+        assert_eq!(p.loc.body_col, 5);
+        assert_eq!(p.loc.dedent_width, 4);
+        assert_eq!(p.loc.line_count, 3);
+        assert!(p.loc.kept.is_empty());
+        let ex = p.directives.exports.unwrap();
+        assert_eq!(ex.items.len(), 1);
+        assert_eq!(&*ex.items[0].text, "spread");
+    }
+
+    #[test]
+    fn one_line_and_header_line_bodies() {
+        let (p, _) = run("let x = @py(data) { sum(data) / len(data) }").unwrap();
+        assert_eq!(&*p.body, "sum(data) / len(data)\n");
+        assert_eq!((p.loc.body_first_line, p.loc.body_col), (1, 21));
+        assert!(p.directives.exports.is_none());
+        let (p, _) = run("@py { x = 1\n    y = 2\n}").unwrap();
+        assert_eq!(&*p.body, "x = 1\ny = 2\n");
+        assert_eq!((p.loc.body_first_line, p.loc.body_col), (1, 7));
+        let (p, _) = run("@py {}").unwrap();
+        assert_eq!(&*p.body, "");
+    }
+
+    #[test]
+    fn fence_bodies() {
+        let (p, _) = run("@py report ```\n    template = \"{ unbalanced\"\n    @export { render }\n```\n").unwrap();
+        assert_eq!(&*p.body, "template = \"{ unbalanced\"\n\n");
+        assert_eq!(p.loc.body_first_line, 2);
+        assert_eq!(p.directives.exports.unwrap().items[0].text.as_ref(), "render");
+    }
+
+    #[test]
+    fn directives_are_exact_tokens_and_escapes_lose_one_at() {
+        let src = "@py {\n    @exporter\n    @export_json\n    def f(): pass\n    s = '''\n@@export { x }\n@@import y\n'''\n}";
+        let (p, _) = run(src).unwrap();
+        assert!(p.directives.exports.is_none(), "decorators are foreign code");
+        assert_eq!(&*p.body, "@exporter\n@export_json\ndef f(): pass\ns = '''\n@export { x }\n@import y\n'''\n");
+        assert_eq!(p.loc.kept.as_ref(), &[5, 6, 7]);
+    }
+
+    #[test]
+    fn multi_line_export_lists_keep_line_numbers() {
+        let src = "@py {\n    def a(): pass\n    @export {\n        a,\n        b, # comment\n    }  // trailing\n    def b(): pass\n}";
+        let (p, _) = run(src).unwrap();
+        assert_eq!(&*p.body, "def a(): pass\n\n\n\n\ndef b(): pass\n");
+        let ex = p.directives.exports.unwrap();
+        let names: Vec<&str> = ex.items.iter().map(|e| &*e.text).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn imports_inside_blocks() {
+        let src = "@js {\n  @import { square, \"odd-name\" as odd } from @py.calc\n  @import { * } from py.statistics\n  @import { log } from v2\n  @import js.\"date-fns\" as dfns\n}";
+        let (p, _) = run(src).unwrap();
+        let imps = &p.directives.imports;
+        assert_eq!(imps.len(), 4);
+        assert!(matches!(&imps[0].selector, Selector::Exact { tag, label } if &*tag.text == "py" && &*label.text == "calc"));
+        assert!(matches!(&imps[0].items, ImportItems::Names(v) if v.len() == 2 && v[1].quoted && v[1].alias.as_ref().unwrap().text.as_ref() == "odd"));
+        assert!(matches!(&imps[1].items, ImportItems::All(_)));
+        assert!(matches!(&imps[1].selector, Selector::Module { lang, path } if &*lang.text == "py" && path.len() == 1));
+        assert!(matches!(&imps[2].selector, Selector::V2 { .. }));
+        assert!(matches!(&imps[3].items, ImportItems::Module(n) if &*n.text == "dfns"));
+        // Every line was a directive, so no line has text: the body is "" (4.4).
+        assert_eq!(&*p.body, "");
+        assert_eq!(p.loc.line_count, 4);
+    }
+
+    #[test]
+    fn directive_errors() {
+        assert_eq!(err("@py {\n @export {}\n}"), "an @export list can't be empty");
+        assert_eq!(err("@py {\n @export { f, f }\n}"), "'f' is exported twice");
+        // In a brace block, an unclosed `@export {` also leaves the block open; a fence shows the
+        // directive's own error.
+        assert_eq!(err("@py {\n @export { f\n}"), "@py block is never closed");
+        assert_eq!(err("@py ```\n @export { f\n```\n"), "unterminated @export list");
+        assert_eq!(err("@py {\n @export { f } g\n}"), "unexpected text after the directive");
+        assert_eq!(err("@py {\n @import calc as c\n}"), "only a package selector (py.name, js.name) can be imported as a whole module");
+        assert_eq!(err("@py {\n @import { a }\n}"), "expected `from` after the @import list");
+    }
+
+    /// The exported names of the first block in `src`.
+    fn exported(src: &str) -> Vec<String> {
+        let (p, _) = run(src).unwrap();
+        p.directives.exports.map(|e| e.items.iter().map(|i| i.text.to_string()).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn review_0_4_regressions() {
+        // Quoted directive items follow the V2 string rules (3.5).
+        assert_eq!(exported("@js {\n  @export { \"n\\n\", \"nn\" }\n}"), vec!["n\n", "nn"]);
+        assert_eq!(err("@js {\n  @export { \"a\\x41\", \"aA\" }\n}"), "'aA' is exported twice");
+        assert_eq!(err("@js {\n  @export { \"a\\d\" }\n}"), "unknown escape \\d");
+        assert_eq!(exported("@js {\n  @export { \"\\u{24}helper\" }\n}"), vec!["$helper"]);
+        assert_eq!(exported("@js {\n  @export { r\"a\\b\" }\n}"), vec!["a\\b"]);
+        assert_eq!(err("@js {\n  @export { b\"x\" }\n}"), "unknown string prefix `b` in a directive");
+        // Tags start with a letter or `_`.
+        assert_eq!(err("@js {\n  @import { a } from @1py\n}"), "expected an engine tag after @");
+        // Keywords: bare in @export lists only; quoted elsewhere; after `.` they are names.
+        assert_eq!(exported("@py {\n  @export { for }\n}"), vec!["for"]);
+        assert_eq!(err("@js {\n  @import { from } from @py\n}"), "expected a name in the @import list, found keyword `from`");
+        assert_eq!(err("@js {\n  @import { a } from for\n}"), "expected a selector (@py, a block label, or py.module), found keyword `for`");
+        assert_eq!(err("@js {\n  @import { a as for } from @py\n}"), "expected a name after `as`, found keyword `for`");
+        assert!(run("@js {\n  @import { a } from py.import\n}").is_ok());
+        assert!(run("@js {\n  @import { \"from\" } from @py\n}").is_ok());
+        // The first @export's own span is recorded.
+        let (p, sm) = run("@py {\n    def f(): pass\n    @export { f }\n}").unwrap();
+        let at = p.directives.exports.unwrap().at.unwrap();
+        assert_eq!(sm.line_col(at.file, at.lo), (3, 5));
+    }
+
+    #[test]
+    fn mixed_indentation_is_an_error_but_deeper_tabs_are_fine() {
+        assert_eq!(err("@py {\n    a = 1\n\tb = 2\n}"), "block indentation mixes tabs and spaces");
+        let (p, _) = run("@py {\n\tif x:\n\t\ty = 1\n}").unwrap();
+        assert_eq!(&*p.body, "if x:\n\ty = 1\n");
+        // NBSP is content, not indentation, and doesn't panic.
+        assert!(run("@py {\n  a\n  \u{a0}b\n}").is_ok());
+    }
+
+    #[test]
+    fn unit_loc_columns() {
+        let (p, _) = run("@py {\n    x = 1\n    y = 2\n}").unwrap();
+        assert_eq!(p.loc.col(1, 1), 5);
+        assert_eq!(p.loc.col(2, 3), 7);
+    }
+}

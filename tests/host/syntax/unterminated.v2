@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: unterminated.v2:5:1: SyntaxError: @py block is never closed
+// stderr: @py {
+print("not printed: a file with a syntax error never runs")
+@py {
+    x = 1

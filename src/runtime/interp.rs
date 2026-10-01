@@ -4,7 +4,7 @@
 use super::builtins::{self, Out, BUILTINS};
 use super::error::{did_you_mean, ErrorValue};
 use super::value::{float_str, to_str, Value};
-use crate::syntax::ast::{Arg, Expr, ExprKind, FPart, Stmt, StmtKind};
+use crate::syntax::ast::{Arg, EngineBlock, Expr, ExprKind, FPart, Stmt, StmtKind};
 use crate::syntax::span::{SourceMap, Span};
 
 pub struct Interp<'a> {
@@ -23,6 +23,7 @@ impl<'a> Interp<'a> {
                 StmtKind::Expr(e) => {
                     self.eval(e)?;
                 }
+                StmtKind::Block(b) => return Err(self.engine_unknown(b)),
             }
         }
         Ok(())
@@ -36,6 +37,12 @@ impl<'a> Interp<'a> {
             e.trace = vec![format!("{display}:{}", span.line)];
         }
         e
+    }
+
+    /// Phase 0 has no engine registry, so reaching any block is `EngineUnknown` (INTERNALS 23).
+    fn engine_unknown(&self, b: &EngineBlock) -> ErrorValue {
+        let msg = format!("unknown engine '@{}' — this build has no engines yet", b.tag.text);
+        self.raise(ErrorValue::new("EngineUnknown", msg), b.tag.span)
     }
 
     fn eval(&mut self, e: &Expr) -> Result<Value, ErrorValue> {
@@ -57,6 +64,7 @@ impl<'a> Interp<'a> {
                     return Err(self.raise(ErrorValue::new("NameError", msg), e.span));
                 }
             },
+            ExprKind::Block(b) => return Err(self.engine_unknown(b)),
             ExprKind::Call { callee, args, paren } => {
                 let f = self.eval(callee)?;
                 let mut pos = Vec::new();
