@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 0: Host core |
-| **Next task** | 0.8 Modules |
-| **Last update** | 2026-10-01: 0.6 + 0.7 interpreter core done (CI written, not yet run) |
+| **Next task** | 0.9 Builtins and JSON |
+| **Last update** | 2026-10-01: 0.8 modules done (CI written, not yet run) |
 
 ## Rules
 
@@ -133,10 +133,11 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
   6 distinct findings fixed with regression tests)
 
 ### 0.8 Modules
-- [ ] `import "./x.v2" as m`: resolution relative to the file, run once, dict snapshot,
+- [x] `import "./x.v2" as m`: resolution relative to the file, run once, dict snapshot,
       `_private` names, cycle detection with the chain; import graph parsed at startup (§6.1, §6.4)
-- [ ] Syntax errors in imported files surface as ImportError at the `import`
-- **Done when:** R49 and the module tests pass
+- [x] Syntax errors in imported files surface as ImportError at the `import`
+- **Done when:** R49 and the module tests pass — **passed 2026-10-01** (`tests/host/modules`;
+  reviewed together with 0.9)
 
 ### 0.9 Builtins and JSON
 - [ ] `codec/json` on serde_json with `$v2` tags (§10.1–10.3)
@@ -340,3 +341,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-01 | 0.4: embedded-block syntax (scan profiles for py/js/ts/c/cpp/rust, fences, C1/C2 guards, unterminated notes), `@export`/`@import` directives, dedent, `UnitLoc`, `extern` bodies; blocks parse and raise EngineUnknown when reached; reviewed (13 findings fixed) |
 | 2026-10-01 | 0.5: full parser and AST, static checks (all violations, in source order), `ffi/cdecl` with the 16.3 messages and the C++ dialect for `@cpp` prototype strings, expression-height limit; reviewed, fixes re-reviewed (25 findings fixed with regression tests) |
 | 2026-10-01 | 0.6 + 0.7: the interpreter core: values, operators, string/list/dict/bytes methods, frames and closures, the call binder, control flow, try/catch/finally, error values with traces, the stack guard, iterative freeing of deep values; 0.5's third review round fixed (C++ prototype references, K&R, nested f-string cost); reviewed (6 findings fixed) |
+| 2026-10-01 | 0.8: `import` with the startup parse of the import graph, run-once modules, namespace snapshots, circular-import chains, ImportError for syntax errors in modules (R49) |

@@ -1,0 +1,13 @@
+// Modules (DOCS 3.10, INTERNALS 6.4): run once, a snapshot dict, `_` names private.
+import "./fixtures/util.v2" as util
+import "./fixtures/util.v2" as again
+print(util.slug("Hello World"))
+print(util.keys())
+print(util == again, "_cache" in util)
+print(util.bump(), util.bump(), util.counter)
+print(util.helper.shout("hi"))
+func later() {
+    import "./fixtures/util.v2" as inner
+    return inner.VERSION
+}
+print(later())

@@ -187,7 +187,7 @@ pub fn normalize(text: &str) -> String {
     out
 }
 
-fn strip_verbatim(p: &Path) -> PathBuf {
+pub fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
@@ -199,7 +199,7 @@ fn strip_verbatim(p: &Path) -> PathBuf {
 }
 
 /// Relative to the current directory with `/` separators when inside it, else absolute (2.1).
-fn display_path(canonical: &Path) -> Rc<str> {
+pub fn display_path(canonical: &Path) -> Rc<str> {
     if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
         let cwd = strip_verbatim(&cwd);
         if let Ok(rel) = canonical.strip_prefix(&cwd) {

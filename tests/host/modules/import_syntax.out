@@ -1,0 +1,5 @@
+main runs
+ImportError
+cannot import './fixtures/two_errors.v2': fixtures/two_errors.v2:2:5: SyntaxError: 'a' is already declared in this block
+5 2
+{"file": "fixtures/two_errors.v2", "line": 3, "col": 1, "message": "break outside a loop"}
