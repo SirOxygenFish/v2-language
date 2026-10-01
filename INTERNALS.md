@@ -1,7416 +1,2887 @@
-﻿# V2 Internals Documentation
+# V2 Internals — how everything works
 
-A compiler/runtime implementation reference for V2. This document focuses on execution behavior, compiler lowering, runtime semantics, diagnostics, safety, and conformance.
+> **Status: design specification.** This file specifies how the rebooted V2 must be built: data
+> structures, algorithms, protocols, platform rules and failure modes. **Nothing here is implemented
+> yet.** User-visible behavior is defined by [`DOCS.md`](DOCS.md); where the two disagree, DOCS.md
+> wins and this file gets fixed. The previous implementation is archived in [`old/`](old/).
 
-This is implementation-only documentation. User-facing syntax examples belong in DOCS.md, while INTERNALS.md defines how features and APIs must work.
+## Contents
 
-> **Specification vs. current implementation.** This document is largely a *specification of how
-> features must work*, and in places describes machinery (multi-backend codegen, HIR/MIR, native/
-> WASM backends, parallel async workers, native sanitizers, hardware/network stdlib) that is
-> **designed but not fully built** in the reference implementation. The shipping engine is a
-> tree-walking interpreter (with a secondary bytecode VM) that fully implements the core language
-> and the pure-computation standard library. For the authoritative, up-to-date list of what is
-> implemented, partial, or stub, see `NOT_YET_IMPLEMENTED.md`; for how optional/native modules are
-> delivered, see `PACKAGES.md`. Sections below that describe unbuilt backends or native subsystems
-> should be read as target design, not a claim about the current binary.
-
----
-
-## Internals-Only Chapters
-
-### 1) Compiler Pipeline
-
-- Stages: lexing -> parsing -> AST -> name resolution -> typing/effects -> lowering -> optimization -> codegen.
-- Errors: recover where possible and emit stable diagnostic categories with source spans and actionable notes.
-- Artifacts: preserve symbol IDs and source mapping continuity across all lowering stages.
-
-### 2) IR and Codegen
-
-- HIR carries normalized semantics and explicit bindings; MIR carries control flow and optimization-friendly form.
-- Backends: bytecode VM, native backend, and WASM backend with capability-aware lowering.
-- Parity: behavior-equivalence tests are required across backends where feature parity is expected.
-
-### 3) Runtime Architecture
-
-- Subsystems: scheduler, allocator/GC, module loader, effect runtime, FFI bridge, engine bridge, diagnostics bridge.
-- Concurrency: async event loop + worker pools + thread APIs + isolate boundaries.
-- Safety: safe-by-default with explicit unsafe boundaries and optional sanitizer instrumentation.
-
-### 4) Security and Determinism
-
-- Capability gates control privileged host access in sandboxed and WASM contexts.
-- Boundary hygiene is required for all FFI and engine bridges (validation, normalization, wrapping).
-- Determinism profile defines reproducible behavior, deterministic test seeds, and stable diagnostics.
-
-### 5) Conformance Strategy
-
-- Every feature/API requires parser, semantic, runtime, negative, and regression coverage.
-- Performance-sensitive APIs require benchmark baselines and regression thresholds.
-- Security-critical APIs require adversarial tests and misuse-path diagnostics validation.
-
-## Chapter Status Matrix
-
-Status key:
-
-- `Draft`: implementation contract exists, but concrete function-level internals records are minimal or missing.
-- `Partial`: core internals path records are documented; exhaustive API-by-API records are still in progress.
-- `Complete`: chapter-level internals and function behavior records are comprehensive and cross-referenced.
-
-| Chapter                                       | Status      | Notes                                                                                                                                                        |
-| --------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| CLI Usage                                     | Complete    | Full command execution paths, diagnostics, and failure matrix documented.                                                                                    |
-| WASM Target                                   | Complete    | Lowering, memory/import contracts, runtime bridge, and failure matrix documented.                                                                            |
-| Step Debugger                                 | Complete    | Breakpoint/step/eval runtime contracts and failure matrix documented.                                                                                        |
-| Data Types                                    | Complete    | Canonicalization, coercion, layout, and type failure matrix documented.                                                                                      |
-| Operators                                     | Complete    | Parse/resolve/lower semantics and operator failure matrix documented.                                                                                        |
-| Control Flow                                  | Complete    | CFG lowering paths and control-flow failure matrix documented.                                                                                               |
-| Structs                                       | Complete    | Layout/init/update internals and failure matrix documented.                                                                                                  |
-| Enums                                         | Complete    | Tag/payload/match internals and failure matrix documented.                                                                                                   |
-| Error Handling                                | Complete    | Propagation/unwind/effects coupling and failure matrix documented.                                                                                           |
-| Effects System                                | Complete    | Inference/check/lowering coupling and failure matrix documented.                                                                                             |
-| Variable Scoping Rules                        | Complete    | Scope stack, capture analysis, and scope failure matrix documented.                                                                                          |
-| Strings                                       | Complete    | UTF-8 storage, slicing/concat behavior, and failure matrix documented.                                                                                       |
-| Lists                                         | Complete    | Allocation/growth, mutation/iteration semantics, and failure matrix documented.                                                                              |
-| Dictionaries                                  | Complete    | Hash/equality contracts, resize/iteration semantics, and failure matrix documented.                                                                          |
-| Tuples                                        | Complete    | Product-type layout/access/destructure behavior and failure matrix documented.                                                                               |
-| Sets                                          | Complete    | Uniqueness/hash contracts, set operations, and failure matrix documented.                                                                                    |
-| Variables & Constants                         | Complete    | Binding init/mutability/const-eval semantics and failure matrix documented.                                                                                  |
-| Functions                                     | Complete    | Define/call/return ABI behavior and function failure matrix documented.                                                                                      |
-| Defer                                         | Complete    | Cleanup stack registration/ordering and defer failure matrix documented.                                                                                     |
-| Lambdas & Closures                            | Complete    | Capture/lowering/invocation behavior and closure failure matrix documented.                                                                                  |
-| Decorators                                    | Complete    | Expansion ordering, transform contracts, and failure matrix documented.                                                                                      |
-| Lazy Expressions                              | Complete    | Thunk force/memoization behavior and failure matrix documented.                                                                                              |
-| Classes                                       | Complete    | Layout/constructor/dispatch/destructor behavior and failure matrix documented.                                                                               |
-| Pattern Matching                              | Complete    | Decision-tree lowering, guards, and failure matrix documented.                                                                                               |
-| Generics                                      | Complete    | Bound solving, specialization cache, and generic failure matrix documented.                                                                                  |
-| `using` Keyword                               | Complete    | Alias/import opening semantics and failure matrix documented.                                                                                                |
-| Traits                                        | Complete    | Trait declaration/impl/dispatch semantics and failure matrix documented.                                                                                     |
-| Trait Associated Types                        | Complete    | Associated-type projection/normalization and failure matrix documented.                                                                                      |
-| Const Generics                                | Complete    | Const-parameter evaluation/specialization and failure matrix documented.                                                                                     |
-| Pipe and Spread                               | Complete    | Pipe lowering and spread expansion semantics and failure matrix documented.                                                                                  |
-| Runtime Introspection                         | Complete    | Reflection metadata/query semantics and failure matrix documented.                                                                                           |
-| Modules & Imports                             | Complete    | Graph resolution, selector binding, and import failure matrix documented.                                                                                    |
-| Module Visibility (`pub(crate)`/`pub(super)`) | Complete    | Visibility lattice enforcement and failure matrix documented.                                                                                                |
-| Embedded Language Engines                     | Complete    | Embedded engine bridge internals and failure matrix documented.                                                                                              |
-| Custom Language Engines                       | Complete    | Engine registration/compile/execute semantics and failure matrix documented.                                                                                 |
-| Inline Assembly                               | Complete    | Constraint-aware asm lowering, safety gates, and failure matrix documented.                                                                                  |
-| Actors & Agents                               | Complete    | Mailbox/supervision runtime semantics and failure matrix documented.                                                                                         |
-| Isolates                                      | Complete    | Isolate lifecycle and cross-isolate transfer failure matrix documented.                                                                                      |
-| Manual Allocation                             | Complete    | Unsafe alloc API semantics and memory-safety failure matrix documented.                                                                                      |
-| Vectors & Tensors                             | Complete    | Shape/dtype/layout execution semantics and failure matrix documented.                                                                                        |
-| Testing                                       | Complete    | Discovery/execution/reporting semantics and failure matrix documented.                                                                                       |
-| Builtins Reference                            | Complete    | Intrinsic resolution/lowering semantics and failure matrix documented.                                                                                       |
-| Method Reference                              | Complete    | Method resolution/dispatch semantics and failure matrix documented.                                                                                          |
-| Operator Overloading                          | Complete    | Overload registration/selection semantics and failure matrix documented.                                                                                     |
-| Keywords                                      | Complete    | Lexing/parser keyword contracts and keyword failure matrix documented.                                                                                       |
-| Importing Standard Libraries                  | Complete    | Std import resolution/binding semantics and failure matrix documented.                                                                                       |
-| Stdlib Module Catalog                         | Complete    | Catalog metadata/resolution semantics and failure matrix documented.                                                                                         |
-| std.fs — Filesystem                           | Complete    | Filesystem API validation/I-O semantics and failure matrix documented.                                                                                       |
-| std.fmt — Formatting                          | Complete    | Format-parse/render semantics and failure matrix documented.                                                                                                 |
-| std.regex — Regular Expressions               | Complete    | Compile/match/replace semantics and failure matrix documented.                                                                                               |
-| std.iter — Iterator Combinators               | Complete    | Iterator pipeline evaluation semantics and failure matrix documented.                                                                                        |
-| std.time — Date & Time                        | Complete    | Clock/timezone/format semantics and failure matrix documented.                                                                                               |
-| std.proc — Process Management                 | Complete    | Spawn/wait/pipe semantics and failure matrix documented.                                                                                                     |
-| std.log — Structured Logging                  | Complete    | Structured sink/flush/filter semantics and failure matrix documented.                                                                                        |
-| Memory Safety and Borrowing                   | Complete    | Borrow/lifetime checking and memory safety failure matrix documented.                                                                                        |
-| Move Semantics                                | Complete    | Ownership transfer, implicit-move-on-last-use, closure capture, and failure matrix documented.                                                               |
-| Compiler Diagnostics                          | Complete    | Diagnostic pipeline, span mapping, error codes, suggestion engine, and output format documented.                                                             |
-| Structured Concurrency                        | Complete    | TaskGroup lifecycle, cancellation propagation, error strategies, and failure matrix documented.                                                              |
-| Data Classes (`@data`)                        | Complete    | Auto-generated method synthesis, exclusion, destructuring, and failure matrix documented.                                                                    |
-| Sealed Classes                                | Complete    | Subclass registration, exhaustiveness checking, and failure matrix documented.                                                                               |
-| Copy-on-Write Classes (`@cow`)                | Complete    | COW refcount, mutation-triggered copy, and failure matrix documented.                                                                                        |
-| Trait Composition & Supertraits               | Complete    | Supertrait resolution, diamond dedup, embedding, and failure matrix documented.                                                                              |
-| Hardware Fault Signals                        | Milestone 1 | `signal.on_fault` registration, OS handler, `FaultInfo` capture, and `dump_json` implemented. Recovery, core dumps, and backtrace symbolication are planned. |
-| Channels and Threads                          | Complete    | Channel/thread lifecycle semantics and concurrency failure matrix documented.                                                                                |
-| Remaining mirrored chapters                   | Complete    | All mirrored chapters now include implementation records, API execution records, and failure matrices.                                                       |
+- [0. Principles](#0-principles)
+- [1. Architecture and crate layout](#1-architecture-and-crate-layout)
+- [2. Source, spans and diagnostics](#2-source-spans-and-diagnostics)
+- [3. Lexer](#3-lexer)
+- [4. Grammar and AST](#4-grammar-and-ast)
+- [5. Host runtime](#5-host-runtime)
+- [6. Program execution and modules](#6-program-execution-and-modules)
+- [7. Engine registry and resolution](#7-engine-registry-and-resolution)
+- [8. Sessions and worker lifecycle](#8-sessions-and-worker-lifecycle)
+- [9. The VEP/1 protocol](#9-the-vep1-protocol)
+- [10. Codec and marshaling](#10-codec-and-marshaling)
+- [11. Handles](#11-handles)
+- [12. Block execution](#12-block-execution)
+- [13. Import resolution and routing](#13-import-resolution-and-routing)
+- [14. Built-in adapters](#14-built-in-adapters)
+- [15. Compiled blocks: the build bridge](#15-compiled-blocks-the-build-bridge)
+- [16. Native FFI layer](#16-native-ffi-layer)
+- [17. Custom engines](#17-custom-engines)
+- [18. Configuration](#18-configuration)
+- [19. CLI, doctor and check](#19-cli-doctor-and-check)
+- [20. Security model](#20-security-model)
+- [21. Failure-mode matrix](#21-failure-mode-matrix)
+- [22. Testing and conformance](#22-testing-and-conformance)
+- [23. Build order](#23-build-order)
+- [Appendix: salvage map from old/](#appendix-salvage-map-from-old)
 
 ---
 
-## Mirrored Chapters from DOCS.md
-
-Chapters below mirror DOCS.md headings, but content here is implementation behavior only.
-
-## Table of Contents
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - TOC indexing, anchor resolution, and navigation internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Heading extraction builds a stable section graph from parsed markdown AST nodes with persistent section IDs.
-- Anchor normalization applies deterministic slug rules and collision suffixing to guarantee unique intra-page targets.
-- Mode-partitioned indexes (docs vs internals) are materialized once and reused by render/search/navigation paths.
-
-### API Execution Records (Complete)
-
-- toc.build(sourceTrees): traverse heading nodes -> assign depth/order -> emit compact TOC graph artifact.
-- toc.resolve(anchor, mode): normalize anchor -> lookup mode-specific index -> return section span + title metadata.
-- toc.search(query, mode): tokenize query -> run prefix/fuzzy ranking over TOC index -> emit ranked section hits.
-- toc.render(tree, viewport): apply collapse/expand policies -> emit paginated TOC view model.
-
-### Failure Mode Matrix
-
-- Duplicate normalized anchors in same scope: deterministic anchor-collision diagnostic with both source headings.
-- Missing anchor target on navigation request: not-found diagnostic including nearest anchor suggestions.
-- Malformed heading hierarchy (depth jump violations): structure diagnostic with offending heading span.
-- TOC index build budget exceeded on huge docs: bounded indexing diagnostic with fallback linear mode.
-
-## Getting Started
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - startup bootstrap sequencing, environment checks, and onboarding internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Bootstrap flow composes template generation, environment probes, and first-run validation into an ordered pipeline.
-- Toolchain detection caches probe results (compiler/runtime/backend) to avoid repeated startup cost.
-- Onboarding checklist generation derives missing prerequisites from manifest + workspace capability profile.
-
-### API Execution Records (Complete)
-
-- bootstrap.initProject(path, template): validate destination -> scaffold baseline layout -> write starter manifest.
-- bootstrap.detectToolchain(profile): probe required executables/backends -> normalize capability report.
-- bootstrap.firstRunCheck(workspace): run prerequisite checks -> aggregate actionable setup tasks.
-- bootstrap.generateChecklist(report): emit ordered remediation checklist with command hints.
-
-### Failure Mode Matrix
-
-- Invalid project destination (non-empty/conflicting files): bootstrap path diagnostic with safe-merge guidance.
-- Required toolchain component missing: setup diagnostic with version requirement and install hint.
-- Template write failure due permissions: filesystem/permission diagnostic with failed path context.
-- Incompatible profile/backend combo for first run: capability diagnostic with supported combinations.
-
-## Docs Modes
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - docs mode routing, rendering, and mode-specific internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Mode router maps CLI/UI requests to docs, internals, and parity validation execution paths.
-- Mode-specific renderers share a common markdown/heading cache while applying distinct visibility filters.
-- Search indexes are keyed by mode to prevent cross-surface leakage of internal-only content.
-
-### API Execution Records (Complete)
-
-- docs.mode.select(args): parse mode flags -> resolve active mode and fallback policy.
-- docs.mode.loadIndex(mode): load or build mode-partitioned heading/search index.
-- docs.mode.renderPage(mode, route): fetch page AST -> apply mode filters -> render output surface.
-- docs.mode.search(query, mode): execute mode-scoped search over cached index -> return ranked snippets.
-
-### Failure Mode Matrix
-
-- Unknown mode selector: mode-resolution diagnostic with allowed mode list.
-- Route not available in selected mode: visibility diagnostic with suggested alternate mode.
-- Stale mode index artifact: cache-invalidation diagnostic and automatic rebuild path.
-- Search query budget exceeded in constrained mode: bounded-search diagnostic with narrowed-query hint.
-
-## Project Manifest
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - manifest parsing, profile resolution, and manifest internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Manifest loader parses schema-versioned configuration into canonical runtime/compiler option models.
-- Profile inheritance and CLI overrides merge deterministically with explicit precedence metadata.
-- Compiler target resolution keeps mode selection (`native`/`wasm`/`bytecode`) separate from platform triples (`os`/`arch`), with mobile modeled as `target=native` plus `os=android|ios`.
-- Library profile normalization enforces publish metadata semantics (`entry=src/lib.vt`, package identity fields, optional discovery metadata).
-- Path fields are normalized relative to workspace root with sandbox escape checks before use.
-
-### API Execution Records (Complete)
-
-- manifest.load(path): read + parse manifest bytes -> decode schema version -> emit typed manifest model.
-- manifest.validateSchema(model): enforce required fields/types/ranges and deprecation policies.
-- manifest.validatePublishMetadata(model): validate package identity/discovery metadata and library entrypoint constraints.
-- manifest.mergeProfiles(base, profile, cli): apply layered override precedence -> emit effective configuration.
-- manifest.resolvePaths(model, root): normalize relative paths -> validate workspace containment and existence policy.
-- manifest.fingerprint(model): hash effective config for cache keys and incremental invalidation.
-
-### Failure Mode Matrix
-
-- Manifest syntax/schema mismatch: parse/schema diagnostic with exact key path and expected type.
-- Circular profile inheritance: manifest-merge diagnostic with cycle chain rendering.
-- Invalid package identity/metadata for publish (name/scope/version/entry): publish-metadata diagnostic.
-- Path escape outside workspace root: security diagnostic with rejected normalized path.
-- Unsupported manifest schema version: compatibility diagnostic with supported version range.
-
-## CLI Usage
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - command routing, build/run/test orchestration, and CLI internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- CLI argument parser resolves command/flag topology and rejects ambiguous combinations before filesystem I/O.
-- Command dispatcher compiles immutable execution plans (run/build/check/test/repl/docs/internals modes).
-- Init templates support both app and lib scaffolds with deterministic starter layouts and manifest defaults.
-- Publish pipeline has explicit preflight stage shared by `vt publish` and `vt publish --dry-run`.
-- Exit normalization maps internal error categories to stable process exit codes for tooling integration.
-
-### API Execution Records (Complete)
-
-- vt.init(path, template): scaffold app/lib project layout and emit starter manifest + source tree.
-- vt.run(file, opts): parse args -> resolve manifest/profile -> compile pipeline -> backend launch -> exit map.
-- vt.build(opts): resolve target/profile -> incremental cache keying -> artifact emission + metadata write.
-- vt.check(opts): run parse/type/effect/borrow validation only -> emit diagnostics without artifact output.
-- vt.test(opts): discover tests -> isolate runtime contexts -> execute with timeout policy -> aggregate report.
-- vt.publish(opts): execute publish preflight (manifest/tests/package) -> dry-run package or registry upload.
-- vt.repl(opts): initialize incremental session -> evaluate cells -> persist context across submissions.
-- vt.docs or vt.internals(opts): load mode-specific indexes -> render/search docs surfaces.
-
-### Failure Mode Matrix
-
-- Invalid command/flag combination: deterministic CLI parser diagnostic with valid combination hints.
-- Missing or invalid manifest/profile: config diagnostic with failing key path and fallback behavior.
-- Publish preflight failed (metadata/tests/package build): publish-preflight diagnostic with blocking checks.
-- Registry authentication missing/expired for upload mode: publish-auth diagnostic.
-- Backend initialization or launch failure: runtime diagnostic with backend selection context.
-- Test session timeout/resource cap breach: bounded execution diagnostic with per-test attribution.
-
-## WASM Target
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - wasm lowering, import/memory wiring, and wasm backend internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- MIR-to-WASM lowering emits typed opcode streams with deterministic source map anchors for debug parity.
-- Import tables are resolved through capability-scoped host bindings (WASI/JS/native bridge profiles).
-- Linear memory planning places static data, stack, and heap segments with relocation metadata for startup.
-
-### API Execution Records (Complete)
-
-- wasm.emitModule(mir, target): lower typed MIR into wasm sections (type/import/function/code/data).
-- wasm.linkImports(module, hostCaps): resolve declared imports to allowed host symbols and signatures.
-- wasm.initMemory(module, dataSegments): materialize linear memory layout and apply data initializers.
-- wasm.start(module, argv): invoke entry trampoline and normalize exit/status mapping.
-
-### Failure Mode Matrix
-
-- Unsupported language feature for wasm backend: lowering diagnostic with unsupported construct witness.
-- Unresolved or signature-mismatched import: link diagnostic with expected vs provided function type.
-- Linear memory/data segment overflow: layout diagnostic with segment bounds and required memory growth.
-- Host capability denied for imported operation: capability diagnostic with blocked import symbol details.
-
-## Step Debugger
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - breakpoint/step/eval internals and debugger failure behavior are documented.
-
-### Implemented Internal Records
-
-- Breakpoint registry indexes source spans to IR offsets and runtime instruction pointers.
-- Step controls (into/over/out) are implemented by temporary trap instrumentation and frame-depth guards.
-- In-frame evaluation executes in a sandboxed expression VM with side-effect policy enforcement.
-
-### API Execution Records (Complete)
-
-- dbg.setBreakpoint(file, line, cond): resolve source location -> install breakpoint with optional condition.
-- dbg.step(mode): arm stepping trap policy (into/over/out) -> resume execution until next stop event.
-- dbg.inspect(frame, expr): evaluate read-only watch expression in selected frame context.
-- dbg.eval(frame, expr, policy): execute interactive expression under side-effect policy constraints.
-- dbg.stack(): capture normalized stack frames, locals, and source mappings.
-
-### Failure Mode Matrix
-
-- Breakpoint location not mappable to executable span: debug-location diagnostic with nearest valid span.
-- Step operation on optimized frame without mapping: debug-step diagnostic with optimization context.
-- Eval blocked by side-effect policy: debug-eval policy diagnostic with allowed evaluation modes.
-- Debug session detached/stale target handle: session-state diagnostic with reconnection requirement.
-
-## Comments & Doc Comments
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - comment lexing, doc binding, and doc-comment internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Lexer strips non-doc comments before parser consumption while preserving source map offsets.
-- Doc comments are parsed into markdown/doc-tag AST nodes and attached to symbol IDs during binding.
-- Doc index emission stores normalized summaries, tags, and links for docs/internals render pipelines.
-
-### API Execution Records (Complete)
-
-- comments.strip(tokenStream): remove line/block comments -> preserve token span mapping.
-- doc.parseBlocks(rawDocTokens): parse markdown + structured tags into doc AST.
-- doc.bindSymbol(symbolId, docAst): attach parsed docs to symbol table entry with visibility checks.
-- doc.emitIndex(module): serialize bound doc metadata for docs/internals search/render.
-
-### Failure Mode Matrix
-
-- Unterminated block comment: lexer diagnostic with opening delimiter span.
-- Malformed doc tag syntax: doc-parser diagnostic with expected tag grammar.
-- Duplicate/conflicting docs for same symbol: binding diagnostic with both doc source locations.
-- Unsafe raw HTML/doc payload in restricted docs profile: sanitization diagnostic with rejected node details.
-
-## Variables & Constants
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Variables & Constants lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Variable binding (`let`) creates a named slot in the current frame's scope dict with mutable storage; `const` bindings are resolved at compile time and prevent reassignment.
-- `comptime const` declarations force evaluation during compilation and bake the result directly into bytecode as an immediate value.
-- Underscore literals in numeric values (`1_000_000`) are lexically stripped during tokenization — they have no runtime representation.
-- Type inference propagates from the initializer expression; explicit annotations (`let x: int = ...`) are checked against the inferred type.
-
-### API Execution Records (Complete)
-
-- let.bind(name, init_expr, scope): evaluate init_expr -> allocate slot in scope frame -> bind name to value -> slot is mutable.
-- const.bind(name, init_expr, scope): evaluate init_expr at declaration time -> allocate immutable slot -> reject any subsequent assignment at compile time.
-- comptime_const.bind(name, expr): force compile-time evaluation of expr -> bake result as immediate in bytecode -> no runtime allocation.
-- type(val): query runtime type tag -> return human-readable string ("int", "str", "list", etc.).
-- typeof(val): query raw runtime type tag -> return internal sized type descriptor.
-- variable.access(name, scope_stack): search scope stack from innermost to outermost -> return value or raise NameError.
-- variable.assign(name, value, scope_stack): search scope stack for existing binding -> update value in found slot -> raise NameError if not found.
-
-### Failure Mode Matrix
-
-- Re-declaring variable with `let` in same scope: compile error "name already declared in this scope".
-- Attempting reassignment of `const` binding: compile error "cannot reassign const".
-- Variable used before declaration: runtime NameError "x is not defined".
-- `comptime const` with expression not resolvable at compile time: compile error "expression cannot be evaluated at compile time".
-- Shadowing outer variable without `@suppress shadow`: compiler warning with inner/outer binding locations.
-
-## Variable Scoping Rules
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Variable Scoping Rules lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Scope is a stack of frame dictionaries — new scope created on `{`, destroyed on `}`. Each scope level holds its own binding set.
-- Loop variables in `for (item in list)` are implicitly `let`-bound with a fresh slot per iteration — mutations do not carry across iterations.
-- Closures capture variables by reference (live binding) — the capturing function holds a pointer to the original scope slot.
-- `@suppress shadow` inline directive disables the shadowing warning for a single redeclaration.
-
-### API Execution Records (Complete)
-
-- scope.enter(parent_scope): allocate new lexical frame -> push onto scope stack -> new bindings isolated from parent.
-- scope.exit(frame): destroy frame -> pop from scope stack -> all bindings in frame become unreachable.
-- for_in.bind(var_name, iterable, body): create iteration scope -> bind var_name to each element -> re-bind fresh slot per iteration.
-- for_loop.bind(init, cond, update, body): create loop scope -> bind init variable -> evaluate cond/update/body in loop scope.
-- closure.capture(var_name, outer_scope): record reference to var_name slot in outer scope -> mutations in closure affect outer binding.
-- closure.freeze(var_name, value): bind var_name as default parameter with current value -> capture by value at definition time.
-- shadow.check(name, outer_scope, inner_scope): detect inner `let` that redefines outer binding -> emit shadow warning unless suppressed.
-
-### Failure Mode Matrix
-
-- Accessing variable after block exits: NameError "x is not defined".
-- Loop variable captured by closure without freeze: all closures see final loop value (classic closure gotcha).
-- Mutable borrow conflict when loop variable is captured by closure and reassigned in loop body.
-- Using loop variable after loop in @borrow_check context: compile error — binding is out of scope.
-- Shadowing without @suppress: compiler emits shadow warning with inner/outer binding locations.
-
-## Data Types
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Data Types lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Primitive types (`int`, `float`, `str`, `bool`) are unboxed and stack-allocated; `int` is arbitrary-precision by default (no overflow unless `--overflow` mode configured).
-- `null` is a singleton value with special equality semantics — `null == null` is true, but `null` fails `is` type checks for other types.
-- Collection types (`list`, `dict`, `set`) use reference semantics — assignment shares the reference, not a copy.
-- `any` type disables static type checking for one binding — runtime type discovery via `type()` or `is` narrowing.
-
-### API Execution Records (Complete)
-
-- int(val, base?): parse val as integer with optional base -> return int or raise ParseError.
-- float(val): parse val as IEEE 754 double -> return float or raise ParseError.
-- str(val): convert val to string representation -> call **str**() if available, else default formatting.
-- bool(val): convert val to boolean using truthiness rules -> falsy set is [null, false, 0, 0.0, "", [], {}, #{}].
-- type(val): query runtime type tag -> return human-readable string name.
-- typeof(val): query raw type descriptor -> return sized type tag (platform-dependent).
-- is_some(opt): check if Option is Some -> return true/false.
-- is_none(opt): check if Option is None -> return true/false.
-- val is TypeName: runtime type check -> narrow value to TypeName in subsequent scope.
-
-### Failure Mode Matrix
-
-- Calling string methods on `null`: runtime TypeError "Cannot call method on null".
-- Indexing list out of bounds: IndexError "list index out of range".
-- Using `any`-typed value in type-specific operation without narrowing: runtime TypeError at operation time.
-- Mixing numeric types: implicit coercion may lose precision (int + float -> float).
-- Hash collision on dict/set keys: follows open-addressing probe chain.
-
-## Operators
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Operators lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Binary operators are left-associative by default except `**` (right-associative). Precedence follows standard mathematical convention.
-- Operator overloading via `__add__`, `__mul__`, etc. methods on user types; compiler rewrites operator expressions to method calls.
-- Short-circuit evaluation for `&&` and `||` — right operand not evaluated if left determines result.
-- Bitwise operators (`band`, `bor`, `bxor`, `bnot`, `<<`, `>>`) operate on sized integers at bit level.
-
-### API Execution Records (Complete)
-
-- op.add(a, b): addition (number) or concatenation (string/list) -> result with type coercion.
-- op.sub(a, b): subtraction (number only) -> numeric result.
-- op.mul(a, b): multiplication (number) or repetition (string _ int, list _ int) -> result.
-- op.div(a, b): float division (always returns float) -> raise ZeroDivisionError if b is 0.
-- op.floordiv(a, b): floor division (rounds toward negative infinity) -> int result.
-- op.mod(a, b): modulo (same sign as divisor) -> numeric result.
-- op.pow(a, b): exponentiation (right-associative) -> result type depends on operands.
-- op.eq(a, b): deep equality comparison -> bool (collections compared recursively).
-- op.lt/gt/le/ge(a, b): comparison operators -> bool.
-- op.and(a, b): logical AND (short-circuit) -> return left if falsy, else right.
-- op.or(a, b): logical OR (short-circuit) -> return left if truthy, else right.
-- op.not(a): logical NOT -> invert truthiness.
-- op.band/bor/bxor(a, b): bitwise operations on integers.
-- op.shl/shr(a, b): bit shift operations -> integer result.
-- op.in(a, b): membership test -> substring in string, item in list/set, key in dict.
-- op.ternary(cond, t, f): evaluate cond -> return t if truthy, else f.
-- op.nullcoal(a, b): null coalescing -> return b if a is null.
-- op.optchain(a, prop): optional chaining -> access prop only if a is not null, else null.
-
-### Failure Mode Matrix
-
-- Division by zero: runtime panic (OverflowError or ValueError depending on --overflow mode).
-- Comparing incompatible types (e.g., `5 > "hello"`): runtime TypeError.
-- Using bitwise operators on non-integer types: compile error or runtime TypeError.
-- Integer overflow: wrap mode silently wraps, saturate mode clamps, panic mode (default) panics.
-- Operator on user type without **add**/**lt**/etc.: "operator not supported" TypeError.
-
-## Strings
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Strings lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Strings are immutable UTF-8; indexing and slicing operate on Unicode code points, not UTF-8 byte offsets.
-- String escape sequences processed at parse time — `\n`, `\u0041`, etc. become single characters in the literal.
-- Raw strings (`r"..."`) disable all escape processing — backslashes remain literal characters.
-- F-strings parse `${expr}` interpolation fragments at compile time and emit concatenation bytecode.
-
-### API Execution Records (Complete)
-
-- str.literal(tokens): parse string with escape processing -> emit string constant.
-- str.fstring(parts, exprs): evaluate each expr -> convert to string via **str**() -> concatenate with static parts.
-- str.len(s): return code point count (not byte count).
-- str.upper(s) / str.lower(s): case conversion -> return new string.
-- str.trim(s) / str.trim_start(s) / str.trim_end(s): strip whitespace -> return new string.
-- str.split(s, sep, max?): split by separator -> return list of parts.
-- str.replace(s, old, new): replace all occurrences -> return new string.
-- str.contains(s, sub) / str.starts_with(s, pre) / str.ends_with(s, suf): substring checks -> bool.
-- str.index(s, i): return code point at position i -> raise IndexError if out of bounds.
-- str.slice(s, start, end, step): return substring with optional step.
-- str.repeat(s, n): repeat string n times -> return new string.
-- str.to_bytes(s): return UTF-8 byte list.
-- str_from_bytes(bytes): construct string from byte list -> raise ValueError if invalid UTF-8.
-- str.graphemes(s): return list of grapheme clusters.
-- str.byte_len(s): return byte length of UTF-8 encoding.
-- tag_fn f"template": pass static parts and interpolated values to tag function -> return tag function result.
-
-### Failure Mode Matrix
-
-- Index out of bounds: IndexError "string index out of range".
-- String mutation attempt (s[0] = "x"): TypeError "strings are immutable".
-- Invalid UTF-8 in str_from_bytes(): ValueError "invalid UTF-8 sequence".
-- Interpolating null or non-Printable type in f-string: runtime lookup calls **str**() or TypeError.
-- Tag function returning unexpected type: type propagation from tag function determines result type.
-
-## Lists
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Lists lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Lists are dynamic arrays with O(1) amortized append, O(n) insertion/deletion at arbitrary positions.
-- List slicing returns a new list (shallow copy of references, not deep copy of elements).
-- List iteration via `for-in` implicitly calls `.iter()` which returns an iterator.
-- Empty list `[]` has inferred element type `any` until context requires a specific type.
-
-### API Execution Records (Complete)
-
-- list.literal(elements): allocate dynamic array -> store elements contiguously.
-- list.push(item): append to end (amortized O(1)) -> mutates list in place.
-- list.pop(i?): remove and return element at index (default: last) -> raise IndexError if empty.
-- list.insert(i, val): insert before index -> shift elements right (O(n)).
-- list.remove(val): remove first occurrence by equality -> no-op if not found.
-- list.extend(other): append all elements from other -> mutates list in place.
-- list.index(i): access element at index -> raise IndexError if out of bounds.
-- list.assign(i, val): mutate element at index -> raise IndexError if out of bounds.
-- list.slice(start, end, step): return new list from slice -> shallow copy.
-- list.len(): return element count.
-- list.contains(val): membership test using == equality -> bool.
-- list.map(fn): apply fn to each element -> return new list.
-- list.filter(fn): keep elements where fn returns truthy -> return new list.
-- list.reduce(fn, init): fold over elements with accumulator -> return accumulated result.
-- list.sort(): in-place TimSort (stable) -> return self for chaining.
-- list.sort_by(fn): in-place sort by key function -> return self.
-- list.reverse(): return reversed copy (non-mutating).
-- list.join(sep): join elements to string with separator.
-- list.flat_map(fn): map then flatten one level -> return new list.
-- list.enumerate(): return list of (index, element) tuples.
-- list.zip(other): pair elements with other list -> list of tuples.
-- list.chunks(n): split into groups of n -> list of lists.
-- list.unique(): remove duplicates preserving order -> new list.
-
-### Failure Mode Matrix
-
-- Indexing out of bounds: IndexError.
-- Iterating list while mutating: RuntimeError "collection modified during iteration".
-- Sorting list with non-comparable types: TypeError.
-- Memory exhaustion on very large append: MemoryError.
-- Calling methods on null list: TypeError.
-
-## Dictionaries
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Dictionaries lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Dicts maintain insertion order for iteration. Keys must be hashable (strings, numbers, tuples).
-- Collision handling via open addressing with linear probing (implementation detail).
-- Missing key access via `dict[key]` returns `null` (no error); use `.has()` to check existence.
-- Dict comprehension syntax `{k: v for ...}` desugars to equivalent iterator pipeline.
-
-### API Execution Records (Complete)
-
-- dict.literal(pairs): allocate hash table -> insert key-value pairs in order.
-- dict.get(key, default?): lookup key -> return value or default (null if no default).
-- dict.set(key, val) / dict[key] = val: insert or update entry -> mutates dict.
-- dict.has(key): check key existence -> bool.
-- dict.remove(key): delete entry -> no-op if key missing.
-- dict.keys(): return list of keys in insertion order.
-- dict.values(): return list of values in insertion order.
-- dict.items(): return list of (key, value) tuples.
-- dict.update(other): merge other dict in-place -> other's keys win on conflict.
-- dict.merge(other): return new merged dict -> non-mutating.
-- dict.len(): return entry count.
-- dict(obj): convert struct/class to dict of field names and values.
-- for (k in dict): iterate keys in insertion order.
-- for ([k, v] in dict.items()): iterate pairs.
-
-### Failure Mode Matrix
-
-- Using mutable object as key (list, dict): TypeError "unhashable type".
-- Modifying dict during iteration: RuntimeError "dictionary modified during iteration".
-- Memory pressure on very large dicts: MemoryError or degraded performance.
-- Non-string keys with f-string interpolation: implicit conversion via str().
-
-## Tuples
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Tuples lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Tuples are immutable, fixed-length, and stack-allocated or compact heap-allocated.
-- Tuple indexing via dot notation `.0`, `.1` is resolved at compile time (not runtime lookup).
-- Empty tuple `()` is truthy (value exists, just no elements).
-- Tuple unpacking in `let` and `for` is syntactic sugar for indexed access with compile-time bounds check.
-
-### API Execution Records (Complete)
-
-- tuple.literal(elements): allocate immutable fixed-length tuple -> elements stored contiguously.
-- tuple.index(i) / tuple.dot(i): access element at compile-time-known position.
-- tuple.len(): return element count.
-- tuple.unpack(pattern): destructure tuple into bindings -> compile error if pattern arity mismatches.
-- tuple(list): convert list to tuple -> immutable copy.
-- for ((x, y) in list_of_tuples): destructure each tuple during iteration.
-
-### Failure Mode Matrix
-
-- Attempting assignment tuple[0] = val: TypeError "tuple is immutable".
-- Out-of-bounds access tuple[10]: IndexError.
-- Mismatched destructuring pattern: ValueError "not enough values to unpack".
-- Using tuple as dict key with mutable elements: TypeError "unhashable".
-
-## Sets
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Sets lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Sets use hash table internally — O(1) average add/remove/lookup.
-- Empty set requires `#{}` syntax (distinct from empty dict `{}`).
-- Set operations (`|`, `&`, `-`, `^`) are routed to method equivalents via operator overloading on the set type.
-- Elements must be hashable; mutable types (list, dict) cannot be set elements.
-
-### API Execution Records (Complete)
-
-- set.literal(elements): allocate hash set -> insert unique elements.
-- set(list): convert list to set, removing duplicates.
-- set.add(val): insert element (no-op if already present) -> mutates set.
-- set.remove(val): delete element (no-op if absent) -> mutates set.
-- set.contains(val): membership test -> bool.
-- set.len(): return element count.
-- set.union(other) / a | b: all elements from both sets -> new set.
-- set.intersect(other) / a & b: elements in both -> new set.
-- set.difference(other) / a - b: elements in self but not other -> new set.
-- set.sym_difference(other) / a ^ b: elements in either but not both -> new set.
-- set.is_subset(other): every element of self in other -> bool.
-- set.is_superset(other): every element of other in self -> bool.
-- set.is_disjoint(other): no shared elements -> bool.
-- set.to_list(): convert to list (unordered).
-- set.clear(): remove all elements.
-
-### Failure Mode Matrix
-
-- Using unhashable type as element (list, dict): TypeError.
-- Modifying set during iteration: RuntimeError "set changed size during iteration".
-- Comparing sets with incompatible element types: may fail at hash time.
-- Empty set literal `#{}` vs empty dict `{}`: parser distinguishes by `#` prefix.
-
-## Comprehensions
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - comprehension parsing, desugaring, type inference, and lowering internals documented.
-
-### Implemented Internal Records
-
-- Parser recognizes `[expr for ident in iterable if cond]` as a ComprehensionExpr AST node with kind (list/dict/set), body expression, iterator bindings, and optional filter.
-- Desugaring pass converts ComprehensionExpr into equivalent iterator pipeline: `iterable.iter().filter(cond).map(body).collect()` — preserving source spans for diagnostics.
-- Type inference propagates element type from the iterable through the body expression; the result type is `list<T>`, `dict<K,V>`, or `set<T>` depending on comprehension kind.
-- Nested comprehensions (`for x in ... for y in ...`) desugar to `flat_map` chains with inner `filter`/`map` stages.
-
-### API Execution Records (Complete)
-
-- comprehension.parse(tokens): recognize `[` expr `for` pattern `in` expr (`if` expr)? (`for` pattern `in` expr)\* `]` -> emit ComprehensionExpr node with source spans.
-- comprehension.desugar(ast): walk ComprehensionExpr -> emit equivalent iter().filter().map().collect() pipeline AST -> attach original spans for error mapping.
-- comprehension.typecheck(desugared, env): infer element type from iterable -> propagate through filter/map -> unify result type -> emit typed IR node.
-- comprehension.lower(typed_ir): emit MIR loop with pre-allocated result buffer (size hint from iterable length if known) -> append/insert operations for each yielded element.
-- comprehension.async_desugar(ast): for `for await` comprehensions -> emit async iterator pipeline with `await` at each yield point.
-
-### Failure Mode Matrix
-
-- Non-iterable expression after `in`: type diagnostic with "expected Iterable, found T" and suggestion to implement Iterator trait.
-- Filter expression not boolean: type diagnostic with "filter condition must be bool, found T".
-- Dict comprehension body not a key:value pair: parse diagnostic with expected syntax hint.
-- Nested comprehension variable shadowing: warning diagnostic with inner/outer binding locations.
-- Async comprehension in non-async context: effect diagnostic requiring async function boundary.
-
-## Control Flow
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Control Flow lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- if/elif/else blocks are compiled to conditional jump instructions with branch prediction hints.
-- Loop variables in `for-in` are lexically scoped; each iteration re-binds the variable in a fresh slot.
-- `break` and `continue` compile to jump targets identified by label or closest enclosing loop.
-- `match` on enum performs exhaustiveness checking at compile time; non-exhaustive match emits a warning.
-
-### API Execution Records (Complete)
-
-- if.exec(cond, then_block, else_block?): evaluate cond -> execute then_block if truthy, else_block otherwise.
-- elif.chain(conds, blocks, else_block?): evaluate conditions in order -> execute first matching block.
-- while.exec(cond, body): evaluate cond -> execute body -> repeat until cond is falsy.
-- for_classic.exec(init, cond, update, body): execute init -> loop (cond -> body -> update) until cond is falsy.
-- for_in.exec(var, iterable, body): call iterable.iter() -> bind var to each element -> execute body.
-- break.exec(label?): jump to loop exit -> unwind to labeled loop if label provided.
-- continue.exec(label?): jump to loop header -> skip to next iteration of labeled loop if provided.
-- match.exec(val, arms): evaluate val -> test each arm's pattern in order -> execute first matching arm's body.
-- match.guard(pattern, guard_expr): test pattern first -> if pattern matches, evaluate guard -> proceed only if both pass.
-- match.or_pattern(p1, p2): try p1 first -> if no match, try p2 -> proceed if either matches.
-- ternary.exec(cond, true_expr, false_expr): evaluate cond -> return true_expr if truthy, false_expr otherwise.
-
-### Failure Mode Matrix
-
-- `break`/`continue` outside loop context: compile error.
-- Non-exhaustive match without default: compiler warning (with --warn exhaustive).
-- Infinite loop (no exit conditions, no break): not an error, but program hangs.
-- Loop variable mutation in for-in: compile error if loop variable reassigned (binding is read-only).
-- Guard expression that throws: exception propagates (guards don't catch errors).
-
-## Functions
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Functions lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Function calls create new stack frame; arguments are evaluated left-to-right before the call.
-- Return without value implicitly returns `null`.
-- Default parameters are evaluated at call time (lazy), not at function definition time.
-- Variadic parameters (`...args`) are collected into a list at the call site.
-
-### API Execution Records (Complete)
-
-- func.declare(name, params, body, return_type?, effects?): register function in module namespace.
-- func.call(name, args): create new stack frame -> bind args to params -> execute body -> return result.
-- func.default_param(name, default_expr): at call time, evaluate default_expr for any unprovided argument.
-- func.variadic(name, fixed_params, rest_name): collect extra positional args into rest_name list.
-- func.named_call(name, kwargs): match named arguments to parameters -> reorder as needed.
-- func.return(value?): exit function -> return value (or null if omitted).
-- func.generator(name, params, body): declare generator function (func\*) -> returns iterator on call.
-- func.async(name, params, body): declare async function -> returns Promise on call.
-- func.apply(fn, args_list): invoke fn with args_list spread as positional arguments.
-- func.effect_annotate(name, effects): attach effect list [io, net, ...] to function metadata.
-- func.rename(old_name, new_name): unbind old_name from function object → register under new_name → old_name becomes unresolved. Raises NameConflictError if new_name is already bound. Scope-local: renaming an imported function only affects the current file's binding table.
-- func.check*name_unique(name, scope): before registering a new function (define or import), verify name is not already bound in scope → raise NameConflictError if it is. Applies to func declarations, selective imports (`import { f }`), and glob imports (`as *`).
-- func.qualified_resolve(module, name): resolve `module.name` to the function object via the module's export table. Available for all import styles; aliased imports use the alias as the module prefix.
-- func.unqualified_resolve(name): resolve bare `name` to the function object via the current scope's flat binding table. Available for `import "mod"` (default) and `import { name } from "mod"`, but NOT for `import "mod" as alias`.
-
-### Failure Mode Matrix
-
-- Missing required parameter at call: TypeError "missing argument".
-- Too many positional arguments: TypeError "too many arguments".
-- Named argument with unknown name: TypeError "unexpected keyword argument".
-- Calling non-function value: TypeError "not callable".
-- Return type mismatch (with explicit annotation): type error at return site.
-- Recursive call without base case: stack overflow RecursionError.
-- rename with already-bound new_name: NameConflictError "function `new_name` already exists in this scope".
-- rename with unbound old_name: NameError "`old_name` is not defined".
-- Defining or importing a function whose name is already bound: NameConflictError with diagnostic pointing to the existing definition.
-- Unqualified call ambiguous (same name from two modules): NameConflictError "ambiguous — `name` exists in `mod_a` and `mod_b`".
-
-## Defer
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Defer lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- `defer` blocks are registered on a cleanup stack in declaration order and executed in LIFO (reverse) order on function exit.
-- Defer runs even on early `return`, `throw`, or normal end of function.
-- Variables captured in `defer` block are evaluated at exit time (live binding), not at registration time.
-- Return value mutation inside `defer` preserves the mutation for the caller — the defer body can alter what gets returned.
-
-### API Execution Records (Complete)
-
-- defer.register(block, cleanup_stack): push block onto cleanup stack -> will execute on function exit.
-- defer.execute_all(cleanup_stack): pop and execute all blocks in LIFO order -> runs after function body completes.
-- defer.with_return(block, return_val): defer block can read and mutate return value before it is returned to caller.
-- defer.with_throw(block, exception): defer block runs before exception propagates -> exception continues after all defers complete.
-
-### Failure Mode Matrix
-
-- Exception thrown inside defer block: propagates up, replacing earlier exception if one was in flight.
-- Infinite loop inside defer: function never exits (hang).
-- Memory allocation in defer without corresponding free: potential leak.
-- Deferred block referencing already-freed resource: operation succeeds but has no effect (safe no-op).
-
-## Lambdas & Closures
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Lambdas & Closures lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Lambdas are anonymous functions with implicit scope capture from their definition site.
-- Closures capture variables by reference (live binding) — reassignments in closure affect outer scope and vice versa.
-- Arrow form `lambda(a) => expr` has single-expression body with implicit return.
-- Async lambdas return Promise when called; generator lambdas (rare) return iterators.
-
-### API Execution Records (Complete)
-
-- lambda.arrow(params, expr): create single-expression lambda -> implicit return of expr.
-- lambda.block(params, body): create multi-statement lambda -> explicit return required.
-- lambda.capture(var_name, outer_scope): record reference to var_name in enclosing scope -> live binding.
-- lambda.freeze(var_name, value): bind var_name as default parameter with current value -> capture by value.
-- lambda.async(params, body): create async lambda -> returns Promise on invocation.
-- lambda.call(args): invoke lambda -> create frame with captured + bound variables -> execute body.
-
-### Failure Mode Matrix
-
-- Loop-spawned lambdas all seeing final loop value: use default param freeze to capture per-iteration.
-- Modifying outer variable from lambda: surprise side effects due to reference semantics.
-- Non-serializable captured binding passed across async boundary: SerializationError.
-- Returning lambda that captures local variable, calling after outer function exits: captured vars may be stale.
-
-## Decorators
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Decorators lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Decorator is a higher-order function applied at declaration time — `@d func f` is equivalent to `f = d(f)`.
-- Multiple decorators applied bottom-up: `@a @b func` means `a(b(func))`.
-- Decorator with arguments: `@retry(3)` calls `retry(3)` which returns a decorator function.
-- Built-in decorators (`@memo`, `@inline`, `@deprecated`, `@comptime`) have special compiler support.
-
-### API Execution Records (Complete)
-
-- decorator.apply(decorator_fn, target_fn): call decorator_fn(target_fn) -> result replaces target_fn in namespace.
-- decorator.stack(decorators, target_fn): apply decorators bottom-up -> innermost first, outermost last.
-- decorator.with_args(factory, args): call factory(args) -> return decorator function -> apply to target.
-- @memo.apply(fn): wrap fn with cache keyed by argument tuple -> return cached result on repeat calls.
-- @deprecated.apply(fn, msg): wrap fn to emit deprecation warning on first call -> proceed with original function.
-- @inline.apply(fn): hint to compiler to inline fn at call sites -> actual inlining is optimizer decision.
-- @comptime.apply(fn): mark fn for compile-time-only evaluation -> fn callable only in comptime context.
-
-### Failure Mode Matrix
-
-- Decorator returns non-function value: runtime error when decorated name is called.
-- @memo with unhashable parameter types: cache key fails, TypeError.
-- Circular decorator dependencies: infinite loop at declaration time.
-- Decorator that throws during application: module fails to load.
-
-## Lazy Expressions
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Lazy Expressions lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- `lazy` creates a thunk — expression wrapped in a zero-argument closure, re-evaluated on each read.
-- Lazy variables are stored as closures internally; `is_lazy(val)` checks if binding holds a thunk vs. concrete value.
-- Re-assigning a lazy binding replaces the thunk entirely with the new value.
-- No automatic caching — each read re-evaluates (use `@memo` or manual cache for memoization).
-
-### API Execution Records (Complete)
-
-- lazy.create(expr): wrap expr in a thunk closure -> store thunk in binding slot.
-- lazy.force(binding): check if binding is thunk -> if so, call thunk to get value -> return value.
-- lazy.assign(binding, new_val): replace thunk with concrete value -> binding is no longer lazy.
-- is_lazy(binding): check if binding holds a thunk -> return bool.
-- lazy.field(struct, field_name, expr): attach lazy expression to struct field -> re-evaluated on each field access.
-
-### Failure Mode Matrix
-
-- Lazy expression with side effects fires side effect on every read (unexpected repeated I/O).
-- Lazy variable referencing reassigned outer binding: sees updated value (live reference).
-- Infinite lazy recursion (`let x = lazy x + 1`): stack overflow on read.
-- Performance degradation if lazy expression is expensive and accessed many times without caching.
-
-## Classes
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Classes lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Constructor dispatch: `new ClassName(args)` resolves the constructor method signature at compile time and generates heap allocation + vtable initialization bytecode.
-- Method dispatch: instance method calls validate `self` binding at compile time; runtime uses vtable for polymorphic lookup.
-- Inheritance chain: base class methods resolved during compilation; superclass lookup walks the inheritance tree at runtime via class metadata.
-- Field layout: instance fields stored contiguously in heap-allocated object; `@fixed` decorator locks the schema for fixed-layout optimization.
-
-### API Execution Records (Complete)
-
-- class.construct(name, args): allocate heap object -> initialize vtable -> call constructor body -> return instance.
-- class.method_dispatch(instance, method_name, args): look up method in vtable -> call with self bound to instance.
-- class.super_call(args): in child constructor, dispatch to parent constructor -> parent fields initialized first.
-- class.field_access(instance, field_name): resolve field offset -> read from heap object.
-- class.field_assign(instance, field_name, val): resolve field offset -> write to heap object.
-- class.extends(child, parent): copy parent vtable -> overlay child methods -> child instances participate in parent type checks.
-- class.impl_block(class_name, methods): register methods in class namespace -> callable as instance.method().
-- class.fixed_check(class_name, field_set): lock field schema at end of class definition -> reject dynamic field addition.
-- class.access_modifier(member, level): enforce pub/priv/internal visibility -> compile error on violation.
-
-### Failure Mode Matrix
-
-- Constructor recursion without base case: stack overflow at runtime.
-- Accessing undeclared field in @fixed class: compile error "field not found".
-- Calling super() in a class without parent: runtime error "no superclass".
-- Method override with incompatible signature: may cause runtime type errors at call site.
-- Accessing private member from outside class: compile error "private member".
-
-## Computed Properties
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - computed property parsing, accessor lowering, lazy caching, and diagnostics documented.
-
-### Implemented Internal Records
-
-- Parser recognizes `get name -> Type { body }` and `set name(param: Type) { body }` inside class/struct bodies as ComputedPropertyDecl AST nodes.
-- Semantic analysis ensures getter has no side effects violations and setter validates the assigned value type matches the declared property type.
-- Lowering converts `get` to a hidden method `__get_name(self)` and `set` to `__set_name(self, value)` — field access/assignment syntax is rewritten to call these methods.
-- `lazy get` inserts a backing cache field (`__lazy_name: Option<T>`) and wraps the getter body in a check-or-compute pattern with atomic initialization for thread safety.
-
-### API Execution Records (Complete)
-
-- computed.parse_getter(tokens): recognize `get` ident `->` type `{` body `}` -> emit GetterDecl with return type annotation and body AST.
-- computed.parse_setter(tokens): recognize `set` ident `(` param `)` `{` body `}` -> emit SetterDecl with parameter binding and body AST.
-- computed.typecheck_getter(decl, class_env): verify body expression type matches declared return type -> verify no mutation of self (purity check for non-lazy getters).
-- computed.typecheck_setter(decl, class_env): verify parameter type -> verify body assigns to backing field or performs valid mutations.
-- computed.lower_access(field_access, class_info): if field has getter -> rewrite to **get_name(self) call; if assignment and field has setter -> rewrite to **set_name(self, value) call.
-- computed.lower_lazy(getter_decl): insert \_\_lazy_cache field -> emit check-or-compute MIR with atomic CAS for thread-safe initialization -> cache result.
-- computed.invalidate_lazy(setter_call): after any setter executes on the owning object -> clear all lazy caches on that instance.
-
-### Failure Mode Matrix
-
-- Assignment to getter-only property: compile error "property 'name' is read-only (no setter defined)" with source span.
-- Read of setter-only property: compile error "property 'name' is write-only (no getter defined)" with source span.
-- Getter body has side effects (mutation, I/O): warning diagnostic suggesting `lazy get` or extracting to a method.
-- Lazy getter circular dependency (getter reads another lazy property that reads this one): runtime deadlock detection -> panic with cycle trace.
-- Type mismatch between getter return and declared type: standard type diagnostic.
-
-## Structs
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Structs lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Value semantics: assignment copies the struct by value; no heap reference sharing unless explicitly borrowed.
-- Field layout: fields laid out in declaration order; memory layout is deterministic for FFI interop.
-- Struct literals `StructName { field: value, ... }` are expressions that construct instances on the stack.
-- Update syntax (`...base`): desugars to field-by-field copy where only modified fields differ from source.
-
-### API Execution Records (Complete)
-
-- struct.construct(name, fields): allocate struct on stack -> initialize fields in declaration order.
-- struct.named_construct(name, field_map, base?): resolve field names -> apply base spread if present -> initialize.
-- struct.field_access(instance, field_name): resolve field offset at compile time -> read value.
-- struct.field_assign(instance, field_name, val): resolve field offset -> write value.
-- struct.impl_block(struct_name, methods): register methods in struct impl namespace.
-- struct.update(base, overrides): copy all fields from base -> override specified fields -> return new struct.
-- struct.mem_size_of(struct_name): compute byte size from field types with alignment -> return int.
-- struct.to_dict(instance): convert fields to dict of name-value pairs.
-
-### Failure Mode Matrix
-
-- Field type mismatch in construction: compile error.
-- Accessing non-existent field: compile error "field not found".
-- Assigning to field of frozen struct: runtime error "cannot mutate frozen value".
-- Struct with borrowed reference cannot be moved until borrow ends: compile error in borrow-checked code.
-
-## C Structs (`cstruct`)
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - C-ABI layout/marshalling and cstruct internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- C struct layout honors ABI-specific alignment/packing rules and emits explicit field offset tables.
-- FFI marshalling converts between managed values and C memory representations with ownership tags.
-- Pointer field policies encode mutability/nullability and lifetime expectations at boundary crossings.
-
-### API Execution Records (Complete)
-
-- cstruct.define(def, abi): validate field ABI compatibility -> emit C layout descriptor and offsets.
-- cstruct.marshalIn(value, layout): convert managed struct value to ABI-compliant C memory block.
-- cstruct.marshalOut(ptr, layout): decode C memory into managed representation with safety checks.
-- cstruct.offsetOf(layout, field): query stabilized field offset for interop codegen.
-
-### Failure Mode Matrix
-
-- Field ABI mismatch (size/alignment/incompatible type): cstruct-abi diagnostic with field diff.
-- Unsupported packing/bitfield combination for active target ABI: layout diagnostic with target details.
-- Unsafe pointer/lifetime violation crossing FFI boundary: ownership diagnostic with boundary trace.
-- Unaligned access during marshal path: runtime alignment diagnostic with offending field offset.
-
-## `using` Keyword
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - `using` Keyword lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Scope projection: `using obj { }` creates a local context where all fields of obj are accessible without the `obj.` prefix.
-- Read-only binding: fields brought into scope via `using` are read-only aliases to the original object's fields.
-- Namespace flattening: `using module` at file scope imports all exported symbols directly into current namespace.
-- Stack-based scope: `using obj { }` block is stack-managed; projected names disappear when block exits.
-
-### API Execution Records (Complete)
-
-- using.block(obj, body): project obj fields into block scope -> field names accessible without prefix.
-- using.module(module_name): flat import all exported symbols -> available without module prefix.
-- using.alias(module, "\_"): wildcard alias disables prefix -> all symbols imported directly.
-- using.field_access(projected_name): resolve to original obj.field -> read-only access.
-- using.scope_exit(block): remove projected names from scope -> no longer accessible.
-
-### Failure Mode Matrix
-
-- Name collision: two modules imported with `using` both export same name -> compile error.
-- Name shadowing in `using` block: outer scope names hidden -> compiler warns about shadowing.
-- Write to using-projected field: runtime or compile error "cannot mutate using-projected field".
-- Using a module not yet imported: compile error "must import before using".
-
-## Traits
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Traits lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Trait object vtable: each trait implementation on a type generates a vtable with method pointers; `dyn Trait` values carry a pointer to this vtable.
-- Static dispatch (impl Trait): trait bounds resolved at compile time; code generated per concrete type without runtime indirection.
-- Dynamic dispatch (dyn Trait): trait bounds resolved at runtime via vtable indirection + heap allocation for trait objects.
-- Coherence checking: no two implementations of the same trait for the same type are allowed; the orphan rule prevents ambiguous impls.
-
-### API Execution Records (Complete)
-
-- trait.declare(name, methods, assoc_types?): register trait definition with method signatures and optional associated types.
-- trait.impl(trait_name, type_name, methods): register trait implementation -> method pointers stored in vtable.
-- trait.static_dispatch(val, method_name, args): resolve concrete type at compile time -> generate direct call.
-- trait.dynamic_dispatch(trait_obj, method_name, args): vtable lookup -> indirect call through method pointer.
-- trait.object_box(val, trait_name): box value with trait object descriptor -> heap-allocated dyn Trait.
-- trait.blanket_impl(trait_name, bound, methods): register impl for all T satisfying bound.
-- trait.coherence_check(trait_name, type_name): verify no conflicting impls exist across crate graph.
-- val is TraitName: runtime type check -> determine if val's type implements trait.
-
-### Failure Mode Matrix
-
-- Calling trait method not implemented by concrete type: compile error (static) or runtime "method not found" (dyn).
-- Conflicting blanket implementations: compile error "overlapping implementations".
-- Trait with generic method used as dyn: compile error "not object-safe".
-- Orphan rule violation: compile error "cannot implement foreign trait for foreign type".
-
-## Trait Associated Types
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Trait Associated Types lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Each trait defines named associated types as unresolved placeholders; each implementation must concretely resolve them.
-- Associated type resolution occurs during monomorphization; code generation happens per concrete type.
-- `T::AssocType` syntax allows code to reference the associated type in generic bounds and return types.
-- Default associated types may be provided in the trait; implementations can override or accept the default.
-
-### API Execution Records (Complete)
-
-- assoc.declare(trait_name, type_name, default?): register abstract associated type in trait definition.
-- assoc.resolve(trait_name, impl_type): look up concrete associated type from impl -> substitute in signatures.
-- assoc.project(T, assoc_name): resolve T::AssocName to concrete type via impl -> monomorphize.
-- assoc.bound_check(T, assoc_name, expected_bound): verify resolved associated type satisfies expected bound.
-- assoc.default_fallback(trait_name, assoc_name): if impl omits associated type -> use trait default.
-
-### Failure Mode Matrix
-
-- Using T::AssocType where T has no matching impl: compile error "no associated type found".
-- Mismatched associated type bounds in where clause: compile error if concrete impl violates bound.
-- Multiple impls with different associated type values for same (trait, type): compile error.
-- Ambiguous associated type without qualifying trait: compile error "ambiguous associated type".
-
-## Const Generics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Const Generics lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Each unique const parameter value generates distinct code during compilation; no runtime overhead.
-- Const parameters must be resolvable at compile time (literals, const expressions, comptime results).
-- Monomorphization per const: `func<const N: int>` produces a different compiled version for each unique N.
-- `static_assert` can validate const parameters, failing compilation if the assertion is false.
-
-### API Execution Records (Complete)
-
-- const_generic.declare(struct_name, const_param, type): register struct/func with const type parameter.
-- const_generic.instantiate(name, const_value): specialize code for concrete const value -> generate distinct type/function.
-- const_generic.assert(const_expr, msg): evaluate const_expr at compile time -> fail compilation if false.
-- const_generic.sizeof(type_with_const): compute type size with const parameter substituted -> compile-time constant.
-- const_generic.compatible_check(a, b): verify two const-generic types have same const value -> type error if different.
-
-### Failure Mode Matrix
-
-- Non-compile-time-resolvable const value: compile error "const parameter must be a compile-time constant".
-- Const parameter in trait object (`dyn`): compile error "const parameters cannot be part of dynamic dispatch".
-- Integer overflow in const expression: compile error at instantiation site.
-- Large const value generating massive code: may exceed compilation budget.
-
-## Pipe and Spread
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Pipe and Spread lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Pipe desugaring: `a |> f(_, b)` desugars to `f(a, b)` at compile time; `_` marks the position of the piped value.
-- Left-to-right evaluation: pipe operations chain sequentially; result of each stage becomes input to the next.
-- Spread unpacking (`...list`) in collection literals unpacks elements into parent collection during construction.
-- Rest collection (`...rest`) in destructuring gathers remaining elements into a list.
-
-### API Execution Records (Complete)
-
-- pipe.desugar(left, fn_call, placeholder): replace placeholder with left -> emit rewritten function call.
-- pipe.chain(stages): evaluate left-to-right -> result of each stage becomes input to next.
-- spread.list(target_list, source_lists): unpack each source -> concatenate into target.
-- spread.dict(target_dict, source_dicts): merge each source -> later keys overwrite earlier.
-- spread.call(fn, args_list): unpack args_list as separate positional arguments.
-- rest.pattern(prefix, rest_name, list): bind prefix elements by position -> collect remainder into rest_name.
-
-### Failure Mode Matrix
-
-- Pipe placeholder `_` in wrong position or multiple times: parse error or type error.
-- Spread on non-iterable value: TypeError "cannot spread non-iterable".
-- Multiple rest patterns in one destructuring: compile error "only one rest pattern allowed".
-- Spread in function call with wrong argument count after expansion: TypeError.
-
-## Runtime Introspection
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Runtime Introspection lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Every value carries a runtime type tag; `type(val)` and `typeof(val)` query this tag.
-- Compiler embeds reflection metadata for classes, structs, enums into the binary.
-- `eval()` and `exec()` parse and execute V2 code at runtime; code generation happens on the fly.
-- `isolate_exec()` runs code in a separate interpreter instance with isolated scope.
-
-### API Execution Records (Complete)
-
-- introspect.type(val): query runtime type tag -> return human-readable string.
-- introspect.dir(obj): enumerate attributes and methods -> return list of names.
-- introspect.hasattr(obj, name): check attribute existence -> bool.
-- introspect.getattr(obj, name): retrieve attribute value -> value or error if not found.
-- introspect.setattr(obj, name, val): set attribute value -> obj mutated.
-- introspect.callable(val): check if val is a function/method -> bool.
-- introspect.vars(): get current scope as dict -> dict of all local bindings.
-- eval(code_str): parse expression string -> execute -> return result.
-- exec(code_str): parse statement string -> execute -> no return value.
-- isolate_exec(code_str, opts): execute in sandbox -> return Result<value, error>.
-
-### Failure Mode Matrix
-
-- Reflecting on non-object primitive with getattr: TypeError "primitive has no attributes".
-- eval() with invalid V2 syntax: parse error.
-- Sandbox escape in isolate_exec: prevented by isolation; accessing host globals throws "not in scope".
-- eval() with side effects modifying global state: mutations persist in calling scope.
-
-## Enums
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Enums lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Each enum variant is a distinct runtime tag; `match` on enum uses tag dispatch to select branch.
-- Enum variants may carry associated data; constructor desugars to variant tag + data payload.
-- Exhaustiveness checking at compile time verifies all variants are handled or a default exists.
-- Generic enums are monomorphized per concrete type parameter.
-
-### API Execution Records (Complete)
-
-- enum.declare(name, variants): register enum type with variant tags in type registry.
-- enum.construct(variant_name, data?): create tagged value with optional data payload.
-- enum.match_dispatch(val, arms): read variant tag -> dispatch to matching arm.
-- enum.destructure(variant, pattern): extract data payload from variant -> bind to pattern variables.
-- enum.impl_block(enum_name, methods): register methods that can match on self's variant.
-- enum.generic_instantiate(enum_name, type_params): monomorphize enum for concrete type parameters.
-- enum.exhaustiveness_check(match_arms, all_variants): verify all variants covered -> warn if missing.
-
-### Failure Mode Matrix
-
-- Missing case in match without default: compile warning/error.
-- Accessing variant data without destructuring: TypeError.
-- Incompatible variant name in pattern: compile error.
-- Generic enum with incompatible type parameter: compile error.
-
-## Generics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Generics lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Monomorphization: each unique generic instantiation generates distinct compiled code for each concrete type.
-- Trait bounds constrain type parameters; compiler verifies all trait methods available at compile time.
-- Generic specialization: multiple implementations can coexist; most specific impl selected.
-- Generic type parameters are compile-time only; no runtime type information remains after compilation (type erasure).
-
-### API Execution Records (Complete)
-
-- generic.declare(name, type_params, bounds?): register generic function/struct with type parameters.
-- generic.instantiate(name, concrete_types): monomorphize code for concrete type arguments.
-- generic.bound_check(T, trait_bounds): verify T implements all required traits -> compile error if not.
-- generic.where_clause(constraints): additional constraints on type parameters and associated types.
-- generic.blanket_impl(trait, bound, methods): register impl for all T satisfying bound.
-- generic.specialization_select(candidates, concrete_type): select most specific impl.
-
-### Failure Mode Matrix
-
-- Calling generic method on T without trait bound: compile error "method not found for type T".
-- Infinite generic recursion in impl resolution: compile error.
-- Specialization ambiguity (two impls equally specific): compile error.
-- Generic struct with incompatible type parameter usage: compile error.
-
-## Pattern Matching
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Pattern Matching lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Dispatch table generation: `match` compiles to a jump tree or dispatch table; simple matches become branch instructions.
-- Type narrowing: pattern matching with type patterns narrows the value's type in the matched branch.
-- Guard evaluation: `if` guards in pattern arms evaluated at runtime; if false, proceeds to next arm.
-- Exhaustiveness verification: compiler statically checks that all variant/value paths are covered.
-
-### API Execution Records (Complete)
-
-- match.dispatch(val, arms): evaluate val -> test each arm's pattern in declaration order -> execute first match.
-- match.literal(val, literal): exact equality comparison -> branch if equal.
-- match.binding(val, var_name): capture-all pattern -> bind var_name to val.
-- match.type_check(val, type_name, binding): check val is type_name -> narrow type and bind.
-- match.guard(pattern, guard_expr): test pattern -> if matches, evaluate guard -> proceed only if both pass.
-- match.destructure_list(val, patterns): decompose list and match element patterns.
-- match.destructure_struct(val, field_patterns): extract fields and match against field patterns.
-- match.or_pattern(p1, p2): try p1 -> if no match, try p2 -> proceed if either matches.
-- match.exhaustiveness(arms, type_info): verify all possible values covered -> warn if gaps exist.
-
-### Failure Mode Matrix
-
-- Non-exhaustive match without default: compiler warning (with exhaustiveness checking enabled).
-- Guard expression that throws: exception propagates (guards don't catch errors).
-- Overlapping patterns: compiler warning about unreachable code.
-- Pattern with undefined destructuring variable: compile error.
-
-## Error Handling
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Error Handling lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Exception stack unwinding: `throw` propagates up the call stack; `try`/`catch` intercepts and handles.
-- Result monad: `Result<T, E>` carries either success or error; `?` operator unwraps or early-returns.
-- Option type: `Option<T>` carries presence or absence; `?` operator unwraps or early-returns None.
-- Error conversion: `?` uses `From` trait to convert error types across function boundaries.
-
-### API Execution Records (Complete)
-
-- error.throw(val): unwind call stack -> search for nearest catch -> terminate if uncaught.
-- error.try_catch(body, catch_clauses, finally?): execute body -> on throw, match catch clause by type -> execute finally always.
-- error.result_unwrap(result): if Ok(val) return val; if Err(e) early-return Err(e) from enclosing function.
-- error.option_unwrap(option): if Some(val) return val; if None early-return None from enclosing function.
-- Ok(val): construct Result in success state.
-- Err(e): construct Result in error state.
-- Some(val): construct Option in present state.
-- None: construct Option in absent state.
-- try_wrap(fn): call fn() -> return Ok(result) on success, Err(error) on throw.
-- result.map(fn): transform Ok value -> Ok(fn(val)) or Err passthrough.
-- result.or_else(fn): recover from Err -> fn(err) returns new Result.
-
-### Failure Mode Matrix
-
-- Unhandled exception: program terminates with stack trace.
-- `?` operator in non-Result/non-Option function: compile error.
-- Catch clause with wrong error type: exception continues propagating.
-- Error type conversion via From fails if impl not found: compile error at `?` site.
-
-## `defer` and Exceptions
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - defer stack + exception unwind ordering internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Defer operations are stacked per lexical frame and executed in LIFO order for all exit paths.
-- Exception payloads carry normalized category, message, and trace metadata through unwind propagation.
-- Catch/finally lowering merges cleanup and handler edges while preserving deterministic execution order.
-
-### API Execution Records (Complete)
-
-- defer.push(frame, cleanup): register cleanup closure onto frame-local defer stack.
-- exception.throw(err): package error payload and begin unwind traversal across active frames.
-- exception.catch(pattern, handler): match normalized exception payload and execute selected handler.
-- unwind.runCleanups(frame): execute deferred cleanups/finally blocks during unwind or normal return.
-
-### Failure Mode Matrix
-
-- Throw across no-exception boundary/profile: exception-boundary diagnostic with required effect declaration.
-- Cleanup failure while unwinding: nested-unwind diagnostic with primary and secondary fault chaining.
-- Rethrow outside active catch context: control-flow diagnostic with nearest valid handler span.
-- Exception payload type mismatch with catch pattern: handler-match diagnostic with payload shape details.
-
-## Generators
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - generator state machine internals and generator failure behavior are documented.
-
-### Implemented Internal Records
-
-- Generator lowering transforms yield points into resumable state machine blocks with explicit program counters.
-- Generator frames store locals/captures in heap-backed suspension records for resume continuity.
-- Borrow/lifetime checks extend across suspension points to prevent invalid captured references.
-
-### API Execution Records (Complete)
-
-- gen.create(fn): lower generator body to state machine and allocate initial suspension frame.
-- gen.next(handle): resume at saved state -> run until next yield/return -> emit yielded value/state.
-- gen.send(handle, value): inject value into suspended generator input slot and resume execution.
-- gen.close(handle): terminate generator, execute pending cleanups, and release frame resources.
-
-### Failure Mode Matrix
-
-- Resume/send on completed generator: generator-state diagnostic with terminal state metadata.
-- Borrowed temporary captured across yield illegally: lifetime diagnostic at yield boundary.
-- Panic/fault during generator resume: runtime generator-fault diagnostic with state index context.
-- Close requested while generator actively executing: concurrent-state diagnostic with owner task info.
-
-## Async / Await
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - async future state machines, wake/cancel flow, and async internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Async functions lower to poll-based state machines implementing future contracts.
-- Scheduler wake queues track waker tokens with deduplicated wake semantics.
-- Cancellation is cooperative and inserts cancellation checkpoints at await/yield-safe boundaries.
-
-### API Execution Records (Complete)
-
-- async.spawn(task, opts): register future with scheduler and return task handle.
-- await.poll(future, cx): poll future state machine and return pending/ready outcome.
-- async.join(handles): await completion of multiple futures with deterministic result ordering.
-- async.cancel(handle, mode): request cooperative cancellation and run cleanup continuation path.
-
-### Failure Mode Matrix
-
-- Await on non-future/non-awaitable value: type/effect diagnostic with required awaitable contract.
-- Double wake/race on completed future: scheduler-state diagnostic with task lifecycle details.
-- Cancellation denied in non-cancellable critical region: cancellation-policy diagnostic.
-- Task handle leak or orphaned future in strict mode: async-resource diagnostic with spawn origin.
-
-## Macros
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - macro parsing/expansion/hygiene and macro internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Macro parser builds token-tree IR preserving delimiters, spans, and repetition operators.
-- Expansion pipeline applies deterministic expansion order with hygiene context propagation.
-- Expansion cache keys macro input + environment to support incremental rebuild stability.
-
-### API Execution Records (Complete)
-
-- macro.parse(invocation): parse invocation token tree and validate macro signature/shape.
-- macro.expand(tree, ctx): execute expansion rules -> produce transformed syntax tree output.
-- macro.resolveHygiene(ast, ctx): apply hygiene renaming and scope marks to generated identifiers.
-- macro.emit(ast): hand expanded AST to normal parser/semantic pipeline with span remapping.
-
-### Failure Mode Matrix
-
-- Recursive macro expansion exceeds limit: expansion-depth diagnostic with expansion chain trace.
-- Hygiene collision causing unresolved/generated identifier conflict: hygiene diagnostic with symbol marks.
-- Macro symbol unresolved or inaccessible in scope: macro-resolution diagnostic with import hint.
-- Non-deterministic expansion in strict mode: determinism diagnostic with cache-key mismatch evidence.
-
-## Compile-Time Execution
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - constexpr evaluation pipeline and compile-time execution internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Const-eval engine executes side-effect-restricted IR in a deterministic sandbox with capability gates.
-- Folded results are cached by expression hash + environment fingerprint for incremental rebuild reuse.
-- Dependency edges from constexpr artifacts to source symbols drive invalidation on upstream edits.
-
-### API Execution Records (Complete)
-
-- cte.eval(expr, env): execute constexpr-safe expression graph in compile-time sandbox.
-- cte.foldConstants(ir): replace foldable IR subgraphs with evaluated literal nodes.
-- cte.materialize(value, targetType): cast/normalize constexpr output for downstream lowering.
-- cte.invalidate(changedSymbols): invalidate affected constexpr cache entries for recompilation.
-
-### Failure Mode Matrix
-
-- Non-deterministic/impure operation in constexpr context: compile-time purity diagnostic.
-- Capability-restricted call attempted during constexpr evaluation: capability diagnostic with blocked intrinsic.
-- Compile-time recursion/step limit exceeded: constexpr budget diagnostic with evaluation trace.
-- Runtime-only value required in constexpr path: context diagnostic with required runtime fallback.
-
-## Integer Overflow
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - overflow mode selection, lowering, and integer-overflow internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Arithmetic lowering selects checked/wrapping/saturating semantics from profile and local annotations.
-- Range analysis precomputes provable non-overflow spans to remove redundant runtime checks.
-- Trap-on-overflow mode emits explicit trap edges with source-span-aware diagnostics hooks.
-
-### API Execution Records (Complete)
-
-- overflow.inferRange(expr): infer operand/result ranges for static overflow elimination.
-- overflow.lowerAddSubMul(op, mode): lower arithmetic op with profile-selected overflow semantics.
-- overflow.insertGuards(expr): inject runtime guards where static proof is unavailable.
-- overflow.report(site, lhs, rhs): emit overflow diagnostic payload for trap paths.
-
-### Failure Mode Matrix
-
-- Checked arithmetic overflow at runtime: trap diagnostic with operand values and source span.
-- Narrowing cast overflow without explicit policy: cast-overflow diagnostic with target width details.
-- Conflicting overflow modes between profile and local annotation: mode-coherence diagnostic.
-- Backend missing saturating intrinsic for target: lowering diagnostic with fallback strategy note.
-
-## Tail-Call Optimization (TCO)
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - tail-position analysis, call rewriting, and TCO internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Tail-position analysis annotates eligible call sites after control-flow and cleanup edge normalization.
-- TCO transform rewrites eligible calls to frame-reuse jumps or loop trampolines by backend policy.
-- Debug metadata preserves logical call-chain attribution even when physical frames are reused.
-
-### API Execution Records (Complete)
-
-- tco.markTailSites(cfg): detect syntactic + semantic tail positions in normalized CFG.
-- tco.rewriteCall(site): replace terminal call+return with frame-reuse jump sequence.
-- tco.emitLoopTrampoline(fn): generate trampoline form for self or mutual recursion sets.
-- tco.verifySemantics(before, after): assert return/effect equivalence after optimization pass.
-
-### Failure Mode Matrix
-
-- Candidate call rejected due pending cleanup/defer edge: non-tail diagnostic with blocking edge info.
-- ABI/varargs mismatch preventing frame reuse: tco-eligibility diagnostic with ABI constraints.
-- Debug stack reconstruction failure in strict debug profile: debug-mapping diagnostic.
-- Mutual-recursion set exceeds trampoline limit: optimization-budget diagnostic with SCC details.
-
-## Warnings System
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - warning rule evaluation, filtering, and warning-system internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Warning registry stores rule metadata, default severities, and language-edition applicability.
-- Lint pass pipeline runs rule evaluators over AST/HIR/MIR phases with deduplicated spans.
-- Severity and suppression configuration is resolved by module, scope, and command-line override precedence.
-
-### API Execution Records (Complete)
-
-- warn.registerRule(rule): register warning rule descriptor and phase binding.
-- warn.analyze(unit, phase): execute enabled warning rules and collect findings.
-- warn.applyConfig(findings, cfg): apply allow/warn/deny/suppress filters and effective severities.
-- warn.emitReport(findings, format): output structured warning report for CLI/IDE tooling.
-
-### Failure Mode Matrix
-
-- Unknown warning code in config/suppression: config diagnostic with known code suggestions.
-- Conflicting warning directives at same scope: precedence diagnostic with winning directive.
-- Malformed inline suppression annotation: parser diagnostic with expected suppression grammar.
-- Warning flood guard triggered in constrained mode: diagnostics-budget warning with truncation metadata.
-
-## Source Directives
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - directive parsing/scoping/application and source-directive internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Directives are parsed in pre-AST pass and bound to scoped directive tables with span provenance.
-- Directive evaluator applies frontend/backend toggles without mutating source semantic intent.
-- Conflicting directive sets are resolved via policy precedence and explicit incompatibility checks.
-
-### API Execution Records (Complete)
-
-- directive.parse(tokenStream): parse directive tokens into normalized directive AST nodes.
-- directive.bindScope(node, scope): attach directives to lexical/module scope tables.
-- directive.apply(unit, policy): apply directive effects to parser/lowerer/backend configuration.
-- directive.finalize(unit): emit effective directive manifest for diagnostics/tooling parity.
-
-### Failure Mode Matrix
-
-- Invalid directive syntax or argument shape: directive parse diagnostic with expected grammar.
-- Directive used outside allowed scope: scope diagnostic with permitted directive locations.
-- Incompatible directive combination: coherence diagnostic listing conflicting directives.
-- Directive disabled by active profile/capabilities: policy diagnostic with required profile hint.
-
-## Modules & Imports
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Modules & Imports lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Each module creates a namespace; symbols are addressable via module-qualified names.
-- Import resolution: `import "path"` resolves to a file or directory with `mod.vt`; symbols registered in current namespace.
-- Visibility enforcement: `pub`, `private`, `internal` checked at compile time; violations are compile errors.
-- Circular import detection: compiler errors or applies deduplication logic.
-- Dual calling convention: `import "mod"` (no alias) registers symbols in both the qualified table (`mod.func`) and the unqualified flat table (`func`). `import "mod" as alias` registers only in the qualified table under `alias.func`. `import "mod" as _` registers only in the unqualified flat table. `import { f } from "mod"` registers `f` in both qualified (`mod.f`) and unqualified (`f`).
-- Name collision at import: before inserting into the unqualified table, check for an existing binding. If a collision is detected, the import is rejected with `NameConflictError` unless the colliding name has been `rename`d away first.
-- Ambiguous unqualified calls: if two modules provide the same unqualified name (both imported without alias), the unqualified name is marked ambiguous. Calls to it produce a compile error; qualified calls (`mod.name`) remain valid.
-
-### API Execution Records (Complete)
-
-- module.import(path): resolve path to source file -> parse -> register namespace. Register all exported symbols in both qualified (mod.name) and unqualified (name) binding tables. Reject on name collision.
-- module.selective_import(path, symbols): import only specified symbols from module.
-- module.alias(path, alias): register module namespace under alias name. Symbols only accessible as alias.name (no unqualified binding).
-- module.export(symbol, visibility): mark symbol with visibility level for importing modules.
-- module.circular_check(import_graph): detect cycles -> error or deduplicate.
-- module.on_import(hook_fn): register initialization hook -> executed when module is first imported.
-- module.cimport(header): parse C header -> generate extern declarations and cstruct definitions.
-- module.inline_mod(name, body): create inline submodule namespace within current module.
-- module.check_unqualified_collision(name, scope): before adding to flat table, verify no existing binding → raise NameConflictError.
-
-### Failure Mode Matrix
-
-- Importing non-existent module: compile error "module not found".
-- Circular imports: compile error or infinite loop.
-- Visibility violation (accessing non-pub symbol): compile error.
-- on_import() throwing: module fails to load.
-- Import causes name collision in unqualified scope: NameConflictError with diagnostic showing both the existing definition and the import source.
-- Ambiguous unqualified call (two modules export same name): compile error "ambiguous — exists in both `mod_a` and `mod_b`; use qualified form".
-
-## Module Visibility — `pub(crate)` and `pub(super)`
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Module Visibility — `pub(crate)` and `pub(super)` lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Four visibility levels: `pub` (everywhere), `pub(crate)` (within crate), `pub(super)` (parent module), `internal` (current module + children), `private` (current file).
-- Visibility enforced at compile time during name resolution; violations produce compile errors.
-- `pub(super)` applies only to the direct parent module; grandparent and higher cannot access.
-- Crate boundary is the unit of compilation declared by `vt.toml`.
-
-### API Execution Records (Complete)
-
-- visibility.pub(symbol): accessible everywhere including other crates.
-- visibility.pub_crate(symbol): accessible within same crate only.
-- visibility.pub_super(symbol): accessible in direct parent module only.
-- visibility.internal(symbol): accessible in current module and submodules.
-- visibility.private(symbol): accessible in current file only.
-- visibility.check(symbol, access_site): verify access_site has sufficient visibility -> compile error if not.
-
-### Failure Mode Matrix
-
-- Accessing pub(super) from sibling module: compile error.
-- Accessing pub(crate) from external crate: compile error.
-- pub(super) in module with no parent: compile error.
-- Mismatched visibility in impl blocks: verification error.
-
-## Embedded Language Engines
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Embedded Language Engines lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Embedded `@py { }` blocks: body extracted and sent to the Python interpreter via stdin/stdout protocol.
-- Cross-language FFI: `@export` and `@import` directives establish name bindings between V2 and embedded language scopes.
-- Block caching: compiled embedded code cached using hash of source; re-run reuses cache.
-- Variable interop: V2 values serialized to embedded language format; results deserialized back to V2.
-
-### API Execution Records (Complete)
-
-- engine.py_exec(code): send Python code to interpreter -> execute in Python context -> return exported symbols.
-- engine.js_exec(code): send JavaScript code to Node.js -> execute -> return exports.
-- engine.export(block, symbols): extract named symbols from embedded block -> register in V2 namespace.
-- engine.export_wildcard(block): export all callable symbols from embedded block.
-- engine.import(symbol, source_block): import symbol from named block or all blocks of engine type.
-- engine.import_from_module(symbol, py_module): import from Python module via Python import system.
-- engine.interop_serialize(v2_value): convert V2 value to JSON/MsgPack -> pass to engine.
-- engine.interop_deserialize(engine_value): convert engine result back to V2 value.
-- register_engine(path, name): register custom engine executable for @name blocks.
-
-### Failure Mode Matrix
-
-- Engine executable not found: runtime error "engine not found".
-- Embedded code syntax error: error reported from target language interpreter.
-- Exporting non-callable symbol: error when V2 tries to call it.
-- Circular import between embedded blocks and V2 code: infinite loop potential.
-
-## Custom Language Engines
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Custom Language Engines lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Engine registration: `register_engine(path, name)` registers an executable for `@name { }` blocks.
-- I/O protocol: engine receives source on stdin; writes results to stdout; V2 parses stdout.
-- Name uniqueness: engine name must not conflict with builtin engines.
-- Per-program scope: registration is per-program instance; not persisted globally.
-
-### API Execution Records (Complete)
-
-- custom_engine.register(path, name): validate executable exists -> register for @name blocks.
-- custom_engine.exec(name, code): serialize code -> send to engine stdin -> read result from stdout -> deserialize.
-- custom_engine.named_block(name, block_name, code): execute named block -> available for import directives.
-- custom_engine.export(block, symbols): extract symbols from engine output -> register in V2 namespace.
-- custom_engine.import(symbol, engine_name): import from custom engine blocks -> symbol callable in V2.
-- custom_engine.re_register(name, new_path): replace existing engine registration -> last registration wins.
-
-### Failure Mode Matrix
-
-- Engine executable not found or not executable: permission error.
-- Engine crashes or returns invalid output: parsing error in V2.
-- Name collision with builtin engine: registration error.
-- Importing from unregistered engine: "engine not found" error.
-
-## Inline Assembly
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Inline Assembly lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Inline asm parsing: `asm! { }` blocks contain target-specific assembly instructions passed directly to the assembler.
-- Variable binding: `%varname` syntax binds V2 local variables as operands to assembly instructions.
-- Architecture-specific: asm syntax varies by target; `@cfg` can conditionally provide alternate implementations.
-- Must be inside `unsafe` block — asm bypasses all safety checks.
-
-### API Execution Records (Complete)
-
-- asm.parse(instructions): extract raw assembly text -> pass to target assembler.
-- asm.bind_operand(var_name, register): bind V2 variable as input/output operand.
-- asm.execute(instructions): assemble and execute inline asm -> result in designated output register.
-- asm.clobber(registers): declare registers modified by asm -> compiler saves/restores caller-save regs.
-- asm.cfg_select(arch, variants): select architecture-specific asm implementation via @cfg.
-
-### Failure Mode Matrix
-
-- Invalid asm syntax for target architecture: assembler error.
-- Using asm outside unsafe block: compile error.
-- Using asm on non-native target (wasm): compile error.
-- Clobbering registers without proper declaration: undefined behavior.
-
-## Actors & Agents
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Actors & Agents lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Actor mailbox: each actor has an incoming message queue; messages processed one at a time (serialized execution).
-- Actor lifecycle: runs until explicitly stopped or killed; supervision trees handle failures.
-- Agent planning: agent repeatedly calls `plan()` method until `agent_done(self)` signals goal achievement.
-- Message passing is async; `actor_call` implements synchronous request/reply pattern.
-
-### API Execution Records (Complete)
-
-- actor.spawn(name, opts): create new actor instance -> return actor handle.
-- actor.send(handle, msg): enqueue message to actor mailbox -> non-blocking.
-- actor.receive(handle): dequeue from actor outbox -> blocks if empty.
-- actor.call(handle, msg): send message and block for reply -> request/reply pattern.
-- actor.stop(handle): gracefully stop after current message -> no new messages accepted.
-- actor.kill(handle): immediately terminate actor -> no cleanup.
-- actor.is_alive(handle): check if actor running -> bool.
-- agent.create(name, init_state): create agent instance -> return handle.
-- agent.set_goal(handle, key, val): set goal parameter -> merged into goal context.
-- agent.run(handle): execute plan loop until agent_done called -> blocks.
-- agent.done(self): signal goal achievement from within plan() -> exit run loop.
-
-### Failure Mode Matrix
-
-- Sending to dead actor: runtime error "actor dead".
-- Unhandled exception in actor: terminates actor; subsequent sends fail.
-- Circular message passing: potential deadlock.
-- Agent plan loop never calling agent_done: infinite loop.
-
-## Isolates
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Isolates lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Each isolate is an independent V2 interpreter instance with its own value stack and type registry.
-- Scope isolation: isolate has no access to host globals; only values explicitly passed via `globals` option are accessible.
-- Memory isolation: values passed across isolate boundary require serialization/deserialization.
-- Named isolates persist scope across multiple `isolate_run()` calls.
-
-### API Execution Records (Complete)
-
-- isolate.block(code): run code in one-shot sandbox -> no access to host globals.
-- isolate.named(handle, code): run code in named isolate -> scope persists.
-- isolate.new(): create named isolate -> return handle.
-- isolate.get(handle, var_name): read variable from isolate scope -> value returned.
-- isolate.set(handle, var_name, val): write variable into isolate scope.
-- isolate.exec(code_str, opts): run source string in sandbox -> Result<value, error>.
-- isolate.run(handle, code_str, opts): run source in named isolate -> Result<value, error>.
-- isolate.drop(handle): destroy isolate and free resources.
-
-### Failure Mode Matrix
-
-- Accessing host globals inside isolate: "not in scope" error.
-- Unhandled exception in isolate: isolate_exec returns Err with error message.
-- Sandbox timeout exceeded: isolate_exec returns Err("timeout").
-- Non-serializable value in globals option: serialization error.
-
-## Memory Safety and Borrowing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Memory Safety and Borrowing lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Optional borrow checker: compile-time analysis enforcing Rust-like ownership rules when `@borrow_check` is enabled.
-- Immutable borrow (`&x`): multiple readers allowed simultaneously; prevents mutations while borrowed.
-- Mutable borrow (`&mut x`): exclusive access; no other borrows allowed while mutable borrow is active.
-- Ownership transfer (`move x`): original binding becomes invalid after move; prevents use-after-move.
-
-### API Execution Records (Complete)
-
-- borrow.immutable(val): create immutable reference -> multiple concurrent borrows allowed.
-- borrow.mutable(val): create exclusive mutable reference -> no other borrows allowed.
-- borrow.deref(ref): access value through reference -> read or write depending on mutability.
-- move.transfer(val): transfer ownership -> original binding invalidated.
-- freeze(val): make value permanently immutable -> no further mutations allowed.
-- is_frozen(val): check if value is frozen -> bool.
-- unsafe.mem_write(ptr, offset, val): bypass safety checks -> raw memory write.
-- borrow_check.enable(scope): opt-in borrow checking for decorated function or file.
-- volatile.bind(name, val): disable compiler optimizations for access -> every read/write goes to memory.
-
-### Failure Mode Matrix
-
-- Multiple mutable borrows: compile error in borrow-checked code.
-- Use after move: compile error in borrow-checked code.
-- Dangling pointer: undefined behavior in unsafe code.
-- Data race in multi-threaded non-atomic mutable access: undefined behavior.
-
-## Manual Allocation
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Manual Allocation lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Unmanaged heap: `mem_alloc` allocates outside V2's GC; programmer responsible for freeing.
-- Pointer type is opaque memory address; no type information attached at runtime.
-- Size queries (`mem_size_of`) resolve at compile time or runtime depending on type information.
-- All manual memory operations require `unsafe` block.
-
-### API Execution Records (Complete)
-
-- mem_alloc(size): allocate size bytes uninitialized -> return pointer.
-- mem_alloc_zeroed(size): allocate and zero-initialize -> return pointer.
-- mem_realloc(ptr, new_size): resize allocation -> return new pointer (old pointer invalid).
-- mem_free(ptr): deallocate memory -> ptr invalid after call.
-- mem_write(ptr, offset, byte_val): write byte at ptr+offset.
-- mem_read(ptr, offset): read byte at ptr+offset -> byte value.
-- mem_copy(dst, src, size): copy size bytes from src to dst.
-- mem_set(ptr, byte_val, size): fill size bytes with byte_val.
-- mem_size_of(type_name): get byte size of type -> integer.
-
-### Failure Mode Matrix
-
-- Double-free: undefined behavior in unchecked mode.
-- Buffer overflow (write beyond allocation): undefined behavior.
-- Use-after-free/realloc: dangling pointer (undefined behavior).
-- Memory leak if mem_free not called.
-
-## Vectors & Tensors
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Vectors & Tensors lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- SIMD acceleration: vector operations compile to target SIMD instructions when available (SSE, AVX, NEON).
-- Dense storage: vectors and tensors store floats contiguously; tensors use row-major layout.
-- Broadcasting: scalar-to-vector operations implicitly broadcast scalar across all elements.
-- Lazy fusion: some combinators (norm, mean) can be fused during compilation for performance.
-
-### API Execution Records (Complete)
-
-- vec_new(size): create zero-filled float vector of given size.
-- vec_from(list): create vector from list of floats.
-- vec_add(a, b): element-wise addition -> new vector.
-- vec_dot(a, b): dot product -> scalar float.
-- vec_norm(v): Euclidean norm -> scalar float.
-- vec_scale(v, scalar): multiply all elements by scalar -> new vector.
-- tensor_new(shape): create zero-filled tensor with given shape.
-- tensor_matmul(a, b): matrix multiplication for 2D tensors -> new tensor.
-- tensor_reshape(t, shape): reshape tensor -> view with new shape.
-- tensor_softmax(t): apply softmax along last axis -> new tensor.
-
-### Failure Mode Matrix
-
-- Vector dimension mismatch in binary operations: "incompatible dimensions" error.
-- Tensor reshape with incompatible element count: reshape error.
-- Division by zero in normalization: NaN or Inf result.
-- Out-of-bounds tensor indexing: IndexError.
-
-## Compiler Diagnostics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Diagnostic pipeline, span mapping, error codes, suggestion engine, and output formats documented.
-
-### Implemented Internal Records
-
-- Each diagnostic is a struct: `Diagnostic { level, code, message, spans: [Span], help: [str], notes: [str] }`.
-- Spans carry file path, byte offsets, line/column, and an optional label string for the caret underline.
-- Error codes use a stable numbering scheme: E0001–E0099 syntax, E0100–E0199 name resolution, E0200–E0299 type system, E0300–E0399 pattern matching, E0400–E0499 type checking, E0500–E0599 borrow checker, E0600–E0699 field/method resolution, E0700–E0799 lifetime/ownership. Warnings: W0001–W0099 unused, W0100–W0199 shadowing/style, W0200–W0299 logic errors.
-- Suggestion engine: Levenshtein distance (threshold ≤ 3) for identifier typo suggestions; scope-aware enumeration for "available fields/methods" hints.
-- Output renderers: human (ANSI-colored terminal), JSON (structured per-diagnostic), SARIF (for CI/CD integration).
-- `--explain CODE` reads from a compiled explanation database embedded in the compiler binary.
-
-### API Execution Records (Complete)
-
-- diag.emit(level, code, message, spans, help?, notes?): construct diagnostic and send to active renderer.
-- diag.suggest_typo(name, candidates, threshold): compute Levenshtein matches → attach "did you mean?" help line.
-- diag.render_human(diag): format diagnostic with ANSI colors, source-line display, and caret underlines.
-- diag.render_json(diag): serialize diagnostic to structured JSON with byte offsets.
-- diag.render_sarif(diags): batch-serialize diagnostics to SARIF 2.1.0 format.
-- diag.explain(code): look up detailed explanation text for an error code.
-- diag.set_max_errors(n): configure error limit; emit "aborting due to N previous errors" when reached.
-- diag.set_color(mode): configure color output ("auto" | "always" | "never").
-
-### Failure Mode Matrix
-
-- Unknown error code in `--explain`: "unknown error code" message with suggestion of nearest valid code.
-- Span with invalid byte offsets: internal compiler error with context dump.
-- Max errors reached: remaining errors suppressed with summary count.
-- Renderer mismatch (e.g., SARIF requested but not supported in this build): fallback to JSON with warning.
-
-## Structured Concurrency
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - TaskGroup lifecycle, cancellation propagation, error strategies, and failure matrix documented.
-
-### Implemented Internal Records
-
-- `TaskGroup` is a runtime object that holds a list of child task handles, a cancellation token, and an error strategy.
-- Cancellation propagates recursively: cancelling a group cancels all children; nested groups form a tree.
-- Tasks check for cancellation at each `await` point; a cancelled task receives `CancelledError` which triggers normal stack unwinding (defer blocks run).
-- `task_scope` desugars to: create group → execute block → join_all → propagate errors.
-- Error strategies: `"cancel"` (default: first error cancels siblings), `"collect"` (await all, return Ok/Err per child), `"ignore"` (swallow errors, return successes only).
-
-### API Execution Records (Complete)
-
-- task_group(on_error?): create TaskGroup with optional error strategy → returns group handle.
-- task_scope(async_fn): create scoped group → execute fn(scope) → auto-join on block exit.
-- group.spawn(task): register child task → schedule on event loop → return task handle.
-- group.join_all(): await all children → return results list (or propagate first error under "cancel" strategy).
-- group.cancel(): send cancellation signal to all active children → await their unwinding.
-- group.with_timeout(ms): attach deadline → auto-cancel children if exceeded.
-- group.count(): return number of currently active (non-completed) children.
-
-### Failure Mode Matrix
-
-- Spawning on a group after join_all has started: runtime error "cannot spawn into a joining group".
-- Timeout exceeded: all children automatically cancelled; `TimeoutError` propagated.
-- All children fail under "cancel" strategy: first error propagated, others suppressed.
-- Task panics inside group: panic propagated after attempting to cancel siblings.
-
-## Data Classes (`@data`)
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Auto-generated method synthesis, exclusion, destructuring, and failure matrix documented.
-
-### Implemented Internal Records
-
-- `@data` is a compile-time decorator that scans the constructor for `self.field = ...` assignments and synthesizes methods.
-- Generated methods: `equals(other)` (field-by-field structural equality), `hash()` (combined hash of all fields), `to_str()` (formatted as `ClassName(field: value, ...)`), `clone()` (shallow copy), `copy(**overrides)` (clone with field substitutions).
-- `@data` implies `@fixed` — the field set is locked at definition.
-- `exclude` parameter: `@data(exclude: ["field1"])` omits specified fields from equals/hash/to_str.
-- Destructuring support: data classes generate positional destructuring bindings based on constructor parameter order.
-
-### API Execution Records (Complete)
-
-- data.synthesize(class_def): inspect constructor → generate equals/hash/to_str/clone/copy methods.
-- data.equals(a, b): field-by-field comparison using each field's own `==` operator → bool.
-- data.hash(obj): combine field hashes using a deterministic mixing function → int.
-- data.to_str(obj): format as `ClassName(field1: val1, field2: val2, ...)` → str.
-- data.clone(obj): create new instance with same field values → new object.
-- data.copy(obj, overrides): clone → apply overrides dict → new object.
-- data.destructure(obj): yield field values in constructor parameter order → tuple.
-
-### Failure Mode Matrix
-
-- `@data` on a class with no constructor: compile error "data class requires a constructor".
-- `copy()` with unknown field name in overrides: runtime error "no such field".
-- `exclude` referencing non-existent field: compile warning "excluded field does not exist".
-- Structural equality on fields that don't implement `==`: compile error "field type does not support equality".
-
-## Sealed Classes
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Subclass registration, exhaustiveness checking, and failure matrix documented.
-
-### Implemented Internal Records
-
-- `sealed` keyword on a class registers all direct subclasses in the same file as the closed set.
-- The compiler builds a variant table at the end of file parsing; any `extends` of a sealed class from another file is a compile error.
-- Exhaustiveness checking in `match`: the compiler enumerates the sealed variant set and verifies all cases are covered (same algorithm as enum exhaustiveness).
-- `sealed` classes cannot be instantiated directly; only their subclasses can be constructed.
-
-### API Execution Records (Complete)
-
-- sealed.register(parent, subclass): add subclass to parent's sealed variant table.
-- sealed.close(parent): finalize variant table at end of file → no further subclasses allowed.
-- sealed.check_exhaustiveness(match_expr, sealed_type): enumerate variants → verify all covered or default present.
-- sealed.is_sealed(type): query whether a type is a sealed class → bool.
-- sealed.variants(type): return list of all registered subclass types.
-
-### Failure Mode Matrix
-
-- Extending sealed class from different file: compile error "cannot extend sealed class outside its defining file".
-- Non-exhaustive match on sealed class: compile error with missing variant names.
-- Instantiating sealed class directly: compile error "sealed class cannot be instantiated directly".
-- Sealed class with no subclasses: compile warning "sealed class has no variants".
-
-## Copy-on-Write Classes (`@cow`)
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - COW refcount, mutation-triggered copy, and failure matrix documented.
-
-### Implemented Internal Records
-
-- `@cow` wraps the class's internal storage in a reference-counted container.
-- Assignment (`let b = a`) increments the refcount on the shared storage — no data copy.
-- Any mutation (write to `self.field` or method call that writes to `self`) checks the refcount; if > 1, a deep copy of the storage is made first, then the mutation proceeds on the private copy.
-- If refcount == 1, mutations proceed in-place (no copy needed — uniquely owned).
-- Deep copy uses the field types' clone semantics; fields that are themselves `@cow` share their inner storage until individually mutated.
-
-### API Execution Records (Complete)
-
-- cow.wrap(class_def): instrument class storage with refcount wrapper.
-- cow.assign(src, dst): increment refcount on shared storage → dst aliases src's data.
-- cow.mutate_check(obj): inspect refcount → if > 1, trigger deep copy → decrement old refcount.
-- cow.deep_copy(storage): clone all fields → allocate new storage → return.
-- cow.refcount(obj): return current reference count (for diagnostics/debugging).
-
-### Failure Mode Matrix
-
-- Deep copy of field that doesn't implement Clone: compile error "cow class requires all fields to be cloneable".
-- Refcount overflow (theoretical, >2^63 references): runtime panic.
-- `@cow` on class with `unsafe` raw pointer fields: compile error "cow is incompatible with raw pointer fields".
-
-## Trait Composition & Supertraits
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Supertrait resolution, diamond dedup, embedding, and failure matrix documented.
-
-### Implemented Internal Records
-
-- Supertraits declared with `trait A: B + C` syntax; the compiler records B and C as required supertraits of A.
-- When checking `impl A for T`, the compiler verifies `impl B for T` and `impl C for T` exist (transitively).
-- Diamond case: if B and C both require D, and T implements D once, no duplication occurs — supertrait graph is a DAG, not a tree.
-- Trait embedding (`trait Entity: Display + Hash + Eq + Clone {}`) creates an alias trait with no additional methods — bounds on Entity expand to the conjunction.
-- Default methods in a trait can reference methods from supertraits without qualification.
-
-### API Execution Records (Complete)
-
-- supertrait.declare(trait_name, supertrait_names): record supertrait edges in trait metadata.
-- supertrait.check(trait_name, type_name): transitively verify all supertrait impls exist for type.
-- supertrait.expand_bounds(trait_name): flatten supertrait DAG to a set of required traits.
-- supertrait.diamond_dedup(trait_dag): ensure shared supertraits are counted once in implementation checks.
-- supertrait.default_method_resolve(trait, method): check method resolution order through supertrait chain.
-
-### Failure Mode Matrix
-
-- Missing supertrait impl: compile error "type implements `A` but does not implement required supertrait `B`".
-- Cyclic supertrait declaration (`trait A: B`, `trait B: A`): compile error "cyclic supertrait dependency".
-- Conflicting default methods from diamond supertraits: compile error "ambiguous method — override required".
-
-## Move Semantics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Ownership transfer, implicit-move-on-last-use, closure capture, and failure matrix documented.
-
-### Implemented Internal Records
-
-- `move x` transfers ownership: the source binding is marked invalid in the compiler's liveness analysis.
-- Under `@borrow_check`: use-after-move is a compile-time error with diagnostic pointing to the move site and the attempted use site.
-- Under GC mode: moved bindings are tagged at runtime; access raises `MovedValueError`.
-- Implicit move on last use: the compiler detects when a binding's last use is a consumption site and avoids inserting a copy.
-- `move` in closures: `move lambda() { ... }` captures all referenced outer bindings by move.
-- `move` in match arms: `case Ok(move value)` transfers ownership of the matched inner value.
-
-### API Execution Records (Complete)
-
-- move.transfer(src_binding, dst_binding): invalidate src → transfer value to dst.
-- move.check_use_after_move(binding, use_site): verify binding is still valid at use site.
-- move.implicit_last_use(binding, use_site): detect last use → elide copy → convert to implicit move.
-- move.closure_capture(lambda, bindings): capture listed bindings by move → invalidate outer bindings.
-- move.match_arm(pattern, binding): transfer ownership of matched inner value to arm binding.
-- move.gc_runtime_check(binding): check GC-mode moved tag → raise MovedValueError if invalid.
-
-### Failure Mode Matrix
-
-- Use of moved value under @borrow_check: compile error with move site and use site spans.
-- Use of moved value under GC mode: runtime MovedValueError.
-- Moving a value that is currently borrowed: compile error "cannot move out of borrowed value".
-- Moving a value inside a loop without re-initialization: compile error on second iteration.
-
-## Hardware Fault Signals
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: **Milestone 1 implemented** — `signal.on_fault` registration, POSIX `sigaction`/Windows VEH handler installation, `FaultInfo` capture, and `signal.dump_json` are in the runtime. Recovery (`set_recovery_point`/`recover`), native core dumps (`dump_core`), backtrace symbolication, and register snapshots are **planned** per `FAULT_HANDLING_DESIGN.md`.
-
-### Implemented Internal Records (Milestone 1)
-
-- `signal.on_fault` installs a platform-specific signal handler (POSIX `sigaction` with SA_SIGINFO, Windows structured exception handler).
-- The handler receives a `FaultInfo` object populated from the OS signal context (siginfo_t on POSIX, EXCEPTION_RECORD on Windows).
-- Backtrace symbolication uses the same symbol table as the debugger; demangling is applied to V2, C, and Rust symbols.
-- `signal.set_recovery_point` uses `sigsetjmp`/`siglongjmp` (POSIX) or `__try`/`__except` (Windows) for recovery.
-- Recovery is inherently unsafe: stack frames between the fault and the recovery point are abandoned without running destructors or defer blocks.
-- Crash dump: `signal.dump_core` calls platform APIs (POSIX `abort()` after enabling core dumps, Windows `MiniDumpWriteDump`). `signal.dump_json` serializes FaultInfo + loaded module list + OS info.
-
-### API Execution Records (Complete)
-
-- signal.on_fault(name, handler): validate signal name is in {SIGSEGV, SIGBUS, SIGFPE, SIGABRT} → install OS handler → requires unsafe context.
-- signal.set_recovery_point(): call sigsetjmp → return RecoveryPoint { recovered: false } → on fault, siglongjmp back with recovered: true.
-- signal.recover(): inside fault handler, jump to most recent recovery point → abandon intermediate frames.
-- signal.dump_core(path): trigger platform core dump → write to specified path.
-- signal.dump_json(path): serialize FaultInfo + modules + OS info → write JSON to path.
-- FaultInfo.construct(os_context): extract signal, address, pc, thread_id, registers, backtrace, is_stack_overflow from OS context.
-
-### Failure Mode Matrix
-
-- `signal.on_fault` outside unsafe block: compile error "hardware fault handlers require unsafe context".
-- `signal.on_fault` with non-hardware signal name: runtime error "only hardware fault signals supported".
-- `signal.recover` called outside a fault handler: runtime panic "no active fault to recover from".
-- Recovery point invalidated by stack unwinding: undefined behavior (documented as unsafe).
-- Crash dump path not writable: fault handler continues but dump_core/dump_json returns error.
-
-## Channels and Threads
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Channels and Threads lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Buffered channels maintain a FIFO queue; unbuffered channels force synchronous handoff.
-- Thread spawning via `thread_spawn(func)` creates OS thread; result obtained via `thread_join()`.
-- Mutex locking: `mutex_with(m, f)` acquires lock, runs f, releases lock atomically.
-- Thread pool: `threadpool_submit(pool, fn)` enqueues fn to worker pool; load balanced across workers.
-
-### API Execution Records (Complete)
-
-- chan_create(buffer_size): create channel with optional buffer -> channel handle.
-- chan_send(ch, msg): send message -> blocks if buffer full.
-- chan_recv(ch): receive message -> blocks if empty.
-- chan_close(ch): close channel -> no new sends.
-- thread_spawn(fn): spawn OS thread -> return thread handle.
-- thread_join(handle): wait for thread completion -> return result.
-- mutex_create(): create mutex -> handle.
-- mutex_lock(m): acquire exclusive lock -> blocks if held.
-- mutex_unlock(m): release lock.
-- mutex_with(m, fn): acquire lock -> run fn -> release lock (RAII pattern).
-- threadpool_create(n): create pool with n workers -> handle.
-- threadpool_submit(pool, fn): enqueue task -> load balanced.
-- atomic_new(val): create atomic variable -> handle.
-- atomic_add(atom, delta): atomically add -> return old value.
-- atomic_cas(atom, old, new): compare-and-swap -> bool success.
-
-### Failure Mode Matrix
-
-- Deadlock from mutexes acquired in opposite order.
-- Race condition on non-atomic shared mutable state.
-- Channel send after close: panic.
-- Thread panic silently terminates thread; join returns error.
-
-## Testing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Testing lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Test discovery: compiler scans source for `test` blocks; `vt test` runs all discovered tests.
-- Each test runs in isolation with its own scope; failure halts the test but not others.
-- Benchmark warmup: bench blocks run warmup phase before measurement to prime caches.
-- Coverage instrumentation: `--coverage` instruments all lines and branches; report generated after run.
-
-### API Execution Records (Complete)
-
-- test.register(name, body): register test block -> discovered by vt test.
-- test.expect_eq(actual, expected): assert equality -> test fails if not equal.
-- test.expect_true(val) / test.expect_false(val): assert truthiness.
-- test.expect_ok(result) / test.expect_err(result): assert Result state.
-- test.expect_some(val) / test.expect_none(val): assert Option state.
-- test.expect_throws(fn): assert fn() throws -> test fails if no throw.
-- bench.register(name, opts, body): register benchmark -> executed by vt bench.
-- bench.measure(body, iters, warmup): run warmup -> measure iters -> compute stats.
-- test.tag(name, tags): associate tags with test -> filterable with --tag.
-- test.snapshot(name, val): compare against saved baseline -> save on first run.
-- test.property(name, gen_or_fn, opts): generate random inputs -> verify property holds -> shrink on failure.
-- test.coverage_report(): after --coverage run -> return per-file line/branch coverage.
-- patch(target, replacement): swap function body -> defer restore for test cleanup.
-
-### Failure Mode Matrix
-
-- Test assertion failure: AssertionError halts test.
-- Unhandled exception in test body: test failure.
-- Benchmark timeout exceeded: marked as timed-out.
-- Modifying global state in test: side effects for other tests.
-- Property test failure: shrunk counterexample reported.
-
-## Builtins Reference
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Builtins Reference lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Builtin functions resolved at compile time with specialized bytecode generation.
-- Type coercion in builtins: arguments trigger conversion logic (e.g., `int()` parses strings).
-- Short-circuit evaluation for logical operators.
-- Math functions delegate to host C math library for native performance.
-
-### API Execution Records (Complete)
-
-- print(...values): print values space-separated with newline -> stdout.
-- type(val): get type name string.
-- len(val): get length of string, list, dict, set, or tuple.
-- int(val, base?): convert to int with optional base -> ParseError on failure.
-- float(val): convert to float -> ParseError on failure.
-- str(val): convert to string representation.
-- bool(val): convert to boolean using truthiness rules.
-- range(start?, end, step?): create lazy range iterator.
-- sort(list): sort list in-place (TimSort) -> return list.
-- sum(list) / max(list) / min(list): reduce list -> numeric result.
-- sqrt(x) / pow(base, exp) / abs(x): math functions -> numeric result.
-- json_parse(str): parse JSON string -> V2 value.
-- json_stringify(val): serialize V2 value to JSON string.
-- clone(val): deep copy value -> independent copy.
-- hash(val): compute hash of hashable value -> int.
-- input(prompt?): read line from stdin -> string.
-
-### Failure Mode Matrix
-
-- int("not a number"): ParseError.
-- Division by zero in math operations: error or Inf/NaN.
-- len() on non-collection type: TypeError.
-- Invalid JSON in json_parse: ParseError.
-- hash() on unhashable type: TypeError.
-
-## Method Reference
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Method Reference lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Method dispatch resolves receiver type at compile time; runtime uses vtable if polymorphic.
-- Method chaining: methods returning self or another object enable fluent interfaces.
-- Built-in methods on collections are optimized; slice operations create views or copies.
-
-### API Execution Records (Complete)
-
-- method.dispatch(receiver, name, args): resolve method from type -> call with self binding.
-- method.chain(receiver, calls): evaluate each call in sequence -> thread result through.
-- list.sort_by(fn): sort by key function -> return sorted list.
-- list.flat_map(fn): map then flatten one level -> new list.
-- list.enumerate(): return list of (index, element) tuples.
-- list.zip(other): pair elements -> list of tuples.
-- list.chunks(n): split into groups -> list of lists.
-- list.unique(): remove duplicates preserving order.
-- str.pad_start(n, ch?) / str.pad_end(n, ch?): pad string to width.
-- str.indexOf(needle) / str.lastIndexOf(needle): find substring position.
-
-### Failure Mode Matrix
-
-- Method on wrong type: TypeError.
-- Mutating method on immutable value: error.
-- Method chain returning null: error on subsequent call.
-- Slice out of bounds: IndexError.
-
-## Operator Overloading
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Operator Overloading lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Each overloadable operator maps to a special method (`__add__`, `__lt__`, etc.) in the class vtable.
-- Overloaded operators maintain V2 precedence rules; no custom precedence allowed.
-- Compiler rewrites `a + b` to `a.__add__(b)` when operator overloading is present.
-- Unary operators (`!`, `-`) map to `__not__()` and `__neg__()`.
-
-### API Execution Records (Complete)
-
-- overload.**add**(self, other): implements + operator.
-- overload.**sub**(self, other): implements - operator.
-- overload.**mul**(self, other): implements \* operator.
-- overload.**div**(self, other): implements / operator.
-- overload.**eq**(self, other): implements == operator.
-- overload.**lt**(self, other): implements < operator.
-- overload.**getitem**(self, key): implements obj[key] access.
-- overload.**setitem**(self, key, val): implements obj[key] = val assignment.
-- overload.**len**(self): implements len(obj).
-- overload.**str**(self): implements str(obj).
-- overload.**contains**(self, item): implements `item in obj`.
-- overload.**iter**(self): implements `for item in obj` -> return Iterator.
-
-### Failure Mode Matrix
-
-- Operator on object without corresponding overload method: TypeError "operator not supported".
-- Operator method returning wrong type: type error downstream.
-- Infinite recursion in **add** calling +: stack overflow.
-- Type mismatch between operand types: coercion error.
-
-## Keywords
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Keywords lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- All V2 keywords are reserved; they cannot be used as variable or function names.
-- Keywords are recognized during tokenization; no runtime keyword lookup.
-- Some keywords (like `using`) have context-dependent meaning based on parsing context.
-
-### API Execution Records (Complete)
-
-- keyword.let: declare mutable variable binding.
-- keyword.const: declare immutable constant.
-- keyword.func / keyword.class / keyword.struct / keyword.enum / keyword.trait: type declarations.
-- keyword.impl: implement trait on type.
-- keyword.return / keyword.throw / keyword.yield: control flow exit points.
-- keyword.try / keyword.catch / keyword.finally: exception handling.
-- keyword.match / keyword.case / keyword.default: pattern matching.
-- keyword.if / keyword.elif / keyword.else: conditionals.
-- keyword.while / keyword.for: loops.
-- keyword.break / keyword.continue: loop control.
-- keyword.async / keyword.await: async control flow.
-- keyword.pub / keyword.private / keyword.internal: visibility modifiers.
-- keyword.import / keyword.from / keyword.as: module system.
-- keyword.unsafe: unsafe block entry.
-- keyword.defer: cleanup registration.
-- keyword.lazy: lazy expression creation.
-
-### Failure Mode Matrix
-
-- Using keyword as identifier: compile error "reserved keyword".
-- Missing required keyword in declaration: parse error.
-- Keyword in wrong context: parse error with context-specific message.
-
-## Importing Standard Libraries
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Importing Standard Libraries lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Stdlib modules ship with V2 toolchain; version pinned by V2 version.
-- Lazy module loading: stdlib modules loaded on first `import`; unused modules don't load.
-- Module symbol registration: importing registers all exported symbols in current namespace.
-- Namespace collision: importing two modules with conflicting names requires `as` aliasing.
-
-### API Execution Records (Complete)
-
-- stdlib.import(module_name): load stdlib module -> register namespace.
-- stdlib.selective_import(module, symbols): import only specified symbols.
-- stdlib.alias(module, alias_name): register module under alias.
-- stdlib.wildcard_import(module): import all exports directly into current namespace.
-- stdlib.availability_check(module): verify module exists for current platform -> compile error if not.
-
-### Failure Mode Matrix
-
-- Importing non-existent stdlib module: compile error.
-- Symbol collision from two stdlib imports: compile error.
-- Stdlib module with missing native dependency: "module not available" error.
-
-## Stdlib Module Catalog
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Stdlib Module Catalog lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Stdlib modules grouped by domain (fs, net, db, crypto, etc.).
-- Most modules can be used independently; some have internal dependencies.
-- Each module has dedicated API documentation accessible via `vt doc`.
-- Capability profiles combine modules into typical application stacks.
-
-### API Execution Records (Complete)
-
-- catalog.list(): enumerate all available stdlib modules with descriptions.
-- catalog.resolve(module_name): locate module source and metadata in stdlib tree.
-- catalog.doc_generate(module_name): extract doc comments -> produce API reference.
-- catalog.profile(name): load predefined set of modules for a use case (Core Service, Data+AI, etc.).
-- catalog.version(module_name): return stdlib module version (pinned to V2 release).
-
-### Failure Mode Matrix
-
-- Referencing non-existent stdlib module in catalog: compile error.
-- Stdlib module API misuse: runtime error with specific API context.
-- Missing native dependency for platform-specific module: "not available on this platform" error.
-
-## std.fs — Filesystem
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.fs path/handle internals and filesystem-operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Filesystem layer normalizes path semantics and metadata queries across host platforms.
-- Handle manager tracks open descriptors with capability modes and lock-state metadata.
-- Atomic operation helpers implement safe replace/move/temp-write commit patterns.
-
-### API Execution Records (Complete)
-
-- std.fs.read(path, options): read file bytes/text with encoding and buffering policy.
-- std.fs.write(path, data, options): write content with create/truncate/append semantics.
-- std.fs.list(path, options): enumerate directory entries with metadata projection controls.
-- std.fs.meta(path): query file metadata (size/type/timestamps/permissions).
-
-### Failure Mode Matrix
-
-- Path resolution fails or target missing: fs-path diagnostic.
-- Permission denied for requested filesystem operation: fs-permission diagnostic.
-- Atomic write/replace commit fails integrity checks: fs-atomic-write diagnostic.
-- Directory traversal encounters cyclic/symlink policy conflict: fs-traversal diagnostic.
-
-## std.fmt — Formatting
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.fmt format-engine internals and formatting failure behavior are documented.
-
-### Implemented Internal Records
-
-- Formatter parser compiles format strings into tokenized render plans with placeholder metadata.
-- Value formatter dispatches type-specific formatters and locale-aware rendering adapters.
-- Output sink abstraction supports string builders, stream writers, and bounded buffers.
-
-### API Execution Records (Complete)
-
-- std.fmt.format(pattern, args, options): render formatted output from compiled format plan.
-- std.fmt.printf(writer, pattern, args): stream formatted output to writable sink.
-- std.fmt.parse(pattern): parse and validate format pattern into reusable plan object.
-- std.fmt.register(type, formatter): register custom formatter hook for user type.
-
-### Failure Mode Matrix
-
-- Invalid format token or placeholder syntax: fmt-parse diagnostic.
-- Argument arity/type mismatch for format placeholders: fmt-argument diagnostic.
-- Custom formatter hook raises or violates contract: fmt-custom diagnostic.
-- Output sink write failure during rendering: fmt-sink diagnostic.
-
-## std.regex — Regular Expressions
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.regex compile/match internals and regex-execution failure behavior are documented.
-
-### Implemented Internal Records
-
-- Regex compiler translates pattern AST to optimized matcher automata with flag-aware transforms.
-- Match engine supports anchored, global, and capture-group extraction over text/byte inputs.
-- Pattern cache stores compiled automata by pattern+flag key with bounded eviction policy.
-
-### API Execution Records (Complete)
-
-- std.regex.compile(pattern, flags): compile regex pattern to reusable matcher object.
-- std.regex.match(re, input): test input against compiled regex and return match summary.
-- std.regex.findAll(re, input): enumerate all non-overlapping matches with capture data.
-- std.regex.replace(re, input, repl): perform regex-driven replacement with capture expansion.
-
-### Failure Mode Matrix
-
-- Pattern parse error or unsupported construct: regex-compile diagnostic.
-- Catastrophic backtracking guard triggered under strict mode: regex-runtime diagnostic.
-- Capture expansion references invalid group index/name: regex-capture diagnostic.
-- Input encoding mismatch for regex mode (text/byte): regex-encoding diagnostic.
-
-## std.iter — Iterator Combinators
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.iter pipeline/combinator internals and iterator failure behavior are documented.
-
-### Implemented Internal Records
-
-- Iterator core models lazy producer chains with pull-based state transitions.
-- Combinator planner fuses map/filter/reduce stages when optimization rules permit.
-- Cursor safety checks enforce invalidation and single-consumer progression invariants.
-
-### API Execution Records (Complete)
-
-- std.iter.from(source): create iterator cursor from collection/range/source adapter.
-- std.iter.map(iter, fn): apply transformation combinator to iterator pipeline.
-- std.iter.filter(iter, pred): apply predicate filter stage to iterator pipeline.
-- std.iter.collect(iter, target): materialize iterator output into target collection type.
-
-### Failure Mode Matrix
-
-- Iterator source exhausted/invalidated unexpectedly in strict mode: iter-state diagnostic.
-- Combinator closure violates type/effect contract: iter-combinator diagnostic.
-- Collect target incompatible with yielded element type: iter-collect diagnostic.
-- Fused pipeline optimization exceeded complexity guard: iter-optimization diagnostic.
-
-## std.time — Date & Time
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.time clock/calendar internals and time-operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Time subsystem unifies monotonic/system clocks with timezone-aware calendar conversions.
-- Duration arithmetic engine handles overflow-safe add/subtract and normalization rules.
-- Formatting/parsing adapters map between temporal values and locale/standard wire formats.
-
-### API Execution Records (Complete)
-
-- std.time.now(clock): read current instant from selected clock source.
-- std.time.parse(text, layout): parse textual timestamp using provided layout rules.
-- std.time.format(value, layout): format temporal value into textual representation.
-- std.time.add(value, duration): compute time result using normalized duration arithmetic.
-
-### Failure Mode Matrix
-
-- Time parse input mismatches layout grammar: time-parse diagnostic.
-- Duration arithmetic overflow in checked mode: time-overflow diagnostic.
-- Unsupported timezone/offset conversion requested: time-timezone diagnostic.
-- Clock source unavailable or unstable on platform: time-clock diagnostic.
-
-## std.proc — Process Management
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.proc lifecycle/stdio internals and process-control failure behavior are documented.
-
-### Implemented Internal Records
-
-- Process launcher builds executable invocation plans with argv/env/working-dir inheritance policies.
-- Child handle manager coordinates stdin/stdout/stderr pipes and lifecycle state transitions.
-- Exit/status collector normalizes host return codes, signals, and termination metadata.
-
-### API Execution Records (Complete)
-
-- std.proc.spawn(spec): create child process with IO redirection and environment options.
-- std.proc.wait(proc, options): wait for process completion with timeout/kill policy.
-- std.proc.signal(proc, sig): send control signal/termination request to child process.
-- std.proc.output(spec): execute process and capture buffered output + exit status.
-
-### Failure Mode Matrix
-
-- Executable not found or launch denied by host policy: proc-launch diagnostic.
-- Pipe setup/read/write fails during process lifetime: proc-io diagnostic.
-- Wait timeout exceeded and termination policy unresolved: proc-timeout diagnostic.
-- Exit status decoding fails for host-specific reason format: proc-status diagnostic.
-
-## std.log — Structured Logging
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.log event/sink internals and logging-pipeline failure behavior are documented.
-
-### Implemented Internal Records
-
-- Logging core builds structured event records with level, context, and span correlation fields.
-- Sink multiplexer routes events to console/file/remote sinks with per-sink backpressure policy.
-- Filter pipeline applies level/module/field predicates before expensive serialization paths.
-
-### API Execution Records (Complete)
-
-- std.log.configure(config): initialize logger graph, sinks, and filter rules.
-- std.log.emit(level, message, fields): push structured log event through active pipeline.
-- std.log.flush(): force buffered sinks to persist outstanding events.
-- std.log.scope(ctx): create scoped logging context with inherited metadata fields.
-
-### Failure Mode Matrix
-
-- Sink initialization fails due to path/network/backend issue: log-sink-init diagnostic.
-- Event serialization error for field/type in strict mode: log-serialization diagnostic.
-- Sink backpressure exceeds drop/block policy limits: log-backpressure diagnostic.
-- Invalid logger configuration graph detected at startup: log-config diagnostic.
-
-## std.test — Testing (Enhanced)
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.test case orchestration/assertion internals and test-runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- Test harness discovers test symbols, parameterized cases, and fixtures into executable test plans.
-- Execution engine isolates test contexts, captures stdout/stderr/events, and applies timeout/retry policies.
-- Assertion subsystem emits structured failure payloads with diff snapshots and source-span metadata.
-
-### API Execution Records (Complete)
-
-- std.test.discover(modules): build deterministic test inventory from exported test declarations.
-- std.test.plan(cases, config): produce execution schedule with isolation, retries, and sharding options.
-- std.test.run(plan): execute tests and stream structured result events.
-- std.test.report(results, format): render summary/artifact output for CI and local diagnostics.
-
-### Failure Mode Matrix
-
-- Fixture initialization failure before case execution: fixture-runtime diagnostic.
-- Assertion mismatch in strict mode: assertion diagnostic with expected/actual diff payload.
-- Test case exceeds configured timeout budget: timeout diagnostic with case metadata.
-- Harness state corruption during parallel run: test-runtime integrity diagnostic.
-
-## std.math — Mathematics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.math numeric kernel dispatch and math-domain internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Math dispatcher routes scalar/vector operations to backend kernels based on type and precision class.
-- Deterministic mode constrains floating-point optimizations and records rounding policy metadata.
-- Special-function subsystem handles approximation tables and fallback algorithms per target profile.
-
-### API Execution Records (Complete)
-
-- std.math.eval(op, args): execute math operation via type-directed kernel dispatch.
-- std.math.precision(scope, mode): set/query precision and rounding policy for evaluation scope.
-- std.math.special(name, args): evaluate special functions with backend fallback handling.
-- std.math.vectorize(op, buffers): apply operation across vectorized buffer lanes.
-
-### Failure Mode Matrix
-
-- Domain error for operation input set (e.g., sqrt of negative in real mode): math-domain diagnostic.
-- Precision policy violation under deterministic mode: precision-policy diagnostic.
-- Backend kernel unavailable for requested type/target: math-backend diagnostic.
-- Numerical instability threshold exceeded in strict analysis mode: numeric-stability diagnostic.
-
-## std.io — Input / Output
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.io stream/buffer pipeline internals and I/O failure behavior are documented.
-
-### Implemented Internal Records
-
-- IO core unifies file/socket/memory streams under reader-writer trait contracts with capability flags.
-- Buffered layer manages read-ahead/write-behind windows and flush consistency guarantees.
-- Async bridge adapts blocking descriptors into event-loop compatible operations when runtime is present.
-
-### API Execution Records (Complete)
-
-- std.io.open(resource, mode): create IO handle with capability metadata.
-- std.io.read(handle, buffer): pull bytes/chunks respecting buffering and blocking policy.
-- std.io.write(handle, data): push payload with partial-write handling and flush semantics.
-- std.io.close(handle): release handle and finalize pending buffered operations.
-
-### Failure Mode Matrix
-
-- Read/write on closed or invalid handle: io-handle-state diagnostic.
-- Permission or capability mismatch for requested operation: io-capability diagnostic.
-- Flush failure due to downstream sink error: io-flush diagnostic with partial-write metadata.
-- Async bridge requested without runtime support: io-runtime diagnostic.
-
-## std.collections — Data Structures
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.collections storage/index internals and collection failure behavior are documented.
-
-### Implemented Internal Records
-
-- Collection backends implement contiguous, hashed, and tree-based storage strategies with common iterator contracts.
-- Mutation paths maintain structural invariants and version counters for iterator invalidation checks.
-- Allocator integration supports growth policies and small-object optimization hooks where applicable.
-
-### API Execution Records (Complete)
-
-- std.collections.new(kind, config): allocate collection instance with backend-specific policy.
-- std.collections.insert(coll, key, value): mutate collection according to structure semantics.
-- std.collections.get(coll, key): retrieve element/value with optional default behavior.
-- std.collections.iter(coll): produce stable iterator cursor with invalidation tracking.
-
-### Failure Mode Matrix
-
-- Key/index lookup invalid under strict access mode: collection-access diagnostic.
-- Structural invariant violation detected after mutation: collection-integrity diagnostic.
-- Iterator used after invalidating mutation in strict mode: iterator-invalid diagnostic.
-- Allocation growth failure during resize: collection-allocation diagnostic.
-
-## std.serialize — Serialization
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.serialize encode/decode pipeline internals and serialization failure behavior are documented.
-
-### Implemented Internal Records
-
-- Serializer planner maps type schemas to format-specific encoders with field-order and tagging metadata.
-- Decoder pipeline performs incremental parsing with schema-guided reconstruction and validation hooks.
-- Versioning layer supports compatibility adapters and optional unknown-field retention policy.
-
-### API Execution Records (Complete)
-
-- std.serialize.encode(value, format, options): serialize value into target wire/document format.
-- std.serialize.decode(data, type, format, options): reconstruct typed value from serialized input.
-- std.serialize.schema(type): emit canonical schema descriptor for type metadata exchange.
-- std.serialize.transcode(data, fromFormat, toFormat): convert serialized payload between formats.
-
-### Failure Mode Matrix
-
-- Input payload malformed for selected format: decode-parse diagnostic.
-- Type schema mismatch during decode reconstruction: schema-mismatch diagnostic.
-- Required field missing under strict schema mode: serialization-required-field diagnostic.
-- Unsupported format codec requested at runtime: serialization-codec diagnostic.
-
-## std.ai — Artificial Intelligence
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ai model/runtime integration internals and AI-runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- AI runtime broker manages model loading, backend selection (CPU/GPU), and inference session lifecycle.
-- Tensor adapter normalizes input/output shapes and dtypes between language values and model buffers.
-- Resource governor enforces memory/latency budgets for inference and training-adjacent operations.
-
-### API Execution Records (Complete)
-
-- std.ai.model.load(spec): load model artifact and initialize runtime backend bindings.
-- std.ai.infer(model, input, options): execute inference pass and return structured output tensors.
-- std.ai.tensor.convert(value, shape, dtype): map language values into tensor representation.
-- std.ai.session.close(session): release model/runtime resources deterministically.
-
-### Failure Mode Matrix
-
-- Model artifact missing/corrupt or unsupported format: ai-model-load diagnostic.
-- Input tensor shape/dtype incompatible with model signature: ai-input-signature diagnostic.
-- Backend resource budget exceeded during inference: ai-resource-budget diagnostic.
-- Requested acceleration backend unavailable on target platform: ai-backend diagnostic.
-
-## std.crypto — Cybersecurity & Cryptography
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.crypto primitive/key-management internals and cryptographic failure behavior are documented.
-
-### Implemented Internal Records
-
-- Crypto registry maps algorithm identifiers to vetted primitive implementations and capability constraints.
-- Key manager controls key generation/import/derivation with secure-memory handling and lifecycle metadata.
-- Entropy provider abstracts platform RNG sources with health checks and fallback policy.
-
-### API Execution Records (Complete)
-
-- std.crypto.hash(algo, data): compute digest using selected hashing primitive.
-- std.crypto.cipher.encrypt(algo, key, nonce, plaintext): produce authenticated/encrypted payload.
-- std.crypto.cipher.decrypt(algo, key, nonce, ciphertext): verify and decrypt protected payload.
-- std.crypto.key.derive(method, params): derive key material via configured KDF.
-
-### Failure Mode Matrix
-
-- Unsupported or disabled algorithm requested by policy: crypto-algorithm diagnostic.
-- Key/nonce length invalid for selected cipher suite: crypto-parameter diagnostic.
-- Authentication tag verification failed on decrypt: crypto-authentication diagnostic.
-- Entropy source health check failure in strict mode: crypto-entropy diagnostic.
-
-## std.gfx3d — 3D Graphics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.gfx3d scene/render internals and 3D rendering failure behavior are documented.
-
-### Implemented Internal Records
-
-- 3D scene graph manages node transforms, material bindings, and light state propagation.
-- Render pipeline schedules draw passes across backend API adapters with resource lifetime tracking.
-- Asset loader resolves mesh/texture/shader resources with cache and dependency metadata.
-
-### API Execution Records (Complete)
-
-- std.gfx3d.scene.create(config): initialize scene graph and renderer state.
-- std.gfx3d.mesh.load(source, options): load mesh asset into GPU-ready buffers.
-- std.gfx3d.render.frame(scene, camera): execute render pass chain for active frame.
-- std.gfx3d.resource.release(handle): dispose GPU/resource allocations safely.
-
-### Failure Mode Matrix
-
-- Shader/material compilation or binding failure: gfx3d-shader diagnostic.
-- Asset decode/load failure for mesh or texture source: gfx3d-asset diagnostic.
-- Render pass submission exceeds backend capability limits: gfx3d-backend diagnostic.
-- Resource lifecycle misuse detected in strict mode: gfx3d-resource diagnostic.
-
-## std.game — Game Creation
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.game loop/entity internals and game-runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- Game runtime coordinates fixed/variable timestep loops with deterministic update ordering.
-- Entity/component store tracks lifecycle, system queries, and mutation safety constraints.
-- Input/timing adapters normalize platform events and frame timing metrics.
-
-### API Execution Records (Complete)
-
-- std.game.runtime.start(config): initialize game runtime and main loop scheduling.
-- std.game.entity.spawn(spec): create entity with initial component set.
-- std.game.system.register(system): register update/render system pipeline stage.
-- std.game.runtime.tick(state): execute one update-render iteration of main loop.
-
-### Failure Mode Matrix
-
-- System update throws or violates component contract: game-system diagnostic.
-- Entity/component access references missing or stale handle: game-entity diagnostic.
-- Frame budget overrun exceeds configured policy: game-frame-budget diagnostic.
-- Runtime initialization fails backend/input setup: game-runtime-init diagnostic.
-
-## std.os — Operating System
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.os process/system-call internals and OS integration failure behavior are documented.
-
-### Implemented Internal Records
-
-- OS abstraction layer normalizes process, environment, and filesystem primitives across targets.
-- Capability gate enforces platform-specific permission constraints before privileged operations.
-- System call adapters translate runtime requests to host ABI with structured error normalization.
-
-### API Execution Records (Complete)
-
-- std.os.process.spawn(spec): launch child process with environment and handle inheritance policy.
-- std.os.env.get(name): read environment value under configured exposure policy.
-- std.os.path.resolve(path): normalize and canonicalize host path semantics.
-- std.os.platform.info(): retrieve host platform/arch/runtime metadata.
-
-### Failure Mode Matrix
-
-- Unsupported system capability on active target: os-capability diagnostic.
-- Spawn/request denied by host permissions: os-permission diagnostic.
-- System call returns unrecoverable host error: os-syscall diagnostic.
-- Cross-platform path normalization conflict in strict mode: os-path diagnostic.
-
-## std.compress — Compression
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.compress codec/stream internals and compression failure behavior are documented.
-
-### Implemented Internal Records
-
-- Compression registry maps algorithm names to encoder/decoder implementations.
-- Stream adapters support chunked compress/decompress workflows with window state tracking.
-- Container helpers manage framing metadata and integrity checksums.
-
-### API Execution Records (Complete)
-
-- std.compress.encode(algo, data, options): compress payload using selected codec.
-- std.compress.decode(algo, data, options): decompress payload into original form.
-- std.compress.stream.encoder(algo, sink): create incremental encoder stream wrapper.
-- std.compress.stream.decoder(algo, source): create incremental decoder stream wrapper.
-
-### Failure Mode Matrix
-
-- Unsupported compression algorithm requested: compress-algorithm diagnostic.
-- Corrupt compressed payload or checksum mismatch: compress-integrity diagnostic.
-- Decoder window/state invalid for stream sequence: compress-stream-state diagnostic.
-- Compression ratio/memory policy constraints violated: compress-policy diagnostic.
-
-## std.xml — XML & HTML Parsing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.xml parse/tree internals and XML/HTML parsing failure behavior are documented.
-
-### Implemented Internal Records
-
-- XML parser tokenizes elements, attributes, text, and namespace scopes into DOM/SAX representations.
-- Validation layer enforces well-formedness and optional schema/DTD rule checks.
-- Serializer emits canonical XML/HTML with configurable escaping and formatting policies.
-
-### API Execution Records (Complete)
-
-- std.xml.parse(text, options): parse XML/HTML input into tree or streaming events.
-- std.xml.query(doc, selector): evaluate path/query expression over parsed document.
-- std.xml.stringify(doc, options): serialize document tree to textual output.
-- std.xml.validate(doc, schema): validate document structure against schema definition.
-
-### Failure Mode Matrix
-
-- Malformed tag/attribute/namespace structure detected: xml-parse diagnostic.
-- Query path references missing/invalid node context: xml-query diagnostic.
-- Schema/DTD validation fails strict conformance checks: xml-schema diagnostic.
-- Serialization emits invalid character or encoding sequence: xml-serialize diagnostic.
-
-## std.image — Image Processing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.image codec/pixel internals and image-processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Image codec layer handles decode/encode for supported raster formats with metadata extraction.
-- Pixel pipeline performs transforms (resize/crop/filter/color-space) over typed image buffers.
-- Memory manager tracks large-frame allocations and tiling strategies for bounded processing.
-
-### API Execution Records (Complete)
-
-- std.image.load(source, options): decode image source into in-memory pixel buffer.
-- std.image.transform(img, ops): apply transformation operation chain to image buffer.
-- std.image.save(img, target, format, options): encode and persist image output.
-- std.image.meta(img): retrieve dimensions/color profile/format metadata.
-
-### Failure Mode Matrix
-
-- Unsupported/corrupt image format encountered: image-codec diagnostic.
-- Transform operation parameters invalid for source buffer: image-transform diagnostic.
-- Color profile conversion unsupported or lossy under strict mode: image-color diagnostic.
-- Memory budget exceeded during large image processing: image-memory diagnostic.
-
-## std.mail — Email
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.mail SMTP/IMAP pipeline internals and mail-delivery failure behavior are documented.
-
-### Implemented Internal Records
-
-- Mail transport engine coordinates SMTP submit, retry queueing, and delivery-status tracking.
-- Message builder normalizes headers, MIME body parts, and attachment encoding policies.
-- Auth/TLS layer negotiates secure sessions and credential mechanisms per provider capabilities.
-
-### API Execution Records (Complete)
-
-- std.mail.compose(headers, body, attachments): build canonical MIME message structure.
-- std.mail.send(client, message): submit message via SMTP transport with retry policy handling.
-- std.mail.fetch(account, query): retrieve message metadata/content from mailbox backend.
-- std.mail.sync(account, state): reconcile remote mailbox deltas into local state snapshot.
-
-### Failure Mode Matrix
-
-- SMTP/IMAP authentication failure: mail-auth diagnostic with provider context.
-- Invalid MIME composition or attachment encoding: mail-message-format diagnostic.
-- Delivery retry budget exhausted after transient failures: mail-delivery diagnostic.
-- TLS negotiation fails policy constraints: mail-transport-security diagnostic.
-
-## std.net — Networking
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.net socket/session internals and network-transport failure behavior are documented.
-
-### Implemented Internal Records
-
-- Network core abstracts TCP/UDP socket lifecycles with nonblocking and timeout policy controls.
-- Address resolver and connection planner normalize endpoint families and fallback strategies.
-- Stream/datagram adapters provide buffered IO integration and event-loop compatible readiness signals.
-
-### API Execution Records (Complete)
-
-- std.net.connect(endpoint, options): establish outbound network session with policy constraints.
-- std.net.listen(endpoint, options): create inbound listener and accept loop resources.
-- std.net.send(handle, payload): transmit payload over stream/datagram transport path.
-- std.net.receive(handle, buffer): receive bytes/frames with timeout and partial-read handling.
-
-### Failure Mode Matrix
-
-- Endpoint resolution/connect attempt fails: network-connect diagnostic.
-- Socket operation on closed or invalid descriptor: network-handle-state diagnostic.
-- Send/receive timeout exceeds configured budget: network-timeout diagnostic.
-- Protocol family mismatch for selected endpoint: network-protocol diagnostic.
-
-## std.db — Databases
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.db connection/query internals and database-operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Database adapter layer manages pooled connections and driver-specific protocol handling.
-- Query executor supports prepared statements, parameter binding, and transaction scopes.
-- Result mapper converts row sets into typed values with nullability and conversion policies.
-
-### API Execution Records (Complete)
-
-- std.db.connect(dsn, options): open/pool database connection resources.
-- std.db.query(conn, sql, params): execute query and stream/materialize result rows.
-- std.db.exec(conn, sql, params): execute mutation statement and return effect metadata.
-- std.db.tx.run(conn, fn): execute callback within managed transaction boundary.
-
-### Failure Mode Matrix
-
-- Connection/authentication handshake fails for backend: db-connect diagnostic.
-- SQL parse/prepare/bind error in query execution: db-query diagnostic.
-- Transaction commit/rollback fails consistency checks: db-transaction diagnostic.
-- Result type conversion mismatch in strict mapping mode: db-mapping diagnostic.
-
-## std.ui — User Interface
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ui widget/layout internals and UI-runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- UI tree reconciler applies diffed widget updates to backend view hierarchy.
-- Layout engine computes constraints and geometry resolution for nested containers.
-- Event dispatcher routes input/focus/state events through bubbling/capture phases.
-
-### API Execution Records (Complete)
-
-- std.ui.app.create(config): initialize UI runtime and root view surface.
-- std.ui.view.render(tree): reconcile widget tree and apply backend updates.
-- std.ui.state.bind(node, store): bind reactive state source to UI node updates.
-- std.ui.event.on(node, event, handler): register UI event handler callback.
-
-### Failure Mode Matrix
-
-- Invalid widget tree or unsupported node configuration: ui-tree diagnostic.
-- Layout constraint conflict yields unsatisfied geometry: ui-layout diagnostic.
-- Event handler throws in protected dispatch context: ui-event diagnostic.
-- Backend render target initialization fails on platform: ui-backend diagnostic.
-
-## std.term — Terminal & ANSI
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.term terminal/ANSI internals and terminal-IO failure behavior are documented.
-
-### Implemented Internal Records
-
-- Terminal adapter abstracts TTY capabilities, ANSI support levels, and mode switches.
-- Input parser decodes key/control sequences into normalized terminal events.
-- Output formatter applies style/color/cursor operations with fallback for limited terminals.
-
-### API Execution Records (Complete)
-
-- std.term.open(options): initialize terminal session with capability detection.
-- std.term.write(term, content, style): emit styled content and control sequences.
-- std.term.readKey(term, options): read normalized key/control input event.
-- std.term.mode(term, settings): set raw/canonical/echo mode behavior.
-
-### Failure Mode Matrix
-
-- Terminal capability detection fails or no TTY available: term-capability diagnostic.
-- Unsupported ANSI/style sequence on active terminal profile: term-style diagnostic.
-- Input decode error for invalid control sequence: term-input diagnostic.
-- Mode switch denied by host terminal policy: term-mode diagnostic.
-
-## std.cli — CLI Argument Parsing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.cli parser/command internals and CLI argument failure behavior are documented.
-
-### Implemented Internal Records
-
-- CLI parser tokenizes argv into options, flags, subcommands, and positional arguments.
-- Command router resolves subcommand trees and default handlers with inherited option scopes.
-- Validation layer enforces required arguments, arity, and type coercion rules.
-
-### API Execution Records (Complete)
-
-- std.cli.define(spec): compile CLI command/option specification model.
-- std.cli.parse(spec, argv): parse argument vector into typed command context.
-- std.cli.dispatch(spec, parsed): execute matched command handler with parsed context.
-- std.cli.help(spec, topic): render contextual usage/help output.
-
-### Failure Mode Matrix
-
-- Unknown option or subcommand encountered in strict mode: cli-parse diagnostic.
-- Missing required argument/flag value for command: cli-argument diagnostic.
-- Type coercion failure for option value conversion: cli-coercion diagnostic.
-- Ambiguous command route due to conflicting spec: cli-routing diagnostic.
-
-## std.csv — CSV Parsing & Writing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.csv parse/emit internals and CSV processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- CSV parser tokenizes delimited records with quote/escape and multiline field handling.
-- Schema mapper projects rows into typed columns with header-index and coercion policies.
-- Writer pipeline serializes records with configurable delimiter, quoting, and newline strategies.
-
-### API Execution Records (Complete)
-
-- std.csv.parse(text, options): parse CSV text payload into typed row structures.
-- std.csv.read(input, options): parse CSV source into row stream or materialized table.
-- std.csv.write(rows, output, options): serialize row data to CSV output sink.
-- std.csv.stringify(rows, options): serialize in-memory rows into CSV text.
-- std.csv.open_reader(input, options): open streaming row reader for large CSV sources.
-- std.csv.schema(headers, types): build typed schema mapping for row projection.
-- std.csv.validate(row, schema): validate/coerce row against schema contract.
-
-### Failure Mode Matrix
-
-- Malformed quoted field or inconsistent column count: csv-parse diagnostic.
-- Header/schema mismatch under strict projection mode: csv-schema diagnostic.
-- Type coercion failure for typed column mapping: csv-coercion diagnostic.
-- Output sink/write failure during serialization: csv-write diagnostic.
-
-## std.toml — TOML Parsing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.toml parse/serialize internals and TOML processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- TOML parser builds typed document tree with table/array-of-table semantics.
-- Key-path resolver enforces dotted-key precedence and duplicate key conflict rules.
-- Serializer emits stable TOML formatting while preserving value-kind fidelity.
-
-### API Execution Records (Complete)
-
-- std.toml.parse(text, options): parse TOML document into typed object tree.
-- std.toml.stringify(value, options): serialize typed object to TOML text.
-- std.toml.get(doc, keyPath): resolve key path against parsed document tree.
-- std.toml.validate(doc, schema): validate parsed TOML object against schema.
-
-### Failure Mode Matrix
-
-- Syntax violation in key/value/table declaration: toml-parse diagnostic.
-- Duplicate/conflicting key assignment detected: toml-key-conflict diagnostic.
-- Unsupported value type for TOML serialization: toml-serialize diagnostic.
-- Schema validation failure under strict mode: toml-schema diagnostic.
-
-## std.yaml — YAML Parsing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.yaml parse/emit internals and YAML processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- YAML parser handles indentation-sensitive blocks, sequences, mappings, and scalar variants.
-- Anchor/alias resolver tracks reference graphs and merge key semantics safely.
-- Emitter pipeline outputs canonical or pretty YAML forms with deterministic ordering options.
-
-### API Execution Records (Complete)
-
-- std.yaml.parse(text, options): parse YAML document stream into typed values.
-- std.yaml.stringify(value, options): serialize value graph to YAML text.
-- std.yaml.loadAll(stream): decode multi-document YAML stream.
-- std.yaml.validate(doc, schema): validate YAML value graph against schema.
-
-### Failure Mode Matrix
-
-- Indentation/tokenization error in YAML source: yaml-parse diagnostic.
-- Invalid anchor/alias reference cycle or unresolved alias: yaml-reference diagnostic.
-- Multi-document boundary parse failure: yaml-stream diagnostic.
-- Schema/type mismatch under strict validation: yaml-schema diagnostic.
-
-## std.uuid — UUID Generation
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.uuid generation/parse internals and UUID processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- UUID generator supports random/time/name-based variants with version-specific bit layout rules.
-- Parser validates canonical textual/binary forms and normalizes variant/version flags.
-- Entropy/time sources are abstracted for deterministic test mode and secure runtime mode.
-
-### API Execution Records (Complete)
-
-- std.uuid.v4(): generate random UUID using secure entropy source.
-- std.uuid.v5(namespace, name): generate namespace-based UUID from hash derivation.
-- std.uuid.parse(text): parse UUID text into binary/structured representation.
-- std.uuid.format(uuid, style): render UUID value to canonical textual style.
-
-### Failure Mode Matrix
-
-- UUID text contains invalid length or character set: uuid-parse diagnostic.
-- Unsupported version/variant requested for generator: uuid-version diagnostic.
-- Entropy source unavailable in secure mode: uuid-entropy diagnostic.
-- Namespace input invalid for name-based UUID generation: uuid-namespace diagnostic.
-
-## std.rand — Random Numbers
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.rand PRNG/entropy internals and random-generation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Random subsystem offers secure and deterministic PRNG engines with pluggable seeds.
-- Distribution samplers implement uniform and common shaped distributions over numeric domains.
-- Stream API exposes reproducible random sequences with independent generator state handles.
-
-### API Execution Records (Complete)
-
-- std.rand.seed(value): initialize deterministic PRNG state for reproducible sequences.
-- std.rand.int(min, max): sample integer from inclusive/exclusive bounds policy.
-- std.rand.float(min, max): sample floating value from configured range.
-- std.rand.bytes(count): produce random byte buffer from selected RNG engine.
-
-### Failure Mode Matrix
-
-- Invalid sampling bounds or distribution parameters: rand-parameter diagnostic.
-- Secure entropy backend unavailable when required: rand-entropy diagnostic.
-- PRNG state corruption detected under strict checks: rand-state diagnostic.
-- Requested sample count exceeds configured safety budget: rand-budget diagnostic.
-
-## std.hash — Non-Cryptographic Hashing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.hash algorithm/seed internals and hashing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Hash registry maps algorithm identifiers to non-cryptographic hash implementations and parameters.
-- Hasher state machine supports incremental update/finalize streaming semantics.
-- Seed policy layer controls deterministic vs randomized seeding for hash-table defense modes.
-
-### API Execution Records (Complete)
-
-- std.hash.compute(algo, data, options): compute hash digest for provided payload.
-- std.hash.new(algo, seed): create incremental hasher context instance.
-- std.hash.update(ctx, chunk): feed chunk into active incremental hasher state.
-- std.hash.finalize(ctx): finalize incremental hasher and return digest value.
-
-### Failure Mode Matrix
-
-- Unknown/disabled hash algorithm requested: hash-algorithm diagnostic.
-- Incremental hasher used after finalize in strict mode: hash-state diagnostic.
-- Seed value invalid for selected algorithm policy: hash-seed diagnostic.
-- Input kind unsupported for configured hash adapter: hash-input diagnostic.
-
-## std.cache — In-Memory Caching
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.cache eviction/storage internals and caching failure behavior are documented.
-
-### Implemented Internal Records
-
-- Cache core tracks key-value entries with TTL/size metadata and access counters.
-- Eviction engine supports LRU/LFU/time-based strategies with deterministic tie-break rules.
-- Concurrency guards synchronize cache mutation paths and stale-read invalidation behavior.
-
-### API Execution Records (Complete)
-
-- std.cache.new(config): create cache instance with capacity/eviction policy.
-- std.cache.get(cache, key): retrieve cached value with hit/miss metadata.
-- std.cache.set(cache, key, value, ttl): insert/update cache entry with optional expiry.
-- std.cache.invalidate(cache, keyOrPattern): evict one or multiple matching entries.
-
-### Failure Mode Matrix
-
-- Cache capacity/eviction policy misconfiguration: cache-config diagnostic.
-- Entry serialization failure for backend persistence mode: cache-encode diagnostic.
-- Concurrent mutation conflict in strict locking mode: cache-concurrency diagnostic.
-- TTL policy violation or negative expiry under strict mode: cache-ttl diagnostic.
-
-## std.signal — OS Signal Handling
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.signal registration/dispatch internals and signal-handling failure behavior are documented.
-
-### Implemented Internal Records
-
-- Signal registry maps host signal numbers to safe runtime callback dispatch points.
-- Delivery queue buffers async signals and coordinates main-loop safe invocation semantics.
-- Masking layer applies temporary block/unblock policies around critical sections.
-
-### API Execution Records (Complete)
-
-- std.signal.on(sig, handler): register handler and update signal routing table.
-- std.signal.off(sig): remove handler and restore default behavior policy.
-- std.signal.mask(set): apply process/thread signal mask update.
-- std.signal.poll(): drain pending signal queue into runtime callbacks.
-
-### Failure Mode Matrix
-
-- Attempted registration for unsupported/restricted signal: signal-registration diagnostic.
-- Unsafe handler operation detected in async context: signal-safety diagnostic.
-- Signal mask operation denied by host runtime policy: signal-mask diagnostic.
-- Pending signal queue overflow under sustained burst: signal-queue diagnostic.
-
-## std.http — HTTP Client & Server
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.http request/response pipeline internals and HTTP failure behavior are documented.
-
-### Implemented Internal Records
-
-- HTTP stack implements client and server pipelines with header canonicalization and body streaming.
-- Router layer resolves method/path matches with middleware chain composition and short-circuit rules.
-- Connection manager supports keep-alive pooling, protocol upgrades, and backpressure-aware writes.
-
-### API Execution Records (Complete)
-
-- std.http.client.request(method, url, req): execute outbound request with redirect/retry policy.
-- std.http.server.serve(bind, routes): run HTTP server loop with middleware/router dispatch.
-- std.http.parse(raw): parse wire bytes into request/response message structures.
-- std.http.encode(message): serialize HTTP message into wire-ready byte stream.
-
-### Failure Mode Matrix
-
-- Malformed request/response framing or headers: http-parse diagnostic.
-- Route dispatch misses required handler in strict mode: http-routing diagnostic.
-- Connection pool exhaustion or refused upgrade path: http-connection diagnostic.
-- Body stream aborted due to backpressure or peer reset: http-stream diagnostic.
-
-## std.ffi — Foreign Function Interface
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ffi ABI/binding internals and foreign-call failure behavior are documented.
-
-### Implemented Internal Records
-
-- FFI binder maps language signatures to foreign ABI call descriptors and marshalling layouts.
-- Library loader resolves shared-object handles with symbol lookup and lifetime reference tracking.
-- Safety boundary checks enforce ownership/pinning and unsafe-call policies for pointer values.
-
-### API Execution Records (Complete)
-
-- std.ffi.load(libPath, options): load foreign library and register symbol table.
-- std.ffi.bind(lib, signature): bind foreign symbol to callable typed wrapper.
-- std.ffi.call(fn, args): invoke bound foreign function with marshalling/unmarshalling.
-- std.ffi.release(lib): unload library handle under safe reference constraints.
-
-### Failure Mode Matrix
-
-- Shared library load or symbol resolution fails: ffi-load diagnostic.
-- ABI signature mismatch between binding and target symbol: ffi-abi diagnostic.
-- Pointer/ownership contract violation in strict safety mode: ffi-safety diagnostic.
-- Foreign call returns invalid/error state mapping: ffi-runtime diagnostic.
-
-## Type Aliases
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - alias resolution, expansion rules, and alias internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Alias declarations are interned in a canonical alias graph with module-qualified identity keys.
-- Expansion engine performs lazy alias expansion with memoization to avoid repeated type inflation.
-- Cycle detection tracks alias expansion stack and emits minimal cycle witnesses for diagnostics.
-
-### API Execution Records (Complete)
-
-- alias.define(name, targetType): register alias entry and module visibility metadata.
-- alias.resolve(name, scope): lookup alias by lexical/module scope and return canonical alias handle.
-- alias.expand(typeExpr): recursively expand aliases to canonical type form with cycle guards.
-- alias.checkRecursion(alias): validate acyclic expansion and emit cycle diagnostics when needed.
-
-### Failure Mode Matrix
-
-- Recursive alias cycle detected: alias-cycle diagnostic with expansion chain.
-- Alias references inaccessible/private type: visibility diagnostic with owning module context.
-- Alias expansion yields forbidden/unsized type in constrained context: type-constraint diagnostic.
-- Conflicting duplicate alias declaration in same scope: symbol-collision diagnostic with original span.
-
-## Destructuring Assignment
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - destructuring bind plan, assignment semantics, and destructuring internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Pattern planner lowers tuple/struct/list destructures into deterministic field/index extraction steps.
-- Binding mode analysis marks each pattern slot as move, copy, immutable borrow, or mutable borrow.
-- Rest bindings and nested patterns are normalized before assignment lowering to maintain evaluation order.
-
-### API Execution Records (Complete)
-
-- destructure.plan(pattern, sourceType): compile pattern into ordered extraction operations.
-- destructure.bind(pattern, value): execute extraction and create scoped bindings with ownership modes.
-- destructure.assign(pattern, value): apply destructuring assignment updates to existing l-values.
-- destructure.rest(pattern, value): compute residual collection for rest captures under policy rules.
-
-### Failure Mode Matrix
-
-- Pattern arity/shape mismatch with source value: destructure-shape diagnostic.
-- Illegal move/borrow in nested destructure slot: ownership diagnostic with slot path.
-- Assignment target immutability conflict in destructuring assignment: mutability diagnostic.
-- Duplicate binding names in same destructure scope: binding-collision diagnostic with name source.
-
-## if let / while let
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - pattern-guarded branch/loop lowering and if/while-let internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- if-let/while-let constructs lower to match-like decision blocks with pattern success/failure edges.
-- Pattern bindings are scoped to success branches/iterations with precise lifetime boundaries.
-- while-let loops reuse pattern test blocks and maintain loop-carried variable state consistency.
-
-### API Execution Records (Complete)
-
-- iflet.lower(node): lower if-let syntax into pattern-test + success/fallback CFG blocks.
-- whilelet.lower(node): lower while-let into loop header pattern-test and body/exit edges.
-- pattern.bind(scrutinee, pattern): bind successful pattern captures into branch-local scope.
-- pattern.test(scrutinee, pattern): evaluate structural match predicate for control-flow branching.
-
-### Failure Mode Matrix
-
-- Pattern incompatible with scrutinee type in if/while-let: pattern-type diagnostic.
-- Non-exhaustive guard assumptions in transformed control flow: control-flow diagnostic.
-- Illegal capture lifetime escape from if-let success scope: lifetime diagnostic.
-- Mutating scrutinee during while-let test/body conflict: borrow/mutation diagnostic.
-
-## Labeled Loops
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - label resolution, break/continue targeting, and labeled-loop internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Label resolver maintains stack of active loop labels with lexical depth metadata.
-- Break/continue nodes lower to explicit target edges resolved against active label stack.
-- Nested loop transformations preserve label identity through optimization passes.
-
-### API Execution Records (Complete)
-
-- label.register(loopNode, name): push loop label into active resolution stack.
-- break.resolve(label): map break statement to target loop exit block.
-- continue.resolve(label): map continue statement to target loop latch/header block.
-- label.lower(cfg): emit resolved labeled control-flow edges in MIR.
-
-### Failure Mode Matrix
-
-- Unknown loop label reference: label-resolution diagnostic with in-scope label suggestions.
-- Continue to non-loop label or invalid target: control-target diagnostic.
-- Duplicate label in same lexical scope: label-collision diagnostic.
-- Labeled edge invalidated by transform pass: CFG consistency diagnostic requiring rebuild.
-
-## Union Types
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - union normalization, narrowing, and union-type internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Union canonicalizer flattens nested unions, removes duplicates, and orders variants deterministically.
-- Narrowing engine refines union members using guards, pattern tests, and flow-sensitive predicates.
-- Runtime tagging strategy is selected when backend requires explicit discriminants for erased unions.
-
-### API Execution Records (Complete)
-
-- union.normalize(types): flatten and canonicalize union member set.
-- union.narrow(value, predicate): refine active member set by control-flow predicate.
-- union.match(value, arms): dispatch union value to compatible arm based on narrowed member set.
-- union.tag(value): query runtime tag/discriminant where representation requires tagging.
-
-### Failure Mode Matrix
-
-- Incompatible union member combination under language constraints: union-coherence diagnostic.
-- Ambiguous member resolution after narrowing: union-ambiguity diagnostic with candidate members.
-- Missing arm for reachable union member in match: union-exhaustiveness diagnostic.
-- Unsafe cast between incompatible unions: cast-safety diagnostic with source/target union sets.
-
-## The `never` Type
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - bottom-type propagation, flow pruning, and never-type internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Bottom-type inference propagates from non-returning expressions through control-flow merge points.
-- CFG simplifier prunes unreachable blocks introduced by never-typed paths.
-- Coercion rules allow never to flow into supertype contexts while preserving exhaustiveness guarantees.
-
-### API Execution Records (Complete)
-
-- never.infer(node): mark expression as never when evaluation cannot return normally.
-- never.propagate(cfg): propagate bottom-type facts through dominance and merge analysis.
-- never.coerce(targetType): coerce never-typed expression into required contextual type.
-- never.prune(cfg): remove unreachable blocks and update diagnostics metadata.
-
-### Failure Mode Matrix
-
-- Expression expected to produce value but inferred never in non-diverging context: type-flow diagnostic.
-- Unreachable code emitted after never path in strict mode: unreachable-code diagnostic.
-- Invalid assumption that never path returns in effect analysis: effect-flow diagnostic.
-- Backend mismatch in never-path pruning metadata: CFG/pruning consistency diagnostic.
-
-## Effects System
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - Effects System lowering/runtime internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Effect annotations stored in compiled function metadata; retrievable via `ct_get_effects` at compile time.
-- Effect verification: compiler checks consistency when `--warn effects` enabled; violations are warnings or errors.
-- Effect inheritance: function calling side-effecting function must declare at least the called function's effects.
-- `pure func` is shorthand for `[effects: none]` — guaranteed deterministic.
-
-### API Execution Records (Complete)
-
-- effects.annotate(func_name, effect_list): attach effect list [io, net, none, ...] to function metadata.
-- effects.check(caller, callee): verify caller's effects are superset of callee's effects -> warn/error if not.
-- effects.pure_verify(func_name): verify function has no side effects (no io, net, mutation) -> compile error if violated.
-- effects.ct_get(func_name): retrieve effect list at compile time -> list of effect strings.
-- effects.infer(func_body): walk function body -> collect effects from all called functions -> compute minimum effect set.
-- effects.cfg_conditional(feature, func_variants): select function variant based on compile-time feature flag.
-
-### Failure Mode Matrix
-
-- Pure function calling impure function: compile warning/error with --warn effects.
-- Effect annotation missing but function has side effects: no warning unless --warn effects enabled.
-- Custom effect label misspelled: false negative (custom effects not validated).
-- Effect inheritance violation in deep call chain: requires transitive effect propagation check.
-
-## The `Default` Trait
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - default trait resolution/derivation and default-trait internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Default trait solver resolves explicit impls, derive-generated impls, and intrinsic defaults by precedence.
-- Derive pipeline synthesizes field-wise defaults while preserving visibility and generic bound requirements.
-- Monomorphized default constructors are cached by concrete type substitution keys.
-
-### API Execution Records (Complete)
-
-- default.resolve(type): locate applicable default provider (impl/derive/intrinsic) for type.
-- default.derive(typeDef): synthesize default implementation from field/member defaults.
-- default.call(type): construct value using resolved default constructor path.
-- default.validate(type): verify trait bounds and field default availability before call lowering.
-
-### Failure Mode Matrix
-
-- Missing default provider for required type: trait-resolution diagnostic with missing impl details.
-- Derive default blocked by non-default field/member: derive diagnostic with offending field path.
-- Generic bound unsatisfied for default instantiation: bound diagnostic with required trait set.
-- Ambiguous default provider candidates: coherence diagnostic with competing impl sources.
-
-## std.audio — Audio Playback & Recording
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.audio stream/device internals and audio-runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- Audio engine manages playback/capture streams with sample format and channel negotiation.
-- Mixer pipeline combines sources with gain/pan/effect stages and timing synchronization.
-- Device adapter selects host backend and tracks hotplug/default-device changes.
-
-### API Execution Records (Complete)
-
-- std.audio.play(source, options): start playback stream from audio source.
-- std.audio.record(device, options): begin capture stream and expose sample buffers.
-- std.audio.mixer.configure(mixer, graph): configure mix graph and routing controls.
-- std.audio.stop(handle): stop active playback/capture stream and release resources.
-
-### Failure Mode Matrix
-
-- Audio device unavailable or format negotiation fails: audio-device diagnostic.
-- Stream underrun/overrun detected beyond tolerance: audio-stream diagnostic.
-- Effect/mixer graph configuration invalid: audio-mixer diagnostic.
-- Permission denied for capture on protected platform: audio-permission diagnostic.
-
-## std.video — Video Processing
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.video decode/encode internals and video-processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Video pipeline handles demux/decode/encode stages with timestamp and frame-order control.
-- Frame processing layer supports resize/convert/filter transforms on decoded frame buffers.
-- Codec backend adapter negotiates hardware/software acceleration paths.
-
-### API Execution Records (Complete)
-
-- std.video.open(source, options): open media source and initialize decode session.
-- std.video.readFrame(session): decode next frame with timing metadata.
-- std.video.encode(frames, target, options): encode frame stream into output container.
-- std.video.transform(frame, ops): apply frame-level processing operations.
-
-### Failure Mode Matrix
-
-- Container demux or stream selection fails: video-demux diagnostic.
-- Codec decode/encode error for selected format profile: video-codec diagnostic.
-- Frame timestamp/order inconsistency under strict mode: video-timing diagnostic.
-- Hardware acceleration backend unavailable for requested path: video-backend diagnostic.
-
-## std.pdf — PDF Generation & Reading
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.pdf document/render internals and PDF processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- PDF parser reads object graph, xref tables, and incremental update sections.
-- Generator pipeline builds pages, fonts, images, and metadata into valid PDF structure.
-- Rendering adapter resolves page content streams to raster/vector outputs when required.
-
-### API Execution Records (Complete)
-
-- std.pdf.open(source, options): load PDF document and parse object/xref graph.
-- std.pdf.page.render(doc, index, options): render page to target bitmap/vector surface.
-- std.pdf.create(spec): build new PDF document model from page/content descriptors.
-- std.pdf.save(doc, target, options): serialize PDF document to output destination.
-
-### Failure Mode Matrix
-
-- Malformed xref/object stream in input document: pdf-parse diagnostic.
-- Font/resource embedding failure during generation: pdf-resource diagnostic.
-- Page render backend cannot satisfy requested output mode: pdf-render diagnostic.
-- Write/serialization failure for output target: pdf-save diagnostic.
-
-## std.excel — Excel / XLSX Files
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.excel workbook/sheet internals and XLSX processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Workbook model tracks sheets, cell stores, styles, formulas, and shared strings.
-- XLSX adapter maps workbook model to/from zipped XML package parts.
-- Formula evaluator performs dependency-aware recalculation with cached cell values.
-
-### API Execution Records (Complete)
-
-- std.excel.open(source, options): load workbook from XLSX source package.
-- std.excel.sheet.get(workbook, name): resolve worksheet handle by name/index.
-- std.excel.cell.set(sheet, ref, value): assign typed cell value with style/formula metadata.
-- std.excel.save(workbook, target): serialize workbook model back to XLSX package.
-
-### Failure Mode Matrix
-
-- XLSX package part missing/corrupt during load: excel-package diagnostic.
-- Cell reference/style assignment invalid for worksheet bounds: excel-cell diagnostic.
-- Formula evaluation dependency cycle detected: excel-formula diagnostic.
-- Workbook serialization fails relationship/package checks: excel-save diagnostic.
-
-## std.jwt — JSON Web Tokens
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.jwt token/signature internals and JWT validation failure behavior are documented.
-
-### Implemented Internal Records
-
-- JWT codec parses/serializes JOSE header, claims payload, and signature segments.
-- Signature verifier dispatches algorithm-specific verification over provided key material.
-- Claim validator enforces exp/nbf/aud/iss and custom claim policy checks.
-
-### API Execution Records (Complete)
-
-- std.jwt.encode(claims, key, options): sign and encode claims into JWT string.
-- std.jwt.decode(token, options): parse JWT into header/claims/signature components.
-- std.jwt.verify(token, key, options): verify signature and validate claim policies.
-- std.jwt.claims.get(token, key): retrieve specific claim value from decoded token.
-
-### Failure Mode Matrix
-
-- Token segment/base64 decode malformed: jwt-parse diagnostic.
-- Unsupported/forbidden signing algorithm requested: jwt-algorithm diagnostic.
-- Signature verification failure with supplied key: jwt-signature diagnostic.
-- Required claim validation fails policy checks: jwt-claims diagnostic.
-
-## std.oauth2 — OAuth 2.0
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.oauth2 flow/token internals and OAuth2 protocol failure behavior are documented.
-
-### Implemented Internal Records
-
-- OAuth2 client manages authorization-code/device/client-credentials flow state machines.
-- Token store handles access/refresh token lifecycle with expiry and scope metadata.
-- HTTP integration secures redirect/state/PKCE handling for interactive flows.
-
-### API Execution Records (Complete)
-
-- std.oauth2.authorize(config, state): initiate authorization flow and produce redirect URL.
-- std.oauth2.exchange(code, verifier, config): exchange auth code for token set.
-- std.oauth2.refresh(token, config): refresh access token using refresh grant path.
-- std.oauth2.revoke(token, config): revoke issued token at provider endpoint.
-
-### Failure Mode Matrix
-
-- Authorization response state/PKCE validation fails: oauth2-state diagnostic.
-- Token endpoint returns protocol or provider error payload: oauth2-token diagnostic.
-- Refresh token invalid/expired under provider policy: oauth2-refresh diagnostic.
-- Scope mismatch between requested and granted token: oauth2-scope diagnostic.
-
-## std.i18n — Internationalization
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.i18n locale/resource internals and internationalization failure behavior are documented.
-
-### Implemented Internal Records
-
-- Locale resolver selects language/region bundles using fallback chain policies.
-- Message formatter applies pluralization/gender rules and parameter interpolation.
-- Date/number/currency adapters integrate locale-specific formatting conventions.
-
-### API Execution Records (Complete)
-
-- std.i18n.locale.set(tag): set active locale and load associated resource bundles.
-- std.i18n.t(key, params): resolve localized message and apply interpolation rules.
-- std.i18n.format.number(value, options): format numeric value per active locale.
-- std.i18n.bundle.load(source): load/merge translation resource bundle data.
-
-### Failure Mode Matrix
-
-- Locale bundle missing and fallback unavailable: i18n-locale diagnostic.
-- Translation key unresolved in strict localization mode: i18n-key diagnostic.
-- Message parameter mismatch for template placeholders: i18n-template diagnostic.
-- Bundle parse/merge conflict during load: i18n-bundle diagnostic.
-
-## std.watch — Filesystem Watching
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.watch filesystem-event pipeline internals and watch-service failure behavior are documented.
-
-### Implemented Internal Records
-
-- Watch backend selects platform notifier (inotify/FSEvents/ReadDirectoryChanges) at initialization.
-- Event coalescer merges duplicate bursts and normalizes path/change-kind metadata.
-- Recursive watch planner tracks dynamic subdirectory additions under policy constraints.
-
-### API Execution Records (Complete)
-
-- std.watch.start(path, options): begin watch subscription with recursive/filter settings.
-- std.watch.next(watcher): retrieve next normalized filesystem event batch.
-- std.watch.stop(watcher): stop watch backend and release OS notification handles.
-- std.watch.snapshot(watcher): emit current watch-state diagnostics and counters.
-
-### Failure Mode Matrix
-
-- Watch target path missing or inaccessible: watch-path diagnostic.
-- Backend notification handle quota exceeded: watch-resource diagnostic.
-- Event stream overflow dropped events in strict mode: watch-overflow diagnostic.
-- Recursive subscription denied by platform capability: watch-capability diagnostic.
-
-## std.grpc — gRPC Client & Server
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.grpc channel/stub internals and gRPC transport failure behavior are documented.
-
-### Implemented Internal Records
-
-- gRPC runtime binds protobuf descriptors to generated client/server stubs and method dispatch tables.
-- HTTP/2 transport layer manages stream multiplexing, metadata frames, and flow-control windows.
-- Interceptor chain applies auth/telemetry/retry behaviors around unary and streaming calls.
-
-### API Execution Records (Complete)
-
-- std.grpc.channel.open(target, options): create gRPC channel with TLS and retry policy setup.
-- std.grpc.client.call(stub, method, request): execute unary RPC and decode typed response.
-- std.grpc.server.bind(serviceDefs, handlers): register service handlers and start RPC serving.
-- std.grpc.stream.exchange(stream, events): drive bidirectional stream send/receive lifecycle.
-
-### Failure Mode Matrix
-
-- Method descriptor missing or handler mismatch: grpc-dispatch diagnostic.
-- Transport stream reset/flow-control violation: grpc-transport diagnostic.
-- Serialization/deserialization mismatch with protobuf schema: grpc-codec diagnostic.
-- Deadline exceeded or retry policy exhausted: grpc-deadline diagnostic.
-
-## std.mqtt — MQTT Messaging
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.mqtt session/topic internals and MQTT failure behavior are documented.
-
-### Implemented Internal Records
-
-- MQTT client runtime manages connect/session keepalive and broker capability negotiation.
-- Topic router tracks subscriptions, wildcard matching, and QoS-specific delivery semantics.
-- Packet codec serializes CONNECT/PUBLISH/SUBSCRIBE flows with stateful acknowledgment handling.
-
-### API Execution Records (Complete)
-
-- std.mqtt.connect(broker, options): establish MQTT session and negotiate protocol settings.
-- std.mqtt.publish(client, topic, payload, qos): enqueue publish with QoS/retain semantics.
-- std.mqtt.subscribe(client, topics, qos): register topic subscriptions and callback dispatch.
-- std.mqtt.poll(client): process incoming packets and heartbeat/ack state transitions.
-
-### Failure Mode Matrix
-
-- Broker rejects connect/auth handshake: mqtt-connect diagnostic.
-- Invalid topic filter or wildcard usage: mqtt-topic diagnostic.
-- QoS acknowledgment sequence violation: mqtt-qos-state diagnostic.
-- Keepalive timeout without broker heartbeat: mqtt-session-timeout diagnostic.
-
-## std.embed — Compile-Time File Embedding
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.embed asset-pack internals and compile-time embedding failure behavior are documented.
-
-### Implemented Internal Records
-
-- Embed planner resolves file globs and emits compile-time asset manifests.
-- Payload packer stores embedded bytes with optional compression and checksum metadata.
-- Linker integration exposes embedded assets via immutable runtime access tables.
-
-### API Execution Records (Complete)
-
-- std.embed.files(patterns, options): resolve and embed files during compile stage.
-- std.embed.get(id): retrieve embedded asset bytes by manifest identifier.
-- std.embed.list(namespace): enumerate embedded assets within namespace scope.
-- std.embed.meta(id): return embedded asset metadata (size/hash/origin).
-
-### Failure Mode Matrix
-
-- Embed source path missing or excluded by policy: embed-source diagnostic.
-- Asset exceeds embed size/budget constraints: embed-budget diagnostic.
-- Manifest identifier collision during build: embed-manifest diagnostic.
-- Runtime lookup references unknown embedded asset ID: embed-lookup diagnostic.
-
-## std.template — Text Templating
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.template parse/render internals and template-execution failure behavior are documented.
-
-### Implemented Internal Records
-
-- Template parser builds AST for text segments, expressions, conditionals, and loops.
-- Render engine evaluates template AST against context objects with escaping policies.
-- Cache layer stores compiled templates keyed by source identity and render options.
-
-### API Execution Records (Complete)
-
-- std.template.compile(source, options): parse/compile template into executable plan.
-- std.template.render(tpl, context, options): render compiled template with context data.
-- std.template.register(name, tpl): register reusable named template in registry.
-- std.template.escape(mode, value): apply escape policy helper to runtime value.
-
-### Failure Mode Matrix
-
-- Template syntax error during parse/compile: template-parse diagnostic.
-- Missing context variable in strict rendering mode: template-context diagnostic.
-- Recursive include/partial cycle exceeds depth guard: template-recursion diagnostic.
-- Escape mode unsupported for target output backend: template-escape diagnostic.
-
-## std.multipart — Multipart Form Data
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.multipart boundary/part internals and multipart parsing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Multipart parser scans boundaries and streams part headers/body segments incrementally.
-- Part decoder handles file fields, text fields, and content-type specific decoding paths.
-- Builder pipeline emits multipart payloads with deterministic boundary and header formatting.
-
-### API Execution Records (Complete)
-
-- std.multipart.parse(stream, boundary, options): decode multipart stream into parts.
-- std.multipart.build(parts, options): construct multipart body and boundary metadata.
-- std.multipart.part.read(part, sink): stream part payload to target sink.
-- std.multipart.part.meta(part): retrieve parsed part headers and size metadata.
-
-### Failure Mode Matrix
-
-- Boundary marker malformed or missing in stream: multipart-boundary diagnostic.
-- Part header parsing fails RFC constraint checks: multipart-header diagnostic.
-- Part payload exceeds configured size limits: multipart-size diagnostic.
-- Stream terminated before final boundary completion: multipart-stream diagnostic.
-
-## std.ssh — SSH Client & SFTP
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ssh channel/auth internals and SSH/SFTP failure behavior are documented.
-
-### Implemented Internal Records
-
-- SSH transport negotiates protocol versions, cipher suites, and key-exchange mechanisms.
-- Session manager multiplexes exec/shell/SFTP channels over authenticated transport tunnels.
-- Credential layer supports key-based and password-based auth with agent/known-host validation.
-
-### API Execution Records (Complete)
-
-- std.ssh.connect(target, credentials, options): establish authenticated SSH session tunnel.
-- std.ssh.exec(session, command): execute remote command and collect streamed output.
-- std.ssh.sftp.open(session): create SFTP channel for remote file operations.
-- std.ssh.sftp.transfer(channel, spec): perform upload/download with resume and integrity checks.
-
-### Failure Mode Matrix
-
-- Host key validation fails trust policy: ssh-host-key diagnostic.
-- Authentication rejected by remote endpoint: ssh-auth diagnostic.
-- Channel open/multiplex operation exceeds limits: ssh-channel diagnostic.
-- SFTP transfer interrupted or integrity check fails: sftp-transfer diagnostic.
-
-## std.qr — QR Code Generation
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.qr encode/matrix internals and QR-generation failure behavior are documented.
-
-### Implemented Internal Records
-
-- QR encoder selects version/error-correction level based on payload size and constraints.
-- Matrix builder places data, timing, and alignment patterns then applies mask scoring.
-- Output renderer converts matrix to raster/vector/text representations.
-
-### API Execution Records (Complete)
-
-- std.qr.encode(data, options): encode payload into QR matrix representation.
-- std.qr.render(matrix, format, options): render QR matrix to output format.
-- std.qr.version.select(data, ecc): select minimal QR version for payload/ecc settings.
-- std.qr.decode(image, options): decode QR image input to payload when supported.
-
-### Failure Mode Matrix
-
-- Payload exceeds QR capacity for selected version/ecc: qr-capacity diagnostic.
-- Invalid mask/pattern placement under strict validation: qr-matrix diagnostic.
-- Render target format unsupported for QR output: qr-render diagnostic.
-- Decode fails due to unreadable/corrupt symbol data: qr-decode diagnostic.
-
-## std.markdown — Markdown Parsing & Rendering
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.markdown parse/render internals and markdown-processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Markdown parser constructs block/inline AST with extension flag controls.
-- Renderer maps AST to HTML/text/other targets with sanitization and escaping policies.
-- Link/reference resolver handles footnotes, anchors, and reference-definition tables.
-
-### API Execution Records (Complete)
-
-- std.markdown.parse(text, options): parse markdown source into AST representation.
-- std.markdown.render(astOrText, target, options): render markdown to chosen output target.
-- std.markdown.sanitize(html, policy): sanitize rendered HTML by policy profile.
-- std.markdown.toc(ast, options): generate table-of-contents structure from heading nodes.
-
-### Failure Mode Matrix
-
-- Markdown tokenization/parse error in strict grammar mode: markdown-parse diagnostic.
-- Renderer target unsupported for selected extension set: markdown-render diagnostic.
-- Sanitization policy violation for unsafe content: markdown-sanitize diagnostic.
-- Link/reference resolution missing target definition: markdown-reference diagnostic.
-
-## std.archive — ZIP & TAR Archives
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.archive container/entry internals and archive-processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Archive adapter supports ZIP/TAR container parsing and entry metadata projection.
-- Entry stream layer performs lazy extraction with path normalization and safety checks.
-- Writer pipeline builds archives with compression mode and file attribute policies.
-
-### API Execution Records (Complete)
-
-- std.archive.open(source, options): open archive container and index entry catalog.
-- std.archive.extract(archive, target, options): extract archive entries to filesystem target.
-- std.archive.create(entries, target, options): create archive container from entry set.
-- std.archive.list(archive): enumerate archive entries with metadata.
-
-### Failure Mode Matrix
-
-- Archive header/index corrupt or unsupported format: archive-parse diagnostic.
-- Entry path traversal or unsafe extraction target detected: archive-safety diagnostic.
-- Compression/decompression operation fails for entry stream: archive-codec diagnostic.
-- File attribute/permission restoration fails on extract: archive-restore diagnostic.
-
-## Weak References
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - weak-reference lifecycle/upgrade semantics and weak-reference internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Weak references share control blocks with strong references while not contributing to strong liveness count.
-- Upgrade operation atomically checks strong count and returns strong handle only if object remains alive.
-- Control block reclamation waits for both strong and weak counts to reach terminal release conditions.
-
-### API Execution Records (Complete)
-
-- weak.new(strongRef): create weak handle from strong reference control block.
-- weak.upgrade(weakRef): attempt strong handle reconstruction if object is still alive.
-- weak.counts(ref): query strong/weak count snapshot for diagnostics or introspection.
-- weak.release(weakRef): decrement weak count and trigger control-block cleanup when eligible.
-
-### Failure Mode Matrix
-
-- Upgrade on already-dropped allocation: weak-upgrade returns none with dropped-object metadata.
-- Control block corruption/count underflow detected: runtime memory-safety diagnostic.
-- Cross-thread weak upgrade without required sync policy: thread-safety diagnostic.
-- Double release of weak handle in strict mode: ownership diagnostic with handle provenance.
-
-## Newtype Wrappers
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - newtype wrapping/coercion semantics and newtype internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Newtype wrappers preserve runtime representation by default while creating distinct semantic type identity.
-- Coercion rules enforce explicit unwrap/wrap boundaries unless transparent policy is declared.
-- Trait forwarding for newtypes is opt-in via derive/impl generation and coherence checks.
-
-### API Execution Records (Complete)
-
-- newtype.wrap(value): construct newtype wrapper from underlying representation.
-- newtype.unwrap(wrapper): extract inner value respecting ownership/borrow mode.
-- newtype.coerce(wrapper, target): apply explicit conversion path between compatible wrappers.
-- newtype.validate(def): enforce transparency/trait/coherence constraints for wrapper definition.
-
-### Failure Mode Matrix
-
-- Illegal implicit coercion between newtype and inner type: coercion diagnostic with explicit-conversion hint.
-- Wrapper transparency violation under ABI/FFI constraint: representation diagnostic.
-- Trait forwarding conflict from overlapping derives/impls: coherence diagnostic.
-- Unwrap move from borrowed wrapper: ownership diagnostic with borrow origin trace.
-
-## The `@derive` Decorator
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - derive expansion generation and derive internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Derive planner expands target traits into synthesized impl AST fragments with hygiene-safe symbols.
-- Expansion pipeline validates trait prerequisites and field/member capabilities before code emission.
-- Generated impl metadata tracks origin trait + expansion span for diagnostics and tooling.
-
-### API Execution Records (Complete)
-
-- derive.scan(typeDef, traits): validate requested derive traits against target type shape.
-- derive.expand(typeDef, traits): generate impl AST fragments for each requested derive trait.
-- derive.hygiene(ast): apply scoped symbol remapping to avoid capture collisions.
-- derive.emit(ast): inject generated impls into semantic pipeline and coherence registry.
-
-### Failure Mode Matrix
-
-- Unsupported derive trait for target shape: derive-compatibility diagnostic.
-- Missing prerequisite bound for derive generation: bound diagnostic with required trait list.
-- Generated impl conflicts with user-defined impl: coherence diagnostic with impl origin trace.
-- Hygiene collision in generated symbols: macro/derive hygiene diagnostic with symbol mapping.
-
-## Built-in Trait Catalog
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - built-in trait registry resolution and trait-catalog internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Built-in trait catalog stores canonical trait descriptors, marker flags, and solver integration metadata.
-- Trait lookup path resolves aliases/deprecations to canonical trait IDs with version compatibility checks.
-- Catalog metadata is exported to IDE/docs tooling for completion and diagnostics enrichment.
-
-### API Execution Records (Complete)
-
-- trait.catalog.resolve(name): resolve trait name/alias to canonical built-in trait descriptor.
-- trait.catalog.list(filters): enumerate traits by marker/category/capability criteria.
-- trait.catalog.check(type, trait): evaluate whether type satisfies built-in trait contract.
-- trait.catalog.meta(trait): retrieve trait metadata for diagnostics and tooling output.
-
-### Failure Mode Matrix
-
-- Unknown/deprecated trait name in strict mode: catalog resolution diagnostic with replacement hint.
-- Trait contract check requested for unsupported type category: trait-check diagnostic.
-- Catalog version mismatch with compiler runtime: compatibility diagnostic requiring update.
-- Conflicting alias mapping in trait catalog metadata: catalog-coherence diagnostic.
-
-## Numeric Casting
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - numeric-cast conversion rules and cast internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Numeric cast engine classifies conversions as widening, narrowing, signedness-shift, or float/integer boundary casts.
-- Lowering inserts checked/unchecked cast ops based on compile mode and explicit cast annotations.
-- Constant-folder performs compile-time cast evaluation with overflow/precision-loss tagging for diagnostics.
-
-### API Execution Records (Complete)
-
-- cast.classify(fromType, toType): determine cast category and safety profile.
-- cast.lower(expr, toType, mode): emit checked/unchecked runtime cast IR instruction.
-- cast.constEval(value, fromType, toType): evaluate cast at compile-time when operands are constant.
-- cast.report(meta): emit precision-loss/overflow notes according to warning policy.
-
-### Failure Mode Matrix
-
-- Narrowing cast exceeds destination range in checked mode: numeric-overflow diagnostic.
-- Float-to-int cast on NaN/inf in strict mode: invalid-cast diagnostic.
-- Unsupported cast between incompatible categories: type-conversion diagnostic.
-- Constant cast precision-loss forbidden by policy: compile-time cast diagnostic.
-
-## Raw and Byte Strings
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - raw/byte-string tokenization semantics and string-literal internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Lexer recognizes raw string delimiters with variable fence width and disables escape processing for raw payloads.
-- Byte-string parser validates literal bytes against encoding policy and emits byte-buffer constants.
-- Intern pool stores canonical literal bodies plus kind metadata (text/raw/byte) for downstream codegen.
-
-### API Execution Records (Complete)
-
-- string.lexRaw(token): parse raw literal body using delimiter fence metadata.
-- string.lexByte(token): parse byte literal payload into byte array constant representation.
-- string.intern(value, kind): intern literal with literal-kind tag for semantic consumers.
-- string.lowerLiteral(node): lower literal node to immutable runtime/constant representation.
-
-### Failure Mode Matrix
-
-- Unterminated raw string fence: lexer diagnostic with opening-delimiter span.
-- Invalid byte escape/value in byte string: literal-byte diagnostic.
-- Non-ASCII byte string content under strict byte mode: encoding-policy diagnostic.
-- Literal size exceeds configured constant budget: literal-size diagnostic.
-
-## Struct Update Syntax
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - struct-update field merge semantics and struct-update internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Struct-update lowering builds new aggregate by overriding explicit fields then sourcing remaining fields from base value.
-- Move/borrow analysis tracks which base fields are consumed vs preserved after update expansion.
-- Generic struct updates validate field set coherence against monomorphized layout descriptors.
-
-### API Execution Records (Complete)
-
-- struct.update.expand(base, overrides): synthesize full field initialization plan from base + overrides.
-- struct.update.validate(type, overrides): enforce field existence/uniqueness and initialization completeness.
-- struct.update.borrowCheck(plan): evaluate ownership impact for moved/borrowed base fields.
-- struct.update.lower(plan): emit aggregate-construction IR sequence.
-
-### Failure Mode Matrix
-
-- Override references unknown field name: struct-field diagnostic.
-- Duplicate override for same field: struct-update duplicate-field diagnostic.
-- Base value unusable due to ownership state: borrow/ownership diagnostic.
-- Non-exhaustive update after applying base + overrides: initialization diagnostic.
-
-## Bitfield Structs
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - bitfield packing/access semantics and bitfield internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Bitfield layout engine assigns bit offsets/widths under alignment and endian policy constraints.
-- Accessor generation emits mask/shift sequences for get/set operations with optional bounds checking.
-- ABI layer exports packed layout metadata for FFI and serialization compatibility checks.
-
-### API Execution Records (Complete)
-
-- bitfield.layout(structDef): compute packed offsets, widths, and storage-unit mapping.
-- bitfield.get(value, field): extract field bits via mask/shift logic.
-- bitfield.set(value, field, newBits): write field bits with range validation and merge semantics.
-- bitfield.abiCheck(layout, targetAbi): verify target ABI compatibility of packed representation.
-
-### Failure Mode Matrix
-
-- Field width/offset exceeds storage unit capacity: bitfield-layout diagnostic.
-- Assigned value does not fit field width in checked mode: bitfield-range diagnostic.
-- Overlapping fields without explicit overlap allowance: bitfield-overlap diagnostic.
-- Packed layout incompatible with target ABI/endianness policy: bitfield-abi diagnostic.
-
-## Block Expressions
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - block-expression value/lifetime semantics and block-expression internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Block expression lowering creates scoped symbol frames and returns terminal expression value when present.
-- Type inference unifies block terminal expression with expected context type, including unit fallback rules.
-- Lifetime tracker computes borrows introduced/ended inside block boundaries for borrow-check integration.
-
-### API Execution Records (Complete)
-
-- block.scope.enter(parentScope): allocate lexical frame for block locals and temporaries.
-- block.typeInfer(blockAst, expectedType): infer block result type from terminal expression/control exits.
-- block.lower(blockAst): emit IR for statement sequence + terminal value projection.
-- block.scope.exit(frame): release scoped symbols and finalize borrow/liveness summaries.
-
-### Failure Mode Matrix
-
-- Terminal expression type mismatches expected context: type-unification diagnostic.
-- Block path missing required terminal value in value context: missing-value diagnostic.
-- Borrow escapes block lifetime illegally: lifetime/borrow diagnostic.
-- Unreachable terminal expression after diverging control flow: control-flow diagnostic.
-
-## Do Blocks
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - do-block sequencing/lowering semantics and do-block internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Do-block desugaring expands effectful step sequencing into explicit bind/continuation form.
-- Effect context propagation carries ambient capability set through each do-step boundary.
-- Optimizer fuses trivial binds and preserves source-step mapping for debugger traces.
-
-### API Execution Records (Complete)
-
-- do.parse(blockAst): classify do steps, bindings, and terminal yield expression.
-- do.desugar(steps, effectCtx): transform do sequence into continuation/bind IR structure.
-- do.optimize(ir): collapse no-op binds and inline single-use continuation steps.
-- do.validate(effectCtx): enforce effect capability requirements for each step.
-
-### Failure Mode Matrix
-
-- Step produces incompatible effect/value for subsequent bind: do-sequence type/effect diagnostic.
-- Missing ambient effect capability for operation in do block: effect-capability diagnostic.
-- Invalid terminal yield in required-value context: do-yield diagnostic.
-- Desugaring introduces recursion/cycle beyond optimizer limits: do-lowering diagnostic.
-
-## Extension Methods
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - extension parsing, scoping, resolution, and collision detection documented.
-
-### Implemented Internal Records
-
-- Parser recognizes `extend Type { ... }` blocks as ExtensionDecl AST nodes containing method and static function declarations.
-- Extensions are registered in a per-module extension registry, keyed by (target_type, method_name). Visibility follows `pub` annotations — non-pub extensions are module-private.
-- Method resolution for dot-call `val.method()` first checks the type's own methods, then searches imported extension registries. Extensions never shadow existing methods.
-- Static extensions (`static func`) are resolved through `Type.method()` syntax with the same priority rules.
-- Generic extensions (`extend list<T>`) carry type parameters and optional `where` bounds; the solver applies bounds during method resolution.
-
-### API Execution Records (Complete)
-
-- extend.parse(tokens): recognize `extend` type_expr `{` method_decls `}` -> emit ExtensionDecl with target type, methods, and visibility.
-- extend.register(decl, module): validate target type is resolvable -> register (type, name) pairs in module extension registry -> check for duplicates within module.
-- extend.resolve(call_site, type, method_name, imported_modules): search type's own methods -> search extension registries of imported modules -> return resolved method or error.
-- extend.typecheck(method, target_type, env): bind `self` parameter to target type -> typecheck body in extended environment -> verify trait bounds if generic.
-- extend.lower(method): emit as a free function with first parameter being the target type -> rewrite call sites to pass receiver as first argument.
-- extend.collision_check(type, name, all_imports): verify at most one extension defines `name` for `type` across all imported modules -> emit collision diagnostic if violated.
-
-### Failure Mode Matrix
-
-- Extension method name collides with existing type method: compile error "extension cannot shadow existing method 'name' on type T".
-- Two imported extensions define same method for same type: compile error "ambiguous extension method 'name' for type T — defined in module A and module B".
-- Extension attempts to add stored field: parse error "extensions may only contain methods and static functions".
-- Extension on unresolvable type: compile error "cannot extend unknown type T".
-- Generic extension with unsatisfied bounds at call site: type diagnostic with unmet trait bound details.
-
-## Trait Coherence and Orphans
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - trait-coherence orphan checks and coherence internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Coherence solver indexes impls by trait+type head and applies overlap detection over normalized forms.
-- Orphan checker enforces locality rules for trait/type ownership before impl admission.
-- Specialization-aware pass validates fallback/child impl ordering constraints where specialization is enabled.
-
-### API Execution Records (Complete)
-
-- coherence.register(implDef): normalize impl signature and add candidate to coherence index.
-- coherence.checkOverlap(implDef): detect conflicting impl regions against existing registry entries.
-- coherence.checkOrphan(implDef, crateCtx): verify orphan/locality constraints.
-- coherence.finalize(): freeze coherence index for downstream monomorphization and trait solving.
-
-### Failure Mode Matrix
-
-- Overlapping impls detected for same trait/type region: coherence-overlap diagnostic.
-- Orphan rule violation (foreign trait on foreign type): orphan-rule diagnostic.
-- Specialization ordering invalid or ambiguous: specialization-coherence diagnostic.
-- Coherence index corruption/inconsistent normalization keys: internal coherence diagnostic.
-
-## Cross-Compilation
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - cross-target toolchain/ABI configuration and cross-compilation internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Target registry resolves architecture/os/abi triples to backend codegen and linker profiles.
-- Build pipeline splits host-tools and target-artifact stages to avoid host-target contamination.
-- Sysroot/runtime selection binds target-specific stdlibs, startup objects, and linker scripts.
-
-### API Execution Records (Complete)
-
-- cross.target.resolve(triple): load target descriptor, data layout, and backend options.
-- cross.stage.plan(project, target): produce host-tool and target-artifact build graph.
-- cross.sysroot.bind(target): locate and validate target sysroot/runtime assets.
-- cross.link.invoke(objects, target): execute target linker invocation with ABI profile flags.
-
-### Failure Mode Matrix
-
-- Unknown/unsupported target triple: target-resolution diagnostic.
-- Missing target sysroot or runtime asset: cross-toolchain diagnostic.
-- ABI mismatch between object set and target profile: link/abi diagnostic.
-- Host tool executed in target stage (or inverse): stage-separation diagnostic.
-
-## Inline Value Types
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - @inline annotation parsing, layout computation, copy-semantics enforcement, and backend lowering documented.
-
-### Implemented Internal Records
-
-- Parser recognizes `@inline` decorator on struct declarations; the decorator is recorded as a type-level attribute in the StructDecl AST node.
-- Semantic analysis validates @inline constraints: all fields must be fixed-size types (primitives, other @inline structs, or fixed-size arrays). No reference types, no class inheritance.
-- Layout computation for @inline types uses a flat, packed representation with known size at compile time. The type's sizeof is computed during type resolution and cached.
-- Copy semantics enforcement: all assignments, function arguments, and return values involving @inline types are deep-copied (bitwise copy for POD types). No reference aliasing is possible.
-- Backend lowering: @inline types are stack-allocated in function frames. When used in collections, they are stored inline in the collection's backing buffer (no pointer indirection).
-
-### API Execution Records (Complete)
-
-- inline.parse(decorator, struct_decl): validate @inline is applied to a struct (not a class/enum) -> set inline attribute on StructDecl.
-- inline.validate_layout(struct_type): compute total byte size from field types -> reject if any field is a reference type or unbounded -> reject if total size exceeds threshold (default 64 bytes, configurable).
-- inline.compute_sizeof(struct_type): recursively sum field sizes with alignment padding -> cache result in type metadata -> emit to backend as constant.
-- inline.lower_assignment(assign_ir, type_info): if type is @inline -> emit bitwise copy instead of reference copy -> update liveness analysis (source remains valid).
-- inline.lower_param(param, type_info): pass @inline types by value (copy to callee frame) or by const reference if optimizer proves no mutation (optimization pass).
-- inline.lower_collection_store(elem_type, collection): if elem_type is @inline -> emit inline storage in collection buffer without pointer indirection.
-- inline.reject_borrow(borrow_expr, type_info): if target type is @inline -> emit compile error "cannot borrow @inline type — use copy semantics".
-
-### Failure Mode Matrix
-
-- @inline on class declaration: compile error "@inline is only supported on struct types".
-- @inline struct contains reference-type field: compile error "field 'name' is a reference type; @inline structs must contain only value types".
-- @inline struct exceeds size threshold: warning "@inline struct 'Name' is N bytes (threshold: 64); consider heap allocation".
-- @inline type used with `is` identity operator: compile error "identity comparison not available for @inline types (use == for equality)".
-- @inline type used with `&` borrow: compile error "cannot borrow @inline type".
-
-## Profiling
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - profiling instrumentation/aggregation pipeline and profiling internals and failure behavior are documented.
-
-### Implemented Internal Records
-
-- Profiler inserts probes/sampling hooks at configured granularity (function/basic-block/allocation).
-- Runtime collector aggregates event streams into time and call-graph summaries with symbol resolution.
-- Export pipeline emits standardized profiling artifacts for flamegraph and trace viewers.
-
-### API Execution Records (Complete)
-
-- profile.instrument(module, config): inject profiling hooks according to instrumentation mode.
-- profile.collect(session): gather samples/events and maintain aggregation counters.
-- profile.symbolize(rawData): map addresses/ids to source symbols using debug metadata.
-- profile.export(report, format): write profiling report in requested output format.
-
-### Failure Mode Matrix
-
-- Instrumentation requested without compatible debug/probe support: profiling-config diagnostic.
-- Sampling buffer overflow with strict retention policy: profiling-runtime diagnostic.
-- Symbolization failed due to missing debug metadata: profiling-symbol diagnostic.
-- Export format incompatible with collected data schema: profiling-export diagnostic.
-
-## std.dns — DNS Resolution
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.dns resolver/cache internals and DNS resolution failure behavior are documented.
-
-### Implemented Internal Records
-
-- Resolver pipeline builds query plans across system resolver, recursive upstreams, and cache layers.
-- Record parser decodes resource records with TTL tracking and canonical name handling.
-- Cache subsystem enforces positive/negative caching with expiry and invalidation policies.
-
-### API Execution Records (Complete)
-
-- std.dns.lookup(name, recordType, options): resolve DNS records via configured resolver chain.
-- std.dns.reverse(ip, options): perform PTR lookup for address-to-name mapping.
-- std.dns.cache.get(key): retrieve cached DNS response when valid.
-- std.dns.cache.invalidate(pattern): evict matching cached entries by key/pattern.
-
-### Failure Mode Matrix
-
-- Query timeout or nameserver unavailability: dns-timeout diagnostic.
-- Malformed DNS response/record parsing failure: dns-parse diagnostic.
-- DNSSEC/policy validation failure in strict mode: dns-validation diagnostic.
-- Cache poisoning guard triggered by inconsistent answer set: dns-cache-integrity diagnostic.
-
-## std.2d — 2D Vector Graphics
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.2d vector/canvas internals and 2D graphics failure behavior are documented.
-
-### Implemented Internal Records
-
-- 2D engine manages path primitives, paint styles, and transform stacks.
-- Rasterizer backend converts vector operations to target surfaces with anti-alias controls.
-- Text subsystem integrates glyph shaping and font atlas caching for draw calls.
-
-### API Execution Records (Complete)
-
-- std.2d.canvas.create(config): create 2D drawing surface and context state.
-- std.2d.path.draw(ctx, path, paint): render vector path using active paint settings.
-- std.2d.text.draw(ctx, text, pos, style): draw text glyph runs on target surface.
-- std.2d.image.blit(ctx, img, dst): composite image buffer into canvas region.
-
-### Failure Mode Matrix
-
-- Invalid path command sequence or geometry state: gfx2d-path diagnostic.
-- Surface/backend allocation fails for canvas target: gfx2d-surface diagnostic.
-- Font glyph shaping/render resource unavailable: gfx2d-text diagnostic.
-- Blend/composite mode unsupported by backend: gfx2d-composite diagnostic.
-
-## std.graphql — GraphQL Client & Server
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.graphql schema/execution internals and GraphQL failure behavior are documented.
-
-### Implemented Internal Records
-
-- GraphQL parser builds operation AST and validates field selections against schema definitions.
-- Execution engine resolves fields through resolver registry with batching and deferred-resolution support.
-- Transport adapters expose HTTP/WebSocket integrations for query/mutation/subscription workflows.
-
-### API Execution Records (Complete)
-
-- std.graphql.schema.load(definition): compile schema and resolver binding metadata.
-- std.graphql.execute(schema, operation, vars): run query/mutation against resolver pipeline.
-- std.graphql.subscribe(schema, operation, vars): establish subscription stream for event updates.
-- std.graphql.validate(schema, operation): perform static validation and cost analysis.
-
-### Failure Mode Matrix
-
-- Operation references unknown field/type in schema: graphql-validation diagnostic.
-- Resolver execution throws or returns incompatible payload: graphql-resolver diagnostic.
-- Query complexity exceeds configured cost budget: graphql-cost diagnostic.
-- Subscription transport/channel teardown during active stream: graphql-subscription diagnostic.
-
-## std.webrtc — WebRTC
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.webrtc peer/session internals and WebRTC failure behavior are documented.
-
-### Implemented Internal Records
-
-- WebRTC stack coordinates SDP negotiation, ICE candidate exchange, and DTLS/SRTP setup.
-- Peer connection manager tracks transceivers, data channels, and media stream lifecycle events.
-- NAT traversal subsystem integrates STUN/TURN configuration and connectivity state transitions.
-
-### API Execution Records (Complete)
-
-- std.webrtc.peer.create(config): initialize peer connection with media/data capabilities.
-- std.webrtc.signal.offer(peer): generate SDP offer and collect local negotiation metadata.
-- std.webrtc.signal.answer(peer, remoteOffer): apply remote offer and generate SDP answer.
-- std.webrtc.channel.open(peer, label): create negotiated data channel for payload exchange.
-
-### Failure Mode Matrix
-
-- SDP negotiation fails capability/codec compatibility checks: webrtc-negotiation diagnostic.
-- ICE connectivity checks fail across candidate set: webrtc-ice diagnostic.
-- DTLS/SRTP handshake failure on secure media setup: webrtc-security diagnostic.
-- Data channel state invalid during send/receive: webrtc-channel-state diagnostic.
-
-## std.clipboard — Clipboard
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.clipboard provider internals and clipboard operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Clipboard adapter resolves platform provider and negotiates text/binary format conversions.
-- Access broker serializes clipboard read/write operations to avoid provider contention.
-- Security gate enforces foreground/session restrictions for clipboard access paths.
-
-### API Execution Records (Complete)
-
-- std.clipboard.readText(): fetch current clipboard text payload if available.
-- std.clipboard.writeText(value): publish text payload to system clipboard provider.
-- std.clipboard.readData(format): read non-text clipboard data for requested format.
-- std.clipboard.clear(): clear active clipboard ownership/content when permitted.
-
-### Failure Mode Matrix
-
-- Clipboard provider unavailable in current session: clipboard-provider diagnostic.
-- Access denied by platform privacy policy: clipboard-permission diagnostic.
-- Requested format conversion unsupported: clipboard-format diagnostic.
-- Provider contention/lock timeout during operation: clipboard-timeout diagnostic.
-
-## std.notify — Desktop Notifications
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.notify notification-dispatch internals and desktop-notification failure behavior are documented.
-
-### Implemented Internal Records
-
-- Notification dispatcher maps payload schema to platform toast/notification center providers.
-- Action routing associates notification interaction events with registered runtime callbacks.
-- Lifecycle tracker manages notification IDs, replacement keys, and expiration policies.
-
-### API Execution Records (Complete)
-
-- std.notify.send(spec): emit desktop notification with title/body/actions metadata.
-- std.notify.update(id, spec): replace existing notification content by identifier.
-- std.notify.cancel(id): cancel active notification and release provider resources.
-- std.notify.onAction(id, handler): register callback for notification action events.
-
-### Failure Mode Matrix
-
-- Notification provider missing on target environment: notify-provider diagnostic.
-- Payload exceeds provider constraints (size/action limits): notify-payload diagnostic.
-- Action callback registration fails lifecycle validation: notify-action diagnostic.
-- Notification delivery suppressed by OS policy: notify-policy diagnostic.
-
-## std.speech — Text-to-Speech & Recognition
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.speech synthesis/recognition internals and speech-runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- Speech runtime broker selects synthesis/recognition engines and voice/language resources.
-- Audio pipeline manages microphone capture, stream chunking, and recognition buffering.
-- Synthesis queue coordinates utterance scheduling with cancel/pause/resume controls.
-
-### API Execution Records (Complete)
-
-- std.speech.tts.speak(text, options): synthesize and play spoken output.
-- std.speech.tts.stop(): stop active speech synthesis playback.
-- std.speech.stt.start(options): begin speech recognition capture session.
-- std.speech.stt.read(session): retrieve recognition transcript events.
-
-### Failure Mode Matrix
-
-- Speech engine unavailable or misconfigured on platform: speech-engine diagnostic.
-- Microphone access denied or device unavailable: speech-input diagnostic.
-- Recognition stream decode fails language/model constraints: speech-recognition diagnostic.
-- Synthesis queue overflow or interruption in strict mode: speech-runtime diagnostic.
-
-## std.camera — Camera & Webcam
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.camera device/capture internals and camera-capture failure behavior are documented.
-
-### Implemented Internal Records
-
-- Camera manager enumerates capture devices and negotiates resolution/frame-rate capabilities.
-- Capture pipeline converts raw frames into configured pixel formats with timestamp metadata.
-- Session state machine coordinates open/start/stop transitions and exclusive-device locks.
-
-### API Execution Records (Complete)
-
-- std.camera.list(): enumerate available camera devices and capabilities.
-- std.camera.open(deviceId, config): open capture session with negotiated stream format.
-- std.camera.read(session): fetch next captured frame buffer and timing metadata.
-- std.camera.close(session): stop capture and release device resources.
-
-### Failure Mode Matrix
-
-- Camera device not found or already locked: camera-device diagnostic.
-- Requested capture format unsupported by hardware: camera-format diagnostic.
-- Permission denied for camera access: camera-permission diagnostic.
-- Capture stream stalls or frame read timeout: camera-stream diagnostic.
-
-## std.serial — Serial Port / UART
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.serial port/session internals and serial-transport failure behavior are documented.
-
-### Implemented Internal Records
-
-- Serial adapter configures UART parameters (baud/parity/stop bits/flow control) per endpoint.
-- Framing layer supports line/binary protocols with configurable delimiter and timeout behavior.
-- Port manager tracks open handles and cross-thread access synchronization.
-
-### API Execution Records (Complete)
-
-- std.serial.list(): enumerate available serial ports with descriptor metadata.
-- std.serial.open(port, config): open serial port using validated UART configuration.
-- std.serial.write(handle, data): transmit bytes with flow-control and timeout handling.
-- std.serial.read(handle, options): read framed or raw bytes from serial stream.
-
-### Failure Mode Matrix
-
-- Invalid UART configuration for selected hardware: serial-config diagnostic.
-- Port unavailable or already in use: serial-port-state diagnostic.
-- Read/write timeout under configured deadline: serial-timeout diagnostic.
-- Framing/parity error detected in strict mode: serial-framing diagnostic.
-
-## std.usb — USB Devices
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.usb device/interface internals and USB I/O failure behavior are documented.
-
-### Implemented Internal Records
-
-- USB subsystem enumerates devices/configurations and resolves interface/endpoint descriptors.
-- Transfer engine handles control/bulk/interrupt transfer scheduling with completion callbacks.
-- Permission layer applies platform-specific device access policies and claim/release semantics.
-
-### API Execution Records (Complete)
-
-- std.usb.list(filters): discover USB devices matching class/vendor/product criteria.
-- std.usb.open(device): claim device handle and initialize configuration context.
-- std.usb.transfer(handle, endpoint, payload): execute endpoint transfer operation.
-- std.usb.close(handle): release claimed interfaces and close device session.
-
-### Failure Mode Matrix
-
-- Device/interface claim denied or detached during use: usb-device-state diagnostic.
-- Endpoint transfer stall or protocol error: usb-transfer diagnostic.
-- Access blocked by platform security policy: usb-permission diagnostic.
-- Unsupported descriptor/alternate setting requested: usb-descriptor diagnostic.
-
-## std.bluetooth — Bluetooth & BLE
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.bluetooth adapter/session internals and Bluetooth/BLE failure behavior are documented.
-
-### Implemented Internal Records
-
-- Bluetooth manager tracks adapter state, discovery sessions, and pairing workflows.
-- BLE GATT layer models services/characteristics and subscription notifications.
-- Transport bridge normalizes classic Bluetooth and BLE channel semantics to runtime APIs.
-
-### API Execution Records (Complete)
-
-- std.bluetooth.scan(options): start device discovery with filter and duration policies.
-- std.bluetooth.connect(device, options): establish classic/BLE connection session.
-- std.bluetooth.gatt.read(conn, characteristic): read characteristic value from connected device.
-- std.bluetooth.gatt.write(conn, characteristic, value): write characteristic payload with mode control.
-
-### Failure Mode Matrix
-
-- Adapter unavailable or powered-off during operation: bluetooth-adapter diagnostic.
-- Pairing/authentication handshake fails security policy: bluetooth-pairing diagnostic.
-- GATT characteristic access violates permissions/properties: bluetooth-gatt diagnostic.
-- Connection drops or signal timeout exceeds retry policy: bluetooth-connection diagnostic.
-
-## std.hotkey — Global Hotkeys
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.hotkey registration/dispatch internals and global-hotkey failure behavior are documented.
-
-### Implemented Internal Records
-
-- Hotkey registry maps key-chord descriptors to global hook registrations per platform backend.
-- Event dispatcher routes key events to subscribed handlers with debounce and repeat filtering.
-- Lifecycle manager ensures hotkey cleanup on process exit and dynamic reconfiguration changes.
-
-### API Execution Records (Complete)
-
-- std.hotkey.register(chord, handler): register global key chord and callback binding.
-- std.hotkey.unregister(id): remove registered hotkey by identifier.
-- std.hotkey.enable(scope): activate hotkey processing in selected scope/context.
-- std.hotkey.disable(scope): suspend hotkey processing without dropping registrations.
-
-### Failure Mode Matrix
-
-- Chord conflicts with existing registration or reserved OS shortcut: hotkey-conflict diagnostic.
-- Global hook installation denied by platform policy: hotkey-permission diagnostic.
-- Handler dispatch fails due to stale registration state: hotkey-dispatch diagnostic.
-- Unsupported key chord format for backend: hotkey-format diagnostic.
-
-## std.tray — System Tray
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.tray icon/menu internals and system-tray failure behavior are documented.
-
-### Implemented Internal Records
-
-- Tray runtime binds icon resources, tooltip metadata, and platform menu models.
-- Menu action router dispatches click/command events to registered handlers.
-- State synchronizer applies incremental tray/menu updates with backend reconciliation.
-
-### API Execution Records (Complete)
-
-- std.tray.create(spec): create tray icon and initial menu/action configuration.
-- std.tray.update(tray, patch): apply tray icon/menu state updates.
-- std.tray.onAction(tray, actionId, handler): bind action callback for tray menu event.
-- std.tray.destroy(tray): remove tray artifact and release backend resources.
-
-### Failure Mode Matrix
-
-- Tray backend unavailable in current desktop environment: tray-provider diagnostic.
-- Icon/menu resource payload invalid or unsupported: tray-resource diagnostic.
-- Action routing references unknown menu item: tray-action diagnostic.
-- Update failed due to backend desync/state invalidation: tray-state diagnostic.
-
-## std.ipc — Inter-Process Communication
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ipc channel/endpoint internals and IPC failure behavior are documented.
-
-### Implemented Internal Records
-
-- IPC broker abstracts named pipes, unix-domain sockets, and shared-memory endpoints per platform.
-- Message codec enforces framing/schema validation and optional zero-copy transfer paths.
-- Endpoint lifecycle manager tracks registration, handshake, and teardown with access-control checks.
-
-### API Execution Records (Complete)
-
-- std.ipc.endpoint.open(name, mode): create or attach to IPC endpoint with policy constraints.
-- std.ipc.send(endpoint, message): serialize and transmit framed IPC message payload.
-- std.ipc.receive(endpoint, options): receive/decode inbound message with timeout policy.
-- std.ipc.close(endpoint): close endpoint and release associated transport resources.
-
-### Failure Mode Matrix
-
-- Endpoint name collision or unavailable transport primitive: ipc-endpoint diagnostic.
-- Framing/schema mismatch for received message: ipc-codec diagnostic.
-- Access-control policy denies endpoint operation: ipc-access diagnostic.
-- Peer disconnect or broken pipe during active exchange: ipc-transport diagnostic.
-
-## std.decimal — Exact Decimal Arithmetic
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.decimal precision/arithmetic internals and decimal-operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Decimal engine stores base-10 coefficient/exponent tuples with configurable precision context.
-- Arithmetic operations implement rounding modes and scale alignment before computation.
-- Conversion layer maps decimal values to/from integer/float/text representations with policy checks.
-
-### API Execution Records (Complete)
-
-- std.decimal.parse(text, context): parse exact decimal value from textual input.
-- std.decimal.add(a, b, context): perform decimal addition under precision/rounding context.
-- std.decimal.mul(a, b, context): perform decimal multiplication with scale management.
-- std.decimal.format(value, style): render decimal value using style/locale formatting rules.
-
-### Failure Mode Matrix
-
-- Decimal parse input invalid or exceeds precision context: decimal-parse diagnostic.
-- Arithmetic overflow/underflow in checked decimal context: decimal-overflow diagnostic.
-- Rounding policy conflict for required exact operation: decimal-rounding diagnostic.
-- Inexact conversion forbidden by strict policy: decimal-conversion diagnostic.
-
-## std.diff — Text Diffing & Patching
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.diff algorithm/patch internals and diff-patching failure behavior are documented.
-
-### Implemented Internal Records
-
-- Diff engine computes line/word/byte deltas using selectable algorithm strategies.
-- Patch applier replays hunks with context matching and fuzz tolerance controls.
-- Normalizer handles newline/encoding policies before comparison or patch application.
-
-### API Execution Records (Complete)
-
-- std.diff.compute(a, b, options): compute structured diff hunks between two inputs.
-- std.diff.apply(base, patch, options): apply patch hunks to base content source.
-- std.diff.reverse(patch): generate reverse patch operations for rollback.
-- std.diff.render(diff, format): render diff output in unified/context/custom formats.
-
-### Failure Mode Matrix
-
-- Patch hunk context not found within tolerance: diff-apply diagnostic.
-- Input normalization/encoding mismatch prevents comparison: diff-encoding diagnostic.
-- Unsupported diff format requested for render/apply: diff-format diagnostic.
-- Reverse patch generation fails due to incomplete metadata: diff-reverse diagnostic.
-
-## std.semver — Semantic Versioning
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.semver parse/constraint internals and semantic-version failure behavior are documented.
-
-### Implemented Internal Records
-
-- Semver parser tokenizes major/minor/patch + prerelease/build metadata components.
-- Constraint solver evaluates version ranges, unions, intersections, and precedence ordering.
-- Normalizer canonicalizes equivalent version expressions for cache and comparison stability.
-
-### API Execution Records (Complete)
-
-- std.semver.parse(text): parse semantic version string into structured components.
-- std.semver.compare(a, b): compare two semantic versions with prerelease precedence rules.
-- std.semver.satisfies(version, constraint): evaluate version against range/constraint expression.
-- std.semver.normalize(expr): canonicalize version or constraint expression string.
-
-### Failure Mode Matrix
-
-- Invalid semver token/order in version string: semver-parse diagnostic.
-- Constraint expression grammar error: semver-constraint diagnostic.
-- Comparison request with non-semver-compatible input: semver-compare diagnostic.
-- Normalization ambiguity under strict mode: semver-normalize diagnostic.
-
-## std.geo — Geospatial
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.geo coordinate/spatial internals and geospatial failure behavior are documented.
-
-### Implemented Internal Records
-
-- Geo core models coordinate systems, projections, and geometry primitives.
-- Spatial algorithms provide distance, containment, intersection, and topology operations.
-- Projection adapter transforms coordinates between CRS definitions with precision metadata.
-
-### API Execution Records (Complete)
-
-- std.geo.point(lat, lon, options): create typed coordinate point value.
-- std.geo.distance(a, b, model): compute geodesic or planar distance metric.
-- std.geo.transform(geom, fromCrs, toCrs): reproject geometry into target CRS.
-- std.geo.query.contains(region, point): evaluate spatial containment predicate.
-
-### Failure Mode Matrix
-
-- Coordinate value outside valid domain for CRS: geo-coordinate diagnostic.
-- Projection definition missing/unsupported for transform path: geo-projection diagnostic.
-- Geometry topology invalid for requested operation: geo-topology diagnostic.
-- Precision policy exceeded for strict spatial computation: geo-precision diagnostic.
-
-## std.gpu — GPU Compute
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.gpu device/compute internals and GPU-compute failure behavior are documented.
-
-### Implemented Internal Records
-
-- GPU runtime selects adapter/device and initializes queue/command resource pools.
-- Buffer/shader manager tracks allocation lifetimes and pipeline binding layouts.
-- Dispatch scheduler submits compute workloads with synchronization fence handling.
-
-### API Execution Records (Complete)
-
-- std.gpu.device.open(options): open GPU device and queue context.
-- std.gpu.buffer.create(size, usage): allocate GPU buffer with usage flags.
-- std.gpu.shader.compile(source, stage): compile shader module for compute/render stage.
-- std.gpu.dispatch(pipeline, groups, bindings): execute compute dispatch workload.
-
-### Failure Mode Matrix
-
-- No compatible GPU adapter found for required features: gpu-adapter diagnostic.
-- Shader compilation/binding layout mismatch: gpu-shader diagnostic.
-- Buffer allocation exceeds device/resource limits: gpu-memory diagnostic.
-- Dispatch synchronization/fence timeout in strict mode: gpu-dispatch diagnostic.
-
-## std.accessibility — Accessibility APIs
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.accessibility tree/event internals and accessibility-API failure behavior are documented.
-
-### Implemented Internal Records
-
-- Accessibility bridge maps runtime UI semantics to platform accessibility tree nodes and roles.
-- Event translator forwards focus/value/state changes to assistive-technology backends.
-- Metadata layer maintains label/hint/action descriptors for accessibility audits and tooling.
-
-### API Execution Records (Complete)
-
-- std.accessibility.node.create(spec): register accessibility node with role/label metadata.
-- std.accessibility.node.update(node, patch): mutate node state and emit accessibility events.
-- std.accessibility.focus.set(node): request accessibility focus transition for node.
-- std.accessibility.audit(tree): run accessibility rule checks over registered node tree.
-
-### Failure Mode Matrix
-
-- Unsupported accessibility role/state mapping on target backend: accessibility-role diagnostic.
-- Node update references invalid parent/child relationship: accessibility-tree diagnostic.
-- Assistive backend event dispatch failure: accessibility-dispatch diagnostic.
-- Audit rule violations in strict conformance mode: accessibility-audit diagnostic.
-
-## std.blockchain — Blockchain & Web3
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.blockchain client/transaction internals and blockchain-operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Blockchain client handles RPC transport, chain metadata caching, and network selection.
-- Transaction builder encodes operations, gas/fee policies, and signing payload layouts.
-- Contract adapter manages ABI encoding/decoding and event log parsing.
-
-### API Execution Records (Complete)
-
-- std.blockchain.client.connect(endpoint, options): connect to chain node/provider backend.
-- std.blockchain.tx.build(spec): construct transaction payload from operation spec.
-- std.blockchain.tx.sign(tx, key): sign transaction payload with configured signer.
-- std.blockchain.tx.send(client, signedTx): submit transaction and track confirmation state.
-
-### Failure Mode Matrix
-
-- RPC transport or chain endpoint unavailable: blockchain-rpc diagnostic.
-- Transaction nonce/gas/fee validation fails policy checks: blockchain-tx diagnostic.
-- Signature invalid for chain/account verification rules: blockchain-signature diagnostic.
-- Contract ABI decode mismatch for call/event payload: blockchain-abi diagnostic.
-
-## std.parse — Parser Combinators
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.parse combinator graph internals and parsing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Parser combinator runtime models parser nodes as immutable graph fragments with compositional success/failure states.
-- Input cursor tracks byte offset, UTF-8 line/column, and rollback checkpoints for backtracking and error reporting.
-- Error aggregator records nearest-failure expected token sets and normalizes deterministic diagnostics ordering.
-
-### API Execution Records (Complete)
-
-- std.parse.token(text): construct exact-match parser node with literal-token expectation metadata.
-- std.parse.seq(nodes): compose parser nodes into ordered sequence with short-circuit failure propagation.
-- std.parse.choice(nodes): evaluate alternatives with priority ordering and nearest-failure aggregation.
-- std.parse.run(node, input): execute parser graph against input and emit value/rest/error result record.
-
-### Failure Mode Matrix
-
-- Recursive parser graph cycle without lazy guard: parse-recursion diagnostic.
-- Backtracking budget exceeded under strict parser limits: parse-backtrack diagnostic.
-- Cursor state corruption after failed rollback path: parse-state diagnostic.
-- Invalid parse-map transform output for declared schema/type: parse-transform diagnostic.
-
-## std.config — Unified Configuration
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.config layer-merge/schema internals and configuration failure behavior are documented.
-
-### Implemented Internal Records
-
-- Layer loader ingests TOML/YAML/JSON/dotenv/env sources into canonical typed config maps.
-- Merge engine applies deterministic precedence and deep-merge strategy with path-level conflict tracking.
-- Dotenv layer handling delegates parsing/expansion to shared std.dotenv primitives to keep semantics aligned.
-- Schema validator checks required/type/range constraints and emits path-precise diagnostics.
-
-### API Execution Records (Complete)
-
-- std.config.load(opts): read configured layers and produce merged configuration object.
-- std.config.merge(base, overlay, policy): merge two configuration trees with conflict policy rules.
-- std.config.validate(cfg, schema): validate configuration object against schema constraints.
-- std.config.dotenv_read(path): parse dotenv file through shared dotenv parser and return key/value map.
-- std.config.dotenv_apply(path, override): parse dotenv file and apply values into environment map.
-
-### Failure Mode Matrix
-
-- Config file unreadable or parse failed for declared format: config-source diagnostic.
-- Deep-merge conflict violates strict policy for same key path: config-merge diagnostic.
-- Required schema path missing or type mismatch: config-schema diagnostic.
-- Dotenv key invalid/unset behavior violates environment policy: config-dotenv diagnostic.
-
-## std.event — Event Bus & PubSub
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.event subscription/dispatch internals and event-delivery failure behavior are documented.
-
-### Implemented Internal Records
-
-- Topic registry maps topic strings to ordered subscriber lists with stable subscription IDs.
-- Dispatch engine supports sync and queued async delivery while preserving per-topic ordering guarantees.
-- Backpressure policy tracks queue depth, drop strategy, and dispatcher health counters.
-
-### API Execution Records (Complete)
-
-- std.event.bus(opts): create event bus instance and initialize queue/dispatcher policy.
-- std.event.on(bus, topic, handler): register topic handler and return subscription identifier.
-- std.event.emit(bus, topic, payload): enqueue/dispatch event payload to matching subscribers.
-- std.event.off(bus, topic, subId): remove subscription and reclaim handler entry.
-
-### Failure Mode Matrix
-
-- Subscription registration exceeds configured topic/subscriber bounds: event-subscription diagnostic.
-- Async queue overflow under strict drop policy: event-backpressure diagnostic.
-- Handler invocation panic/error in strict propagation mode: event-handler diagnostic.
-- Event payload fails schema/type guard for topic contract: event-payload diagnostic.
-
-## std.diag — Diagnostics & Observability
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.diag metric/tracing/health internals and observability failure behavior are documented.
-
-### Implemented Internal Records
-
-- Metric registry manages counters/gauges/histograms keyed by metric name and normalized label set.
-- Span runtime tracks parent-child relationships, events, and duration metadata for trace exports.
-- Health subsystem executes registered probes with timeout budgets and aggregate status rollup.
-
-### API Execution Records (Complete)
-
-- std.diag.counter(name, opts): register or retrieve counter metric handle.
-- std.diag.histogram(name, opts): register histogram metric with bucket policy.
-- std.diag.span(name, attrs): open trace span context and attach metadata.
-- std.diag.health.report(opts): execute health checks and emit aggregate report payload.
-
-### Failure Mode Matrix
-
-- Metric registration conflicts on name/type/label schema: diag-metric-schema diagnostic.
-- Span lifecycle misuse (end twice, invalid parent context): diag-span-state diagnostic.
-- Health check timeout or exception in strict mode: diag-healthcheck diagnostic.
-- Exporter backend unavailable or payload encoding failed: diag-export diagnostic.
-
-## std.iot — IoT & Embedded
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.iot hardware-adapter internals and embedded runtime failure behavior are documented.
-
-### Implemented Internal Records
-
-- Hardware abstraction layer maps logical pin/bus operations onto board-specific driver adapters.
-- Capability registry records per-target support for gpio/pwm/adc/dac/i2c/spi/uart at runtime startup.
-- Interrupt/timer coordination enforces deterministic ordering policies for soft realtime execution profiles.
-
-### API Execution Records (Complete)
-
-- std.iot.board(): resolve active board adapter and expose capability metadata (gpio/pwm/adc/dac/i2c/spi/uart).
-- std.iot.gpio.write(pin, value): validate pin mode and dispatch digital write through board driver.
-- std.iot.i2c.transfer(bus, addr, payload): execute I2C transaction with timeout/retry policy.
-- std.iot.spi.transfer(bus, payload): execute SPI full-duplex transfer and return response buffer.
-
-### Failure Mode Matrix
-
-- Requested capability unavailable on active board profile: iot-capability diagnostic.
-- Pin/bus index out of range or reserved by runtime: iot-pin-bus diagnostic.
-- Peripheral transaction timeout exceeded strict policy: iot-timeout diagnostic.
-- Driver adapter initialization failed due permission/hardware lock: iot-driver diagnostic.
-
-## std.office — Office Documents
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.office document-package internals and office-format failure behavior are documented.
-
-### Implemented Internal Records
-
-- OOXML package builder manages part/relationship graphs for DOCX/PPTX documents.
-- Style/numbering engine normalizes document runs, paragraphs, and table metadata before serialization.
-- Reader pipeline validates ZIP container + XML schema expectations before exposing typed document models.
-
-### API Execution Records (Complete)
-
-- std.office.docx.new(opts): allocate DOCX document model and initialize package graph.
-- std.office.docx.save(doc, path): serialize DOCX parts and write ZIP package artifact.
-- std.office.pptx.new(opts): allocate PPTX slide deck model and relationship index.
-- std.office.read(path): detect office format and decode into typed document object.
-
-### Failure Mode Matrix
-
-- Document model violates OOXML relationship/schema constraints: office-schema diagnostic.
-- Embedded asset missing or unsupported media format: office-asset diagnostic.
-- ZIP/package write fails integrity checks: office-package diagnostic.
-- Unsupported office feature encountered in strict reader mode: office-feature diagnostic.
-
-## std.money — Money & Financial Arithmetic
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.money typed-currency internals and financial arithmetic failure behavior are documented.
-
-### Implemented Internal Records
-
-- Money value layout stores decimal mantissa/scale with ISO currency code and rounding context.
-- Arithmetic engine enforces same-currency invariants unless explicit conversion graph is provided.
-- FX adapter validates rate timestamp/source metadata and applies deterministic conversion rounding.
-
-### API Execution Records (Complete)
-
-- std.money.new(amount, currency): construct typed money value with currency metadata.
-- std.money.add(a, b): perform same-currency addition with decimal precision preservation.
-- std.money.round(m, scale, mode): apply configured rounding mode to money amount.
-- std.money.convert(m, to, rates): convert money across currencies via supplied rate table.
-
-### Failure Mode Matrix
-
-- Arithmetic attempted across different currencies without conversion context: money-currency diagnostic.
-- Invalid rounding mode/scale for selected currency policy: money-rounding diagnostic.
-- FX rate missing/stale for requested pair under strict policy: money-fx diagnostic.
-- Decimal precision overflow exceeds configured financial bounds: money-precision diagnostic.
-
-## std.dotenv — Environment Files
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.dotenv parse/expand internals and environment-loading failure behavior are documented.
-
-### Implemented Internal Records
-
-- Dotenv lexer/parser handles key/value quoting, escapes, comments, and multiline value policies.
-- Expansion resolver evaluates `${VAR}` placeholders against parsed map and process environment precedence.
-- Shared dotenv primitives are reused by std.config dotenv helpers to enforce identical behavior.
-- Loader applies normalization and optional override semantics when mutating runtime environment map.
-
-### API Execution Records (Complete)
-
-- std.dotenv.parse(text, opts): parse dotenv text into key/value dictionary.
-- std.dotenv.read(path, opts): load file and parse dotenv entries.
-- std.dotenv.load(path, override): apply dotenv values into process environment.
-- std.dotenv.require(keys): assert required keys exist and return normalized subset.
-
-### Failure Mode Matrix
-
-- Invalid dotenv syntax/tokenization at key/value boundary: dotenv-parse diagnostic.
-- Variable expansion cycle or unresolved placeholder in strict mode: dotenv-expand diagnostic.
-- Attempted override of protected runtime variable: dotenv-protected diagnostic.
-- Dotenv file unreadable due path/permission errors: dotenv-io diagnostic.
-
-## std.scrape — Web Scraping & Browser Automation
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.scrape fetch/dom/headless internals and scraping failure behavior are documented.
-
-### Implemented Internal Records
-
-- Fetch layer applies HTTP policy (timeouts, redirects, cookies, robots checks) before DOM extraction.
-- Selector engine compiles CSS/XPath selectors and executes deterministic traversal over parsed DOM trees.
-- Headless runtime manages browser process/session/page lifecycle and command serialization across managed `chromium` (default) and optional `webkit` adapters.
-
-### API Execution Records (Complete)
-
-- std.scrape.fetch(url, opts): fetch remote resource and produce response/document context.
-- std.scrape.select(doc, selector): evaluate selector and return matched node set.
-- std.scrape.browser.new(opts): launch browser session with selected backend and initialize automation channel.
-- std.scrape.page.goto(page, url): navigate page with wait strategy and lifecycle events.
-
-### Failure Mode Matrix
-
-- Robots/policy gate denies requested crawl operation: scrape-policy diagnostic.
-- Selector parsing/execution fails for malformed query: scrape-selector diagnostic.
-- Headless session startup fails due missing/unsupported selected runtime backend: scrape-browser diagnostic.
-- Navigation timeout/network failure under strict mode: scrape-navigation diagnostic.
-
-## std.map — Geospatial Rendering
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.map scene/tile/render internals and map-rendering failure behavior are documented.
-
-### Implemented Internal Records
-
-- Scene graph stores vector layers, styling rules, camera parameters, and projection metadata.
-- Tile manager resolves provider templates, cache keys, and zoom-level fetch policies.
-- Renderer composes vector/tile layers into SVG/PNG/PDF outputs with deterministic paint order.
-
-### API Execution Records (Complete)
-
-- std.map.scene(opts): create scene container with projection and viewport settings.
-- std.map.layer.geojson(scene, data, style): attach GeoJSON layer into scene graph.
-- std.map.render.svg(scene, opts): render scene graph to SVG artifact.
-- std.map.render.png(scene, opts): render scene graph to PNG artifact.
-
-### Failure Mode Matrix
-
-- Unsupported projection or invalid CRS transform request: map-projection diagnostic.
-- Tile provider unavailable or cache integrity mismatch: map-tile diagnostic.
-- Layer style references unsupported paint property: map-style diagnostic.
-- Render output dimensions exceed configured budget limits: map-render diagnostic.
-
-## std.task — Persistent Task Queue
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.task queue/scheduler internals and durable-job failure behavior are documented.
-
-### Implemented Internal Records
-
-- Queue storage adapter persists jobs, states, retries, and dead-letter transitions with transaction semantics across `sqlite://`, `postgres://`, `redis://`, and `memory://` backends.
-- Scheduler computes due jobs from cron/delay expressions and enqueues runnable tasks deterministically.
-- Worker coordinator manages leases, concurrency windows, and heartbeat/recovery for crashed workers.
-
-### API Execution Records (Complete)
-
-- std.task.queue.open(name, backend): initialize queue/storage adapter and validate supported backend scheme.
-- std.task.enqueue(queue, job, opts): persist new job with retry/scheduling metadata.
-- std.task.worker.start(queue, opts, handler): run worker loop with lease + ack protocol.
-- std.task.deadletter.move(queue, jobId, reason): move failed job into dead-letter store.
-
-### Failure Mode Matrix
-
-- Storage backend transaction failed while mutating job state: task-storage diagnostic.
-- Retry policy exhausted and no dead-letter route configured: task-retry diagnostic.
-- Scheduler expression invalid or unsupported in strict mode: task-schedule diagnostic.
-- Worker lease lost due heartbeat timeout race: task-lease diagnostic.
-
-## std.phone — Telephony & SMS
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.phone provider abstraction internals and telephony-operation failure behavior are documented.
-
-### Implemented Internal Records
-
-- Provider registry maps canonical SMS/call operations onto backend-specific HTTP/API adapters.
-- Number normalization pipeline validates E.164 formatting and country policy constraints.
-- Verification subsystem tracks OTP issuance/attempt windows and anti-abuse throttling state.
-
-### API Execution Records (Complete)
-
-- std.phone.client(opts): create provider-backed telephony client context.
-- std.phone.sms.send(client, request): send SMS and record provider message metadata.
-- std.phone.call.start(client, request): initiate outbound voice call workflow.
-- std.phone.otp.verify(client, token, code): verify OTP under attempt/time constraints.
-
-### Failure Mode Matrix
-
-- Invalid/unsupported phone number format for configured region: phone-number diagnostic.
-- Provider authentication/authorization failure: phone-provider-auth diagnostic.
-- Message/call request rejected by provider policy limits: phone-provider-policy diagnostic.
-- OTP token expired or max attempts exceeded: phone-otp diagnostic.
-
-## std.barcode — Barcode Generation & Scanning
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.barcode symbology/render internals and barcode-processing failure behavior are documented.
-
-### Implemented Internal Records
-
-- Symbology registry validates payload constraints and check-digit policies per barcode type.
-- Encoder builds canonical bar/space (or matrix) representations before raster/vector rendering.
-- Decoder pipeline applies image preprocessing, finder pattern detection, and confidence scoring.
-
-### API Execution Records (Complete)
-
-- std.barcode.encode(kind, value, opts): validate payload and generate barcode model.
-- std.barcode.render.svg(code, opts): render barcode model into SVG representation.
-- std.barcode.render.png(code, opts): rasterize barcode model into bitmap image.
-- std.barcode.decode.image(path, opts): decode barcode payloads from image input.
-
-### Failure Mode Matrix
-
-- Payload invalid for requested symbology/checksum policy: barcode-payload diagnostic.
-- Unsupported render option for selected barcode model: barcode-render diagnostic.
-- Decoder confidence below strict acceptance threshold: barcode-decode diagnostic.
-- Image preprocessing failed due unsupported format/corruption: barcode-image diagnostic.
-
-## std.ml.vision — Vision Pipelines
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ml.vision model/pipeline internals and vision-task failure behavior are documented.
-
-### Implemented Internal Records
-
-- Model loader resolves backend runtime and performs shape/precision compatibility checks.
-- Vision pipeline normalizes image tensor preprocessing and postprocess decoding for tasks.
-- Batch executor coordinates device scheduling and deterministic result collation ordering.
-
-### API Execution Records (Complete)
-
-- std.ml.vision.load(model, opts): load vision model artifact into inference runtime.
-- std.ml.vision.detect(model, image, opts): execute object detection pipeline.
-- std.ml.vision.ocr(image, opts): execute OCR pipeline and produce text spans.
-- std.ml.vision.segment(model, image, opts): execute segmentation and return mask artifacts.
-
-### Failure Mode Matrix
-
-- Model artifact incompatible with selected inference backend: ml-vision-model diagnostic.
-- Input image shape/type fails preprocessing constraints: ml-vision-input diagnostic.
-- Inference runtime/device execution failure: ml-vision-runtime diagnostic.
-- Postprocess decoding failed for configured task schema: ml-vision-postprocess diagnostic.
-
-## std.ml.audio — Audio ML Pipelines
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - std.ml.audio model/pipeline internals and audio-task failure behavior are documented.
-
-### Implemented Internal Records
-
-- Audio loader normalizes sample rate/channel layout and chunking strategy for model runtimes.
-- Pipeline stages support transcription, diarization, and classification with shared feature extraction.
-- Streaming coordinator tracks segment boundaries and merges partial hypotheses deterministically.
-
-### API Execution Records (Complete)
-
-- std.ml.audio.load(model, opts): load audio model and initialize runtime context.
-- std.ml.audio.transcribe(model, audio, opts): run ASR transcription pipeline.
-- std.ml.audio.diarize(audio, opts): run speaker diarization and produce segment labels.
-- std.ml.audio.classify(audio, opts): classify audio event labels with confidence scores.
-
-### Failure Mode Matrix
-
-- Unsupported sample format/rate for selected model profile: ml-audio-input diagnostic.
-- Runtime backend unavailable for requested audio model: ml-audio-model diagnostic.
-- Streaming chunk sequence violates continuity policy: ml-audio-stream diagnostic.
-- Postprocess alignment failed between transcript and diarization segments: ml-audio-alignment diagnostic.
-
-## std.hal — Hardware Abstraction Layer
-
-Implementation contract (required):
-
-- Purpose and boundary: define runtime/compiler responsibility and explicit non-goals.
-- Frontend behavior: parser entrypoints, AST/HIR nodes, desugar passes, and symbol-table effects.
-- Semantic rules: type/effect/borrow/coherence constraints and invariants that must hold.
-- Lowering plan: MIR/IR shape, intrinsic expansion, and backend-specific differences.
-- Runtime behavior: state transitions, scheduling/allocation effects, synchronization/I-O interactions.
-- Diagnostics contract: stable categories, span mapping, note chains, and remediation guidance.
-- Performance contract: complexity targets, allocation profile, hot paths, and cache policy.
-- Security contract: capability checks, unsafe boundaries, trust boundaries, and validation rules.
-- Conformance contract: parser + semantic + runtime + negative + parity + perf tests required.
-
-Function behavior coverage required: document every exported API in this chapter with preconditions, state transitions, side effects, failure modes, complexity, backend notes, and security constraints.
-Coverage status: Complete - HAL platform detection, device enumeration, GPIO/I2C/SPI/ADC drivers, and bare-metal lowering documented.
-
-### Implemented Internal Records
-
-- HAL module detects platform at compile time (via --os/--arch flags) and selects the appropriate platform driver backend (Linux sysfs/devfs, Windows WinAPI, bare-metal register-mapped).
-- Device enumeration queries the platform HAL backend for available peripherals and constructs a capability-tagged device registry at startup.
-- GPIO/I2C/SPI/ADC/PWM operations are lowered to platform-specific syscalls or register writes; on bare-metal targets (--os none), they compile to direct memory-mapped register access.
-- Safety gates: all HAL operations require the `hal` effect capability. In sandboxed/WASM contexts, HAL operations are rejected at compile time unless explicitly enabled.
-
-### API Execution Records (Complete)
-
-- hal.platform(): detect current platform from compile target -> return platform descriptor with architecture, OS, and available buses.
-- hal.devices(): enumerate available hardware peripherals from platform HAL backend -> return list of device descriptors with capabilities.
-- hal.gpio.open(pin, mode): validate pin number and mode (input/output/alt) -> acquire platform GPIO handle -> configure pin direction and pull resistor.
-- hal.gpio.read(pin): read current pin state -> return 0 or 1.
-- hal.gpio.write(pin, value): validate value (0/1) -> write to pin output register.
-- hal.gpio.watch(pin, edge, callback): register interrupt/poll handler for rising/falling/both edges -> invoke callback on state change.
-- hal.i2c.open(bus, address, opts): validate bus ID and 7/10-bit address -> acquire I2C bus handle -> configure clock speed.
-- hal.i2c.read(handle, length): issue I2C read transaction -> return byte buffer.
-- hal.i2c.write(handle, data): validate data buffer -> issue I2C write transaction.
-- hal.i2c.write_read(handle, write_data, read_length): issue combined write-then-read I2C transaction.
-- hal.spi.open(bus, cs, opts): validate bus/chip-select -> acquire SPI handle -> configure mode/clock/bit-order.
-- hal.spi.transfer(handle, tx_data): perform full-duplex SPI transfer -> return rx_data of same length.
-- hal.adc.open(channel, opts): validate ADC channel -> configure resolution and sample rate -> return handle.
-- hal.adc.read(handle): trigger ADC conversion -> return raw digital value.
-- hal.adc.read_voltage(handle): trigger conversion -> apply calibration -> return voltage as float.
-- hal.pwm.open(channel, frequency, duty): configure PWM channel with frequency (Hz) and duty cycle (0.0-1.0) -> start output.
-- hal.pwm.set_duty(handle, duty): update duty cycle on active PWM channel.
-- hal.pwm.stop(handle): stop PWM output and release channel.
-- hal.uart.open(port, baud, opts): open UART port with baud rate and optional parity/stop-bit config -> return handle.
-- hal.uart.read(handle, length, timeout?): read bytes from UART with optional timeout -> return byte buffer.
-- hal.uart.write(handle, data): write byte buffer to UART.
-- hal.sleep_us(microseconds): busy-wait or timer-based microsecond delay for bare-metal timing.
-
-### Failure Mode Matrix
-
-- HAL operation in sandboxed/WASM context without hal capability: compile error "hal operations require the 'hal' effect capability".
-- GPIO pin not available on target platform: runtime HalError with pin/platform details.
-- I2C/SPI bus contention (concurrent access without locking): runtime HalError with bus ID and contention context.
-- ADC channel not calibrated or out-of-range reading: runtime HalError with channel and raw value.
-- UART read timeout exceeded: TimeoutError with port and timeout duration.
-- Bare-metal register write to invalid address: undefined behavior in unsafe context; sanitizer catches in debug builds.
+## 0. Principles
+DOCS.md defines what V2 does; this file defines how. Where they disagree, DOCS.md wins and this file is corrected. "ch. N" and "N.M" refer to this file; "DOCS N" refers to DOCS.md.
+### 0.1 Rules
+| Rule | What it means in code |
+| ---- | --------------------- |
+| **One backend** | One tree-walking interpreter (`runtime/interp.rs`) runs the AST. There is no bytecode, no alternate mode and no `--target`. Every feature exists once, so no execution path can drop an engine statement (old/'s VM compiled every block to a no-op). |
+| **Polyglot is the product** | The host is small on purpose (DOCS 3). Sessions, units and handles are core runtime objects, not plugins. When host convenience conflicts with crossing quality (exact numbers, handles instead of lossy copies, foreign lines mapped to `.v2` lines), crossing quality wins. |
+| **Fail loudly** | Every unsupported situation raises an error of a listed kind (ch. 21) with a location. old/ did each of the following, so all are forbidden: printing a warning and continuing; skipping a block whose engine is missing; stripping a directive; dropping named arguments; a catch-all builtin or method that fabricates `null`/`""`/`[]`; stringifying a value that cannot cross. A value that cannot cross exactly becomes a handle or an error. It is never rounded, truncated or replaced. |
+| **One codec, one protocol** | Everything that leaves the process as data goes through `codec/json` (serde_json plus `$v2` tags, ch. 10): VEP frames, `json_parse`/`json_stringify`, JSON reverse calls from compiled code (15.9) and `V2_ARG_*` values (17.4). Built-in and custom bridged adapters speak the same VEP/1 (ch. 9). There are no side channels. |
+| **Spans everywhere** | Every token, AST node, thrown `ErrorValue` and block unit carries a `Span` or a `UnitLoc` (ch. 2). A thrown error without a location is a bug. |
+| **Explicit tables** | Tags and aliases (7.2), scanning profiles (3.8), marshaling (ch. 10), C types (16.4) and error kinds (including `SyntaxError`, 2.4) are data in the source, and a test walks every row. Nothing converts "by best effort" outside a table. |
+| **Data, never source** | V2 values are never inserted into foreign code. Block args and call arguments travel as data (DOCS 4.4, 16). A body is passed as written, with its common indentation removed and its directive lines blanked (4.4). The only foreign text V2 generates is compiled-block wrappers and shims (ch. 15). That text depends on declarations, never on runtime values. |
+| **Machine-independent syntax** | Lexing and parsing never read config, the environment or toolchains, so a file gives the same AST and the same static errors on every machine. Tags are resolved at runtime (ch. 7). |
+| **Nothing in the project** | Per-run files live in one private run directory. It is created on first use and removed on every exit path (20.3, 6.5). User-level files live only in `~/.v2/` (18.1). V2 writes nothing into the project; only user code does. |
+
+### 0.2 Baseline: what old/ did
+`old/` is a reference, not a base. Nothing is inherited; the appendix lists the pieces worth porting.
+- **Processes.** Blocks without `@export` ran as one-shot temp-file processes. `@bash`, `@sh`, `@ps`, `@os` and `@lua` blocks ran that way and could not export. A block with `@export` started a JSON-lines worker for each *execution* of the block. A re-run block therefore spawned a second worker and made later imports ambiguous.
+- **Imports.** `@import { a, b as c, * } from @lang | label | @lang.label` resolved at runtime, with the ambiguity and missing-export messages that DOCS keeps. `from py.module` worked; other languages were refused.
+- **Values and errors.** Values crossed as hand-rolled JSON. `1.0` arrived as `1`, a raw `\r` desynchronized the protocol permanently, and non-JSON values failed with "not JSON serializable". Foreign exceptions arrived as bare strings, and the AST had no spans, so no runtime error had a line number.
+- **Documented but missing or broken:** compiled blocks (skipped with a warning), `@import` inside blocks (stripped with a warning), JS module imports, custom tags (a lexer constant), `register_engine` (a stub), the `[engines]` config, any build cache, and `extern`/`cimport`/`std.ffi` (parse-only, or with fabricated results). Under the bytecode VM, every polyglot statement compiled to nothing. The only polyglot tests covered Python (`old/v2/testsuite/test_engines.v2`).
+
+---
+
+## 1. Architecture and crate layout
+`v2` is one binary crate (edition 2021, stable Rust). It targets 64-bit x86_64 and aarch64 on Windows (MSVC), Linux and macOS (ch. 16); CI covers the matrix in 22.6.
+### 1.1 Processes and run pipeline
+```text
+ v2 host process
+   main thread          argv, config; starts the watchdog and interrupt handler; runs and joins the interpreter (6.1)
+   interpreter thread   syntax -> runtime::interp -> engines::units -> engines::session + vep (bridged engines)
+                          | engines::runonly (run engines, compiled programs) | build + ffi (in process, never unloaded)
+   watchdog thread      deadlines (8.5) and interrupts (6.5); never touches values, never writes frames
+ workers, one per bridged engine: python py.py (@py, py.<module>) | node js.js (@js, @ts, js.<pkg>) | custom adapter
+   stdin: host->worker frames; stdout: worker->host frames; stderr inherited
+ per-use children (stdin null): run engines, compiled programs, cl/gcc/clang/rustc, probes
+ per-use children (stdin piped): transpilers (TS source in, JS out; 12.5)
+```
+**Pipeline**
+1. `cli` parses argv (19.1). `config` finds the project root and merges the config layers (ch. 18). Errors here exit with 2.
+2. `syntax` loads the entry file: it lexes, parses and runs the static checks (ch. 3, 4). A `SyntaxError` in the entry file is printed (2.4) and the run exits with 1, before any code runs or any tag is resolved.
+   - The `import "…"` literals are followed transitively at startup: each named file is parsed once, depth-first in source order, as `v2 check` does (6.1, 19.3).
+   - A diagnostic in an imported file is stored with that file and raised as `ImportError` when an `import` of it runs (6.4). A file first seen at run time is parsed then (6.4).
+3. `runtime::interp` runs the entry file. `engines::units` resolves each block's tag through `engines::registry` (ch. 7) and dispatches the block (12.1):
+   - bridged engines go to their session (ch. 8, 9);
+   - `run` engines and compiled action blocks go to `engines::runonly` (17.3, 15.5);
+   - compiled definition blocks go to `build` + `ffi` (ch. 15, 16).
+
+   A definition block loads once. If its load fails, every later reach re-raises the stored error; the load is never retried (12.1).
+4. A normal end, an uncaught error and `exit(code)` take the orderly shutdown path. Interrupts and panics take the hard path. Both are in 6.5.
+
+**Processes**
+- **Sessions.** Each bridged engine gets one worker per run. It is spawned on first use and kept until exit (ch. 8); `ts` units run in the `js` session. A worker's stdin and stdout are the VEP pipes, so `input()` is the only reader of the user's stdin (DOCS 4.6).
+- **Worker output.**
+  - Language-level output (`print`, `console.log`, `process.stdout.write`) travels as `out` frames, in program order.
+  - Fd-level output (C extensions, `os.write(1, …)`, children that inherit stdout) goes to stderr (9.9).
+    - The Python adapter moves the protocol to private non-inheritable fds, then points fd 1 at fd 2 and fd 0 at the null device (14.3).
+    - Node has no `dup2`, so the Node adapter keeps the protocol on fds 0 and 1. It writes frames with a saved `fs.writeSync(1, …)` and reads with `fs.readSync(0, …)`, and wraps `process.stdout`/`stdin`/`console`, `fs` calls on fds 0–2 and `child_process` stdio (14.4, D73).
+    - Native addons, and code that reopens `/dev/stdout` or bypasses the wrappers, can still corrupt the stream (fatal `ProtocolError`, 9.11).
+  - Output produced while a worker is idle goes out with its next frame.
+  - Before `hello`, the host forwards non-JSON stdout lines to stderr (noise from `sitecustomize`, `.pth` files or `--require`). After `hello`, any line that is not a frame is a `ProtocolError` (9.11).
+- **Per-use children** get a null stdin, except transpilers, which read the TS source on a pipe (8.3, 12.5). For run engines and compiled programs:
+  - as a statement, the block's stdout streams to V2's stdout in program order (the host flushes first);
+  - as an expression, stdout is captured as the value, with one trailing `\n` or `\r\n` stripped;
+  - stderr always streams live, and its last 4 KiB go to `e.data.stderr` of `EngineExitError` (12.1, 15.5, 17.3).
+- **Spawning and killing.** Only the interpreter thread spawns, because Linux `PR_SET_PDEATHSIG` fires when the spawning *thread* exits. Every kill takes the whole process tree. Processes that a block started are killed as a tree when the block finishes or times out. Workers are killed at shutdown, and everything is killed when V2 exits (8.3).
+  - **Unix:** every child starts with `setsid()` in `pre_exec`: a new session and process group with no controlling terminal. Terminal SIGINT and SIGHUP never reach it, and a `/dev/tty` prompt (git, ssh, sudo, `getpass`) fails at once (`ENXIO`) instead of stopping the child.
+  - **Windows:** `CREATE_NEW_PROCESS_GROUP` plus a kill-on-close Job Object. This blocks Ctrl+C only; Ctrl+Break and console close reach every process on the console. Adapters ignore SIGBREAK (14.3, 14.4), and the host's console control handler sets `INTERRUPTED` as its first action, so failures of children caused by the same event are never reported (6.5).
+
+### 1.2 Module map
+| Module | Responsibility |
+| ------ | -------------- |
+| `main.rs` | Starts the threads (1.3), owns the run-dir guard and the exit paths (6.5), and maps outcomes to exit codes: **0** success; **n** for `exit(n)` (an i32; POSIX keeps the low 8 bits); **1** uncaught error or `SyntaxError`; **2** usage or config error; **3** uncaught `EngineNotFound`; **130** interrupt, always (never 128+signal); **101** internal panic. `check` and `doctor` codes: 19.1. |
+| `cli/` | Hand-written argv parsing (19.1): `v2 FILE [args]`, `run`, `check FILE`, `doctor [TAG]`, `cache clean`, `--engine TAG=PATH`, `--no-cache`, `--version`, `--help`. |
+| `config/` | Project root discovery, layered config (ch. 18), and the paths of `~/.v2` and the run dir. |
+| `syntax/` | `span`: FileId, SourceMap, Span, UnitLoc (ch. 2). `token` and `lexer` (ch. 3). `scan`: raw bodies, profiles, fences, line states (3.7, 3.8). `directives`: body lines, `@export`/`@import`, dedent (4.4). `parser`: recursive descent and static checks (4.1, 4.5). `ast` (4.3). |
+| `runtime/` | `value`, `env`, `interp`, `call`, `builtins` (including the `Out` writer), `error` (ErrorValue, error kinds, traces, rendering per 2.4), and `module` (`import "…"`, the run-once cache, cycles). See ch. 5 and 6. |
+| `codec/json` | The single codec: `$v2` tags, VEP payloads, JSON builtins, base64, hex (ch. 10). |
+| `engines/` | `spec` (EngineSpec and the built-in table), `registry` and `resolve` (discovery, probes, `toolchains.json`): ch. 7. `session` and `vep`: ch. 8, 9. `units`: ch. 12. `imports`: ch. 13. `handles`: ch. 11. `runonly`: 17.3, 15.5. |
+| `adapters/` | `py.py` and `js.js`, embedded with `include_str!` and installed before launch (14.1). |
+| `build/` | `mod`, `cache`, `c`, `cpp`, `rust`, `shims` (ch. 15). |
+| `ffi/` | `cdecl` parses C declarations: `extern` bodies for the parser, prototypes and definition heads for ch. 15. Also `types`, `lib`, `call` (ch. 16). |
+| `doctor/` | `v2 doctor`, the deep test `v2 doctor TAG`, and `v2 check` (19.2, 19.3). |
+
+### 1.3 Threads
+- **Main thread.** Parses argv, loads config, starts the watchdog, installs the interrupt handler, then spawns the interpreter thread (stack size: ch. 5) and joins it (6.1).
+- **Interpreter thread.** The logical main thread. It is the only thread that touches `Value` (`Rc`/`RefCell`, not `Send`), session pipes, native libraries and `Out`.
+  - Foreign calls are synchronous. While it waits for a reply, it serves the worker's re-entrant calls itself (9.7).
+  - A worker may call into V2 only while the host has a request outstanding to that worker (9.8). Compiled code may call into V2 only from this thread, while the V2→native call is running (15.9).
+  - Compiled and `extern` code runs on this thread, so APIs that insist on the process main thread (macOS AppKit) do not work in v1. Host functions that native code calls wrap their bodies in `catch_unwind`.
+- **Watchdog.** Enforces the startup, call, probe and grace deadlines by killing child trees (8.5), and carries out the interrupt path (6.5).
+- **Interrupts** (Ctrl+C, Ctrl+Break, console close, SIGINT, SIGTERM, SIGHUP) are handled by the host alone (1.1). The interrupt handler only sets `INTERRUPTED` (an `AtomicBool`).
+  - **Unix:** a `sigaction` handler for SIGINT, SIGTERM and SIGHUP that does nothing else (no lock, no Condvar, no allocation).
+  - **Windows:** the `SetConsoleCtrlHandler` routine runs on its own thread. It sets `INTERRUPTED`, notifies the watchdog's Condvar (8.5), then blocks until the process ends, because returning early would let `CTRL_CLOSE_EVENT` terminate the process before cleanup.
+  - The watchdog waits on its Condvar with a timeout of at most 100 ms and checks `INTERRUPTED` on every wake. Once it is set, the watchdog `kill_tree`s every registered child (8.7), removes `<run>` (best effort) and ends the process with `_exit(130)` or `ExitProcess(130)`.
+  - `finally` blocks do not run on this path, and they do not run for `exit(code)` either. In both cases engines are still stopped and the run dir is removed (6.5).
+- **Output order.** One writer, `Out` (5.10), carries `print`, worker `out` text and forwarded child stdout. Native stdio is flushed lazily before host output (16.7). Language-level output of every engine therefore interleaves in program order, also when output is redirected (DOCS 4.6). Fd-level output inside workers goes to stderr (1.1). A failed write to stdout raises `IOError`.
+
+### 1.4 Dependencies
+| Crate | Used for | Why a crate |
+| ----- | -------- | ----------- |
+| `serde_json` (`preserve_order`, `float_roundtrip`, `unbounded_depth`) | codec, VEP frames, JSON builtins | Strict parsing (it rejects lone-surrogate escapes), escaping of every control character, exact float round-trip. The hand-rolled old codec caused the `\r` desync and sent `1.0` as `1`. The codec bounds nesting itself (10.1). |
+| `toml` | `v2.toml`, `~/.v2/config.toml` | Full TOML; the old reader had no arrays or numbers. Files are read as `toml::Table` with hand-written key checks, so "unknown key" errors are exact (18.5). |
+| `indexmap` | dict storage | Insertion order with O(1) lookup (DOCS 3.2). |
+| `libloading` | compiled blocks, `extern` | Portable `dlopen`/`LoadLibraryExW` that reports the OS error text (15.8, 16.2). |
+| `libffi` | calls whose signature is known only at runtime | Per-ABI call frames (SysV, Win64, AAPCS64). The crate builds a vendored libffi, so building v2 needs a C compiler (and `ml64` on MSVC); the binary has no runtime dependency. |
+| `sha2` | build and probe cache keys (15.6, 7.7) | Standard SHA-256. |
+| `libc` | `kill`, `setsid`, `sigaction`, `waitid`, `prctl(PR_SET_PDEATHSIG)`, `getentropy`, `fflush`, `_exit` | Direct OS calls. |
+| `windows-sys` | Job Objects; `CREATE_NEW_PROCESS_GROUP`; `SetConsoleCtrlHandler`; the run-dir DACL and `BCryptGenRandom` (20.3); `SetDllDirectoryW(L"")` at startup, so the cwd never joins the DLL search (16.2); `LoadLibraryExW` flags | Direct OS calls. |
+
+Not used: an async runtime, a CLI or regex crate (the few patterns in ch. 7 and 15 are hand-written matchers), `rand`, serde derive.
+
+---
+
+## 2. Source, spans and diagnostics
+### 2.1 Source files
+```rust
+pub struct FileId(pub u32);        // index into SourceMap::files; the entry script is 0
+pub struct SourceFile {
+    pub path: PathBuf,             // fs::canonicalize with `\\?\` stripped: the dedupe key, and the path adapters get (9.4)
+    pub display: Rc<str>,          // what messages and e.file print
+    pub text: Rc<str>,             // normalized text (3.1); every offset refers to it
+    pub line_starts: Vec<u32>,     // byte offset of each line start
+}
+pub struct SourceMap { files: Vec<SourceFile>, by_path: HashMap<PathBuf, FileId> }
+```
+- **Ids** follow the startup parse order (6.1 step 2): the entry file is 0, then the files its `import "…"` literals name, followed transitively and depth-first in source order, as `v2 check` does (19.3). A file first seen at run time (6.4 step 1) gets the next id then. A path that is already known returns its existing id, so each file is read once per run and `UnitId`s stay stable.
+- **Display path.** Under the canonicalized cwd, it is relative, with `/` on every OS (`src/util.v2`). Otherwise it is the absolute path with `\\?\` stripped (`\\?\UNC\` becomes `\\`). `e.file` is `display`.
+- **Only `.v2` files** are in the map. Config errors name the file and TOML key instead (18.5). Foreign files appear only inside frame strings (2.5).
+
+### 2.2 Spans
+```rust
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Span { pub file: FileId, pub lo: u32, pub hi: u32, pub line: u32, pub col: u32 }
+```
+- `lo..hi` is a byte range in the normalized text. `line` and `col` are the 1-based position of `lo`; `col` counts Unicode scalar values, and a tab counts as 1.
+- A node's span runs from its first token's `lo` to its last token's `hi`, and copies the first token's `line`/`col`.
+- `SourceMap::line_col(file, offset)` serves any other offset: a binary search in `line_starts`, then a char count.
+
+The error caret points at:
+
+| Raised by | Span |
+| --------- | ---- |
+| binary or unary operator | the operator token |
+| call: arity, not callable, builtin failure, foreign call without a mapped frame | the callee's last name (`c` in `a.b.c(x)`), else the `(` |
+| index or slice / member or `?.` | the `[` / the member name |
+| `throw` | the `throw` keyword |
+| block load, or an engine error without a mapped frame | the block's `@tag` |
+| `@import` | the failing item, or the selector for selector errors |
+| lexer, parser, static check | the offending character, token or declaration |
+
+`error(...)` makes a value with no location. `throw` fills in the span and trace only when they are empty. So a rethrow keeps them, `e.line` is the first throw site, and an uncaught error's header and caret point at that `throw` (5.9).
+### 2.3 Unit locations
+```rust
+pub struct UnitLoc {               // one per block, recorded by the parser (4.4); indexed per file by body line range
+    pub file: FileId,
+    pub body_first_line: u32,      // .v2 line of body line 1; sent as `line` in `load` (9.4)
+    pub body_col: u32,             // .v2 column of body line 1, column 1
+    pub dedent_width: u32,         // chars removed from each dedented line (4.4)
+    pub line_count: u32,           // lines in the processed body
+    pub kept: Rc<[u32]>,           // body lines left undedented (4.4 step 3), sorted
+}
+impl UnitLoc { pub fn col(&self, body_line: u32, fcol: Option<u32>) -> u32; }
+```
+- **Lines.** Adapters compile every unit with the `.v2` path as the file name and `body_first_line - 1` as the line offset (12.3, 12.4, 14.5). A frame inside a block therefore already carries its `.v2` file and line. Directive lines are blanked, never removed (4.4), so line numbers never drift.
+- **Columns** arrive relative to the processed body line, in Unicode scalar values, or as `null` (12.6). Adapters convert V8's UTF-16 units and CPython's UTF-8 byte offsets first.
+  - The host finds the block whose body covers the frame's line. If several one-line blocks share that line, it takes the first.
+  - It maps the column as follows: `body_col + fcol - 1` on body line 1, `fcol` on a `kept` line, `dedent_width + fcol` on any other line.
+  - Without a column, the result is the first non-blank column of the `.v2` line.
+- **Everything else.** A frame outside every body (generated text), or in a foreign file, keeps its location as reported.
+### 2.4 Diagnostics
+An uncaught error, and every static diagnostic of the entry file, is printed to stderr as plain UTF-8, without colors:
+```text
+<file>:<line>:<col>: <Type>: [<foreign_type>: ]<first message line>
+    <source line, leading whitespace removed>
+    <spaces>^
+    <other message lines, indented 4>
+  note: <text> (<file>:<line>:<col>)
+  hint: <text>
+  at <frame>
+  caused by: <Type>: [<foreign_type>: ]<first message line of the cause>
+    at <frame of the cause>
+```
+- **Location.** Normally the error's span. For a `ForeignError`, it is the innermost foreign frame that maps into a `.v2` file, or the V2 call site if none maps. With no location at all (startup errors), the header is `v2: <Type>: …`.
+- **Excerpt.** Printed whenever the location is in the SourceMap, for every error kind, `ForeignError` included.
+  - Leading whitespace is removed, the rest is indented 4, and each tab prints as one space. The caret follows `4 + (col - 1 - removed)` spaces.
+  - A line longer than 120 chars is cut to a 120-char window around the caret, with `...` at each cut end.
+  - In multi-line messages (compiler output, foreign messages), the first line goes in the header and the rest follows the caret, indented 4.
+- **Notes and hints** come only from static diagnostics (`SyntaxError`, config errors). A runtime error that needs a hint carries it in its message.
+- **Cause.** When `cause` is set, it prints as `caused by:` blocks, at most 8 levels deep.
+- **Frames** (2.5) print innermost first. When there are more than 100, the first 50 print, then `  ... N frames omitted`, then the last 20. `e.trace` keeps all of them (5.9).
+- **BuildError** prints up to 20 of its `data.diagnostics` after the excerpt, one per line, as `file:line:col: severity: message` (15.7).
+- **EngineExitError** does not repeat the child's stderr, because that already streamed live (1.1).
+
+```text
+main.v2:3:16: ForeignError: ZeroDivisionError: division by zero
+    return a / b
+           ^
+  at ratio (main.v2:3, in @py risky)
+  at main.v2:9
+```
+**`SyntaxError`** is the kind of every lexer, parser and static-check diagnostic, for example `main.v2:3:1: SyntaxError: @py block is never closed`. It is in the error-kind table, but it can never be caught in the file that contains it, because that file never runs.
+- **In the entry file**, every diagnostic is printed in source order and the run exits with 1 (1.1).
+- **In a file loaded by `import`**, the diagnostics are not printed. The importer raises `ImportError` instead: its message is the first diagnostic and its `data` holds all of them (6.4).
+### 2.5 Frames and messages
+| Frame | `e.trace` entry (the renderer prefixes `  at `) |
+| ----- | ----------------------------------------------- |
+| V2 `func` / lambda | `parse_port (main.v2:4)` / `lambda@main.v2:7 (main.v2:7)` (lambda names: 5.7) |
+| top level of a file | `main.v2:10` |
+| foreign frame in a block | `ratio (main.v2:3, in @py risky)`; for an unlabeled block, `(main.v2:3, in @py block at main.v2:1)` (12.6) |
+| foreign frame in a foreign file | `mean (/usr/lib/python3.12/statistics.py:430, in py)` |
+
+- **Frame lines.** The innermost frame's line is where the error was raised; every other frame's line is the call it is executing.
+- **Names.** Tags always print in canonical form (`@py`, even when the source says `@python`). Foreign function names print as the engine reports them (`<module>`).
+- **Parse errors** read `expected <what>, found <token>`, with tokens named as: name `x`; keyword `let`; number `42`; string / f-string / bytes literal; an operator or bracket in backticks; end of line; `;`; end of file; block `@py stats`; block body; `@import`; `@export`; a selector tag `@py`.
+- **Message style.** Messages start lower-case and have no final period. They put names in `'…'` and code in backticks, as DOCS does. Rust `Debug` output never appears (old/ printed things like `Ident("hi")`).
+
+---
+
+## 3. Lexer
+### 3.1 Input
+`SourceMap::load` does three things:
+- It rejects invalid UTF-8 (`file is not valid UTF-8`, at the line of the first bad byte).
+- It strips one leading U+FEFF, which Windows editors and PowerShell add.
+- It turns every CRLF and every lone CR into LF.
+
+The normalized text is what gets stored, spanned, scanned and handed to engines, so block bodies always use LF. (Run files with ext `bat`/`cmd` are written with CRLF, 17.3.) The lexer turns the whole file into one `Vec<Token>` before parsing starts.
+### 3.2 Tokens
+```rust
+pub struct Token { pub tok: Tok, pub span: Span }
+pub enum Tok {
+    Int(u64), Float(f64), Str(Rc<str>), Bytes(Rc<[u8]>), FStr(Vec<FPartTok>),
+    Ident(Rc<str>), Kw(Kw), Op(Op), LBrace(BraceKind /* Body | Dict, 3.3 */), RBrace,
+    DirImport, DirExport, AtTag(Rc<str>),               // `@import`, `@export`, `@py` in a selector
+    BlockHead { tag: Rc<str>, label: Option<(Rc<str>, Span)> },
+    BlockBody(Box<RawBody>), ExternBody(Box<RawBody>), Newline, Semi, Eof,
+}
+pub enum FPartTok { Lit(Rc<str>, Span), Expr { toks: Vec<Token>, fixed: Option<u8>, span: Span } }
+pub struct RawBody { pub text: Rc<str>, pub text_span: Span, pub open: Span, pub close: Span,
+                     pub delim: Delim /* Brace | Fence(u8): n backticks */, pub starts_in_code: Vec<bool> /* 3.8 */ }
+```
+- **Keywords** (DOCS 18, case-sensitive): `let const func lambda return if elif else while for in not break continue try catch finally throw import as from extern true false null`. A keyword directly after `.` or `?.` lexes as `Ident` (`h.from`, `result.in`), so every rule below sees a member name there.
+- **Operators**, longest match first: `** ... .. ?. ?? => == != <= >= && || += -= *= /= %=`, then `+ - * / % = < > ! ? : . , ( ) [ ] ;`.
+  - `&`, `|`, `^`, `~`, `<<` and `>>` are errors: "V2 has no bitwise operators".
+  - Any other character is `unexpected character '#'`; for `#` the hint says comments start with `//`.
+- **Identifiers** start with `_` or a char for which `char::is_alphabetic` is true, and continue with those or ASCII digits. They are compared by code point, with no normalization.
+- **Comments.** `//` runs to the end of the line. `/* */` does not nest, and an unterminated one is an error at its start. A block comment that contains a line break counts as one line break.
+### 3.3 Where statements end
+The lexer keeps a stack of open brackets: `Paren`, `Bracket`, `Dict`, `Body` and `Interp` (an f-string `${`).
+
+**Body and Dict braces.** A `{` is a **Body** brace when the previous token is `)`, `]`, `}`, a name, a literal (number, string, f-string, bytes, `true`, `false`, `null`), or one of `else`, `try`, `catch`, `finally`. Any other `{` is a **Dict** brace: after an operator, `(`, `[`, `,`, `:`, `=`, `=>`, `return`, `throw`, `in`, `Newline`, `;` or `@import`, or at the start of the file or of an interpolation.
+- So `if x {`, `} else {`, `func f() {` and `lambda(s) {` open bodies.
+- `let d = {`, `f({`, `@import {` and the first brace of `for k, v in {a: 1} {` open dicts.
+- Block and `extern` braces never reach this rule (3.7, 3.9).
+- Closers must match their openers (`found ] but ( opened at 3:5 is still open`). A bracket still open at end of file is an error at its opener.
+
+**Line breaks.** A line break becomes a `Newline` token unless one of these holds:
+1. The stack top is `Paren`, `Bracket`, `Dict` or `Interp`.
+2. The previous token is `,` `=>` `=` `+=` `-=` `*=` `/=` `%=` `+` `-` `*` `/` `%` `**` `==` `!=` `<` `>` `<=` `>=` `&&` `||` `??` `?` `:` `!` `.` `?.` `..` `...`, or the keyword `in`, `not`, `as` or `from`.
+3. The next line that is not blank or comment-only starts with `.` (but not `..`) or with `?.`.
+
+Other rules:
+- Inside a `Body` the stack top is `Body`, so a `lambda(x) { … }` inside a call still separates its statements.
+- A run of line breaks produces one `Newline`, and none comes before the first token. `;` is a `Semi` token.
+- The parser ends a statement at `Newline`, at `Semi`, before `}` and at `Eof`. It skips `Newline`s before `elif`, `else`, `catch` and `finally`.
+- A line that starts with a binary-only operator does not continue the previous one: `+ b` fails with the hint "end the previous line with the operator".
+- **A body `{` must be on its header's line.** This applies to `if`, `elif`, `else`, `while`, `for`, `func`, `lambda`, `try`, `catch` and `finally`. After a `Newline`, a `{` is a Dict brace, so the parser reports `expected {` with the hint "put { at the end of the if line".
+### 3.4 Numbers
+- **Integers.** `0`, `[1-9][0-9_]*`, or `0x` followed by hex digits. `_` is allowed only between two digits. These are errors: leading zeros (`007`), `0b`, `0o`, and a number followed directly by an identifier character (`12abc`, `0x`, `0X1`, `1f`).
+- **Floats.** Digits `.` digits with an optional exponent, or digits followed by an exponent (`e|E [+|-] digits`).
+  - A `.` joins the number only when a digit follows it. So `0..3` lexes as `Int .. Int`, `1.len()` is a member call, and no float starts with `.`.
+  - Floats are parsed with `str::parse::<f64>` (correctly rounded) after removing `_`. A result of ±inf is an error: "float literal is out of range".
+- **Integer range.** `Int` holds the magnitude; anything above 2^63 is an error: "integer literal does not fit in 64 bits". Exactly 2^63 is accepted only as the entire operand of a unary minus (`-9223372036854775808`, which gives `i64::MIN`). Anywhere else, including `-9223372036854775808 ** 1`, it is the same error.
+### 3.5 Strings, bytes, f-strings
+| Form | Escapes | Line breaks inside |
+| ---- | ------- | ------------------ |
+| `"…"` `'…'` | yes | no: "unterminated string" at the opening quote (hint: `\n` or `"""`) |
+| `"""…"""` | yes, decoded after dedent | yes, see below |
+| `r` + any form | none: `\` is literal and the first matching quote ends the string | as its form |
+| `f` + any form / `b` + any form | in literal parts / the byte subset | as its form |
+
+- **Prefixes.** A prefix is a word that is exactly `r`, `f` or `b`, directly followed by a quote. A literal takes at most one: `rf`, `br` and upper-case prefixes are errors.
+- **Escapes.** `\n \t \r \\ \" \' \0 \$`, `\xNN` and `\u{…}`.
+  - `\xNN` takes exactly 2 hex digits. It is U+00NN in a string and the byte NN in bytes.
+  - `\u{…}` takes 1–6 hex digits naming a Unicode scalar value.
+  - Any other escape, including `\` before a line break, is an error at the backslash: `unknown escape \d` (hint: `\\` or a raw string).
+- **Bytes literals** must be ASCII. They take the same escapes, except `\u{}`.
+
+**Triple-quoted strings** (DOCS 3.5), for every prefix:
+1. The opening `"""` ends its line: only spaces and tabs may follow it. Otherwise the error is `the text of a """ string starts on the line after the opening """`. The line break after the opener is not part of the content.
+2. The closing `"""` must have only whitespace W before it on its line (error: `the closing """ must be on its own line`). Ordinary tokens may follow it, as in `""")`.
+3. Each content line either starts with W, which is removed, or is whitespace-only, which becomes empty. Any other line is an error at that line: `indented less than the closing """, or with different tabs/spaces`. In f-strings, lines that begin inside `${…}` are neither checked nor dedented.
+4. The line break before the closing line is dropped. So a literal whose four source lines are `"""`, `    a`, `    b` and `    """` is `"a\nb"`; to end with `\n`, leave an empty line before the closing `"""`. Escapes (none for `r"""`) are decoded after dedent, so an escaped `\n` never starts a line.
+
+**f-strings**
+- Literal text runs until `${`. A `$` anywhere else is literal, and so is `\$`.
+- `${` starts an interpolation. The lexer lexes ordinary tokens recursively, on a fresh stack whose bottom is `Interp`, until the `}` that closes it. So nested strings, even with the same quote, and nested f-strings work: `f"${d["k"]}"`.
+- **Format spec.** While no bracket inside the interpolation is open, the exact characters `:` `.` one or two digits `f` `}` end it with `fixed = Some(N)` (DOCS 3.5 `:.Nf`). Any other `:` is an ordinary token, as in a ternary.
+- `${}` is an error. Line breaks inside an interpolation are allowed only in triple-quoted f-strings.
+### 3.6 The `@` sigil
+- `@import` and `@export` (the word ends there) lex as `DirImport` and `DirExport`.
+- `@` TAG right after `from` or `DirImport` is `AtTag(TAG)`, a selector (`@py`, `@py.stats`).
+- `@` TAG anywhere else is a `BlockHead`, continued by 3.7.
+- `@` not followed by an ASCII letter or `_` is the error `expected an engine tag after @`.
+
+TAG is ASCII `[A-Za-z_][A-Za-z0-9_]*` and case-sensitive. The lexer never checks it: `@lua` lexes whether or not an engine exists. A tag that is unknown, or not a valid engine tag (`[a-z][a-z0-9_]{0,31}`, 17.1; so `@PY` too), raises `EngineUnknown` only when its block is reached (ch. 7). V2 has no decorators: `@memo` followed by `func` fails as a block header, with a hint that says so.
+### 3.7 Block heads and raw bodies
+The header is `'@' TAG [LABEL] ['(' args ')'] ( '{' | FENCE )`. Outside the args, only spaces and tabs may appear between its parts.
+- **LABEL** is an identifier that is not a keyword, or a plain (unprefixed), one-line, non-empty string literal. A keyword is not taken as a label; the error hints `@py "for" {`.
+- **args** are ordinary tokens under a `Paren` entry, so they may span lines. The `{` or fence must be on the line of the header's last token.
+- **Brace on the next line.** If the next non-blank line starts with `{`, the error is `the { that opens a block must be on the same line as @py`, at that `{`, with a note at the header and the hint "move { to the end of line N". Anything else there gives `expected { or a ``` fence after @py stats`.
+
+**Brace form.** The body starts after `{`, and the profile scanner (3.8) finds the matching `}`. Two guards catch a scanner that closed early on a brace hidden in a construct it does not understand. Both raise a `SyntaxError` whose hint names the fence form ("if that } belongs to the foreign code, use the fence form"):
+- **C1.** If the body spans lines, the closing `}` must be the first non-blank character of its line: `@py block closes at a } that does not start its line`.
+- **C2.** After the closing `}`, the rest of its line must be blank, a `//` or `/*` comment, or text starting with `)`, `]`, `}`, `,` or `;`. Otherwise the error is `unexpected text after the } that closes the @py block`. So `@py { 1 } + 2` and `c ? @py { 1 } : 2` are errors; the hint also shows `(@py { 1 }) + 2` (4.1).
+
+**Fence form.** The header ends with N ≥ 3 backticks followed by nothing but whitespace (```` ```python ```` is an error). The body is every following line up to the first line whose trimmed text is exactly N backticks; that closing line is consumed. Nothing inside a fence is scanned for its end.
+
+**Unterminated block.** If the end of the file comes first, the error is `@py block 'stats' is never closed` (unlabeled: `@py block is never closed`), at the block's `@`. For the brace form, notes point at the innermost `{` still open inside the body and at any foreign string, comment or template that never closed; the hint names the fence form.
+
+**Output.** Otherwise the lexer emits `BlockHead`, the arg tokens, then `BlockBody`. Its `text` is the exact text between `{` and `}` (or the lines between the fences), directives and indentation included (4.4).
+### 3.8 Scanning profiles
+A tag's profile depends only on the tag's text, never on config or `register_engine`. Built-in ids and aliases take the profile of their static spec (7.1, 7.2):
+- **Python:** `py`, `python`.
+- **CLike**, with a dialect: `js`, `javascript`, `ts`, `typescript` (Js); `c` (C); `cpp`, `cxx` (C++); `rust`, `rs` (Rust).
+- **Plain:** every other tag, meaning every custom engine. Plain counts every `{` and `}`.
+
+The scanner works in state Code, where `{` adds 1 to the depth, `}` subtracts 1, and depth 0 ends the body. It skips these constructs:
+
+| Construct | Python | C | C++ | Rust | Js |
+| --------- | ------ | - | --- | ---- | -- |
+| line comment | `#` | `//` | `//` | `//` | `//` |
+| block comment | none | `/* */` | `/* */` | `/* */`, nesting | `/* */` |
+| `"…"` | one line | one line | one line | may span lines | one line |
+| `'…'` | string | char | char | char or lifetime | string |
+| `'''…'''` `"""…"""` | span lines | none | none | none | none |
+| raw strings | (prefixes need no care) | none | `R"d(…)d"` | `r"…"`, `r#"…"#` | none |
+| template | none | none | none | none | `` `…${…}…` `` |
+
+- **Escapes.** In every string or char form, `\` skips the next char, even a line break; this is also right for Python raw strings. A one-line string or char that reaches a line break ends there, and the foreign compiler reports it, so a stray quote damages at most one line.
+- **C/C++.** A `'` inside a word that starts with a digit (`1'000'000`) is a digit separator. In C++, a word that is exactly `R`, `u8R`, `uR`, `UR` or `LR` followed by `"` starts a raw string. Its delimiter is the text up to `(` (at most 16 chars), and the string ends at `)`, the delimiter, then `"`.
+- **Rust raw strings.** A word that is exactly `r`, `br` or `cr`, followed by zero or more `#` and then `"`, starts a raw string. It ends at `"` plus the same number of `#` (`r#ident` has no `"`).
+- **Rust chars and lifetimes.** `'\` starts a char that runs to the next unescaped `'`, so `'\u{7D}'` is skipped whole. `'x'` (a `'` two chars on) is a char. Anything else is a lifetime or label, and only the `'` is consumed.
+- **Js templates.** A backtick opens a template, and `\` escapes inside it. `${` pushes a Code context with its own depth; its `}` at depth 0 returns to the template. Templates nest.
+- **Not recognized:** regex literals, preprocessor lines with unbalanced braces, heredocs, unusual string forms. A brace or quote inside one of them can end the block early, or never. C1, C2 and the unterminated error make that failure loud, and the fence form is the fix (DOCS 4.2).
+- **Python f-strings** are scanned as plain strings. PEP 701 same-quote nesting still scans correctly whenever its quotes pair up.
+- **Line states.** For every body line, the scanner records whether it starts in Code or inside a multi-line string, raw string, template or block comment (`RawBody.starts_in_code`, used by dedent in 4.4). A fenced body is scanned only for these states, never for its end. A Plain body marks every line as Code.
+### 3.9 `extern` bodies
+After `extern`, the lexer expects a string literal, an optional `as` NAME, and `{` on the same line. It captures the body with the C dialect of CLike, under C1, C2 and the unterminated rule, and emits `ExternBody`. The parser hands the body to `ffi::cdecl` at once, so a declaration V2 cannot read is a `SyntaxError` at the offending token (16.1, 16.3). `extern` has no fence form.
+
+---
+
+## 4. Grammar and AST
+### 4.1 Grammar
+EBNF over the tokens of ch. 3. Notation:
+- `SEP` is `Newline` or `;`.
+- `RAW` is a `BlockBody` or `ExternBody`.
+- `BLOCK_HEAD` and `AT_TAG` are the tokens of 3.6–3.7.
+- `&x` is lookahead.
+- Keywords after `.`/`?.` are already `NAME` tokens (3.2).
+```ebnf
+program   = stmts EOF                          body = "{" stmts "}"                  (* Body brace *)
+stmts     = { SEP } { statement ( SEP { SEP } | &"}" | &EOF ) }
+statement = let | const | if | while | for | "break" | "continue" | return | throw | try | func
+          | import | engine_import | extern | block | expr [ assign_op expr ]
+let       = "let" NAME [ "=" expr ]            const = "const" NAME "=" expr
+assign_op = "=" | "+=" | "-=" | "*=" | "/=" | "%="                     throw = "throw" expr
+if        = "if" expr body { "elif" expr body } [ "else" body ]        while = "while" expr body
+for       = "for" NAME [ "," NAME ] "in" expr [ ".." expr ] body
+func      = "func" NAME "(" params ")" body    params = [ param { "," param } [ "," ] ]
+param     = NAME [ "=" expr ] | "..." NAME     return = "return" [ expr ]  (* bare before SEP, "}", EOF *)
+try       = "try" body [ "catch" [ "(" NAME ")" ] body ] [ "finally" body ]
+import    = "import" STRING "as" NAME          extern = "extern" STRING [ "as" NAME ] RAW
+engine_import = "@import" ( "{" items "}" "from" selector | selector "as" NAME )
+items     = "*" | item { "," item } [ "," ]    item = ( NAME | STRING ) [ "as" NAME ]
+selector  = AT_TAG [ "." label ] | label | NAME "." segment { "." segment } | "v2"
+label     = NAME | STRING                      segment = NAME | STRING
+block     = BLOCK_HEAD [ "(" [ block_arg { "," block_arg } [ "," ] ] ")" ] RAW
+block_arg = NAME [ ":" expr ]                  expr = block | ternary      (* see "Blocks" below *)
+ternary   = coalesce [ "?" expr ":" expr ]     coalesce = or { "??" or }
+or        = and { "||" and }                   and = equality { "&&" equality }
+equality  = compare { ( "==" | "!=" ) compare }
+compare   = additive [ ( "<" | ">" | "<=" | ">=" | "in" | "not" "in" ) additive ]
+additive  = term { ( "+" | "-" ) term }        term = unary { ( "*" | "/" | "%" ) unary }
+unary     = ( "-" | "!" ) unary | power        power = postfix [ "**" unary ]
+postfix   = primary { "(" [ arg { "," arg } [ "," ] ] ")" | "[" subscript "]" | ( "." | "?." ) NAME }
+arg       = expr | NAME ":" expr | "..." expr  subscript = expr | [ expr ] ":" [ expr ]
+primary   = INT | FLOAT | STRING | FSTRING | BYTES | "true" | "false" | "null" | NAME
+          | "(" expr ")" | list | dict | lambda
+list      = "[" [ expr { "," expr } [ "," ] ] "]"      lambda = "lambda" "(" params ")" ( "=>" expr | body )
+dict      = "{" [ entry { "," entry } [ "," ] ] "}"    (* Dict brace *)
+entry     = ( NAME | STRING | "[" expr "]" ) ":" expr
+```
+- **Blocks.** A statement that starts with `@TAG` is a block statement, ended by `SEP`, `}` or `EOF`.
+  - Anywhere else, a block is a whole `expr` (a `let` value, an argument, an element, a parenthesized operand), and it must be an action block (4.5).
+  - An operator or postfix after a block value is rejected. On the same line, C2 catches it (3.7). On the next line, where `.m()` continues the statement by 3.3 rule 3, the parser reports `a block value must be in parentheses here: (@py { … }).m()`.
+- **Assignment** is a statement, not an expression. Targets are NAME, `postfix "." NAME` and `postfix "[" expr "]"`. Any other target is `cannot assign to this expression`, and a target chain that contains `?.` is `cannot assign through ?.`.
+- **Optional chains.** The parser wraps a postfix chain that contains `?.` in `OptChain`. The chain runs to the end of the postfix sequence, and parentheses end it: `(a?.b).c` leaves `.c` outside.
+  - When a `?.` finds `null`, the whole chain is `null`, and its remaining steps are not evaluated, arguments included. So `a?.b.c()` with `a == null` is `null`, as in JS.
+  - Other steps behave normally: `.c` on a `null` `a.b` is a `TypeError`, and a missing dict key is a `KeyError` (5.5).
+- **Operands and arguments.**
+  - `-2 ** 2` is `-(2 ** 2)`, and `2 ** -1` is valid.
+  - Named args come after all positional and spread args. A named arg is `NAME` then `:` (two-token lookahead), so `f(c ? a : b)` is positional.
+  - The block arg `nums` is short for `nums: nums`.
+  - Past 256 levels of nested expressions, bodies and interpolations, the parser stops with `nested too deeply`. This protects the host stack from generated input.
+
+### 4.2 Precedence
+The grammar encodes DOCS 3.4's table, from lowest to highest:
+
+| Level | Operators | Associativity | AST |
+| ----- | --------- | ------------- | --- |
+| 1 | `c ? a : b` | right | `Ternary` |
+| 2–4 | `??`, `\|\|`, `&&` | left, short-circuit | `Coalesce`, `Or`, `And` |
+| 5 | `==` `!=` | left | `Binary` |
+| 6 | `<` `>` `<=` `>=` `in` `not in` | none: chaining is an error | `Binary` |
+| 7–8 | `+` `-`; `*` `/` `%` | left | `Binary` |
+| 9 | prefix `-` `!` | prefix | `Unary` |
+| 10 | `**` | right | `Binary(Pow)` |
+| 11 | call, index, slice, `.`, `?.` | postfix | `Call`, `Index`, `Slice`, `Member`, `OptChain` |
+### 4.3 AST
+```rust
+pub struct Name { pub text: Rc<str>, pub span: Span }      pub struct Stmt { pub kind: StmtKind, pub span: Span }
+pub enum StmtKind {
+    Let(Name, Option<Expr>), Const(Name, Expr), Expr(Expr), Break, Continue, Return(Option<Expr>), Throw(Expr),
+    Assign { target: Target, op: Option<BinOp>, value: Expr },        // op None = plain `=`
+    If { arms: Vec<(Expr, Body)>, else_: Option<Body> }, While { cond: Expr, body: Body },
+    For { first: Name, second: Option<Name>, iter: ForIter /* Value(Expr) | Range(Expr, Expr) */, body: Body },
+    Try { body: Body, catch: Option<(Option<Name>, Body)>, finally: Option<Body> },
+    Func(Rc<FuncDecl>), Import { path: Rc<str>, alias: Name }, EngineImport(Rc<EngineImport>), Extern(Rc<Extern>), Block(Rc<EngineBlock>),
+}
+pub enum Target { Name(Name), Member(Box<Expr>, Name), Index(Box<Expr>, Box<Expr>) }
+pub struct Body { pub stmts: Vec<Stmt>, pub funcs: Vec<usize> /* hoisted */, pub span: Span }
+pub struct FuncDecl { pub name: Option<Name>, pub params: Vec<(Name, Option<Expr>)>, pub rest: Option<Name>,
+                      pub body: FuncBody /* Block(Body) | Expr(Expr) */, pub span: Span }
+pub struct Expr { pub kind: ExprKind, pub span: Span }
+pub enum ExprKind {
+    Null, Bool(bool), Int(i64), Float(f64), Str(Rc<str>), Bytes(Rc<[u8]>), Name(Rc<str>),
+    FStr(Vec<FPart>),                     // FPart = Lit(Rc<str>) | Expr { expr, fixed: Option<u8> }
+    List(Vec<Expr>), Dict(Vec<(DictKey, Expr)>),     // DictKey = Str(Rc<str>, Span) | Computed(Expr)
+    Unary(UnOp, Span, Box<Expr>), Binary(BinOp, Span, Box<Expr>, Box<Expr>),    // Span: the operator
+    And(Box<Expr>, Box<Expr>), Or(Box<Expr>, Box<Expr>), Coalesce(Box<Expr>, Box<Expr>), Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    Call { callee: Box<Expr>, args: Vec<Arg>, paren: Span },  // Arg = Pos | Named(Name, Expr) | Spread
+    Index { obj: Box<Expr>, index: Box<Expr>, bracket: Span }, Slice { obj: Box<Expr>, lo: Option<Box<Expr>>, hi: Option<Box<Expr>>, bracket: Span },
+    Member { obj: Box<Expr>, name: Name, optional: bool },    // method call = Call with a Member callee
+    OptChain(Box<Expr>), Lambda(Rc<FuncDecl>), Block(Rc<EngineBlock>),
+}
+// UnOp = Neg | Not;   BinOp = Add Sub Mul Div Rem Pow Eq Ne Lt Gt Le Ge In NotIn
+pub struct UnitId { pub file: FileId, pub offset: u32 }                 // byte offset of the `@` (6.2)
+pub struct EngineBlock {
+    pub unit_id: UnitId, pub tag: Name /* as written */, pub label: Option<Name>, pub args: Vec<(Name, Expr)>,
+    pub body: Rc<str>, pub loc: UnitLoc,   // processed text and its location (4.4, 2.3)
+    pub body_span: Span, pub delimiter: Delim, pub directives: Directives, pub span: Span,  // span: `@` .. closing delimiter
+}
+pub struct Directives { pub exports: Option<Exports>, pub imports: Vec<EngineImport> }   // Some => definition block
+pub struct Exports { pub items: Vec<ExportItem>, pub star: Option<Span> }
+pub struct ExportItem { pub text: Rc<str>, pub quoted: bool, pub span: Span }   // quoted, in c/cpp/rust: a prototype (15.2)
+pub struct EngineImport { pub items: ImportItems, pub selector: Selector, pub span: Span }
+pub enum ImportItems { All(Span), Names(Vec<ImportItem>), Module(Name) }         // Module: `sel as name`
+pub struct ImportItem { pub name: Rc<str>, pub quoted: bool, pub alias: Option<Name>, pub span: Span }
+pub enum Selector {            // as written: @py | @py.stats | stats, "odd-name" | py.os.path, js."@scope/pkg" | v2
+    Union { tag: Name }, Exact { tag: Name, label: Name }, Label { label: Name }, Module { lang: Name, path: Vec<Name> }, V2 { span: Span },
+}
+pub struct Extern { pub lib: Name, pub alias: Option<Name>, pub decls: Vec<ffi::Sig>, pub body_span: Span }
+```
+- **Selectors.** `Selector` keeps tags and path segments exactly as written. Ch. 13 canonicalizes them (`@python.stats` is `@py.stats`) and joins module paths.
+- **When C declarations are parsed.** `extern` declarations are parsed at parse time (3.9). The quoted `@export` items of `c`, `cpp`, `cxx`, `rust` and `rs` blocks are parsed as prototypes by `ffi::cdecl` at parse time too; one it cannot read is a `SyntaxError` with the messages of 16.3 (4.5). An unsupported type or a missing function is still a `BuildError` when the block is reached (15.2).
+### 4.4 Block bodies: lines, directives, dedent
+`syntax/directives.rs` turns a `RawBody` into `body`, `loc` (2.3) and `directives`. The result is what engines receive: the code as written, with directive lines blanked and the common indentation removed (DOCS 4.1).
+
+**Step 1: lines.**
+- *One-line brace block:* the body is the text, trimmed. `body_first_line` is the header line and `body_col` is the column of the body's first char.
+- *Multi-line brace block:* the body is L1 (the text after `{` on the header line) plus the middle lines. The text before the closing `}` is blank (C1) and is dropped.
+  - A blank L1 is dropped too, and the body starts on the next line.
+  - Otherwise L1 is trimmed and becomes body line 1, with `body_col` its column. It takes no part in dedent.
+- *Fence form:* the body is the lines between the fences, and `body_first_line` is the fence line + 1.
+
+**Step 2: directives.** A body line is a directive when, after leading spaces and tabs, it starts with `@export` or `@import` followed by a space, a tab, `{` or the end of the line. The match is on the exact token: `@exporter` and `@import_hook` are foreign code. Matching is line-based on purpose, whatever the foreign string or comment state, so an `@export` line inside a foreign string is still a directive. A line starting with `@@export` or `@@import` is the escape: it stays foreign code, minus one `@` (DOCS 6.1).
+- **Directive-mode lexing.** The V2 lexer lexes from that `@` in directive mode. Spans are real file spans, and a line break ends the directive except inside `{ }` (3.3 rules 2 and 3 are off).
+- **Parsing.** The parser reads one `@export` list or one `engine_import`. A list spans lines until its braces balance; if the body ends first, the error is `unterminated @export list`. The directive's last line may then hold only whitespace or a comment starting with `#` or `//`.
+- **Blanking.** Every line the directive touched becomes an empty line, so foreign line numbers never shift.
+- **`@export` grammar:** `"@export" "{" ( "*" | xitem { "," xitem } [ "," ] ) "}"`, with `xitem = NAME | KEYWORD | STRING`.
+  - Keywords are accepted bare, because they name foreign functions.
+  - Several `@export` lines merge into one list, which may combine `*` with explicit names (12.3).
+  - In `c`, `cpp` and `rust` blocks (and their aliases), items name functions only, and a quoted item is a C prototype (15.2).
+  - Elsewhere, a quoted item is a name that is not a V2 identifier (JS `"$helper"`).
+- **`@import` inside a block** uses `engine_import` and may use the `v2` selector. Its quoted items need no `as`, because the name binds in the foreign namespace.
+  - Compiled blocks allow only `{ names } from SEL`, and only together with `@export`. Anything else is a `BuildError` (15.2).
+  - A run-engine block with any directive raises `ImportError` when it is reached (17.3).
+
+**Step 3: dedent.** A line is a *code line* unless the scanner recorded that it starts inside a multi-line string, template or comment (3.8). An L1 kept from the header line takes no part.
+1. Whitespace-only code lines become empty and are ignored. m is the smallest number of leading spaces and tabs over the remaining code lines.
+2. Their first m chars must be identical. If they are not, the error is `block indentation mixes tabs and spaces`, at the first line that differs, with a note at the first code line (DOCS 4.1). Chars after the first m are the foreign language's business.
+3. m chars are removed from every code line, and from every other line that starts with the same m chars. The remaining lines (string or comment text indented less than the code) stay exactly as written and are listed in `UnitLoc.kept`. So a Python triple-quoted string whose text starts at column 1 keeps its content, and the code around it is still dedented.
+
+`dedent_width` is m. These are ASCII chars, so byte slicing is char-safe. A dedented line 1 has `body_col` = m + 1. The body is the lines joined with `\n`, plus a final `\n`; it is `""` when no line has text.
+```text
+line 10  @py stats {                      blank L1: dropped
+line 11      def spread(xs):              body line 1
+line 12          return max(xs) - min(xs)
+line 13      @export { spread }           becomes "", exports = [spread]
+line 14  }
+=> body "def spread(xs):\n    return max(xs) - min(xs)\n\n", loc { body_first_line: 11, body_col: 5, dedent_width: 4, line_count: 3, kept: [] }
+```
+### 4.5 Static checks
+- **Lexing and parsing** stop at the first error; there is no error recovery.
+- **Static checks.** A file that parses gets every check below, and all violations are reported in source order (2.4). `v2 check` reports the same (19.3).
+- **Kind.** Every error below is a `SyntaxError` with a span.
+- **Known tags.** The only tags this pass knows are the fixed compiled tags `c`, `cpp`, `cxx`, `rust` and `rs`, which cannot be redefined (DOCS 13.3).
+
+| Check | Message |
+| ----- | ------- |
+| the same label on two blocks in one file, in any languages (DOCS 4.7) | `duplicate block label 'stats'`, with a note at the first one |
+| label `v2`, or selector `v2.x` | `'v2' is reserved for this file's V2 functions` |
+| `@export` outside a block; `from v2` outside a block | `@export is only valid inside an embedded block` (hint: modules export every top-level name not starting with `_`) / `the v2 selector is only valid inside a block` |
+| a definition block used as a value (DOCS 4.5); an operator or postfix after a block value (4.1) | `a block with @export is a definition block and cannot be used as a value`, with a note at the `@export` / `a block value must be in parentheses here` |
+| args on a `c`, `cpp`, `cxx`, `rust` or `rs` block (DOCS 4.4) | `compiled blocks take no args — @export a function and call it with arguments` |
+| a block arg given twice, or named like one of the block's inner `@import` aliases (12.1) | the specific reason |
+| `@export {}`, a name exported twice, text after the list, an unterminated list (4.4) | the specific reason |
+| `@import sel as x` where sel is not a package selector `lang.module` | `only a package selector (py.name, js.name) can be imported as a whole module` |
+| a quoted V2-level import item that is not a plain name (a V2 identifier that is not a keyword, 13.4) and has no `as` | `quoted name 'from' needs an alias: "from" as NAME` |
+| `a..b` outside a `for` head; `for i, x in a..b`; `for (x in xs)` | `a..b is only allowed in a for head; use range(a, b)` / `a range loop takes one variable` / `a for head takes no parentheses` |
+| `break` or `continue` outside a loop (a function body starts outside any loop); `return` outside a function | `break outside a loop`, and so on |
+| a name declared twice directly in one body: `let`, `const`, `func`, named `@import` items, `import` and `extern` aliases, `extern` functions, and the parameters, loop variables or catch name that the body introduces (DOCS 3.3; inner bodies may shadow) | `'x' is already declared in this block`, with a note at the first declaration |
+| a duplicate parameter, a non-default parameter after a default one, `...rest` not last; a positional argument after a named one, a duplicate named argument | the specific reason |
+| `try` with neither `catch` nor `finally` | `try needs a catch or a finally` |
+| `a < b < c`; `not` without `in` | `comparisons cannot be chained; write a < b && b < c` / `not is only used in 'not in'; negate with !x` |
+| a dict key that is a number or a keyword | `dict keys are names, strings or [expr]` |
+| an invalid assignment target; a target through `?.` (4.1) | `cannot assign to this expression` / `cannot assign through ?.` |
+| an `extern` declaration V2 cannot read (3.9) | the messages of 16.3 |
+| a quoted `@export` prototype in a `c`, `cpp`, `cxx`, `rust` or `rs` block that V2 cannot read (4.3) | the messages of 16.3 |
+
+These are checked later, not here:
+- tags: `EngineUnknown` when the block is reached (ch. 7);
+- names bound by `@import { * }`: known only at runtime, and duplicates get the runtime error of 13.4;
+- compiled-block directive rules: `BuildError` (15.2);
+- directives in run-engine blocks: `ImportError` (17.3).
+
+---
+
+## 5. Host runtime
+
+`runtime/` is a tree-walking interpreter over the span-annotated AST (ch. 4). It runs only on the interpreter thread (256 MiB stack, 1.3); `Value` is `Rc`/`RefCell` and never crosses threads.
+
+### 5.1 Values
+
+```rust
+pub enum Value {
+    Null, Bool(bool), Int(i64), Float(f64), Str(Rc<str>), Bytes(Rc<[u8]>),
+    List(Rc<RefCell<Vec<Value>>>), Dict(Rc<RefCell<IndexMap<Rc<str>, Value>>>),
+    Func(Rc<Callable>), Handle(Rc<HandleRef>), Error(Rc<ErrorValue>),
+}
+pub enum Callable {
+    Closure { decl: Rc<FuncDecl>, env: Env, file: Rc<FileScope> },  // file: the declaring file (6.2)
+    Builtin(&'static BuiltinDef),                                    // 5.10
+    Proxy { session: SessionId, unit: Rc<str>, name: Rc<str> },      // bridged export; unit = wire unit id (13.4)
+    Native { lib: LibId, sym: Rc<str>, sig: Rc<Sig> },               // compiled export (15.8) or extern (16.1)
+    HandleMethod { handle: Rc<HandleRef>, method: Rc<str> },         // built only as the callee of h.m(...) (11.3)
+}
+pub struct ErrorValue {
+    pub type_: Rc<str>, pub message: Rc<str>, pub data: Value, pub lang: Option<Rc<str>>,
+    pub foreign_type: Option<Rc<str>>, pub cause: Option<Rc<ErrorValue>>,
+    pub span: OnceCell<Span>, pub trace: OnceCell<Rc<[Rc<str>]>>,  // set by the first raise (5.9)
+}
+```
+
+- `Value::clone` is O(1): assigning, passing, returning or storing a list or dict shares it; `str`, `bytes`, `func`, `handle` and `error` are immutable. `.copy()` is shallow: a new `Vec`/`IndexMap`, nested containers shared.
+- `type(x)` is one of `null bool int float str bytes list dict func handle error`. Every `Callable` is `"func"`, including names bound by `@import`; foreign functions, bound methods and classes *returned as values* are callable handles, type `"handle"` (11.6). Native pointers are handles in the native pseudo-session (16.6).
+- `Closure.file` makes blocks and `@import`s in a function body resolve against the declaring file, whichever file calls it.
+
+### 5.2 Equality, ordering, truthiness
+
+`eq(a, b)` implements `==`/`!=`; `in` on lists and `index_of` reuse it.
+
+| Operands | Rule |
+| --- | --- |
+| same scalar type | value equality; floats follow IEEE (`nan != nan`, `0.0 == -0.0`) |
+| `Int` vs `Float` | exact: `f.fract() == 0.0 && -2^63 <= f < 2^63 && f as i64 == i` (never `i as f64 == f`, wrong beyond 2^53) |
+| `Str`, `Bytes` | byte equality |
+| `List`, `Dict` | `Rc::ptr_eq`, else pairwise `eq` (list) or the same key set with `eq` values (dict, order ignored) |
+| `Handle` | same session and id (11.6); native pointers: same address (16.6) |
+| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same session, unit, name; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
+| `Error` | `Rc::ptr_eq` |
+| different types (`Int` vs `Bool` too) | `false`, never an error |
+
+- **Depth.** `eq` and `str()` recurse; past 1,000 levels they raise `RecursionError: value nested too deeply (or cyclic)`, and `str()` prints a container already on its current path as `[...]`/`{...}`. The codec has its own limits: `json_parse` and `json_stringify` reject nesting over 1,000 levels with `ValueError` (10.1), and the 256-level container limit applies only to VEP frames and compiled reverse-call JSON (10.5).
+- **Ordering** (`< > <= >=`, `sort`) exists only for number–number and str–str. Int vs float is exact: NaN compares `false`; `f >= 2^63` or `f < -2^63` decides at once; otherwise compare `i` with `f.trunc() as i64`, a tie decided by the sign of `f - f.trunc()`. Strings compare by code point (Rust `str` order). Other pairs → `TypeError: cannot compare list and int with '<'`; a handle operand gets the TypeError of 11.7.
+- **Truthiness.** Falsy: `null`, `false`, `0`, `0.0`, `-0.0` and an empty str, bytes, list or dict. Everything else is truthy, including NaN, functions, errors and every handle (no round trip). `!x` and `bool(x)` use this rule.
+
+### 5.3 Operators
+
+| Op | int ∘ int | with a float | other operands |
+| --- | --- | --- | --- |
+| `+` | `checked_add` | f64 | str+str, bytes+bytes, list+list → new value; else `TypeError: unsupported operand types for +: 'str' and 'int'`, plus `— use f"...${x}" or str(x)` when one side is a str |
+| `-` `*` | `checked_sub` / `checked_mul` | f64 | `*`: str or list × int, either order; count ≤ 0 → empty; size via `checked_mul`, buffer via `try_reserve_exact` (failure → `ValueError: repetition result too large`) |
+| `/` | both to f64; always a float | f64 | divisor `0` or `0.0` → `ValueError: division by zero` |
+| `%` | floor: `r = a.wrapping_rem(b); if r != 0 && (r < 0) != (b < 0) { r += b }` | same fix-up on f64 `%` | divisor `0` or `0.0` → `ValueError: division by zero` |
+| `**` | `e >= 0`: `checked_pow` (`e > u32::MAX` overflows unless the base is 0, 1 or -1); `e < 0`: a float | `powf` | zero base (int or float) with a negative exponent → `ValueError: division by zero` |
+| `-x` | `checked_neg` | negate | TypeError |
+
+- Integer overflow raises `ValueError: integer overflow in '*'` (the operator). Float `+ - * **` follow IEEE and may give `inf`/`nan`.
+- `x op= y` always means `x = x op y`, with the target's container and key evaluated once: `xs += [1]` makes a new list and rebinds `xs` (other names keep the old list). `&&`/`||` short-circuit and return an operand; `??` returns its left operand unless it is `null`.
+- `x in y`: list → an element `eq` to `x`; dict → key lookup, `x` must be a `Str`; str → substring, `x` must be a `Str`; bytes → a `Bytes` subsequence or an `Int` byte (outside 0–255 → `false`); otherwise TypeError. `not in` negates.
+- Handles take only `==`/`!=`: `in`, slicing, arithmetic, unary `-` and ordering raise the TypeErrors of 11.7, whose hint says to do it inside a block or convert with `value(h)`.
+
+### 5.4 Strings and bytes
+
+A `Str` is always valid UTF-8 (lone surrogates never enter, 10.4); user-visible positions are **code-point** indexes. `Interp` keeps an 8-slot round-robin cache of `CharIndex { s: Weak<str>, ascii: bool, chars: usize, marks: Vec<usize> }` (`marks`: byte offsets of chars 0, 64, 128, …) so `s[i]`, `len(s)`, slices and `find` are not O(n). A lookup compares `Weak::as_ptr` with `Rc::as_ptr` (the `Weak` keeps the allocation, so its address cannot be reused). Char → byte is `i` when `ascii`, else `marks[i / 64]` plus `i % 64` steps; byte → char binary-searches `marks`. Strings under 64 bytes and `for ch in s` use no index.
+
+- `s[i]` is a one-char `Str`; negative `i` adds the length; out of range → `IndexError: string index 9 out of range (length 5)` (lists and bytes use the same wording).
+- `x[a:b]` on str, bytes and list follows Python: a missing bound is 0 or the length, a negative bound adds the length, both clamp to `[0, len]`, `a >= b` gives an empty value, the result is new (shallow for lists). No step, no slice assignment; slicing anything else is a TypeError.
+- f-strings: `${e}` inserts `str(e)`; `${e:.Nf}` needs an int or float (else TypeError) and is `format!("{:.N$}", x as f64)`, rounding the exact binary value (`${19.999:.2f}` → `20.00`); NaN prints `nan`, not Rust's `NaN`.
+- `Bytes` supports `len(b)`, `b[i]` (an `Int` 0–255), slices, `+`, `==` and `in`, but no ordering. `b.decode()` is strict UTF-8 (else `ValueError: invalid UTF-8 at byte offset N`); `b.hex()` is lowercase without separators.
+
+### 5.5 Members, indexing and optional chains
+
+| Receiver | `r.name` | `r.name(args)` | `r[k]` | `r.name = v` / `r[k] = v` |
+| --- | --- | --- | --- | --- |
+| dict | key; missing → KeyError | key `name` holding a `Func` → call it; otherwise the dict method | `Str` key (else TypeError); missing → KeyError | insert or replace (a replaced key keeps its position) |
+| list | `TypeError: list has no field 'len'` | list method | `Int`, negative from the end; IndexError | index assignment; IndexError, never grows |
+| str, bytes | TypeError | method (5.11) | code point / byte | `TypeError: str is immutable` |
+| handle | `op getattr` | `call {h, method}` | `op getitem` | `op setattr` / `op setitem` (11.3; native pointers: TypeError, 16.6) |
+| error | field (5.9) | TypeError | TypeError | `TypeError: error values are read-only` |
+| null | `TypeError: cannot read 'name' of null (use ?.)` | same | `TypeError: cannot index null` | same |
+| other | `TypeError: int has no field 'x'` | `TypeError: int has no method 'x'` | TypeError | TypeError |
+
+- A dict dispatches `d.name(args)` on its key first **only when that key holds a `Func`**: module namespaces (6.4), `extern … as ns` dicts (16.1) and dicts of lambdas work like objects (`ns.keys(…)` calls a C function named `keys`), while JSON data with a `"values"` key keeps the dict methods. A float index (even `1.0`) or bool index is a TypeError; a computed literal key `[e]: v` must be a `Str`.
+- **Optional chains.** The parser wraps a postfix chain containing `?.` in `OptChain` (4.1). A `?.` step whose receiver is `null` ends the **whole chain** at once with `null`, as in JS: `a?.b.c()` with a null `a` evaluates neither `.b`, `.c` nor the call's arguments. Parentheses end the chain, so `(a?.b).c` fails when `a` is null. Only a null receiver of `?.` is guarded: `a?.b.c` with a non-null `a` and a null `b` fails at `.c`, and a missing dict key is still a KeyError. Assigning through `?.` is a SyntaxError (4.1). `eval_chain` returns `Ok(None)` for the short-circuit, and only `OptChain` turns it into `null`.
+
+### 5.6 Environments and declarations
+
+`Env = Rc<RefCell<Frame>>`; `Frame { vars: IndexMap<Rc<str>, Slot { value, is_const: bool }>, parent: Option<Env>, closures: u32 }`.
+
+- **Frames:** builtins frame (shared, read-only) ← one module frame per file ← call frames ← block frames. Each `if`/`elif`/`else` arm and `try`/`catch`/`finally` body gets a new frame; loops get **one fresh frame per iteration**, holding a `for`'s variables, in which the body runs directly; a call frame holds the parameters and is the body's top-level frame; a catch body's frame holds the catch name. Parameters, loop variables and the catch name are therefore declared in the body they introduce (4.5); inner blocks may shadow. Lookup walks `parent`; a `RefCell` borrow is held only while one slot is read or written.
+- **Declarations:** `let x = e` evaluates `e`, then declares `x` (`let x = x + 1` in an inner block reads the outer `x`); `let x` binds `null`. `const`, `@import` names (13.4) and `extern` names (16.1) are const slots: assigning → `TypeError: cannot assign to constant 'LIMIT'` (shallow: a const list can still `push`). A name declared twice in one body is a static SyntaxError (4.5). Only `@import { * }` declares names the parser cannot see; there `Frame::declare` raises `NameError: 'x' is already declared in this block`. An undeclared name → `NameError: 'x' is not declared` + did-you-mean (an assignment adds `— declare it with let`).
+- **Hoisting:** entering a body turns each `func` statement directly inside it into a `Closure` over that frame before the first statement runs; reaching the statement later does nothing. **Closures** capture the `Env`, so `lambda() => i` made in a loop keeps its iteration's `i`.
+- **Cycle trimming:** a closure stored in the frame it captures (every local `func`, `let f = lambda …`) is an `Rc` cycle, counted in `Frame.closures`. When such a frame goes out of scope, let `k` = its slots holding a `Closure` over it with `Rc::strong_count == 1`; if `Rc::strong_count(&frame) == 1 + k`, nothing else reaches it and its `vars` are cleared (releasing held handles). Cycles through containers are not trimmed.
+
+### 5.7 Calls
+
+The callee is evaluated first, then the arguments left to right; `...xs` must be a list (`TypeError: spread argument must be a list, got dict`) and expands in place. `Closure` and `Builtin` (a `&'static [ParamSpec]`) share one binder:
+
+1. Positional args fill the parameters before the rest parameter; extras go to the rest list, or without one → `ArityError: greet() takes 2 positional arguments but 3 were given`.
+2. Named args match by name: unknown → `ArityError: greet() got an unexpected argument 'greting' — did you mean 'greeting'?`; already bound → `… got multiple values for argument 'name'`; the rest parameter → `… cannot take rest parameter 'nums' by name`.
+3. Unfilled parameters without a default → `ArityError: greet() missing required argument 'name'` (all listed), checked before any default runs.
+4. Push the `CallRecord` (5.8), check the depth (5.9), create the call frame (parent `Closure.env`) and walk the parameters in order: declare the bound value or the rest list (possibly empty), else evaluate the default **in the call frame** (it sees earlier parameters; re-evaluated per call). Parameters after the rest parameter are named-only.
+5. Hoist the body's `func`s and run it; falling off the end returns `null`.
+
+- `Proxy`, handle calls `h(…)` and `HandleMethod` forward positional and named args as given (`call`, 9.5). Named args to a session without the `kwargs` cap (js, ts; custom engines per 17.5) → `ArityError: {tag} functions take positional arguments only (got '{kw}')`, raised before sending (10.8, 17.5).
+- `Native` (compiled exports, `extern`) takes positional args only (`ArityError: {name}() takes positional arguments only`, D63), counted against the C signature (16.5), and runs in-process (16.7).
+- A non-function → `TypeError: 'int' is not callable`. A lambda is named `lambda@main.v2:12` in messages and `str()`; its trace frame prints `<lambda>` (2.5).
+- V2 functions called from foreign code (`fn` and `route` calls, 11.8, 13.6; compiled `host_call`, 15.9) go through the same binder on the interpreter thread, inside the host's wait for that engine (9.7). They can arrive only while V2 has a request outstanding to that engine (9.8); a stored callback stays valid for later requests.
+
+### 5.8 Control flow and frame discipline
+
+Statements return `Exec<()>`, expressions `Exec<Value>`: `type Exec<T> = Result<T, Flow>`, `enum Flow { Error(Rc<ErrorValue>), Return(Value), Break, Continue, Exit(i32) }`. `exec_block(body, env, file)` and `eval(e, env, file)` take the environment as an **argument**, never interpreter state: a child frame is a local `Env` dropped on every exit path, including `?`.
+
+- The only interpreter-level stack is `calls: Vec<CallRecord { name: Option<Rc<str>>, call_site: Span }>`. Calls of non-builtin callables and module imports push a record and pop it with the result held in a local (`let r = self.run_call(..); self.calls.pop(); r`), never with a `?` in between.
+- A call turns `Return(v)` into `Ok(v)`; `break`/`continue` never cross a function (static, 4.5). Loops: `Ok`/`Continue` → next iteration, `Break` → exit, anything else propagates.
+- `try`: the body runs in a new frame; on `Flow::Error(e)` the `catch` body runs in a new frame with `e` bound; `Return`/`Break`/`Continue` are never caught. `finally` runs last for every flow except `Exit`: if it completes normally the pending outcome (value, flow, or a new error from `catch`) continues, else its own flow replaces it. Every error kind is catchable, `RecursionError` and engine errors included.
+- `Exit(code)` (from `exit()`, 5.10) is caught by nothing and skips every `finally`; it unwinds through foreign frames (9.7) and native frames (15.9) to the top, where 6.5 ends the run. Interrupts never become a `Flow` (6.5).
+- **Iteration** evaluates the iterable once: list → a snapshot of its elements; dict → a snapshot of its `(key, value)` pairs (one variable gets the key); str → chars; bytes → `Int`s; `a..b` → a lazy `i64` counter (both ends `Int`, else TypeError; `b <= a` → no iterations); handle → `op iter`/`next` (11.4). Two variables get `(index, item)`, or `(key, value)` for a dict. Otherwise `TypeError: cannot iterate over int`.
+
+> **Regression (old `interpreter.rs:4956-4971`).** The old call ran `push_scope_with_parent(…); exec_block_no_scope(&body)?; set_scope(saved)`; an error skipped the restore, so the caller's `catch` ran in the callee's scope and `func g() { let local = 7; try { f() } catch (e) { }; return local }` failed with `Undefined variable 'local'` (for-in bodies leaked the same way). Required tests (R09): `g()` returns 7; the same in a `for` body and a lambda; `return`/`break` out of `try … finally`; a V2 error thrown in a callback crosses a Python frame and is caught with locals intact.
+
+### 5.9 Errors, traces and limits
+
+- **Kinds.** Host: `Error TypeError ValueError KeyError IndexError NameError ArityError IOError RecursionError ImportError`. Engines and crossings (ch. 21): `EngineUnknown EngineNotFound EngineNameConflict EngineCrashed EngineTimeout EngineExitError MarshalError BuildError ForeignError ProtocolError FFILoadError FFISymbolError FFIValueError`. These 23 are catchable. `SyntaxError` is a diagnostic kind (2.4): it is reported before its file runs and never reaches a `catch` in that file; an importer sees it as `ImportError` (6.4). `error(type, …)` accepts any non-empty type string.
+- **Raising.** `throw v` throws an `Error` as is, turns a `Str` into `error("Error", v)`, else `TypeError: throw expects an error or a str, got int`. `span` and `trace` are filled when the error is first raised: by `throw` (the `throw` keyword), by a failing node (operator, call, index, member; spans per 2.2), or on surfacing from an engine (the mapped foreign location, 12.6). `error()` leaves both empty; a rethrow keeps them (`OnceCell`), so `==` still holds and the uncaught header points at the first `throw`.
+- **Trace** (innermost first): `loc` = raise span; for each `CallRecord` from the top, emit `(record.name, loc)`, then `loc = record.call_site`; finally `(None, loc)`. A proxy call's record emits the reply's mapped foreign frames (12.6) instead. Frame strings are 2.5; rendering and elision of long traces are 2.4 (`e.trace` keeps every frame).
+- **Fields:** `type message file line col trace data lang foreign_type`; any other → `TypeError: error has no field 'x'` + did-you-mean. `file`/`line`/`col` are `null` until raised (`file` is the display path, 2.1); `trace` is a new list of strings on each read. `cause` is not a field; an uncaught error prints it as `caused by:` (2.4).
+- **RecursionError:** a call that takes `calls.len()` past **10,000** → `RecursionError: maximum call depth (10000) exceeded` at its span. A stack guard also covers deep expressions and nested foreign callbacks: each call and each nested `eval` of a call, block or container literal compares a local's address (`std::hint::black_box`) with the one recorded at thread start and raises the same error past 7/8 of the stack size. Cross-language nesting has its own limit of 64 (9.7).
+- **Did-you-mean** (names, keys, fields, methods, named args; tags use 7.3): optimal string alignment distance on lowercased names, accepted when `d <= max(1, min(3, (len + 2) / 3))`; the smallest wins, ties → innermost frame, then declaration order.
+
+### 5.10 Builtins
+
+`BuiltinDef { name, params: &'static [ParamSpec], f: fn(&mut Interp, Args, Span) -> Exec<Value> }` entries live in the builtins frame, so user names can shadow them. Notes beyond DOCS 3.11:
+
+| Builtin | Notes |
+| --- | --- |
+| `print` | `str()` of each value joined by `sep`, then `end` (both `Str`, else TypeError); one write to `Out`. |
+| `input` | Writes `str(prompt)`, flushes (see Output), reads one line from the host's stdin and strips `\n` and one `\r` before it. End of input before any byte → `null`; a last line without `\n` is returned; invalid UTF-8 → IOError. |
+| `len`, `type`, `bool` | `len`: chars (5.4), bytes, list items, dict entries, a handle's `op len` (11.3), else TypeError. `type`: 5.1. `bool`: 5.2 truthiness (no round trip). |
+| `str` | A `Str` is returned unchanged; others get the canonical form: `null`, `true`, `42`; floats by Rust `{:?}` (`2.0`, `0.1`, `1e20`) plus `nan`, `inf`, `-inf`; strings inside containers double-quoted with `\" \\ \n \r \t` and `\u{..}` for other control chars (`[1, "a"]`, `{"k": 1}`, `b"\x00A"`); `<func greet>`, `<func lambda@main.v2:3>`, `<func spread (py)>`, `<func fast_sum (rust)>`, `<func cos (extern)>`, `<builtin print>`; errors `ValueError: msg` or `ForeignError: ZeroDivisionError: msg`; handles via `op str` (11.3; a dead session raises EngineCrashed, 8.2, 11.7); native pointers `<native sqlite3* 0x…>` (16.6). |
+| `int`, `float` | `int`: a float truncates toward zero (NaN, inf, out of range → ValueError); a str must be `[+-]?[0-9]+` after trimming (else `ValueError: invalid int: 'abc'`; beyond i64 → `ValueError: int out of range: '…'`); bool → 0/1. `float`: int → nearest f64, bool → 0.0/1.0, a trimmed str via `f64::from_str` (also `nan`, `inf`, `infinity`, any case), failure → ValueError. Other types → TypeError. |
+| `range` | 1–3 positional `Int`s; `range(a)` = `range(0, a)`; the length is computed first with checked arithmetic and the list reserved with `try_reserve_exact` (failure → `ValueError: range too large`); `step == 0` → ValueError. |
+| `json_parse` | The codec in plain mode (10.1) straight into `Value`: integer tokens that fit i64 → `Int`; integer tokens outside i64 → `ValueError: invalid JSON at line L column C: integer does not fit in 64 bits`, raised by the 10.1 pre-parse byte scan, since serde_json would already have made them `f64` (never the nearest `Float`, 0.1; 10.2); tokens with `.`, `e` or `E` → `Float` (`1.0` stays a float); duplicate keys: the last value wins at the first key's position; `$v2` keys are plain data. Syntax errors, lone `\uD800` escapes and nesting past 1,000 levels (10.1) → `ValueError: invalid JSON at line L column C: …`. |
+| `json_stringify` | null, bool, int, finite float (keeps `.0`), str, list, dict. bytes, func, handle, error and non-finite floats → TypeError naming the path (`TypeError: cannot convert handle to JSON at [2] (use value(h) first)`, 10.1); a cycle → `ValueError: cannot convert a cyclic list to JSON`; nesting past 1,000 levels → ValueError (10.1). `indent: null` → compact; an int ≥ 0 → pretty with that many spaces. |
+| `read_file`, `write_file` | Relative paths resolve against the process working directory (unlike `import` and `extern`, which use the `.v2` file's folder). Text reads are strict UTF-8, BOM kept, no newline translation (invalid → `IOError: 'x' is not valid UTF-8 (use binary: true)`). `write_file` takes `Str` (UTF-8) or `Bytes` (raw), else TypeError, via `fs::write` (creates or truncates, no parent folders). OS failure → `IOError: cannot read 'x': <os message>` (or `write`). |
+| `getenv`, `args` | `var_os`/`args_os`, decoded lossily. A name that is empty or contains `=` or NUL → ValueError (std may panic on it). `args()` returns a new list each call. |
+| `exit` | `code`: an `Int` in i32 range (else TypeError / ValueError; POSIX keeps the low 8 bits). Returns `Flow::Exit(code)` (5.8): no `catch` or `finally` runs, engines are still shut down and the run dir removed (6.5). |
+| `error`, `value` | `error`: `type` (non-empty) and `message` must be `Str`, `data` anything; no location until raised. `value`: a handle → `op value` (11.5; native pointer → MarshalError, 16.6); anything else is returned unchanged (containers are not walked). |
+| `engine_available` | 7.3: canonicalizes the tag, resolves it (may run cached probes, 7.7), never starts a session or compiles; an unknown tag → `false`; a later crash does not change the answer. `register_engine`: 17.2. |
+
+**Output.** `Out` (`BufWriter<StdoutLock<'static>>`, 64 KiB, owned by `Interp`) is the only writer of the host's stdout: `print` and the stdout text of worker `out` frames (9.9). Worker `out` frames carry language-level output only; fd-level output in workers goes to stderr (9.9). `Out` is flushed after every write when stdout is a terminal (`IsTerminal`, checked once), and before every in-process native call (16.7), every frame written to a worker (9.9), every child spawn (a statement-position compiled or `run` block inherits stdout, 6.3), every `input()` read, every write to stderr (diagnostics, `out` stderr text), and at the end of the run; dirty native stdio is flushed before every write to `Out` (16.7). A failed write (closed pipe; Rust ignores SIGPIPE, so it is `EPIPE`) raises IOError at the `print`. Stdin belongs to `input()` alone: a worker's stdin is its VEP channel, and compiled and `run` processes get the null device.
+
+### 5.11 Methods
+
+Arguments bind as for builtins. `push`, `insert`, `sort`, `reverse` return `null`; `pop`, `remove_at` and dict `remove` return the removed item. Unknown method → `TypeError: list has no method 'append'` + did-you-mean.
+
+| Type | Methods |
+| --- | --- |
+| str | `len()`; `upper()`, `lower()` (full Unicode mapping); `trim()` (`char::is_whitespace`); `split(sep)` (non-empty `Str`, keeps empty parts); `lines()` (Rust `str::lines`: `\n` or `\r\n`, no trailing empty line); `replace(old, new)` (all matches, left to right; empty `old` → ValueError); `starts_with(p)`, `ends_with(p)`; `find(sub)` (code-point index or `-1`); `encode()` |
+| bytes | `decode()`, `hex()` (5.4) |
+| list | `push(x)`; `pop()` (empty → `IndexError: pop from empty list`); `get(i, default = null)` (`Int`, negative from the end; out of range → `default`); `insert(i, x)` (negative `i` adds the length, then clamps to `[0, len]`); `remove_at(i)` (negative from the end; IndexError); `sort()`; `reverse()`; `map(f)`, `filter(f)` (over a snapshot; `f` gets exactly one argument; new list); `join(sep)` (`str()` of each item); `index_of(x)` (first `eq`, or `-1`); `len()`; `copy()` (shallow) |
+| dict | `keys()`, `values()` (new lists, insertion order); `get(k, default = null)`; `remove(k)` (`shift_remove`, the rest keeps its order; missing → KeyError); `len()`; `copy()` (shallow). `get`/`remove` keys must be `Str` (TypeError). |
+
+`sort()` is stable and in place; it first checks that the elements are all numbers or all strings (else `TypeError: cannot sort a list mixing int and str`); numbers use 5.2's exact order with NaN last, so the comparator is total and runs no user code. **Borrow rule:** no `RefCell` borrow of a list, dict or frame is held across user code or a session round trip (a callback may mutate the same list; `op str` for `str(h)` may call back into V2), so `map`, `filter`, `join` and `str()` of containers clone the element values out first.
+
+---
+
+## 6. Program execution and modules
+
+### 6.1 Startup and the run
+
+1. **Startup** (1.1, 1.3): parse argv (19.1) and load the config (ch. 18); a usage or config error, or a missing or unreadable script, prints a message and exits 2. On Windows, `SetDllDirectoryW(L"")` runs first, so the cwd never joins the DLL search (16.2, 20.2). The interpreter thread runs steps 2 and 3.
+2. **Syntax** (1.1 step 2): the entry file and every file its `import "…"` literals name are lexed, parsed and checked (ch. 3, 4; the parser stops at a file's first error, 4.5). A `SyntaxError` in the **entry** file prints as `file:line:col: SyntaxError: msg` with an excerpt (2.4) and exits 1 before anything runs or any engine is resolved. A diagnostic in an **imported** file is stored with that file and raised as `ImportError` when an `import` of it runs (6.4). Tags are not checked here: `register_engine` adds them at runtime, so an unknown tag raises `EngineUnknown` when its block is reached (7.3). `v2 check` stops after this step and prints its inventory (19.3).
+3. **Run:** build the entry file's `FileScope` (6.2), hoist its top-level `func`s, execute its statements in order, then end the run (6.5).
+
+### 6.2 FileScope and interpreter state
+
+```rust
+pub struct FileScope {
+    file: FileId, path: PathBuf,              // canonical path, the dedupe key (2.1)
+    frame: Env,                               // module frame; parent: the builtins frame
+    blocks: Rc<[BlockInfo]>,                  // static block list: labels, tags, declared exports (12.1)
+    exports: RefCell<ExportRegistry>,         // exports of loaded definition units (13.2)
+}
+pub struct Interp {
+    calls: Vec<CallRecord>,                                      // 5.8
+    units: HashMap<UnitId, UnitState>,                           // definition units (12.1)
+    modules: HashMap<PathBuf, ModuleState>, import_stack: Vec<PathBuf>,   // 6.4
+    routes: Vec<Route>, sessions: SessionTable, registry: Registry,       // 13.6, ch. 8, ch. 7
+    out: Out, chars: [Option<CharIndex>; 8],                     // 5.10, 5.4
+}
+```
+
+Reaching a block runs `exec_block` (12.1); the rules that shape a program:
+
+| Block | When reached |
+| --- | --- |
+| definition (has `@export`) | First reach: resolve the tag, evaluate the block args, load (bridged: `load`, 12.2; compiled: ch. 15), register the exports, `Loaded`. Later reaches do nothing and do **not** evaluate the args again. A failed load is `Failed(err)`: every later reach re-raises the same stored error (no retry, no repeated side effects), and `@import` from it gives 13.3's `block 'stats' failed to load: …`. Reached again during its own load → 12.1's `still loading` ImportError. |
+| action (no `@export`) | Every reach: resolve the tag, evaluate the args left to right, run in a fresh namespace (bridged: a new unit dropped after its reply; compiled: build or reuse the program, 15.5; `run`: 17.3). |
+
+- "Reached" means control executes the statement: inside a function, on the first call that runs it; in a loop, on the first iteration; in an `if` arm never taken, never. Inside `try` a load error is catchable, so `try { @py probe { … @export { … } } } catch (e) { … }` is a probe, but reaching it again re-raises the stored error.
+- Messages name a block by its label, or `@py block at main.v2:12` when unlabeled (12.1 `block_name`).
+- A V2-level `@import` runs when reached: it resolves its selector against `exports` at that moment (13.3) and declares the `Proxy`/`Native` values or module handle in the current frame like `const` (13.4). It must come after the block has run, else `ImportError: block 'stats' has not run yet — move this @import below it`. `@import` inside a block resolves lazily at first call (13.7), so blocks may import from each other in any order; the `v2` selector looks the file's top-level name up at every call (13.6).
+- Blocks, labels and selectors belong to one `FileScope`: a block in `util.v2` never makes `@import … from @py` in `main.v2` ambiguous, and `from v2` inside `util.v2` means `util.v2`.
+
+### 6.3 Blocks as statements and expressions
+
+An action block is an expression; as a statement its value is discarded, and the engine is told so. Definition blocks are statements only (4.5).
+
+| Engine kind | Expression position | Statement position |
+| --- | --- | --- |
+| py, js, ts, custom bridged | py: the last statement's value if it is an expression statement, else `null`; js, ts: the script's completion value (what `eval` would return; `undefined` → `null`; DOCS 4.5, 12.2); custom bridged: whatever the adapter returns for the action (17.6 item 5). Each is awaited if awaitable (9.8), marshaled per ch. 10 | `want_value: false`: the value is computed (and awaited) but never encoded, so no handle is created (12.2) |
+| compiled action program, custom `run` | stdout piped and collected; one trailing `\n` or `\r\n` stripped; strict UTF-8, else MarshalError (17.3) | the host flushes `Out` and dirty native stdio, and the child inherits stdout, so its output streams in program order |
+
+In both positions: stdin is the null device; stderr streams live and its last 4 KiB are kept; a non-zero exit raises `EngineExitError` whose `data.stderr` holds that tail, not repeated in the message (17.3); the block's whole process tree is killed when the block finishes or times out (`call_timeout`, 8.5), so nothing it started outlives it. Blocks inside larger expressions keep left-to-right order: in `f(@py { 1 }, g())` the block runs before `g`.
+
+### 6.4 V2 modules
+
+`import "PATH" as name` may appear in any body and declares `name` in the current frame:
+
+1. **Resolve** `PATH` as written (no extension added) against the **importing file's** folder (absolute paths as is), then `fs::canonicalize`. Missing → `ImportError: cannot find module './util.v2' (looked for C:\proj\util.v2)` (paths shown per 2.1). A file that did not exist at startup but exists now is parsed now.
+2. **Look up** `modules`, whose `ModuleState` is `Running | Done(Value) | Failed(Rc<ErrorValue>)` (the entry file starts `Running`):
+   - `Done(ns)` → declare `name = ns`. `Failed(e)` → throw `e` again: a module's top level never runs twice.
+   - `Running` → `ImportError: circular import: a.v2 -> b.v2 -> a.v2` (the chain from the path's first entry in `import_stack`).
+   - Absent, with a stored diagnostic (6.1) → `Failed` with `ImportError: cannot import './util.v2': util.v2:3:9: SyntaxError: <message>` at the `import`, `data` = the list of diagnostics as `{file, line, col, message}`.
+   - Absent otherwise → push onto `import_stack`, mark `Running`, push a nameless `CallRecord` for the import site, build a new `FileScope` whose module frame's parent is the builtins frame, hoist and run it.
+3. **Success:** the namespace is a new `Dict` (type `"dict"`) of the module frame's bindings in declaration order, minus names starting with `_`: values, `func`s, `@import`ed proxies and module handles, `extern` functions and `extern … as` dicts, imported module dicts. It is stored as `Done(ns)` and shared by every importer. It is a snapshot: rebinding a module-level `let` later is not visible through it. `util.slug(…)` works by dict-key dispatch (5.5).
+4. **Failure:** `Failed(err)`; the error propagates unchanged with the import site in its trace.
+
+Re-exported proxies keep their `session` and `unit` and work from any file. Modules share the entry file's project root and config (18.1).
+
+### 6.5 Ending the run: exit codes and shutdown
+
+| Code | When |
+| --- | --- |
+| 0 | the entry file ran to its end |
+| n | `exit(n)` (i32; POSIX keeps the low 8 bits) |
+| 1 | an uncaught error (printed per 2.4), or a `SyntaxError` in the entry file (6.1) |
+| 2 | a usage or configuration error, before any V2 code runs (18.5, 19.1) |
+| 3 | an uncaught `EngineNotFound` |
+| 130 | an interrupt: Ctrl+C, Ctrl+Break, console close, SIGINT, SIGTERM or SIGHUP; always 130, never 128+signo |
+| 101 | an internal panic (a V2 bug) |
+
+`v2 check` and `v2 doctor` codes: 19.1.
+
+**End of run.** A normal end, an uncaught error and `exit(code)` take one path (1.1 step 4); `exit` is `Flow::Exit`, which unwinds to the top without running any `catch` or `finally` (5.8), abandoning pending foreign calls (9.7) and native frames (15.9). The interpreter thread then:
+1. Flushes dirty native stdio and `Out`; an uncaught error is written to stderr (2.4).
+2. Shuts the sessions down (8.7): `bye`, one shared 1 s grace period that keeps forwarding `out` frames, then `kill_tree` on survivors.
+3. Kills and reaps, as trees, any child still running: `run` engines, compiled programs, compilers, transpilers (8.3).
+4. Flushes `Out` again (late `out` frames) and returns the code to main.
+
+Main removes the run dir (20.3; on Windows up to 3 retries 50 ms apart while killed processes release their locks, then errors are ignored) and exits with the code. Native libraries are never unloaded (16.2).
+
+**Interrupts** are handled by the host alone (1.3). Unix: every child starts in its own session (`setsid()`, 8.3) with no controlling terminal, so terminal SIGINT and SIGHUP never reach it. Windows: `CREATE_NEW_PROCESS_GROUP` keeps only Ctrl+C from children; Ctrl+Break and console close reach every process on the console, and adapters ignore SIGBREAK (14.3, 14.4). The interrupt handler only sets `INTERRUPTED` (an `AtomicBool`). Unix: a `sigaction` handler for SIGINT, SIGTERM and SIGHUP that does nothing else (no lock, no Condvar, no allocation: only async-signal-safe work). Windows: the `SetConsoleCtrlHandler` routine runs on its own thread; it sets `INTERRUPTED`, notifies the watchdog's Condvar (8.5), then blocks until the process ends, because returning early would let `CTRL_CLOSE_EVENT` terminate the process before cleanup. The watchdog (1.3) waits on its Condvar with a timeout of at most 100 ms and checks `INTERRUPTED` on every wake. Once it is set, the watchdog `kill_tree`s every registered child, workers included (8.7), removes `<run>` (best effort) and ends the process with `_exit(130)` / `ExitProcess(130)`: no `bye`, `catch` or `finally`. The interpreter thread never handles an interrupt: once `INTERRUPTED` is set it prints no diagnostic (neither the EOF of a killed worker as `EngineCrashed` nor the failure of a per-use child ended by the same event) and spawns no process.
+
+**Panics.** A panic in the interpreter thread prints `v2: internal error: <panic message>`; unwinding drops the sessions (killing their workers), main removes the run dir and exits 101. Host functions called from native code wrap their bodies in `catch_unwind` (1.3, 15.9). If the host dies with no path at all (SIGKILL, a native crash), Windows' kill-on-close Job Objects, Linux's `PR_SET_PDEATHSIG` and adapters' exit on stdin EOF still end every child (8.3); the run dir is left behind, owner-only (20.3).
+
+---
+
+## 7. Engine registry and resolution
+
+Code: `engines/spec.rs` (specs, the built-in table), `engines/registry.rs` (tags, `register_engine`), `engines/resolve.rs` (discovery, probes, `toolchains.json`).
+
+### 7.1 Data model
+
+```rust
+pub enum EngineKind { Bridged, Compiled, Run }   pub enum Profile { Python, CLike(Dialect), Plain }   // 3.8
+pub enum Family { Python, Node, Gcc, Clang, Msvc, Rustc, Custom }
+pub struct EngineSpec {                                    // py: "py", "Python", ["python"], Bridged, builtin, Python
+    pub id: Rc<str>, pub language: Rc<str>, pub aliases: Vec<Rc<str>>, pub kind: EngineKind, pub builtin: bool,
+    pub profile: Profile, pub session_of: Option<Rc<str>>, // Some("js") for ts: no process of its own
+    pub candidates: Vec<Vec<Rc<str>>>, pub fixed_args: Vec<Rc<str>>,  // argv prefixes tried in order; appended args ({adapter})
+    pub env: Vec<(Rc<str>, Rc<str>)>, pub min_version: Option<Version>,
+    pub adapter: Option<(&'static str, &'static str)>,     // (file name, include_str! source), 14.1
+    pub custom: Option<Rc<CustomFields>>,                  // custom engines: 17.1's validated fields
+}
+pub struct ResolvedEngine {
+    pub spec: Rc<EngineSpec>, pub from: ConfigSource,      // 18.3; doctor FROM column
+    pub argv: Vec<OsString>, pub shown: OsString,          // [C:\Windows\py.exe, -3]; shown: doctor COMMAND (rust: 7.6)
+    pub version: Option<Version>, pub family: Family,      // None: custom engine, or "not probed" (v2 check)
+    pub target: Option<String>, pub env: Vec<(OsString, OsString)>,  // triple, or cl x64|x86|arm64; spec env (+ vcvars env)
+    pub skipped: Vec<(PathBuf, String)>,                   // "Microsoft Store placeholder", "too old: 3.6.8 < 3.8"
+}
+```
+
+`Registry` holds the specs (built-ins, then config-declared custom engines in declaration order, then `register_engine` additions), `by_tag` (id or alias → id) and `resolved: RefCell<HashMap<Rc<str>, Result<Rc<ResolvedEngine>, Rc<ErrorValue>>>>`. It is built from the merged config (ch. 18) at startup; the lexer never consults it (3.8). Resolution is lazy (the first block, selector, `engine_available` or doctor that needs it) and memoized per id, failures included; unknown tags are not memoized, so a later `register_engine` can still add them.
+
+### 7.2 Built-in engines
+
+| id | aliases | kind / profile | candidates, in order | fixed args | env | minimum | probe |
+|---|---|---|---|---|---|---|---|
+| `py` | `python` | Bridged / Python | `python3`, `python`, Windows: `py -3` | `-B -u {adapter}` (`-B`: no `__pycache__` in the project; `-u`: unbuffered) | `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8` | 3.8 | `--version`: `Python (\d+)\.(\d+)\.(\d+)` |
+| `js` | `javascript` | Bridged / CLike(Js) | `node` | `{adapter}` | `NODE_PATH` (8.3) | 18.0 | `--version`: `^v(\d+)\.(\d+)\.(\d+)` |
+| `ts` | `typescript` | Bridged / CLike(Js), session `js` | (js) | | | Node 22.13+ on 22.x, or 23.2+, for stripping (7.6) | js's probe |
+| `c` | | Compiled / CLike(C) | Windows: `cl`, `gcc`, `clang`; else `cc`, `gcc`, `clang` (D35) | | | gcc 7, clang 5 (full C++17), cl 19.28 (VS 2019 16.8, first with `/std:c11`) | 7.7 |
+| `cpp` | `cxx` | Compiled / CLike(Cpp) | Windows: `cl`, `g++`, `clang++`; else `c++`, `g++`, `clang++` | | | as `c` | 7.7 |
+| `rust` | `rs` | Compiled / CLike(Rust) | `rustc` | | | 1.56 (edition 2021) | `-vV` (7.6) |
+
+### 7.3 Tags, EngineUnknown and `engine_available`
+
+- **Canonical tags.** `canonical(tag)` maps an id or alias to `spec.id` everywhere: block headers (`@python stats` is a `py` block), selectors (`@python.stats` = `@py.stats`, `python.os.path` = `py.os.path`), `engine_available`, `[engines.<tag>]`, `V2_ENGINE_*`, `--engine` and `v2 doctor TAG`. Messages print the canonical form (2.5).
+- **Profiles are static.** The lexer takes a tag's scanning profile from the fixed built-in table; every other tag, registered or not, is Plain (3.8, D3). The parser never rejects a tag as unknown.
+- **EngineUnknown.** `resolve_tag(tag, span)` runs when a block is reached or a selector is bound. A miss raises `EngineUnknown: unknown engine '@pyhton' (did you mean '@py'?)` (did-you-mean per 5.9, over ids and aliases); with no close match, `unknown engine '@lua' — known engines: py, js, ts, c, cpp, rust; declare it in [engines.lua] or call register_engine`. Custom tags have the shape `[a-z][a-z0-9_]{0,31}` (D42), so a tag the lexer accepts outside it (`@PY`) is simply unknown.
+- **`engine_available(tag)`** (D41): `false` for an unknown tag (no error); otherwise `true` iff resolution succeeds (7.4, 7.6). It may run probes (cached, 7.7) but never starts a session or compiles, and a later crash (8.2) does not change its answer.
+
+### 7.4 Custom engines in the registry
+
+- `[engines.<tag>]` tables with a non-built-in tag and `register_engine(tag, spec)` share 17.1's validator. Names (D42, 17.2): `v2`, `export` and `import` are reserved; a tag or alias that is built-in, a built-in alias, declared in config, or already registered with a different spec raises `EngineNameConflict`; an identical re-registration is a no-op.
+- A custom spec gets profile Plain, no candidates, minimum or probe, `ext` defaulting to the tag (D37), and 18.1's path rules for its `command` (D38). `V2_ENGINE_<TAG>` and `--engine` replace `command[0]` (18.4), also for a tag registered later.
+- Resolving it only finds `command[0]` (7.5) and runs nothing (`version` is `None`; doctor VERSION `-`). A miss is `EngineNotFound: 'lua' not found on PATH (engine declared in C:\proj\v2.toml)`.
+
+### 7.5 Finding an executable
+
+Children are always spawned by absolute path (Windows `Command` would search the application and system folders before `PATH`). `find_program(name, base)`:
+1. `name` containing `/` or `\`: `base.join(name)` (`base` per 18.1); on Windows an extensionless name is also tried with each accepted extension.
+2. Otherwise each `std::env::split_paths(PATH)` entry in order, skipping empty and relative entries such as `.` (D43: the cwd is never searched, so a cloned project cannot shadow `python`). Windows: `dir\name` if it already has an accepted extension, then `dir\name{ext}` per `PATHEXT` entry (unset: `.COM;.EXE;.BAT;.CMD`; case-insensitive), accepting only `.com`, `.exe`, `.bat`, `.cmd` (`CreateProcess` cannot start `.py` or `.ps1`). Unix: `dir/name` passing `access(X_OK)`.
+3. The hit must be a regular file (`symlink_metadata` when `fs::metadata` fails, as for `WindowsApps` aliases) and stays absolute, not canonicalized. `.bat`/`.cmd` hits are spawned directly (Rust ≥ 1.77.2 quotes arguments for `cmd.exe`; its `InvalidInput` for an unquotable argument is a spawn failure, 8.3).
+
+### 7.6 Per-engine rules
+
+**Order.** The configured command or `[python] venv` (whichever 18.3 picks), else the candidates. A configured value never falls back to auto-detection: a missing one is `EngineNotFound: engine 'py' command 'C:/Python312/python.exe' not found (set by C:\proj\v2.toml)`, and a failing probe is an error too (doctor `broken`). Each auto-detected hit is probed (7.7); a hit whose probe fails, times out or matches no version, that is below the minimum, or that has the wrong target is skipped (kept in `skipped`) and the search goes on (next `PATH` entry, then next candidate). Probes of `PATH` hits always pass arguments: an App Execution Alias run without arguments opens the Microsoft Store.
+
+- **py.** venv: `<venv>\Scripts\python.exe` on Windows, `<venv>/bin/python` then `bin/python3` elsewhere; missing: `EngineNotFound: [python] venv 'C:\proj\.venv' has no Scripts\python.exe (create it: python -m venv .venv)`. A hit under `%LOCALAPPDATA%\Microsoft\WindowsApps` (case-insensitive) is an alias: a real Store or Install Manager Python, or the placeholder that prints "Python was not found" and exits 9009 (skipped: `Microsoft Store placeholder`). `py -3` (`find_program("py")` + `-3`) is Windows-only and last. It and a Windows venv `python.exe` are launchers that run the real interpreter as a child, and aliases change target without their file changing; so the version is re-checked from `hello` (8.4) and every kill is a tree kill (8.3).
+- **macOS.** `/usr/bin/python3`, `cc`, `gcc`, `g++`, `clang` and `clang++` are `xcrun` shims that open an install dialog when the Command Line Tools are missing; V2 first runs `/usr/bin/xcode-select -p`, and a non-zero exit skips them (`Command Line Tools missing`).
+- **js** is `node`. **ts** has no process of its own: `resolve(ts)` = `resolve(js)` plus a type-stripping method:
+  - `transpiler = "node"` (default, D33): decided from the probed Node version, since only 22.13+ on the 22 line and 23.2+ have `module.stripTypeScriptTypes`. Older: `EngineNotFound: @ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found 22.6.0) — upgrade Node or set [engines.ts] transpiler`; the running worker is re-checked at the first ts load (12.5). Strip mode blanks types with spaces, so positions stay exact; `enum`, `namespace` and parameter properties need a transpiler.
+  - `transpiler = <command>` (D36): a string is one program path (never split), an array an argv; `argv[0]` via 7.5, missing: `EngineNotFound: [engines.ts] transpiler 'tsx' not found`. The host runs it once per distinct ts source per run (memoized by sha256), bounded by the js `startup_timeout` (a `Probe` timer, 8.5): TypeScript on stdin, JavaScript from stdout; the stdin write and the stdout and stderr reads are concurrent (8.3). A non-zero exit is a `ForeignError` (lang `ts`) carrying its stderr, at the block's span. Lines are taken 1:1 (no source maps), so they are approximate with a transpiler that reformats code.
+- **c, cpp** (D35). `cl` (Windows only; a candidate or a configured `argv[0]`) is resolved specially:
+  1. `find_program("cl")` hits and `INCLUDE` is non-empty (a Developer Prompt): use it with the current environment; FROM `PATH`.
+  2. Else the probe cache's `vcvars` entry if still valid (7.7), else a fresh capture (FROM `vswhere`): `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe -nologo -utf8 -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath` (`VC.Tools.ARM64` on arm64; no output: not found), then `cmd.exe /u /d /s /c ""<install>\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul && set"` (`arm64` on arm64; `/u` makes `set` write UTF-16LE, so non-ASCII user folders survive). From the `NAME=VALUE` lines (names starting with `=` skipped) keep `INCLUDE` (empty: broken, `vcvarsall.bat did not set INCLUDE`), `LIB`, `LIBPATH` and the `PATH` entries not already in `PATH` (prepended at use); `cl.exe` is `find_program("cl")` over that `PATH`.
+  3. A configured absolute `cl.exe` gets the current environment if `INCLUDE` is set, else the vswhere capture.
+
+  Family: file stem `cl` is Msvc; probe output containing `clang` is Clang; else Gcc (gcc, cc, MinGW). Target: `-dumpmachine`, or for cl the folder holding `cl.exe` (`x64`, `x86`, `arm64`). It must pass 15.7's target check (V2's arch, with `x86_64` = `x64` = `amd64` and `aarch64` = `arm64`, and an accepted OS; on Windows gcc and clang only with a MinGW target, `*-w64-mingw32` or `*-windows-gnu`), else the hit is skipped (`targets i686-w64-mingw32 but V2 is x86_64`; a clang reporting `*-windows-msvc`: `clang targets MSVC — use cl`). Ch. 15 receives `family`, `target`, `argv` and `env`.
+- **rust.** `rustc -vV`: `release: (\d+)\.(\d+)\.(\d+)`, `host: (\S+)`, target checked as above. The `rustc` on `PATH` is usually the rustup proxy, which picks a toolchain from `RUSTUP_TOOLCHAIN` or a `rust-toolchain.toml` in the cwd while its own file never changes; so a run that uses Rust runs `<proxy> --print sysroot` once (cwd = the user's) and sets `argv[0] = <sysroot>/bin/rustc[.exe]`, which keys the probe cache and is what ch. 15 compiles with. `shown` stays the proxy (DOCS 2). rustc finds MSVC `link.exe` itself.
+
+### 7.7 Version probes and the probe cache
+
+- **Running:** `argv + probe args`, stdin null, stdout and stderr are read concurrently (8.3) and joined stdout first (lossy UTF-8), cwd the user's, host env plus `spec.env`, 8.3's child rules; a 10 s `Probe` timer (60 s for vcvarsall), then `kill_tree`. **Parsing:** 7.2's patterns; gcc/clang: the first `(\d+)\.(\d+)(?:\.(\d+))?` of the first `--version` line; cl, run without arguments: the first `\d+\.\d+\.\d+` of its localized banner.
+- **Cache** `~/.v2/cache/toolchains.json` = `{"format": 1, "entries": {…}, "vcvars": {…}}`. Entry key: sha256(path, canonical path if `canonicalize` succeeds, size, mtime ns, spec hash), spec hash = sha256(engine id, probe args, pattern, V2 version); an alias is stat'ed as the link itself. Value: `{"path", "ok", "reason", "version", "family", "target", "output"}`; skips are stored too (`ok: false`) so `v2 check` can reuse them. `vcvars.<arch>` = `{"install", "vcvarsall_size", "vcvarsall_mtime_ns", "cl", "include", "lib", "libpath", "path_prefix"}`, valid while `vcvarsall.bat` keeps its size and mtime and `cl` and every `include` folder exist (a VS update deletes the old toolset).
+- **Access:** runs read, and write misses; `v2 doctor` re-probes and overwrites; `v2 check` only reads; `--no-cache` skips reads (19.4). Writes go to `toolchains.json.<pid>.tmp`, then rename (a failed rename is ignored); an unreadable file or unknown `format` counts as empty.
+
+### 7.8 EngineNotFound messages
+
+`EngineNotFound` (exit 3 when uncaught) means there is no usable toolchain (D40): none installed, only too-old versions, an executable that cannot start (8.3), a configured command, venv or transpiler that does not exist, or a Node too old for ts stripping (7.6). Custom engines: 7.4.
+
+```text
+EngineNotFound: engine 'py' (Python) not found
+  tried: python3, python, py -3 on PATH
+  skipped: C:\Users\me\AppData\Local\Microsoft\WindowsApps\python.exe (Microsoft Store placeholder)
+  install: winget install -e --id Python.Python.3.12
+  or set [engines.py] command in v2.toml, V2_ENGINE_PY, or --engine py=PATH
+```
+
+| engine | Windows | Linux | macOS |
+|---|---|---|---|
+| py | `winget install -e --id Python.Python.3.12` | `sudo apt install python3` / `sudo dnf install python3` | `brew install python` |
+| js, ts | `winget install -e --id OpenJS.NodeJS.LTS` | https://nodejs.org (distro packages may be older than 18, or than 22.13 for ts) | `brew install node` |
+| c, cpp | `winget install -e --id Microsoft.VisualStudio.2022.BuildTools` (workload "Desktop development with C++"), or MSYS2 + `pacman -S mingw-w64-ucrt-x86_64-gcc` | `sudo apt install build-essential` / `sudo dnf install gcc gcc-c++` | `xcode-select --install` |
+| rust | `winget install -e --id Rustlang.Rustup` | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | as Linux |
+
+---
+
+## 8. Sessions and worker lifecycle
+
+`engines/session.rs`. A session is the one worker process of a bridged engine for the whole run: `py`, `js` (which also runs every ts unit) and one per custom bridged tag. Frames: ch. 9; adapters: ch. 14.
+
+### 8.1 Session
+
+```rust
+pub struct Session {                                // SessionTable: by key, plus creation order (SessionId = index)
+    pub key: Rc<str>, pub engine: Rc<ResolvedEngine>, pub state: RefCell<SessionState>,   // "py", "js" (also ts), custom
+    child: RefCell<Option<ChildProc>>,              // std Child + Windows job handle or Unix pgid (8.3)
+    to_worker: RefCell<Option<BufWriter<ChildStdin>>>, from_worker: RefCell<Option<BufReader<ChildStdout>>>,
+    pub hello: RefCell<Option<Hello>>, next_id: Cell<u64>,   // host request ids (9.7)
+}   // unit state: 12.1; release queue: 11.2. No RefCell borrow is held across frame dispatch: a callback may re-enter
+pub enum SessionState { NotStarted, Spawning, Handshaking, Ready, Busy(u32), Closing, Closed, Dead(DeadReason) }
+pub enum DeadReason { SpawnFailed(Rc<ErrorValue>), StartupTimeout(Duration), CallTimeout(Duration), Protocol(String),
+                      Exited { code: Option<i32>, signal: Option<i32>, during: Option<Rc<str>>, at: Span } }
+```
+
+### 8.2 State machine
+
+| From | Event | To |
+|---|---|---|
+| NotStarted | first use: block reached, module import, `v2 doctor TAG` (never `engine_available`) | Spawning |
+| Spawning | spawn ok / spawn error | Handshaking / Dead(SpawnFailed): `EngineNotFound` |
+| Handshaking | `hello`, then `ret` for `init` / deadline / EOF or `err` for `init` / bad frame / `hello` version too old | Ready / Dead: `EngineTimeout` / `EngineCrashed` / `ProtocolError` / `EngineNotFound` (8.4) |
+| Ready, Busy(n) | host sends a request (load, module, call, op), also nested ones while serving the worker's `call` | Busy(n+1) |
+| Busy(n) | `ret` or `err` for the innermost request | Busy(n−1), Ready at 0 |
+| Ready, Busy | EOF, pipe error, child exited, call timeout, protocol violation / program exit (8.7) | Dead(reason) / Closing, then Closed |
+
+Once Dead, every use (loads, its Proxies, handle operations (11.7), imports from its units) raises `EngineCrashed: engine 'py' is not running (stopped earlier: exited with code 1 during a call to 'ratio' at main.v2:14); engines are not restarted`. The first use after an unobserved idle death raises 8.6's "exited while idle" instead, and Dead(SpawnFailed) re-raises its `EngineNotFound`. Releases for a Dead session are dropped (11.2); definition blocks it loaded stay `Loaded` on the host, and their Proxies fail as above. v1 never restarts a session.
+
+### 8.3 Spawning and child processes
+
+1. py, js: the embedded adapter is materialized per 14.1 and its path substituted for `{adapter}`.
+2. `Command::new(argv[0]).args(rest + fixed_args)`, cwd inherited (the host never calls `set_current_dir`), env = the host's plus `spec.env`; js also gets `NODE_PATH` = absolute `[node] modules`, then `[node] paths` (D54, 14.1). Python paths travel in `init` (9.3), never in `PYTHONPATH`. stdin and stdout are piped (VEP), stderr is inherited. Before any user code the adapter moves the protocol to a private fd, sends fd-level output to stderr and makes language-level stdin raise (D45, D73; 9.9, 14.3, 14.4), so the user's stdin belongs to `input()` alone.
+3. A spawn error is `EngineNotFound: could not start 'C:\...\python.exe': <OS message>` (Windows error 193 adds `(not a valid program for this machine)`).
+
+**Child rules**, for every process V2 starts (workers, probes, transpilers, compilers, run engines, compiled programs):
+- **Own session or group:** Unix: `pre_exec` calls `setsid()` (not `process_group(0)`), so the child leads a new session and process group and has no controlling terminal: terminal SIGINT and SIGHUP never reach it, and a `/dev/tty` prompt (git credentials, ssh, sudo, `getpass`) fails at once with `ENXIO` instead of stopping the child on SIGTTIN/SIGTTOU (DOCS 4.6). Windows: `CREATE_NEW_PROCESS_GROUP` (+ `CREATE_NO_WINDOW` when the host has no console), which blocks Ctrl+C only; Ctrl+Break and console close reach every process on the console. Children stay attached to the host's console (never `DETACHED_PROCESS`, whose descendants would open new console windows) and only stdin is replaced (null or a pipe), so a program that reads the console directly (`CONIN$`: an ssh password prompt, Python `getpass`) waits for keyboard input (DOCS 4.6). Adapters ignore SIGINT and SIGBREAK (14.3, 14.4), so a keyboard interrupt never makes a worker die mid-frame or print a `KeyboardInterrupt` trace; the host's console control handler sets `INTERRUPTED` as its first action, so failures of other children caused by the same event are never reported (8.7). stdin: a pipe for workers and transpilers, null for the rest (DOCS 4.6).
+- **Windows:** created `CREATE_SUSPENDED`, assigned to its own Job Object (`KILL_ON_JOB_CLOSE | BREAKAWAY_OK`), then resumed (its thread found with `CreateToolhelp32Snapshot`, 17.3), so every descendant is in the job unless created with `CREATE_BREAKAWAY_FROM_JOB`. **Linux:** after `setsid()`, `pre_exec` runs `prctl(PR_SET_PDEATHSIG, SIGKILL)` and `_exit(1)` if `getppid()` is no longer the host; PDEATHSIG fires when the spawning *thread* exits, so spawns and shutdown run on the interpreter thread (1.3). **All:** adapters exit on stdin EOF (macOS has only this, so a busy worker outlives a SIGKILLed host until its next read).
+- **`kill_tree`** is every kill V2 performs: Windows `TerminateJobObject(job, 1)`, Unix `kill(-pid, SIGKILL)` (the session leader's pid is its pgid; `kill(pid)` on `ESRCH`). Launchers (`py -3`, a Windows venv `python.exe`, `.cmd` shims, `bash`) run the real work in a descendant that also holds the pipes.
+- **Lifetime (D44):** workers are killed as a tree at shutdown (8.7); a run-engine or compiled-program child is killed as a tree, with everything it started, when its block finishes, times out or V2 exits; probes and transpilers when they exit or time out.
+- **Pipes** (every child but workers, whose stdin and stdout carry frames, 8.5): every piped stream is serviced at the same time as the others. Each piped output (expression-position stdout, the stderr tail, probe, compiler and transpiler output) gets its own helper thread that collects into memory or forwards; a transpiler's stdin is written from its own thread. The interpreter thread waits only for the exit (or the timer's kill), then runs `kill_tree`, then joins the helper threads, which reach EOF because the tree is dead, then reaps (below).
+- **Reaping:** exit is observed without reaping (Unix `waitid(P_PID, pid, WEXITED|WNOHANG|WNOWAIT)`, Windows the process handle), then `kill_tree`, then `wait()` and the job handle closed: nothing a child started without detaching (`setsid`, `CREATE_BREAKAWAY_FROM_JOB`) outlives it, and the unreaped leader keeps its pgid from being reused.
+
+`<run>` is the private per-run temp dir (0, 20.3).
+
+### 8.4 Handshake
+
+One deadline covers spawn → `hello` → `init` reply: `startup_timeout` (`[engines.js]`'s for ts; default 30 s; 0 = none), a `Startup` timer (8.5).
+- **Before `hello`** (D74), lines that are not JSON objects (preload noise from `sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`) are forwarded to the host's stderr; any other first frame is `ProtocolError: engine 'py' sent 'ret' before hello`. After `hello`, a line that is not a frame is a `ProtocolError` (9.11).
+- **`hello`** must carry `vep: 1` (else 9.3's `ProtocolError`). Its `caps` are recorded and gate features (17.5, D68). For built-in engines its `version` must meet 7.2's minimum, because a launcher or alias may run another interpreter than the one probed: else kill, Dead(SpawnFailed), `EngineNotFound: Python 3.6.8 at C:\...\python.exe is too old (needs 3.8+)`.
+- **`init`** (9.3): `ret` → Ready; `err` → kill, `EngineCrashed: engine 'py' failed to start: <message>`.
+- **EOF first:** Windows exit status 9009 (a Store placeholder the probe did not catch) → Dead(SpawnFailed) with 7.8's `EngineNotFound`; otherwise `EngineCrashed: engine 'py' exited during startup (exit code 1); see its error output above`.
+- **Deadline:** kill, `EngineTimeout: engine 'py' did not start within 30 s (C:\...\python.exe); raise [engines.py] startup_timeout if it is only slow`.
+
+### 8.5 Requests and call_timeout
+
+- **Before each request:** check whether the child exited (without reaping; if so, Dead, 8.6), check the cross-language depth limit (64, 9.7) and put pending releases on the frame (11.2).
+- **Frame I/O:** compact `serde_json` plus `\n` in one `write_all`, then flush; reads split on `\n` only and drop one `\r` before it (D74); frames are at most 64 MiB in either direction (D72, 9.1). A session's stdout is read only while the host awaits a reply from it (and in 6.5's shutdown drain), so a worker can call V2 only while the host has a request outstanding to it (D46); adapters reject calls from idle code themselves (9.8).
+- **Watchdog state** (the thread: 1.3): `Arc<(Mutex<Watch>, Condvar)>`, `Watch { stack: Vec<Timer>, fired: Option<(String, TimerKind)> }`, `Timer { session: String, kill: KillHandle, kind: Startup | Call | Probe, remaining: Option<Duration>, running_since: Option<Instant> }` (`None` = no limit / paused; `KillHandle` = duplicated process and job handles, or pid and pgid).
+- **Timers (D39):** each host request after `init` (load, module, call, op) pushes a running `Call` timer with `remaining = call_timeout` (`None` for 0); probes and transpilers push `Probe`. An inbound `call` from that worker pauses the top timer, sending its reply resumes it, and the reply to the request pops it. Only the top timer runs, so exactly the innermost pending host→worker request is timed, never V2 code or another engine: V2 → py (A runs) → V2 callback (A paused) → js (B runs, popped) → py (A resumes). Run engines and compiled programs use the same `Call` timers (message: 17.3); in-process calls (compiled exports, `extern`) cannot be interrupted and are never timed. Every 250 ms the watchdog also checks whether the top timer's child exited (`WaitForSingleObject(h, 0)`; `waitid` + `WNOWAIT`) and then runs `kill_tree`, so a descendant holding the stdout pipe cannot keep the read from reaching EOF.
+- **Expiry:** holding the mutex, the watchdog runs `kill_tree` and sets `fired`; the blocked read gets EOF, sees `fired`, and the session becomes Dead(CallTimeout): `EngineTimeout: call to 'slow' in engine 'py' exceeded call_timeout (5 s); the engine was stopped` (v1 cannot cancel a call any other way). A child's timers and kill registration are removed under the mutex before it is reaped, so a reused pid is never signalled.
+
+### 8.6 Crash detection
+
+EOF on stdout, a pipe error (`EPIPE`, `ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`; Rust ignores SIGPIPE), the child found exited, or a fatal protocol violation (9.11): `kill_tree`, reap, record the `DeadReason`.
+- The pending request fails with `EngineCrashed: engine 'py' (pid 4242) exited during a call to 'ratio' (exit code 3221225477 = 0xC0000005); see its error output above` (codes ≥ 0xC0000000 also in hex; Unix: `killed by signal 11 (SIGSEGV)`), or with 9.11's `ProtocolError`. The worker's last output is already on stderr.
+- A death while idle is noticed at the next use: `EngineCrashed: engine 'py' exited while idle (exit code 1)`; later uses get 8.2's "not running".
+- Raised inside another engine's callback, the error travels back through that engine like any V2 error (9.6). EOFs caused by an interrupt are not reported (8.7).
+
+### 8.7 Shutdown and interrupts
+
+6.5 owns the shutdown order and the exit codes; the session part:
+1. On every orderly exit (end of program, `exit(code)` even inside a callback, an uncaught error after it is printed; `exit` runs no `finally`, D15), each Ready or Busy session, newest first, gets `{"t":"bye"}`, its stdin is closed, state Closing. An adapter blocked in a stub exits without unwinding user code (9.10).
+2. 6.5's shared 1 s drain forwards `out` frames (exit-handler output is kept) and ignores all others; worker exit codes are ignored.
+3. Survivors are `kill_tree`d and every worker is reaped (8.3), state Closed; 6.5 then kills the remaining children and removes `<run>`.
+
+Interrupts (Ctrl+C, Ctrl+Break, console close, SIGINT, SIGTERM, SIGHUP) are the host's (8.3): on Unix no terminal signal reaches a child, which runs in its own session; on Windows Ctrl+Break and console close reach every process on the console, adapters ignore SIGBREAK (14.3, 14.4), and because the host's console control handler sets `INTERRUPTED` first, child failures the same event causes are never reported. On 6.5's interrupt path the watchdog `kill_tree`s every registered child, workers included; the resulting EOFs are not reported as `EngineCrashed`, no `finally` runs, `<run>` is still removed, and the exit code is 130 on every OS (D15). A panic takes 6.5's hard path and exits 101.
+
+---
+
+## 9. The VEP/1 protocol
+
+VEP/1 (V2 Engine Protocol, version 1) connects the host to every bridged engine: the `py` session, the `js` session (which also runs `ts` blocks) and custom `bridged` engines (17.5). Host side: `engines/vep.rs` on top of `engines/session.rs` (ch. 8); values go through `codec/json` (ch. 10); the built-in adapters are `adapters/py.py` and `adapters/js.js` (ch. 14). This chapter owns the wire format and the call discipline: the member names and shapes of every frame are defined in 9.2 and 9.4; their semantics are in 12.2 (`load`), 13.5 (`module`), 13.7 (`imports` entries) and ch. 11 (handle ops).
+
+### 9.1 Transport and framing
+
+- **Channels.** Host→worker frames travel on the worker's stdin, worker→host frames on its stdout. Worker stderr is inherited and never parsed.
+- **Frames.** One UTF-8 JSON object per line, ended by a single `\n` (0x0A). Writers use a real JSON encoder (serde_json, `json.dumps`, `JSON.stringify`) with compact separators; it escapes every U+0000–U+001F inside strings, so a frame never contains a raw 0x0A. Raw U+2028/U+2029 inside strings are allowed.
+- **Splitting.** Both sides read raw bytes, split on 0x0A only, then decode each complete line. Nothing splits on `\r`, U+0085 or U+2028: no Python text-mode `readline` or `for line in sys.stdin`, no Node `readline` module (splitting on a lone `\r` caused the old desync). The host drops one `\r` before the `\n` (D74); adapter parsers accept it as JSON whitespace.
+- **Size limit: 64 MiB per frame, both directions (D72).** The host refuses to send a larger frame: `MarshalError: value too large to send to engine 'py' (70 MiB, limit 64 MiB)`, nothing sent. A longer incoming line is fatal: `ProtocolError: frame from engine 'py' exceeds 64 MiB`. An adapter never sends a larger frame: a reply becomes `err` `MarshalError`, a stub call raises `MarshalError` in the foreign code, `out` text is chunked (9.9).
+- **Host I/O.** Reading is a bounded `read_until`: the `BufReader<ChildStdout>` is scanned with `fill_buf`/`consume` and gives up once the pending line passes the limit. Each outgoing frame is serialized into one `Vec<u8>` and written with one `write_all` + `flush`. A write error (EPIPE, `ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`) is handled like EOF: the worker is gone (8.6).
+- **Adapter I/O.** Stdin EOF or a broken stdout pipe means the host is gone: the adapter exits quietly with status 0. A host line it cannot parse, or a reply it is not waiting for, is reported on stderr and the adapter exits with status 2 (14.2).
+- **Evolution.** Both sides ignore unknown members. The set of `t` values is fixed for VEP/1: an unknown `t` from a worker is fatal (9.11); an adapter answers an unknown `t` that carries an `id` with `err` `ProtocolError` and keeps running (17.6).
+
+### 9.2 Frame catalogue
+
+| `t` | Direction | `id` | Members |
+| --- | --- | --- | --- |
+| `hello` | W→H | – | `vep`, `engine`, `impl`, `version`, `pid`, `caps` (9.3) |
+| `init` | H→W | yes | `project_root`, `paths` (9.3) |
+| `load` | H→W | yes | `unit`, `kind`, `lang`, `label`, `file`, `line`, `source`, `args`, `imports`, `exports`, `want_value` (9.4; 12.2) |
+| `module` | H→W | yes | `unit`, `name`, `from`, `names`, `as_handle` (9.4; 13.5) |
+| `call` | both | yes | `target`, `args`, `kwargs` (9.5) |
+| `op` | H→W | yes | `op`, `h`, plus `name`/`key`/`value`/`n` as the op needs (9.5, 11.3) |
+| `ret` | both | echoed | `value`; plus `exports` and `missing` when answering `load`/`module` |
+| `err` | both | echoed | `error` (9.6) |
+| `out` | W→H | – | `stream` (`"stdout"` or `"stderr"`), `text` (9.9) |
+| `release` | both | – | `h` (H→W: handle ids) or `fn` (W→H: callable ids) (9.10) |
+| `bye` | H→W | – | – (9.10) |
+
+`init`, `load`, `module`, `call` and `op` are requests: each gets exactly one `ret` or `err`. A session is `hello`, `init`, any number of requests (with nested traffic), then `bye`. In `op` frames and `call` targets, `h` is the bare handle id, not an `h` tag (10.3).
+
+Example: a `py` block labeled `risky` imports the V2 function `log_line` (route 1) and exports `ratio`. The worker's `call` carries the worker's own id 1; the host's `call` has host id 3.
+
+```json
+{"t":"hello","vep":1,"engine":"py","impl":"CPython","version":"3.12.4","pid":4242,"caps":["modules","handles","kwargs","reverse"]}
+{"t":"init","id":1,"project_root":"C:\\work","paths":["C:\\work"]}
+{"t":"ret","id":1,"value":null}
+{"t":"load","id":2,"unit":"0:812","kind":"definition","lang":"py","label":"risky","file":"C:\\work\\main.v2","line":3,"source":"\ndef ratio(a, b):\n    log_line(\"dividing\")\n    return a / b\n\n","args":{},"imports":[{"as":"log_line","route":1}],"exports":["ratio"],"want_value":false}
+{"t":"ret","id":2,"value":null,"exports":[{"name":"ratio","kind":"func"}],"missing":[]}
+{"t":"call","id":3,"target":{"unit":"0:812","name":"ratio"},"args":[1,0],"kwargs":{}}
+{"t":"call","id":1,"target":{"route":1},"args":["dividing"],"kwargs":{}}
+{"t":"ret","id":1,"value":null}
+{"t":"err","id":3,"error":{"type":"ForeignError","message":"division by zero","foreign_type":"ZeroDivisionError","trace":[{"file":"C:\\work\\main.v2","line":6,"col":12,"func":"ratio"}],"text":"Traceback (most recent call last):\n..."}}
+```
+
+### 9.3 Handshake: `hello` and `init`
+
+**`hello`** is written by the adapter before any user code runs. Ch. 8.4 owns its deadline (`startup_timeout`), the minimum-version check and the startup error messages.
+- `vep` must be `1`; anything else is fatal (9.11): `ProtocolError: engine '{tag}' speaks VEP/{n}; this V2 speaks VEP/1`. `engine` is the adapter's tag. `impl` and `version` (`"CPython"`/`"3.12.4"`, `"node"`/`"22.13.1"`) are shown by `v2 doctor` and `v2 doctor TAG` (D34). `pid` is the interpreter's own pid, not a `py -3` launcher's; crash messages use it (8.6).
+- `caps` is a list of strings. The host gates features on `modules`, `handles`, `kwargs` and `reverse` (D68; what each enables and the error without it: 17.5) and ignores unknown caps. The py adapter sends `["modules","handles","kwargs","reverse"]`; the js adapter sends `["modules","handles","reverse"]` (no `kwargs`, D63).
+- **Preload noise (D74).** Before `hello`, a stdout line that is not a JSON object (output of `sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`) is copied to the host's stderr. The first JSON object must be a valid `hello`, else fatal `ProtocolError`. From `hello` on, every line must be a frame (9.11). EOF before `hello` is a failed start (8.4).
+
+**`init`** is always the first request; the adapter answers `ret` with `value: null` (an `err` kills the worker, 8.4).
+- `project_root`: the absolute folder holding `v2.toml`, or the entry script's folder.
+- `paths`: ordered, de-duplicated absolute folders for the engine's module search. py: `project_root`, then `[python] paths`, prepended to `sys.path`; the adapter also inserts each `.v2` file's folder before the project root at that file's first `load`/`module` (14.3), which gives DOCS 5's order. js: `[]`, because Node gets `[node] modules` and `[node] paths` through `NODE_PATH` at spawn (D54, 14.1). Custom engines: `[]`.
+
+### 9.4 Units: `load` and `module`
+
+`load` members are those of 9.2 (there is no `col`); the host fills them as 12.2 says. The protocol rules are:
+- **`unit`** is the wire UnitId `"<FileId>:<byte offset of the block's @>"`. Module units are `"<canonical tag>:<name>"` (`py:statistics`, `js:date-fns`; `ts.pkg` is `js:pkg`, D52): one unit per module per session, shared by every importing file (13.5). Concurrent action runs of one block share its id, so adapters never key action state by it.
+- **`kind: "definition"`** is sent once per UnitId. The adapter keeps the namespace until `bye` only if its reply's `missing` is empty. A failed definition load is never resent: the host marks the unit Failed and re-raises the stored error on every later reach (D31, 12.1). **`kind: "action"`** is sent on every execution: fresh namespace, run, drop; objects that escaped as handles or stubs stay alive.
+- **`lang`** is the canonical tag; `"ts"` makes the js adapter strip types first (12.5). **`label`** is the block's label as written, or `null`. **`file`** (absolute `.v2` path) and **`line`** (the `.v2` line of `source` line 1) are what adapters compile with, so frames inside blocks already carry `.v2` files and lines; the host maps columns itself (12.6). **`source`** is the dedented body with directive lines blanked (4.4); V2 never inserts values into it (D13).
+- **`args`** are bound as unit globals, then **`imports`**, then the code runs. An `imports` entry has exactly one of four shapes (when each is used: 13.7): `{"as","unit","name"}` binds an export or module attribute already in this session; `{"as","unit","module":true}` binds a module object of this session; `{"as","value"}` binds a decoded constant; `{"as","route"}` binds a stub for that route (13.6). **`want_value`** asks for the completion value (12.2).
+
+The `ret` of a `load` or `module` carries `value`, `exports` and `missing`. `exports` is a list of `{"name","kind","value"?}`: `kind` is `"func"`, `"class"` or `"value"`, and `value` (the constant, copied at load) is present only for `"value"`. `missing` lists the requested names the unit does not define; the host raises `ImportError` (12.2, 13.5). An exception while running the block is answered with `err`; a foreign syntax error is `ForeignError` with `foreign_type: "SyntaxError"` at the `.v2` line (12.3, 12.4, 12.6).
+
+**`module`** imports a foreign package into its module unit (13.5). `from` is the absolute path of the importing `.v2` file; adapters resolve against it (`createRequire`, the `sys.path` folder of 9.3). `names` is a list, `"*"`, or `null` with `as_handle: true`, in which case `ret.value` is the module object as a handle. A second `module` for the same unit reuses the imported module. The not-found mapping to `ImportError` is 13.5's. Without the `modules` cap the host raises before sending (17.5).
+
+### 9.5 `call` and `op`
+
+| `target` | Sent by | Meaning |
+| --- | --- | --- |
+| `{"unit","name"}` | host | a Proxy call (13.4): `name` is looked up in the unit's namespace when the call arrives (gone since load: `err` `NameError`, 12.3); a JS class is constructed (11.3) |
+| `{"h"}` / `{"h","method"}` | host | calls the handle's object, or one of its methods, in one round trip (11.3) |
+| `{"route"}` | worker | calls a route created by an inner `@import` (13.6); a `Pending` route resolves at this first call (D53) |
+| `{"fn"}` | worker | calls a V2 callable the worker received as a value (11.8) |
+
+- `args` (array) and `kwargs` (object) are always present, empty when unused. The host expands a spread `...xs` into `args`. Named arguments go only to sessions with the `kwargs` cap (10.8).
+- A worker `call` with a `unit` or `h` target, or from a worker without the `reverse` cap, is fatal. An adapter answers a host `call` with a `route` or `fn` target with `err` `ProtocolError`.
+- An unknown `route` or `fn` id is answered with `err` `ProtocolError: unknown callable id 42`; the session stays usable.
+
+`op` goes host→worker only, and never to a session without the `handles` cap: `getattr {h,name}`, `setattr {h,name,value}`, `getitem {h,key}`, `setitem {h,key,value}`, `len {h}`, `iter {h}`, `next {h,n}`, `str {h}`, `value {h}` (semantics: 11.3–11.5). `setattr` and `setitem` answer `null`; `next` answers `{"items":[...],"done":bool}`.
+
+### 9.6 `ret` and `err`
+
+`ret.value` is an encoded value (ch. 10). `err.error` has these members:
+
+| Member | Content |
+| --- | --- |
+| `type` | a V2 error kind: `ForeignError` for a foreign exception; `ImportError`, `NameError`, `ArityError`, `ValueError`, `MarshalError`, `ProtocolError` or `Error` for failures the adapter detects itself |
+| `message` | the message text |
+| `foreign_type` | the foreign exception class, such as `"ZeroDivisionError"`, or `null` |
+| `trace` | frames `{"file","line","col","func"}`, innermost first, adapter-internal frames left out; `col` in code points or `null`; `func: null` at a block's top level (12.6) |
+| `cause` | optional: the chained exception (`__cause__`, `e.cause`) in the same shape, at most 8 deep |
+| `text` | optional: the engine's own formatted traceback |
+| `v2` | optional: the `error` tag (10.3) of a V2 error that propagated through foreign code |
+
+**How the host converts `err`:**
+- With `v2`, the host restores that error (type, message, data, location) and appends the foreign frames to its trace, so a V2 error thrown in a callback comes back with its original type (DOCS 10).
+- Without `v2`, the kind is `type` if it names a runtime error kind (DOCS 3.9, 10; `SyntaxError` is static-only, D1), otherwise `ForeignError` with `foreign_type = type`. The location is the innermost frame that maps into a `.v2` file, else the V2 call site (2.4, 12.6); `e.lang` follows 12.6. If `trace` is empty, the lines of `text` become the trace.
+- Adapters make every error string well-formed first (10.4).
+
+**The other direction.** When a V2 callback fails, the host's `err` always carries `v2`. Adapters raise it as `V2Error` (`class V2Error(Exception)` in Python, `class V2Error extends Error` in JS), which exposes `.type`, `.message` and `.data` and keeps the tag, so if foreign code does not catch it, it goes back in `v2` unchanged.
+
+### 9.7 Ids, depth and the re-entrant loop
+
+- **Ids.** Each side numbers its own requests 1, 2, 3 … per session (u64, never reused). `ret`/`err` echo the other side's id, so the two counters never collide.
+- **LIFO replies.** A reply must answer the receiver's innermost outstanding request. Anything else is fatal: `ProtocolError: engine 'py' broke the protocol: reply to request 7, which is not the innermost pending request`.
+- **Depth limit (DOCS 8.4).** `xdepth` counts the crossings in progress across all engines: each outstanding host request, each worker `call` being served, each in-process native call (16.7) and each `host_call` (15.9). The crossing that would be the 65th raises `RecursionError: cross-language call depth limit (64) exceeded`: at the V2 expression before a request is sent, or, for a worker `call`, as its `err` reply, so it unwinds through the foreign code back to V2 with its kind.
+
+```rust
+fn request(&mut self, s: SessionId, f: Frame, at: Span) -> Result<Value, Flow> {  // init, load, module, call, op
+    let _level = self.xdepth.enter(at)?;                     // RecursionError past 64; left on every path
+    let id = self.send(s, f)?;                               // queued releases go first (9.10); size check (9.1)
+    loop {
+        match self.read_frame(s)? {                          // EOF → EngineCrashed, deadline → EngineTimeout (8.5, 8.6)
+            Frame::Ret { id: r, value, .. } if r == id => return codec::decode(value, Mode::Vep(s), self),
+            Frame::Err { id: r, error } if r == id => return Err(self.foreign_error(s, error)),
+            Frame::Call { id: c, target, args, kwargs } => {
+                self.watchdog.pause(s);                      // the worker waits on us; it is not computing (8.5)
+                let res = self.serve_call(s, target, args, kwargs);  // enters a level; may re-enter request()
+                self.watchdog.resume(s);
+                let reply = self.reply_frame(c, res);        // an encode failure becomes err MarshalError
+                self.send(s, reply)?;
+            }
+            Frame::Out { stream, text } => self.out.write(stream, &text),      // 9.9
+            Frame::Release { fns, .. } => self.release_fns(s, &fns),           // 11.8
+            other => return Err(self.fatal(s, other.describe())),              // 9.11
+        }
+    }
+}
+```
+
+An `exit()` inside a served call sends no reply to the pending `call`: the process shuts down (6.5), and the waiting worker gets `bye` like every other session (9.10).
+
+**The adapter loop** (skeleton: 14.2) is `serve(wait_id)`; the top level runs `serve(None)`. For each incoming frame:
+- `ret` or `err`: it must carry `wait_id` and ends the loop; otherwise the adapter reports it on stderr and exits with status 2.
+- `release`: applied. `bye`: the adapter exits (9.10). EOF: it exits quietly.
+- Anything else is a request: push it on the adapter's stack, handle it (possibly recursively), send exactly one `ret` or `err`, pop it.
+
+A **stub** (a route or `fn` function; 14.2's `host_call`) checks 9.8, sends `call` with a fresh id (buffered output and queued releases go first, 9.9), marks itself waiting on the stack, runs `serve(id)`, and returns the decoded `value` or raises `V2Error`.
+
+**User code cannot end the worker.** Request handlers catch everything (Python `BaseException`, any thrown JS value) and reply `err`: `sys.exit()` becomes a `ForeignError` with `foreign_type: "SystemExit"`, and JS `process.exit()` throws an `Error` (D55; 14.3, 14.4). Adapters ignore SIGINT and SIGBREAK; the host owns interrupts (6.5).
+
+### 9.8 When a worker may call V2
+
+**Only while V2 is waiting on this engine (D46).** A stub may send `call` only while the innermost entry on the adapter's stack is a host request that is executing: during a synchronous call, while that request's coroutine or Promise is awaited, or during a nested request served inside a stub. A callback stored earlier stays valid and may be called during any later request. A timer, event handler, thread or `__del__` that fires while the worker is idle, or while it is blocked in a stub (V2 is computing then), gets a `V2Error` (type `Error`) raised in the foreign code, and nothing is sent: `V2 function 'progress' called outside an active V2 call` (DOCS 8.4). In JavaScript, timers and event handlers run only right after a call returns (the event-loop turn the adapter yields after every outermost reply, 14.4), or while V2 is waiting on a JS Promise. One that calls V2 right after a call fails; one that fires while V2 awaits a JS Promise is allowed.
+
+**Only from the dispatch thread.** Python stubs compare `threading.get_ident()` with the dispatch thread's id: `V2 function 'progress' called from another thread`. JS stubs always run on the main thread, because functions cannot be sent to `worker_threads`.
+
+The host cannot enforce either rule: it reads a worker's frames only while a request to that worker is pending (17.6).
+
+**Awaiting (the async rule).** The result of a `call`, and the completion value of a `load` even with `want_value: false`, are awaited when awaitable (`inspect.isawaitable`; a thenable). `op` results never are.
+- **py:** `loop.run_until_complete(x)` on the session's event loop (one per session, created on first use), at any depth. If an event loop is already running in the thread, the reply is `err` type `Error`: `'fetch' returned a coroutine while another coroutine is being awaited; call it directly from V2`.
+- **js:** only a request served from the idle listener (stack depth 1) is awaited, and the event loop keeps running meanwhile (14.4). Inside a stub's synchronous wait the event loop cannot run, so the reply is `err` type `Error`: `'fetch_json' returned a Promise during a nested cross-language call; only an outermost call can be awaited` (DOCS 8.4).
+- Before either error reply the adapter calls `coro.close()` or attaches a no-op rejection handler, so no "never awaited" or unhandled-rejection warning appears.
+
+### 9.9 Output and worker stdio
+
+**Stdio contract (D45, D73; implementation: 14.3, 14.4).** User code is kept off the protocol stream:
+- **Protocol descriptors.** Python moves the protocol to private non-inheritable fds (`os.dup` of fds 0 and 1), then `dup2`s the null device to fd 0 and fd 2 to fd 1 (14.3). Node has no `dup2`, so it keeps the protocol on fds 0 and 1 (D73's "private fd" applies to Python only): it writes frames with a saved `fs.writeSync(1, …)` and reads with `fs.readSync(0, …)`, and wraps everything else that reaches those fds: `process.stdout`, `console` and `fs` writes to fd 1 are captured, `process.stdin` and `fs` reads of fd 0 are replaced, and `child_process` stdio is rewritten (14.4).
+- **Language-level output** (`print`, `sys.stdout.write`, `console.log`, `process.stdout.write`) is sent as `out` frames, in program order.
+- **Fd-level output goes to stderr:** C extensions, `os.write(1, …)`, and `os.system`/`subprocess`/`child_process` children that inherit stdout.
+- **Stdin.** Language-level stdin is replaced by a stream whose reads raise (14.3); fd-level and child reads see EOF. The user's stdin belongs to V2's `input()` (DOCS 4.6).
+- **Remaining gap.** In Node, code that bypasses the wrappers (a native addon, or reopening `/dev/stdout`) can still write fd 1 and corrupt the stream (fatal `ProtocolError`, 9.11), or read fd 0 and steal protocol bytes.
+
+**Adapter side.**
+- Buffering and flush points follow 14.2: a write ending in `\n`, the size threshold, an explicit flush, right before any other frame, and at `bye`. `out` text is sent in chunks below the frame limit. Queued releases go out as one `release` frame just before the next frame.
+- An adapter writes frames only while it is executing a host request or handling `bye`; during a request any thread may flush `out` under the send lock.
+- Output produced while idle (Python non-dispatch threads, signal handlers, JS timers) stays buffered and goes out with the next frame (D45). Once 1 MiB of it is buffered, a Python non-dispatch thread that writes more waits until the next request starts.
+- Lone surrogates in output become U+FFFD (10.4).
+
+**Host side.**
+- `out` text for `"stdout"` goes through `Out`, the writer of V2's `print` (5.10); `"stderr"` text goes to the host's stderr after `Out` is flushed.
+- While a worker runs, the host is blocked in `request()` for it and handles its frames in arrival order, so block output and V2 output appear in program order, also when redirected (DOCS 4.6). The host flushes `Out` before writing any frame and before `input()` blocks.
+- Idle output appears before the worker's next frame; its position relative to V2 output printed in between is not guaranteed.
+
+### 9.10 `release` and `bye`
+
+**`release`** carries refcount decrements (ch. 11).
+- `h` (host→worker) lists handle ids the host dropped; `fn` (worker→host) lists callable ids whose stubs died. An id appears once per dropped reference. No reply; applied at once; unknown ids are ignored.
+- Neither side writes it from a finalizer: finalizers only append to a queue, which goes out as one `release` right before the next frame that side sends.
+- At V2 statement boundaries the host also sends a standalone `release` to any session whose queue holds 256 or more ids. This is always safe: while V2 code runs, every worker is idle or blocked in a stub, so it is reading. Sessions without the `handles` cap never get `release`.
+
+**`bye`** is sent on every orderly exit path (end of program, `exit()`, uncaught error; 6.5, 8.7), possibly while the worker is blocked in a stub; interrupts kill workers instead. The adapter flushes its output and exits with status 0 without running user `except`/`finally` code:
+- **Python at depth 0:** `sys.exit(0)` from the main loop, so normal finalization and `atexit` handlers run.
+- **Python inside a stub:** `atexit._run_exitfuncs()`, a flush, then `os._exit(0)`; raising `SystemExit` there would run through user code.
+- **Node:** the saved `process.exit(0)`.
+
+After `bye` the host drains the worker's stdout for the grace period, forwarding `out` frames and ignoring everything else (8.7).
+
+### 9.11 Malformed input and `ProtocolError`
+
+From `hello` on, every stdout line must parse as a JSON object whose `t` is a string (D74); there is no stray-output recovery. A fatal protocol error kills the worker and marks the session Dead (8.2). The current operation raises `ProtocolError: engine 'py' broke the protocol: <what> (got: <first 80 bytes, escaped>)`; later uses raise `EngineCrashed` (8.2).
+
+**Fatal:**
+- a line that is not a JSON object, invalid UTF-8, a lone-surrogate `\u` escape (serde_json rejects them), or a line over 64 MiB;
+- an invalid first frame (8.4), or `vep` ≠ 1 (9.3);
+- an unknown `t`, or a required member that is missing or has the wrong type;
+- a `ret` or `err` that does not answer the innermost host request;
+- a frame a worker may not send: `init`, `load`, `module`, `op`, `bye`, a `call` with a `unit`/`h` target, a `call` without the `reverse` cap, an `h` tag without the `handles` cap;
+- an unknown or malformed `$v2` tag, an `int` tag outside i64, or value nesting deeper than 256 (10.5).
+
+**Not fatal:** a worker `call` with an unknown `route`/`fn` id (the host answers `err`); an adapter's `err` of type `ProtocolError` (raised in V2).
+
+### 9.12 Why it cannot deadlock
+
+- **One thread of control** spans all processes. Exactly one party computes at a time; every other party in the call chain is blocked in its loop, reading its input.
+- **The host writes only to readers.** It is the only router (workers never talk to each other) and writes only to workers whose input is being read: requests to idle workers, replies to workers blocked in a stub, standalone `release` frames to either. The js adapter reads stdin with a blocking `fs.readSync` whenever it is idle or waiting in a stub (14.4), except during the one event-loop turn it yields after every outermost reply; that turn sends nothing and does not wait on the host, so a frame written meanwhile is read once it ends. While it awaits a depth-1 Promise the host is blocked reading its output, so nothing is written to it then. In JavaScript, timers and event handlers run only right after a call returns, or while V2 is waiting on a JS Promise (9.8).
+- **Workers write only while the host reads.** Adapters write only while executing a request (9.9); the host is then in `request()` for that session and drains the pipe. A Python non-dispatch thread may block on a full pipe while the host serves one of that worker's calls; the dispatch thread keeps reading stdin meanwhile and needs the send lock only once the host reads again.
+- **Hangs are not deadlocks.** A hang inside user code is covered by `call_timeout` (8.5). A custom adapter that follows 9.1–9.11 and the 17.6 checklist gets the same guarantee.
+
+---
+
+## 10. Codec and marshaling
+
+### 10.1 One codec
+
+`codec/json.rs` is the only JSON implementation (0.1). It serves VEP frames, `json_parse`/`json_stringify` (5.10), the JSON of reverse calls from compiled blocks (15.9) and `V2_ARG_*` values (17.4). It wraps `serde_json` with three features:
+- `preserve_order`: objects keep insertion order, like V2 dicts; with duplicate keys the last value wins.
+- `float_roundtrip`: exact float parsing.
+- `unbounded_depth`: serde_json's own limit of 128 is below V2's limits, so the codec calls `disable_recursion_limit()` and bounds nesting itself. Before parsing, a byte scan rejects input whose bracket nesting outside strings exceeds 1,000 (fatal `ProtocolError` on the VEP path, `ValueError` in `json_parse` per 5.10, `MarshalError` for compiled-block JSON), which bounds the parser's recursion. Conversion then enforces the container limit of 256 on the VEP and compiled paths (10.5). So `json_parse` accepts nesting up to 1,000, and `json_stringify` has the same bound: encoding a value nested deeper is a `ValueError`.
+
+`arbitrary_precision` is not enabled, so serde_json turns an integer token above u64::MAX or below i64::MIN into an f64 while parsing, and the parsed value no longer shows it was an integer. The same byte scan therefore also checks each number token outside strings: in `json_parse`, a token with no `.`/`e`/`E` whose value is outside i64 is `ValueError: invalid JSON at line L column C: integer does not fit in 64 bits` (5.10). On the VEP and compiled-block paths such a token decodes as a `Float` per 10.2, as serde already does; a serde `u64` above i64::MAX becomes a `Float` there too.
+
+Base64 (standard alphabet, padded, strict decoding) is about 40 hand-written lines in the same file.
+
+```rust
+pub enum Mode { Vep(SessionId), Plain }   // Vep: the session whose handles and callables are in play
+pub fn encode(v: &Value, m: Mode, rt: &mut Runtime) -> Result<serde_json::Value, ErrorValue>;
+pub fn decode(j: serde_json::Value, m: Mode, rt: &mut Runtime) -> Result<Value, ErrorValue>;
+```
+
+| Mode | Used for | `$v2` tags (10.3) |
+| --- | --- | --- |
+| `Vep` | VEP frames | all |
+| `Plain` | `json_parse`, `json_stringify`, `V2_ARG_*`, `args_json` and results of compiled-block reverse calls (15.9) | none: `"$v2"` is an ordinary key. `bytes`, `func`, handles, errors and non-finite floats are rejected with an error that names the path (`json_stringify`: 5.10; `V2_ARG_*`: 17.4; compiled-block reverse calls: `MarshalError`, 15.9) |
+
+- **Top-down decoding.** The content of a `dict` tag is never reinterpreted. Adapters do the same: plain `json.loads`/`JSON.parse` first, then a top-down walk; never `object_hook` or a `reviver`, which work bottom-up.
+- **Failed encodes.** If an encode fails part-way, the callable-table counts it added (11.8) are rolled back.
+
+### 10.2 Numbers
+
+| Step | Rule |
+| --- | --- |
+| host encodes `Int` | a JSON integer if abs(n) ≤ 2^53−1 or the mode is not `Vep`; else `{"$v2":"int","v":"<decimal>"}` |
+| host encodes `Float` | finite: serde_json's shortest round-trip text, which always has a `.` or an exponent (`1.0`, `0.1`, `1e21`, `-0.0`), so `json_stringify(2.0)` is `"2.0"`; NaN/±∞: the `float` tag (serde_json alone would write `null`) |
+| host decodes a literal | no `.`/`e`/`E` and fits i64 → `Int`; no `.`/`e`/`E` but outside i64 → `Float`, the nearest double (`json_parse`: `ValueError` from the 10.1 scan, 5.10); anything else → `Float`. serde_json reads `-0` as the float `-0.0` |
+| host decodes an `int` tag | parse as i64; out of range → fatal `ProtocolError` |
+
+- Adapters for languages with unbounded integers send integers outside i64 as handles, never as bare literals, which the host would read as floats.
+- The py adapter tags non-finite floats, then encodes with `allow_nan=False` as a safety net.
+- So the int/float kind survives every crossing: `1.0` stays a float in Python. JavaScript has only `number`, so an integral JS number that fits i64 arrives as `int` (DOCS 9.1).
+
+### 10.3 `$v2` tags
+
+An object with a `"$v2"` member is a tag in a value position: `args`, `kwargs` values, `value`, export, import and `op` values, and anything nested inside them. Frame envelopes are never tags.
+
+| Tag | Members | Meaning |
+| --- | --- | --- |
+| `h` | `id`, `type` | a handle (ch. 11). Worker→host: a new reference. Host→worker: only to the owning session |
+| `fn` | H→W: `id`, `name`. W→H: `id` or `route` | a V2 callable (11.8); `route` marks a stub made by an inner `@import` (13.6) |
+| `int` | `v`: decimal string | V2 ints beyond ±(2^53−1) going out; JS `BigInt`s within i64, and integral JS `number`s beyond ±(2^53−1) but within i64 (10.7), coming back |
+| `bytes` | `b64` | `bytes`, as standard padded base64 |
+| `float` | `v`: `"nan"`, `"inf"` or `"-inf"` | a non-finite float |
+| `error` | `type`, `message`, `data`, `lang`, `foreign_type`, `file`, `line`, `col`, `trace` (strings), `cause` (tag or `null`) | a V2 error value |
+| `dict` | `v`: object | a real dict that has a `"$v2"` key: the keys of `v` are literal, its values are decoded normally |
+
+An unknown tag or a missing member is a fatal `ProtocolError` on the host (9.11); adapters answer it with `err` `ProtocolError`.
+
+### 10.4 Strings
+
+Host strings are always valid UTF-8. Foreign strings can hold lone surrogates: in Python any code point U+D800–U+DFFF (for example `surrogateescape` file names), in JS an unpaired UTF-16 half. Handling depends on where the string appears:
+- **Values** (arguments, results, attribute values, dict keys): `MarshalError: string contains an unpaired surrogate (U+DC80) at index 12`. Python detects it through the `UnicodeEncodeError` of `s.encode("utf-8")`; JS through `s.isWellFormed()` (Node ≥ 20) or `/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/`.
+- **Text** (`out`, error messages, `text`, traces, `str` op results, the `type` of `h` tags): each lone surrogate becomes U+FFFD (Python `re.sub("[\ud800-\udfff]", "\ufffd", s)`, JS `s.toWellFormed()` or the regex), so printing and error reporting never fail.
+
+### 10.5 Containers
+
+- **Copying.** Lists and dicts are copied in both directions, so mutations never propagate (DOCS 9.1). Substructure shared inside one value is copied once per occurrence.
+- **Dict keys** on the wire are strings. Whoever encodes a dict that has a `"$v2"` key wraps it in the `dict` tag.
+- **Depth limit: 256 nested lists/dicts.** Host encode fails with `MarshalError: value nested deeper than 256 levels`; host decode fails with a fatal `ProtocolError`; adapter encode sends the container at depth 257 as a handle.
+- **Cycles.** Host encode tracks the `Rc` pointers on the current path; a revisit fails with `MarshalError: cannot send a list that contains itself`. Adapter encode tracks object identities on the current path and sends a revisited container as a handle: Python `a = [1]; a.append(a)` arrives as `[1, <handle>]`.
+- **Error paths.** Errors inside containers name the path, e.g. `… (at args[0]["when"])`.
+
+### 10.6 Python
+
+**V2 → Python:** `null`, `bool`, `int`, `float`, `str`, `bytes` become `None`, `bool`, `int`, `float`, `str`, `bytes`; `list` and `dict` a new `list` and `dict` in the same order; `func` a stub (11.8); a handle of this session its original object; `error` a `V2Error` instance, not raised.
+
+**Python → V2**, checked in this order, with `type(x) is …` fast paths first:
+1. `None` → `null`. `bool` → `bool` (before `int`, because `bool` subclasses `int`); numpy `bool_` (type module `numpy`, type name `bool_` or `bool`) → `bool`.
+2. `int` and its subclasses (`IntEnum`), any `numbers.Integral` (numpy integer scalars register themselves) → `int(x)`; outside i64 → handle.
+3. `float` and its subclasses (`numpy.float64`), numpy floating scalars (`numbers.Real` from module `numpy`) → `float(x)`, non-finite through the `float` tag. `Fraction`, `Decimal`, `complex` → handles.
+4. `str` and its subclasses → `str`, after the surrogate check. Exactly `bytes` → `bytes`; `bytearray` and `memoryview` → handles.
+5. Exactly `list` or `tuple` → `list`, and exactly `dict` with only `str` keys → `dict`, recursively (D48). Subclasses (namedtuples, `OrderedDict`, `Counter`, custom lists) and dicts with other keys → handles, so `row.region` works on an `itertuples()` row (DOCS 9.2).
+6. A V2 stub → `fn` tag. A `V2Error` → `error` tag.
+7. Anything else → handle: functions, bound methods and classes (callable handles, 11.6), modules, sets, `datetime`, `DataFrame`, generators.
+
+### 10.7 JavaScript
+
+**V2 → JS:**
+- `null`, `bool`, `str`, `float` become `null`, `boolean`, `string`, `number` (`1.0` and `1` are the same JS value). `int` becomes a `number` when abs(n) ≤ 2^53−1, otherwise a `BigInt` (from the `int` tag).
+- `bytes` becomes a `Buffer`, `list` an `Array`, `func` a stub (11.8), `error` a `V2Error`; a handle of this session its original value.
+- `dict` becomes an ordinary object whose prototype is `Object.prototype`. Its entries are own data properties defined with `Object.defineProperty`, never by assignment, so a `"__proto__"` key stays an ordinary key. It is not a null-prototype object, because those break `String(obj)`, template literals and `obj.hasOwnProperty`.
+- Values are decoded in the adapter's realm, not the unit's (12.4): blocks use `Array.isArray(x)`, not `x instanceof Array`. JS lists integer-like keys first, in ascending order: `{b: 1, "2": 2}` comes back as `{"2": 2, b: 1}`.
+
+**JS → V2**, checked in this order:
+1. `undefined` and `null` → `null`. `boolean` → `bool`.
+2. `number`: NaN and ±Infinity → `float` tag. A number for which `Number.isSafeInteger(x)` is true is written as a JSON integer: `3` → `int`, `-0` (written `0`) → `int` 0. An integral number outside ±(2^53−1) but inside i64 (−2^63 ≤ x < 2^63) is sent as the `int` tag with `v: BigInt(x).toString()`, the double's exact value, so `2**60` arrives as `int` 1152921504606846976 (`JSON.stringify` would write `1152921504606847000`). Any other finite number is written by `JSON.stringify`, and the host reads it as a `float` (10.2): non-integral numbers (`3.5`) and integral numbers outside i64 (`1e20`, written `100000000000000000000`).
+3. `bigint` within i64 → `int` tag, any other `bigint` → handle. `string` → `str`, after the surrogate check.
+4. `Buffer` or any `Uint8Array` (`util.types.isUint8Array`, which works across realms) → `bytes`; other typed arrays → handles.
+5. `Array.isArray(x)` → `list`, recursively; holes become `null`.
+6. A plain object → `dict` over `Object.keys`; symbol keys are ignored. Plain means prototype `null`, or a prototype `p` with `Object.getPrototypeOf(p) === null` and `p.constructor.name === "Object"` (any realm; `instanceof Object` fails across `vm` contexts).
+7. A V2 stub → `fn` tag. A `V2Error` → `error` tag.
+8. Anything else → handle: functions and classes (callable handles, 11.6), symbols, `Map`, `Set`, `Date`, `RegExp`, class instances, other `Error`s, and Promises that are not awaited (9.8).
+
+### 10.8 Named arguments
+
+- Named arguments travel in `call.kwargs`; a spread `...xs` is expanded into `args` first. Block args are not kwargs: they travel in `load.args`.
+- Before sending, the host checks the destination session's `kwargs` cap (9.3, 17.5). The py adapter has it and calls `f(*args, **kwargs)`. For js and ts functions (and custom engines without the cap), a non-empty `kwargs` raises `ArityError: js functions take positional arguments only (got 'color')` and nothing is sent (D63). This applies to imported functions, handle calls and method calls alike.
+- In the other direction, Python stubs forward keyword arguments as `kwargs`, and the host binds them to V2 parameter names like any named call (5.7). An unknown name is an `ArityError`, raised back into Python as a `V2Error`.
+
+---
+
+## 11. Handles
+
+A handle is V2's reference to an object that stays inside a worker: V2 holds `(session, id)`, the worker holds the object. The host side is `engines/handles.rs`; the worker side is each adapter's handle table (14.2). Only sessions whose `hello` declares `handles` produce them (17.5). Native pointers from `extern` and compiled code are handles of a reserved native pseudo-session with their own rules (16.6); this chapter is about worker handles.
+
+### 11.1 Worker-side table
+
+```python
+_handles = {}   # hid -> [obj, count, batch]   count = references the host holds; batch: 11.4
+_by_obj  = {}   # id(obj) -> hid               identity map; safe because the table keeps obj alive
+```
+
+JS uses a `Map<number, {obj, count, batch}>` plus a `Map<any, number>` identity map; objects are keyed by identity, symbols and `BigInt`s by value.
+- **Sending** an object reuses its live id or allocates the next one (per session, never reused), then does `count += 1`: every `h` tag sent is one host reference.
+- **Releasing** does `count -= 1` per occurrence of the id; at 0 both entries are removed and the object can be collected. Unknown ids in `release` are ignored; an unknown id in an `op` or a `call` target is answered with `err` `ProtocolError: unknown handle id 7`.
+- **`type`**: in Python, `module.qualname` of `type(obj)` without the `builtins.` prefix (`datetime.date`, `pandas.core.frame.DataFrame`, `int` for a big int); in JS, the constructor name, or `function`, `class`, `symbol`, `bigint`.
+
+### 11.2 Host side and releases
+
+```rust
+pub struct HandleRef { session: SessionId, id: u64, type_name: Rc<str>, repr: Rc<str>,   // repr: native pointers only (16.6)
+                       releases: Option<Rc<RefCell<Vec<u64>>>> }   // the session's queue (8.1); None: native pointer
+impl Drop for HandleRef {
+    fn drop(&mut self) { if let Some(q) = &self.releases { if let Ok(mut q) = q.try_borrow_mut() { q.push(self.id) } } }
+}
+```
+
+- **One `Rc` per tag.** Each decoded `h` tag creates a new `Rc<HandleRef>`, matching one count on the worker side; the host never deduplicates.
+- **`Drop` only queues.** No code keeps the queue borrowed across other calls (the flush drains it inside one short borrow), so `Drop` is safe anywhere: mid-decode, during unwinding, at shutdown.
+- **Flushing.** A session's queue goes out as one `release` frame right before the host's next frame to that session, or as a standalone frame at a statement boundary once it holds 256 ids (9.10).
+- **Dead sessions and shutdown.** Queued ids of dead or closed sessions are discarded; `bye` frees everything, so no releases are sent at shutdown.
+
+### 11.3 Operations
+
+| V2 | Frame | Python | JavaScript |
+| --- | --- | --- | --- |
+| `h.name` | `op getattr` | `getattr(obj, name)` | `obj[name]`, a missing property is `null`. A function `f` that is not a constructor comes back as `new Proxy(f, {apply: (t, _this, args) => Reflect.apply(t, obj, args)})`, cached per `(obj, f)` in a two-level `WeakMap`: `let f = h.m; f()` keeps `this` like a Python bound method, `f`'s own properties stay readable (`chalk.red.bold`), and repeated reads give the same handle |
+| `h.name = v` | `op setattr` | `setattr(obj, name, v)` | `obj[name] = v` |
+| `h.m(a, k: b)` | `call {h, method}` | `getattr(obj, "m")(*args, **kwargs)` | `f = obj.m`; not a function → `TypeError`; a constructor → `Reflect.construct(f, args)`; else `Reflect.apply(f, obj, args)` |
+| `h(a)` | `call {h}` | `obj(*args, **kwargs)` | a constructor → `Reflect.construct`; else `Reflect.apply(obj, undefined, args)` |
+| `h[k]`, `h[k] = v` | `op getitem`, `op setitem` | `obj[k]`, `obj[k] = v` | a `Map`: `get`/`set`; else `obj[k]`, `obj[k] = v` |
+| `len(h)` | `op len` → int | `len(obj)` | `obj.length`; else a numeric `obj.size`; else `TypeError("object has no length")` |
+| `str(h)`, `print(h)`, `f"${h}"` | `op str` → str | `str(obj)` | `util.inspect(obj, {depth: 2, breakLength: Infinity})` for functions and for objects whose `toString` is inherited from a realm's `Object.prototype`; else `String(obj)` |
+| `for x in h`, `value(h)` | `op iter`/`next`, `op value` | 11.4, 11.5 | 11.4, 11.5 |
+
+- **JS constructors.** A function `f` is a constructor when `Function.prototype.toString.call(f)` starts with `class`, or when `f` is native (`{ [native code] }`), has a non-writable own `prototype`, and is not `Number`, `String`, `Boolean`, `Symbol` or `BigInt`. So classes, `Map`, `Date` and `URL` are constructed, while ES5-style `function Point() {}` is called without `new` (as in 12.4).
+- **Method calls.** In call position `h.m(...)` takes one round trip: the interpreter evaluates the callee to `Callable::HandleMethod{handle, method}` without a `getattr`, and calling it sends `call {h, method}`. Anywhere else, `h.m` is a `getattr`.
+- **Results and errors.** Results are marshaled like any value: plain data is copied, anything else becomes a new handle. Exceptions become `ForeignError` with the foreign class (`AttributeError`, `KeyError`, `TypeError`, …) in `foreign_type`. Named arguments follow 10.8. `call` results are awaited (9.8), `op` results never.
+
+### 11.4 Iteration
+
+`for x in h` (DOCS 9.2, D28):
+1. The host sends `op iter {h}`. The worker calls `iter(obj)` (Python) or `obj[Symbol.iterator]()` (JS; not iterable → `TypeError`) and returns the iterator as a new handle.
+2. The host repeats `op next {h: it, n: 64}`; each answer is `{"items": [...], "done": bool}`.
+3. The loop ends when `done` is true and the received items are used up. `break` or an error simply drops the iterator handle.
+
+`for i, x in h` gives the index and the item, as for lists; this holds for mapping-like handles too.
+
+**Batching.** A `next` returns more than one item only if the iterator's `batch` flag is set. The adapter sets it at `iter` time when the source is an eager built-in container whose iteration runs no user code: Python `list`, `tuple`, `dict` and its views, `set`, `frozenset`, `str`, `bytes`, `range`, numpy `ndarray`; JS `Array`, typed arrays, `Map`, `Set`, strings. Other iterators (generators, `map` objects, `itertuples()`) return one item per `next`, so foreign side effects such as prints stay in step with the loop body.
+
+### 11.5 `value(h)`
+
+`op value {h}` converts the object to plain data inside the worker (D49), recursively up to depth 256; deeper nesting or a cycle is a `MarshalError`. At each node:
+1. **Plain values** convert as in 10.6/10.7.
+2. **JSON-convertible containers** convert element by element: Python `list` and `tuple` (subclasses included, such as namedtuples) and `Mapping`s whose keys are all `str` (`dict`, `OrderedDict`, `Counter`); JS arrays and plain objects.
+3. **Hooks.** Otherwise a callable `to_dict` is tried first, then a callable `tolist`, and the result converts from step 1. So a pandas `Series` becomes a dict (DOCS 17.2) and a numpy array a list.
+4. **Anything else** is `MarshalError: value(): can't convert datetime.date to V2 data`: a `datetime`, a class instance, an int outside i64, a set, a JS `Map` or `Set`. A mapping with a non-`str` key reads `value(): can't convert dict to V2 data (key 1 is not a str)`.
+
+A hook that raises gives a `ForeignError`. `value(x)` on a non-handle returns `x` unchanged (5.10); on a native pointer it is a `MarshalError` (16.6).
+
+### 11.6 Callable handles, identity, diagnostics
+
+- **Callable handles (D47).** Foreign functions, bound methods, classes and callable objects that come back as values (call results, `getattr`, attributes of a module handle) are handles: `type(h)` is `"handle"`, and they are called as `h(...)`. Names brought in with `@import` are `func`s (Proxies, 13.4), not handles. A callable handle obeys every handle rule, so it cannot be passed to another engine; wrap it instead: `js_fn(lambda(x) => h(x))`.
+- **Equality.** `h1 == h2` is true exactly when session and id match. The identity map (11.1), together with removal only at count 0, makes this mean "the same foreign object" for all live handles. A handle equals nothing else.
+- **No round trips.** `type(h)`, truthiness (always true) and diagnostics never contact the worker. Diagnostics show `<py datetime.date>`, built from `type_name`.
+
+### 11.7 Invalid uses
+
+| Use | Error |
+| --- | --- |
+| a handle sent to another session (in args, kwargs, block args, or inside lists/dicts) | `MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — convert it with value(h) first`, plus the path (10.5) |
+| a handle as an argument of a compiled export or `extern` function; returned to compiled code by a reverse call | `MarshalError: cannot pass a py handle (datetime.date) to native code; convert it with value(h) first` (16.5); `MarshalError` (15.9) |
+| any use after its session died | `EngineCrashed` (8.2) |
+| arithmetic, ordering, `in`, slicing | `TypeError` with the "do it inside a block / `value(h)`" hint (5.2, 5.3; D28) |
+| a handle as a dict key (`d[h]`, `{[h]: 1}`) | `TypeError: dict keys must be str, not handle` |
+| `json_stringify(h)` | `TypeError` (5.10) |
+
+### 11.8 V2 callables inside workers
+
+When the host encodes a V2 `func` for session S (a closure, a builtin, a `Proxy` of any session, a `Native` function or a `HandleMethod`), it registers the function in S's callable table and sends `{"$v2":"fn","id":n,"name":"log_line"}`. A session without the `reverse` cap gets a `MarshalError` instead (17.5).
+
+```rust
+struct CallableTable { next: u64, entries: HashMap<u64, Entry>, by_ptr: HashMap<*const Callable, u64> }
+struct Entry { func: Value, count: u32 }
+```
+
+- **Reuse.** Sending the same `Rc<Callable>` again reuses its id and does `count += 1`. The table holds the `Rc`, so the pointer key stays valid.
+- **Worker stubs.** The worker keeps one stub per id in a weak map (Python `weakref.WeakValueDictionary`, JS `Map<id, WeakRef>`), so one V2 function is one foreign object (`f is g`); its name is the V2 name. Each stub owns a cell `{id, n}` counting the `fn` tags it absorbed.
+- **Release.** When a stub is collected, its finalizer (Python `weakref.finalize`, JS `FinalizationRegistry`) only appends the id `n` times to the release queue, which goes out as `release {fn: [...]}` before the worker's next frame. The host subtracts once per occurrence and drops the entry at 0. A stub that dies just as its id is sent again is safe, because the new stub gets its own cell.
+- **Calls.** Calling a stub sends `call {"fn": n}` (9.7). The host calls the value, re-entering the interpreter, and encodes the result for S; a V2 error goes back as `err` with `v2` (9.6).
+- **Passing back.** A stub passed to the host is sent as `{"$v2":"fn","id":n}` and decodes to the original V2 value; counts do not change. A stub made by an inner `@import` is sent as `{"$v2":"fn","route":r}` and decodes to that route's target (a `Pending` route resolves first). Routes live in `Interp.routes` (13.6), not in this table, and are never released.
+
+### 11.9 Leaks
+
+- **Cross-process cycles are never collected.** A Python object that holds a V2 closure whose environment holds a handle to that same object keeps both alive until the session ends.
+- **CPython** frees unreferenced stubs immediately through refcounting.
+- **V8 finalizes late.** `FinalizationRegistry` callbacks run only after a garbage collection and an event-loop turn, so passing callbacks in a loop could grow the host's table without bound; the loop blocks in `fs.readSync` between requests (14.4), so the event loop does not turn on its own. After the reply to every outermost (stack depth 1) request, before the next `fs.readSync`, the js adapter therefore yields one event-loop turn (`await new Promise(r => setImmediate(r))`). If more than 1,000 `fn` stubs were created since the last turn, it calls `gc()` first. The `FinalizationRegistry` cleanups then run, and their queued `release` goes out with the next frame. During this turn the stack is empty, so a callback that calls V2 raises 9.8's idle-call `V2Error`. `gc` is obtained once, via `v8.setFlagsFromString("--expose-gc")` and `vm.runInNewContext("gc")`.
+
+---
+
+## 12. Block execution
+
+Host: `engines/units`; workers: the adapters (ch. 14). This chapter is the path every block takes, plus loading bridged
+units; compiled blocks continue in ch. 15, run engines in 17.3.
+
+### 12.1 Reaching a block
+
+A block is an `EngineBlock` (4.3) whose `body` and `loc` come from 4.4 and 2.3; each execution of it is a **unit**, named
+by its `UnitId`. Only definition blocks keep a state, in `Interp.units` (6.2): `Loading`, `Loaded` or `Failed(err)`; an
+action run leaves nothing on the host except its routes (13.6). Messages name a block with `block_name(b)`:
+`block 'stats'`, or `@py block at main.v2:12` when it has no label (D31); tags always print canonical.
+
+`exec_block(b, want_value)`:
+
+1. **State** (definition blocks): `Loaded` → return `null`, evaluating nothing, not even the args (D30). `Failed(e)` →
+   throw the stored `e` unchanged: no retry, no repeated side effects (D31). `Loading` → `ImportError: block 'stats' is
+   still loading (reached again during its own load)`. Otherwise set `Loading`.
+2. **Engine:** `registry.resolve(tag)`, else `EngineUnknown` / `EngineNotFound` (ch. 7).
+3. **Directive check:** a **run-engine** block with `@export` or an inner `@import` → 17.3's `ImportError`; a compiled
+   block (`c`/`cpp`/`rust` or an alias) with an inner `@import` but no `@export` (program mode), or with `@import { * }`
+   or `@import SEL as h` → 15.2's `BuildError` (D57). It runs after the tag is resolved, before args and inner imports.
+4. **Args:** evaluated left to right in the current scope.
+5. **Inner imports** → `load` entries (13.7).
+6. **Dispatch:** bridged → `load` (12.2) to the engine's session, spawned lazily (ch. 8; ts uses js's); compiled →
+   ch. 15; run → 17.3.
+7. **Definition:** register the exports (13.2), set `Loaded`. An error in steps 2–7 is stored as `Failed(err)`, then thrown.
+8. **Value:** a bridged action with `want_value` → the decoded `ret.value`; a compiled or run action → its stdout as 6.3
+   specifies (D18: captured in expression position with one trailing `\n` or `\r\n` stripped, streamed in program order
+   in statement position); otherwise `null`.
+
+Static checks (4.5; `SyntaxError`, D1; also reported by `v2 check`): a definition block in expression position; duplicate
+arg names; args on a built-in compiled tag (`compiled blocks take no args — @export a function and call it with
+arguments`, D32); an arg name equal to an inner-import alias of the same block (`'x' is already declared in this block`).
+
+### 12.2 The `load` frame
+
+The frame is 9.4's; the host fills it from the `EngineBlock`:
+
+| Member | Value |
+| --- | --- |
+| `unit` | `"<FileId>:<byte offset of @>"` (`"0:812"`); not unique across concurrent runs of one action block (recursion), so adapters never key action state by it |
+| `kind`, `lang` | `definition` or `action`; the canonical tag (`ts`, or `js` once a transpiler ran, 12.5) |
+| `label` | the block's label as written, or `null` |
+| `file`, `line` | the canonical `.v2` path (2.1); `loc.body_first_line`. No column member: the host maps columns itself (2.3, 12.6) |
+| `source` | `EngineBlock.body`: dedented, directive lines blank, nothing added (4.4, D13) |
+| `exports` | `[]` for an action; else the explicit `@export` names in order, plus the element `"*"` when the list contains `*` (4.4) |
+| `imports` | 13.7 |
+| `args` | object in written order of codec values (ch. 10), e.g. `{"nums":[4,8,15]}`; a V2 function goes as an `fn` tag (11.8); another session's handle is a `MarshalError` before sending (11.7) |
+| `want_value` | `true` only for an action block in expression position |
+
+**Reply** (9.4). Action: `{"value": v, "exports": [], "missing": []}` (`v` is `null` unless `want_value`). Definition:
+`{"value":null,"exports":[{"name":"area","kind":"func"},{"name":"Point","kind":"class"},{"name":"VERSION","kind":"value","value":"1.2"}],"missing":["typo"]}`.
+A non-empty `missing` → `ImportError: @export lists 'typo' but block 'geometry' does not define it`, at that `@export`
+item; the unit is `Failed` and the adapter has already dropped it. `func`/`class` entries become Proxies (13.4); a `value`
+entry is the copy taken at load (non-plain values arrive as handles; constant exports exist for py/js/ts only, D56).
+
+**Adapter side.** Arg names and import aliases must be identifiers of the adapter's language that are neither keywords
+nor names the adapter provides (Python: `str.isidentifier()`, not `keyword.iskeyword()`, no dunders; JS: 12.4's identifier
+pattern, not reserved, not `undefined NaN Infinity globalThis __proto__`), else `err ValueError: block arg 'pass' is not
+a valid Python name`. Args bind first, then imports, then the code runs. The completion value (py: the last statement
+if it is an expression; js/ts: the script's completion value from `runInContext`) is always computed and awaited if
+awaitable (9.8), and encoded only if `want_value`.
+
+### 12.3 Python load
+
+```python
+def do_load(m):
+    path, first = m["file"], m["line"]
+    add_file_dir(path); remember_source(path, first, m["source"])          # 9.3; 12.6
+    name = unique_name("__v2_" + m["unit"].replace(":", "_"))             # "_2", "_3"… while taken
+    mod = types.ModuleType(name); g = mod.__dict__
+    g["__file__"], g["__builtins__"] = path, builtins
+    for k, v in m["args"].items(): g[check_name(k)] = decode(v)
+    bind_imports(g, m["imports"])                                          # 13.7
+    tree = ast.parse("\n" * (first - 1) + m["source"], path, "exec")       # SyntaxError carries .v2 lines
+    tail = ast.Expression(tree.body.pop().value) if tree.body and isinstance(tree.body[-1], ast.Expr) else None
+    sys.modules[name] = mod; keep = False
+    try:
+        exec(compile(tree, path, "exec", dont_inherit=True), g)
+        value = eval(compile(tail, path, "eval", dont_inherit=True), g) if tail else None
+        value = await_if_awaitable(value)                                  # 9.8
+        if m["kind"] == "action":
+            return {"value": encode(value) if m["want_value"] else None, "exports": [], "missing": []}
+        reply = export_reply(g, name, m["exports"]); keep = not reply["missing"]
+    finally:
+        if not keep: sys.modules.pop(name, None)
+    units[m["unit"]] = mod
+    return reply
+```
+
+- The prepended blank lines act like `ast.increment_lineno(tree, first - 1)` and also put `SyntaxError`/`SyntaxWarning`
+  on the right `.v2` line, so `linecache` shows real `.v2` lines in tracebacks Python prints itself; the text V2 sent is
+  unchanged (D13). Columns stay body-relative (12.6); `from __future__` works; `dont_inherit=True` keeps the adapter's
+  flags out.
+- While it lives, the unit is in `sys.modules` (for `pickle`, `dataclasses`, `typing.get_type_hints`) under a name with
+  no dot (`pickle` imports a dotted name's parent); `__name__` is never `"__main__"` (D55).
+- `export_reply`: the union, each name once, of the explicit names and, when `"*"` is listed, every key of `g` (dict
+  order) not starting with `_` whose value the block defined (DOCS 6.1): a class, or a function after `inspect.unwrap`
+  (admits `functools.wraps`, `lru_cache`, named lambdas), whose `__module__` is the unit's name, so imports, stubs and
+  other units' objects are left out; an exception while checking means no. Absent explicit names go to `missing`. Kind: `class` if `inspect.isclass`, `func` if `callable`, else
+  `value` with `encode(v)`.
+- A Proxy call looks the name up in `g` at call time, so rebinding is seen; a name deleted since →
+  `err NameError: 'area' is no longer defined in block 'geometry'` (9.5).
+
+### 12.4 JavaScript load
+
+```js
+// NODE_GLOBALS (computed once): own names of globalThis absent from a fresh context, minus 'global', 'console'
+function newContext(file) {                      // one vm context (one realm) per unit: private top-level names
+  const sb = {}, module = { exports: {} };
+  for (const k of NODE_GLOBALS) Object.defineProperty(sb, k, Object.getOwnPropertyDescriptor(globalThis, k));
+  Object.assign(sb, { console /* the adapter's (9.9); V8's per-context console prints nothing */, module,
+    exports: module.exports, require: Module.createRequire(file), __filename: file, __dirname: path.dirname(file) });
+  const ctx = vm.createContext(sb);
+  sb.global = vm.runInContext('Error.stackTraceLimit = 50; globalThis', ctx);
+  return ctx;
+}
+function doLoad(m) {
+  const src = m.lang === 'ts' ? stripTypes(m.source) : m.source;           // 12.5
+  rememberSource(m.file, m.line, src);
+  const ctx = newContext(m.file);
+  for (const [k, v] of Object.entries(m.args)) ctx[checkName(k)] = decode(v);  // adapter realm (10.7)
+  bindImports(ctx, m.imports);                                              // 13.7
+  const script = compileOrExplain(src, { filename: m.file, lineOffset: m.line - 1,
+    importModuleDynamically: /\bimport\s*\(/.test(src) ? dynImport(m.file) : undefined });
+  return settle(script.runInContext(ctx), v => {  // settle: now, or once a thenable settles (9.8)
+    if (m.kind === 'action') return { value: m.want_value ? encode(v) : null, exports: [], missing: [] };
+    const unit = { ctx, get: new Map() }, reply = exportReply(unit, src, m.exports);
+    if (reply.missing.length === 0) units.set(m.unit, unit);
+    return reply;
+  });
+}
+```
+
+- `require` is created for the `.v2` file (D54): `./x` resolves from its folder, bare names walk up `node_modules`
+  folders from there (so the project root's is found), then `NODE_PATH` (14.1). `module`/`exports` only let
+  CommonJS-style code run. No `columnOffset`: V8 applies it to line 1 only; the host maps columns (12.6).
+- `dynImport(file)` = `spec => import(entryUrl(spec, file))` (14.4); without it `import()` fails with
+  `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`. It is attached only to sources containing `import(`: some Node versions never
+  collect a script compiled with it, and per-run action contexts would leak.
+- Decoded values (10.7), and values from `require`d modules and Node built-ins (an `fs` error, a package's array),
+  belong to the adapter's realm, not the unit's, so `instanceof Array`/`instanceof Error` is false for them: blocks test
+  `Array.isArray(x)` and `e.name`/`e.message`.
+- `import`/`export` declarations and top-level `await` are SyntaxErrors in a Script. `compileOrExplain` keeps V8's
+  location and sends a `ForeignError` (foreign_type `SyntaxError`) with a clearer message (`@ts` for ts blocks):
+
+| V8 message contains | Message sent |
+| --- | --- |
+| `Cannot use import statement outside a module` | `import statements are not allowed in @js blocks — use require(...), await import(...) inside an async function, or @import { x } from js.<package>` |
+| `Unexpected token 'export'` | `export statements are not allowed in @js blocks — use @export { name }` |
+| `await is only valid in async functions` | `top-level await is not allowed in @js blocks — end the block with a Promise (it is awaited) or export an async function` |
+
+**Export lookup** caches one getter per name in `unit.get`, returning the current binding. For an identifier
+(`/^[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*$/u`, not reserved) the getter is
+``new vm.Script(`(() => ${name})`).runInContext(unit.ctx)``, which also sees `let`/`const`/`class`; other quoted names
+(D11) read the context's own property. A `ReferenceError` at load puts the name in `missing`. Kind: `class` if
+`Function.prototype.toString` starts with `class`, `func` for other functions (calls: 11.3), else `value`.
+
+**`@export { * }`** scans the top level of `src` (after type stripping): context properties would miss
+`const`/`let`/`class` and include `var x = require('x')`. The tokenizer skips whitespace, comments, `'…'`/`"…"` strings,
+template literals (a stack tracks `${…}`) and regex literals (`/` starts one at input start, after any punctuator except
+`)` `]` `}`, and after `return typeof instanceof in of new delete void throw case do else yield await`), and tracks
+`()[]{}` depth. At depth 0 it collects `function [*] NAME`, `async function [*] NAME`, `class NAME`, and each
+`const`/`let`/`var` declarator `NAME = INIT` whose INIT starts with `function`, `async`, `class`, `IDENT =>` or a balanced
+`(…)` then `=>`. Declarators split at depth-0 commas; a declaration ends at a depth-0 `;` or at a line break whose
+previous token is not `,`, `=` or `=>`. `_` names are dropped; the rest stay if their getter returns a function without
+throwing. `exportReply` returns the union of these names and the explicit ones, each name once.
+
+### 12.5 TypeScript
+
+ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
+
+- `[engines.ts] transpiler = "node"` (default): `module.stripTypeScriptTypes(src, { mode: 'strip' })` blanks types with
+  whitespace, so positions stay exact; `enum`, value `namespace` and parameter properties fail with
+  `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. The stripper parses the whole block, so it also throws on any syntax error, before
+  V8 compiles anything. On any stripping failure the adapter sends `err` `ForeignError` (foreign_type `SyntaxError`) with
+  one trace frame `{file: m.file, line: m.line + L − 1, col: C}`, where L:C is the 1-based body position the stripper's
+  message reports (its `[line:col]` marker); with no readable position it sends no frame, so the error stays at the
+  block's `@ts` (12.6). A `process.emitWarning` filter drops the one
+  `ExperimentalWarning` it prints. It needs Node 22.13+ or 23.2+ (D33): the host decides from the probed Node version
+  (confirmed by `hello.version`) and raises 7.6's `EngineNotFound` before the first ts load (D40); `engine_available("ts")`
+  and doctor apply the same test.
+- A transpiler command runs on the host as 7.6 specifies (once per distinct source; TypeScript on stdin, JavaScript on
+  stdout; a non-zero exit is a `ForeignError`, D36). Its output is sent with `lang: "js"`; error lines are right only if
+  the transpiler keeps lines.
+
+### 12.6 Foreign positions to .v2 positions
+
+- **Adapters** compile with the `.v2` path as filename and the block's line offset (12.3, 12.4), so frames inside blocks
+  already carry the `.v2` file and line. Frames go innermost first, in 9.6's shape plus `col`; adapter frames and engine
+  internals (`<frozen importlib._bootstrap…>`, `node:internal/…`, `node:vm`) are dropped; library frames stay.
+- **`col`** is 1-based code points relative to the body text line (kept by `remember_source`), sent only for frames in
+  `.v2` files, else `null`. Python 3.11+: `FrameSummary.colno` (0-based UTF-8 bytes) converted; 3.8–3.10: `null`. JS:
+  parsed from `err.stack` (`at fn (file:line:col)`, UTF-16 units) and converted. Syntax errors: Python `e.offset`; V8's
+  caret line; ts type stripping: the stripper's `[line:col]` marker, which gives the line too (12.5).
+- **Host:** a frame in a known `.v2` file whose line lies in a block body gets body line `line − loc.body_first_line + 1`
+  and its column from `UnitLoc::col` (2.3; a `null` col becomes the line's first non-blank column), and prints as 2.5 says
+  (`in @py risky`).
+- **Error fields:** `e.file/line/col` come from the innermost mapped frame, else the V2 call site (2.4; the excerpt prints
+  either way, D2); `e.lang` is that frame's block tag (`ts` for ts blocks), else the session's tag.
+
+---
+
+## 13. Import resolution and routing
+
+`engines/imports` resolves selectors against the file's export registry; `runtime/interp` binds the results.
+
+### 13.1 Selectors
+
+| Written | `Selector` (4.3) | Resolves against |
+| --- | --- | --- |
+| `@py` | `Union` | every definition block of that engine in this file |
+| `stats`, `"odd name"` | `Label` | the block with that label, any engine |
+| `@py.stats` | `Exact` | the block with that label, which must be a `py` block |
+| `py.statistics`, `js."date-fns"` | `Module` | a module unit (13.5); segments joined with `.` (JS subpaths and scopes are quoted: `js."lodash/fp"`) |
+| `v2` | `V2` | this file's top-level names; inside blocks only (4.5) |
+
+Tags canonicalize at run time through the registry (7.3): `@python.stats` is `@py.stats`, `ts.x` is `js.x` (D52); an
+unknown tag is 7.3's `EngineUnknown`. `sel as NAME` needs a `Module` selector (4.5, D10). Selectors are file-scoped: an
+`@import` in `util.v2` or its blocks sees only `util.v2`'s blocks (6.4). Messages quote selectors as written.
+
+### 13.2 ExportRegistry
+
+```rust
+pub struct ExportEntry { name: Rc<str>, unit: UnitId, value: Value }    // Func(Proxy | Native) or a copied constant
+pub struct ExportRegistry { keys: HashMap<Rc<str>, Vec<ExportEntry>> }  // FileScope.exports (6.2)
+```
+
+When a definition unit becomes `Loaded`, each export is pushed under `"@<canonical tag>"` and, if labeled, under
+`"<label>"` and `"@<tag>.<label>"` (duplicates within a block collapse; entries are never removed): bridged blocks register
+`Proxy{session, unit, name}`, compiled blocks `Native` callables (15.8), `value` exports their copy. The file's
+`EngineBlock` list is the static side (labels, tags, declared names, `*`) for "not run yet" checks.
+
+### 13.3 Resolving a name from a block selector
+
+`cands` = the file's definition blocks that `sel` matches, in source order, reached or not. Blocks are named by
+`block_name` (12.1).
+
+1. `cands` empty → `ImportError: No engine exports found for selector 'stats'`.
+2. `hits` = the distinct `Loaded` units in `cands` whose entries under `sel`'s key contain `name`.
+3. One hit → its `value`.
+4. More → `ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats' and 'calc') — use @py.stats
+   or @py.calc` (DOCS 6.3). Three or more read `'a', 'b' and 'c'` / `@py.a, @py.b or @py.c`; an unlabeled block is listed
+   as `@py block at main.v2:12`, and the advice becomes `— label the blocks to choose one`.
+5. None → the first candidate that is not `Loaded` and declares `name` or `*` decides: never reached →
+   `ImportError: block 'stats' has not run yet — move this @import below it` (D53); `Loading` → `ImportError: block
+   'stats' is still loading — its exports exist once its top-level code finishes`; `Failed(e)` → `ImportError: block
+   'stats' failed to load: <e.message>` (D31).
+6. Otherwise → `ImportError: 'x' is not exported by 'stats' (did the block @export it?)`.
+
+`@import { * } from sel`: step 1; with no `Loaded` candidate, step 5 on the first; otherwise the union of the loaded
+candidates' entries, where a name exported by two distinct units fails as in step 4, used or not (DOCS 6.3).
+
+### 13.4 Binding into the V2 scope
+
+`@import` declares each alias in the current scope like `const` (assigning it is an error; a name already declared there
+is 4.5's redeclaration `SyntaxError`, or 5.6's `NameError` for names bound by `*`) and re-resolves each time it runs. `*`
+binds only names that are V2 identifiers and not keywords; import others quoted, with `as`. Imported names are `func`
+(D47): a foreign function becomes `Callable::Proxy { session, unit, name }` (5.1; `unit` is the wire unit id, 9.4), and
+calling it sends `call` with target `{"unit","name"}` plus `args`/`kwargs` (9.5, 10.8). Proxies are ordinary values:
+stored, passed, re-exported by V2 modules (6.4), sent to other engines as `fn` tags (11.8). `sel as NAME` binds a module
+handle (13.5).
+
+### 13.5 Module units
+
+A `Module` selector names one unit per module per session, `"<canonical tag>:<name>"` (9.4): `py:statistics`,
+`py:os.path`, `js:date-fns`; for a relative or absolute JS specifier `<name>` is the absolute path joined from the
+importing file's folder. `ts.X` and `js.X` share the js session's unit `js:X` (D52). Only bridged engines take module
+selectors (`ImportError: module imports need a bridged engine — 'c' is compiled` / `— 'lua' is a run engine`), and only
+with the `modules` cap (17.5). Python names must be dotted identifiers (`ImportError: 'my-mod' is not a valid Python module name`); a JS name is any non-empty specifier
+(package, `node:` built-in, `./path` from the `.v2` file). Every `@import` from a module sends one `module` frame; the
+adapter imports once per unit, so a bare name's first import wins for the session, as in `sys.modules`:
+
+```json
+{"t":"module","id":7,"unit":"py:statistics","name":"statistics","from":"C:\\proj\\main.v2","names":["mean"],"as_handle":false}
+```
+
+`from` is the absolute path of the importing `.v2` file; the adapters use it for `sys.path` and `createRequire`. `names`
+is a list, `"*"`, or `null` with `as_handle: true` (`@import py.numpy as np`). Reply:
+`ret {"value": <module handle or null>, "exports":[{name, kind, value?}], "missing":[...]}`.
+
+| Step | Python | JavaScript |
+| --- | --- | --- |
+| load | `importlib.import_module(name)`, the folder of `from` on `sys.path` (9.3) | `createRequire(from)(name)` (Node 20.19+/22.12+ `require` also loads synchronous ES modules); on `ERR_REQUIRE_ESM`, `ERR_REQUIRE_ASYNC_MODULE` or `ERR_PACKAGE_PATH_NOT_EXPORTED`, `import(entryUrl(name, from))` (14.4), awaited as 9.8 allows |
+| failure | not found → `err ImportError` with the foreign message (`No module named 'pandas'`); any other exception → `ForeignError` (9.4) | the same, with Node's message |
+| name `n` | `getattr(mod, n)`, else the submodule `import_module(name + "." + n)` | `mod[n]` unless inherited from `Object.prototype`/`Function.prototype`; `"default"` → `mod.default ?? mod`; else `mod.default[n]` |
+| `*` | `__all__` if present (absent entries go to `missing`), else the names in `vars(mod)` not starting with `_`, in dict order | own enumerable keys of `mod` (and of an object `mod.default`), minus `default`, `__esModule` and `_` names |
+| kind | class → `class`, callable → `func`, else `value` (copied; non-plain values arrive as handles) | function → `func`/`class` (12.4), else `value` |
+
+- `@import js.pkg as x` binds the module object as a handle; for a CommonJS package that exports a function it is a
+  callable handle (`@import js.slugify as slugify`, D51, D54). `@import { "default" as x } from js.pkg` takes
+  `mod.default ?? mod`.
+- A missing requested name → `ImportError: 'x' is not exported by 'py.statistics'`. A module Proxy targets
+  `{"unit":"py:statistics","name":"mean"}`; the adapter repeats the lookup on every call.
+
+### 13.6 Routes
+
+Foreign code cannot hold a V2 `Value`, so what a block imports through the host is reached by numbered routes. A route
+is an entry of `Interp.routes` (6.2), numbered separately from the callable table of 11.8; `{"route": r}` carries its
+index, and routes are never released. Each holds:
+
+```rust
+pub enum Route {
+    Target(Value),                                           // a resolved Func: Proxy, Native or Closure
+    Pending { file: FileId, sel: Selector, name: Rc<str> },  // resolved at its first call (D53)
+    V2 { file: FileId, name: Rc<str> },                      // `v2` selector: looked up at every call
+}
+```
+
+One route per (importing unit, directive item), allocated at the importer's first load; each later load (a re-run action
+block) resets a resolved route to `Pending`, so the table stays bounded by the import directives. On
+`call {"route": r}` (9.5): `Target(f)` → call `f`; `Pending` → resolve now with 13.3 or 13.5 (it becomes `Target`) or raise
+that `ImportError` into the caller; `V2` → call the file's current top-level `name` (`NameError: 'log_line' is not
+defined at the top level of main.v2`; `TypeError: 'x' is not a function`). Compiled blocks keep the same `Route`s per
+loaded library, keyed by alias (13.7).
+
+### 13.7 Imports inside blocks
+
+At step 5 of 12.1 each directive item becomes one `imports` entry (shapes: 9.4). Resolution is lazy (D53): an item is
+bound at load only when its target is already available in the same session; everything else becomes a route resolved at
+its first call, so blocks may import from each other in any order. `as` is the name bound in the block (the alias, else
+the imported name).
+
+| Target | Entry | The adapter binds |
+| --- | --- | --- |
+| an export of a `Loaded` block of **this session** (py→py, js↔ts), or an attribute of a module of this session (imported first with a `module` frame, 13.5) | `{"as","unit","name"}` | the real object, fetched once at load (`g[name]`, the JS getter, or the module attribute): no host hop, exceptions propagate natively; later rebinding in the source is not seen, as with Python's `from m import f` |
+| a whole module of this session (`@import py.numpy as np` in a py block) | `{"as","unit","module":true}` | the module object |
+| a `value` export of a `Loaded` block | `{"as","value"}` | a decoded copy (a same-session handle decodes to the live object) |
+| anything else: another session's block or module, a compiled export, a block not loaded yet, `v2` | `{"as","route"}` | a stub that sends `call {"route": r}` (14.2) |
+
+- Errors that no later load can fix are raised at load: a selector matching no block (13.3 step 1); no candidate
+  declaring the name or `*` (step 6); an invalid module name (13.5); a whole-module handle of another engine
+  (`ImportError: a py module can't be imported as a handle into a @js block (handles belong to their engine)`); a `v2`
+  name not declared at the file's top level (`func`, `let`, `const`, `import`, `extern`, `@import`):
+  `ImportError: 'x' is not a top-level name in main.v2`.
+- Calling a route whose block has not loaded → `ImportError: block 'b' has not run yet — 'f' can't be called before it
+  loads` (still loading or failed: 13.3 step 5). A route that resolves to a constant raises `TypeError: 'VERSION' is not
+  a function` at that call; import constants from loaded blocks.
+- `*` expands at load into explicit entries, so its targets must be loaded (a module is imported then); `*` from `v2`
+  means the file's top-level `func` declarations not starting with `_`.
+- Compiled blocks accept only `{ names } from SEL`, and only in library mode (D57; the BuildErrors are in 15.2). The host
+  keeps alias → `Route` per loaded library; the generated wrappers pass the alias to `host_call` (15.9), never a route
+  id, because a cached library outlives a run.
+
+---
+
+## 14. Built-in adapters
+
+`adapters/py.py` and `adapters/js.js` are the worker side of ch. 9–13; custom bridged adapters follow the same shape
+(14.5).
+
+### 14.1 Distribution and launch
+
+- Both files are embedded with `include_str!` and written create-new (0600 on Unix) to `<run>/adapters/` when their
+  session first spawns (8.3); they are never read from the project, `PATH` or `~/.v2` (20.2).
+- Launch argv and environment are 7.2's: `<python> -B -u <run>/adapters/py.py` with `PYTHONUTF8=1` and
+  `PYTHONIOENCODING=utf-8`; `<node> <run>/adapters/js.js`. The js session also gets `NODE_PATH` = the absolute
+  `[node] modules`, then `[node] paths`, then any inherited value (D54); Node reads it at startup.
+- Code can run before the adapter owns fd 1 (`sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`): until `hello` the
+  host forwards non-JSON stdout lines to stderr; after it, any non-frame line is a `ProtocolError` (D74).
+
+### 14.2 Shared skeleton
+
+```text
+setup()            14.3 / 14.4: import hygiene, protocol fds and stdio (9.9), signals
+send(hello)        vep 1, engine, impl, version, pid (9.3); caps: py ["modules","handles","kwargs","reverse"],
+                   js ["modules","handles","reverse"] (D68; JS takes no named arguments, D63)
+serve(None)        the top-level loop (9.7); it ends only by exiting
+serve(wait_id):    for each incoming frame m:
+  ret, err         must carry wait_id: return the decoded value / raise the decoded V2Error; else stderr, exit 2
+  release          apply (11.1, 11.8); no reply
+  bye              flush output, exit 0 (9.10)
+  init load module call op
+                   push request; try: reply ret(handler(m)), awaiting per 9.8
+                   except any exception e: reply err(serialize(e));  finally: pop
+  other t, with id → err ProtocolError, keep serving (17.6);  unparseable → stderr, exit 2 (9.1)
+  EOF              exit 0 quietly (9.1)
+host_call(target, args, kwargs)                     route stubs (13.7) and V2 function stubs (11.8)
+  top != request   raise V2Error (type Error): V2 function 'progress' called outside an active V2 call  (D46)
+  Python, not the dispatch thread → raise V2Error (type Error): V2 function 'progress' called from another thread
+  id = next_out_id(); send(call {id, target, args, kwargs}); push waiting; try: return serve(id)  finally: pop
+send(f)            under the send lock: buffered output as out frames (9.9), queued releases as one release frame
+                   (9.10), then f; a reply over 64 MiB becomes err MarshalError, an oversize call raises
+                   MarshalError in the caller (9.1, D72)
+```
+
+- **The stack** (9.7) holds a `request` entry per host request being handled and a `waiting` entry per stub blocked in
+  `serve(id)`. `host_call` proceeds only when the top entry is a `request`: a synchronous call, a request whose coroutine
+  or Promise is being awaited, or a nested request served inside a stub (D46, 9.8). A callback stored during one request
+  may be called during any later one; from a timer, an idle turn or a finalizer, or while the adapter is blocked in a
+  stub, it raises.
+- **Tables** live in the adapter's scope, never in user globals: `units` (wire unit id → namespace, for definition blocks
+  and modules, never actions), handles (11.1), V2 function stubs (11.8) and the release queue. Finalizers only append to
+  that queue, because they can run in the middle of `send`.
+- **Errors** (`err.error`, 9.6): `type` is `ForeignError`, or the kind the adapter detected itself (`ImportError`,
+  `NameError`, `ValueError`, `MarshalError`, `ProtocolError`, `Error`); `foreign_type` is Python `type(e).__name__`, JS
+  `e.name`, or `typeof` for a thrown non-Error; `trace` per 12.6; `text` the engine's own formatted traceback. A
+  `V2Error` that escapes user code goes back with its `v2` tag, so it round-trips unchanged.
+- **Output** follows 9.9: output produced while idle waits for the next frame (D45). Every string sent as text is first
+  made well-formed (10.4).
+
+### 14.3 py.py
+
+All code runs under `if __name__ == "__main__":`, so a `multiprocessing` spawn child (the default on Windows and macOS)
+that re-imports `__main__` starts no second adapter. Setup, in order:
+
+1. Import every stdlib module the adapter uses (`sys os io json ast types builtins inspect importlib keyword traceback
+   linecache weakref threading signal base64 codecs collections`, plus `msvcrt ctypes` on Windows) while no user folder
+   is on `sys.path`, so a user's `json.py` cannot replace them; `asyncio` is imported on first need with the original
+   path (9.3).
+2. Protocol, stdio and signals exactly as 9.9 (D73): the protocol moves to non-inheritable `os.dup` copies of fds 0 and 1
+   (binary mode on Windows); fd 0 becomes `os.devnull` and `os.dup2(2, 1)` points fd 1 at stderr (plus `SetStdHandle` on
+   Windows); `sys.stdout` and `sys.stdin` are replaced; SIGINT (and SIGBREAK) are ignored, since the host owns Ctrl+C
+   (ch. 8). C extensions, `os.write(1, …)`, `os.system` and inheriting `subprocess` children therefore write to stderr
+   and read EOF (D45).
+3. Remove the adapter's own folder (`sys.path[0]`, i.e. `<run>/adapters`); `init` and each `load`/`module` then order
+   the path per 9.3.
+
+- **Framing.** `recv` reads `os.read(IN, 65536)` into a bytearray and splits on `b"\n"` only, so a `\r` inside a string
+  cannot split a frame. `send` writes `json.dumps(obj, ensure_ascii=False, allow_nan=False,
+  separators=(",", ":")).encode() + b"\n"` in an `os.write` loop under 9.9's lock.
+- **Calls** run `f(*args, **kwargs)`. `BaseException` is caught per request, so `sys.exit()` in a call or a block is an
+  `err` (`ForeignError`, foreign_type `SystemExit`, D55), not a dead worker. Awaitables run per 9.8 (one kept session
+  loop; `err` when a loop already runs in the thread).
+- **Python 3.8** is the floor for the adapter itself: no `match`, `X | Y`, `list[int]`, `str.removeprefix`, dict `|` or
+  parenthesized `with`; `FrameSummary.colno` is 3.11+ and `SyntaxError.end_lineno` 3.10+.
+
+### 14.4 js.js
+
+Setup, in order, before anything touches `process.stdout` or `process.stdin`: their getters create libuv handles on the
+protocol fds, which makes a POSIX pipe non-blocking (`writeSync` would then fail with `EAGAIN`) and may read ahead on
+fd 0 (9.9).
+
+1. `require` the built-ins used: `fs vm v8 path module stream string_decoder url util child_process`.
+2. Stdio exactly as 9.9 (D73): the `process.stdout`, `stderr` and `stdin` getters are replaced (`console` binds lazily,
+   so it follows), `fs` calls on fds 0–2 are wrapped, `child_process` stdio is rewritten so children never inherit fd 0
+   or 1 (their output goes to stderr, D45), then `module.syncBuiltinESMExports()`. Frames are written only through the
+   saved `fs.writeSync(1, …)`, the adapter's private channel, and fd 1 stays blocking. Native addons that write fd 1 are
+   not covered; after `hello` their lines are a `ProtocolError` (D74).
+3. `process.exit` throws 9.7's error (D55); the original is kept for `bye` (9.10).
+4. `process.on('SIGINT' | 'SIGBREAK', () => {})`; `uncaughtException` and `unhandledRejection` print the stack to stderr
+   and the worker keeps running (9.8).
+
+The loop is 9.7's: an async top level that blocks in `fs.readSync` between requests, with nested `serve(id)` fully
+synchronous; event-loop turns and Promise awaiting follow 9.8. After the reply to every outermost (stack depth 1)
+request, before the next `fs.readSync`, the loop yields one event-loop turn (`await new Promise(r => setImmediate(r))`);
+if more than 1,000 `fn` stubs were created since the last turn, it calls `gc()` synchronously first (11.9). During this
+turn the stack is empty, so a timer or event handler that calls V2 raises 9.8's idle-call `V2Error`; the
+`FinalizationRegistry` cleanups run, and their queued `release` goes out with the next frame. Calls use
+`Reflect.apply`/`Reflect.construct` as 11.3 decides; named arguments never arrive, since js declares no `kwargs` cap and
+the host raises `ArityError` before sending (10.8, D63).
+
+- `entryUrl(spec, from)` (12.4, 13.5): a built-in (`node:` or in `Module.builtinModules`) stays as is; `./`, `../` or an
+  absolute path → `pathToFileURL(path.resolve(path.dirname(from), spec))`; a bare name → `createRequire(from)
+  .resolve(spec)`, else walk up from `from` (then `NODE_PATH`) to `node_modules/<pkg>/package.json` and take
+  `exports["."]` (or `["./sub"]`, or a string) with conditions `import` → `node` → `default`, else `module`, `main`,
+  `index.js`.
+- **Node 18** is the floor: `isWellFormed`/`toWellFormed` (20+) have 10.4's regex fallback, `require` of ES modules needs
+  20.19+/22.12+ (else 13.5's `import()` fallback), and `stripTypeScriptTypes` 22.13+ (12.5).
+
+### 14.5 Custom bridged adapters
+
+A custom `bridged` engine (DOCS 13.2) can port either file. The host relies on 17.6's checklist. The adapter declares in
+`hello` only the caps it implements, and the host raises 17.5's defined errors for the rest (D68), so an adapter may skip
+`module` (no `modules`), `op`/`release` (no `handles`), kwargs, or stubs (no `reverse`). Units keep 12.2's contract: a
+fresh namespace per action run, a persistent one per definition, `exports`/`missing` in the reply. Line mapping: the
+`.v2` path as filename and `line - 1` as the line offset where the language allows it (Ruby:
+`eval(src, binding, file, line)`), else `line - 1` prepended blank lines; `col: null` when unknown. `v2 doctor TAG` (D34)
+runs 17.7's handshake checks.
+
+---
+
+## 15. Compiled blocks: the build bridge
+
+A compiled block (`@c`, `@cpp`, `@rust` and their aliases; kind Compiled, 7.2) never speaks VEP. With `@export` it is in **library mode**: built into a native library, cached under `~/.v2/cache/build`, loaded into the host with `libloading` and called through `ffi/call` (16.7). Without `@export` it is in **program mode** (15.5). Code: `build/{mod, cache, c, cpp, rust, shims}`; `mod` holds the pipeline, the per-run memo, loading, binding and `host_call`. Messages name a block with 12.1's `block_name`: `block 'fast'`, or `@rust block at main.v2:12` when it has no label.
+
+### 15.1 Pipeline
+
+This is 12.1's step 6: 12.1 has already checked the unit state, resolved the tag, run the directive check (step 3; 15.2's `BuildError`s) and routed the inner imports, and afterwards registers the exports and produces the value. Compiled blocks take no block args; args on a built-in compiled tag are a `SyntaxError` (4.5): `compiled blocks take no args — @export a function and call it with arguments`.
+1. **Body** (4.4): the dedented text with directive lines blanked, its `UnitLoc` (2.3), the export items and the inner imports.
+2. **Signatures** (15.2, 15.3): text analysis only, no toolchain.
+3. **Toolchain** (7.6; target check in 15.7). None usable: `EngineNotFound`.
+4. **Generation** (15.4, 15.5), then the **cache** (15.6): look the build up, build on a miss (15.7).
+5. Library mode: **load and bind** (15.8). Program mode: **run** (15.5).
+
+Steps 1–4 are memoized for the run in `Memo: HashMap<UnitId, Result<Rc<Artifact>, Rc<ErrorValue>>>`, failures included: a program block in a loop builds once and runs on every reach, and a failed build is re-raised on later reaches without rebuilding (for a definition block this is 12.1's `Failed` state: no retry, no repeated side effects). `v2 check` runs steps 1–2 only (19.3).
+
+### 15.2 Exports and inner imports
+
+The items are 4.3's `Exports { items, star }`: each explicit item follows its row below, and when `star` is set the `*` row adds every other function, so each function is exported once. A quoted item is a prototype that `ffi::cdecl` already parsed at parse time (an unreadable one is a `SyntaxError`, 4.3, 16.3); here it is only matched against the body. Each resolves to `struct Export { name: Rc<str>, sig: ffi::Sig, via_prototype: bool, span: Span }`. Compiled blocks export **functions only** (constant exports are py/js/ts only), so a constant's name counts as "not found":
+
+| Item | Found, supported | Unsupported type | Several definitions | Head unreadable | Not found |
+|---|---|---|---|---|---|
+| `name` | exported | `BuildError` naming the parameter and its type | `BuildError: 'f' has several definitions — export one as a prototype string` | `BuildError: cannot read the signature of 'f' — give its C prototype in @export` | `ImportError: block 'fastmath' exports 'x', but does not define it as a function` |
+| `*` | exported, except `main` and `static`/`inline` functions | skipped | skipped | skipped | — |
+
+- *Several definitions*: a C++ overload set, or C/C++ definitions that differ under `#if`/`#else`. Definitions with identical lowered signatures (the usual `#ifdef _WIN32` pair) count as one.
+- *Head unreadable*: a definition head naming the function exists (the name is the identifier just before the head's first depth-0 `(`), but `cdecl` rejected it: macros, templates, generics.
+- Skipped functions and their reasons are kept in `Artifact.skipped`, which `v2 check` lists (19.3 step 6). A name exported twice, directly or through a prototype, is a `SyntaxError` (4.5).
+
+**Prototype strings** (`"int mul(int a, int b)"`; in `@cpp` also `std::string` and `const std::string&`) name a function defined in the body or declared by an `#include`; a type outside 15.3's table is a `BuildError`, as for a name. The shim calls *through the prototype*, so the compiler checks that the function exists and fits:
+- C calls `mul(v2_a1, v2_a2)`, so C argument conversions apply.
+- C++ calls `static_cast<int(*)(int, int)>(&mul)(v2_a1, v2_a2)`, which selects an overload or instantiates a template.
+- Rust maps `int`→`i32`, `long`→`::std::os::raw::c_long`, `size_t`→`usize`, a `const char*` parameter→`&str` and a `char*`/`const char*` result→`String`, then calls `mul(v2_a1, v2_a2)`.
+
+**Inner imports.** Compiled blocks take only `@import { a, b as c } from SEL`; `{ * }` and `SEL as h` are `BuildError: compiled blocks only support @import { names } from SEL`, raised by the directive check at 12.1 step 3 when the block is reached (after tag resolution, before args and inner-import routing, so `*` is never expanded) and reported by `v2 check` (19.3), because the wrapper list must be fixed before building and compiled code cannot hold handles.
+- **Library mode:** one generated wrapper per local name (15.4). The name must be a valid, non-keyword identifier of the block's language: `BuildError: 'x' is not a valid C identifier — rename it with 'as'`.
+- **Program mode:** any `@import` is `BuildError: @import in a compiled block needs @export — a compiled program runs as a separate process`, raised by the directive check at 12.1 step 3, after tag resolution and before args and inner-import routing.
+- **Routing:** 12.1 step 5 gives each item a route (13.6, 13.7). A target block that has not loaded yet gets a `Pending` route, resolved at the first call, so blocks may import each other in any order. `CompiledUnit.routes: HashMap<Rc<str>, RouteId>` is keyed by local name: wrappers pass the name, never a route id, because a cached library outlives the run.
+- **Reserved names** (a clash is an ordinary compile error): C/C++ identifiers starting with `v2_`, `V2_` or `__v2`; the Rust module `v2` and Rust items starting with `__v2`.
+
+### 15.3 Signature extraction
+
+**C/C++** (`build/c.rs`). The body goes through the cdecl tokenizer (16.3); the C++ dialect adds `::`, `R"d(…)d"` and `[[…]]`. Comments are dropped, and a preprocessor line with its `\` continuations is one token. A depth-0 walk collects `head` tokens while tracking parentheses:
+- A `;` at paren depth 0, or a preprocessor token, clears `head` (prototypes, globals, `#if` lines).
+- A `{` at paren depth 0 ends a **definition head** when `head` has a depth-0 `(` and no depth-0 `=` (so `struct S {`, `namespace n {`, `extern "C" {` and initializers are not heads), the identifier just before its first depth-0 `(` is not a C/C++ keyword, and at least one token (a return type or specifier) comes before that identifier. A head starting with `if`, `else`, `for`, `while`, `do`, `switch`, `return`, `try` or `catch` is never a definition head (so `for (int i = 0; i < 3; i++) {`, `else if (x) {` and a range-`for` are statements, whose `{…}` is skipped like any other). A definition head goes to `cdecl::parse_definition_head`: parameter names are optional; `static`, `inline`, `template<…>` and C++ `extern "C"` are recorded; `const`, `noexcept` and attributes after the `)` are allowed.
+- After every `{` (a head or not), the matching `}` is skipped by counting braces and `head` is cleared, so bodies, statement blocks and the contents of `struct`, `namespace` and `extern "C" { }` are never scanned; functions inside them need a prototype string.
+
+**Rust** (`build/rust.rs`). A small tokenizer handles `//`, nested `/* */`, `"…"`, `r#"…"#`, byte and char literals (`'a` not followed by `'` is a lifetime) and feeds a depth-0 item walk: items start after `;` or `}`, and `#[…]`/`#![…]` groups are skipped.
+- An item whose first non-qualifier token is `fn` is read as `fn NAME ( params ) [-> TYPE] {`. Each param is `IDENT: TYPE`, `mut IDENT: TYPE` or `_: TYPE`; a type is the tokens up to the next depth-0 `,` (counting `()`, `[]`, `<>`; `->` is not a bracket), joined without spaces.
+- The qualifiers `pub`, `pub(…)`, `const` and `extern "C"` are allowed; `unsafe`, `async`, `<…>` generics and `where` make the head unreadable. Any other depth-0 `{` (`impl`, `mod`, `macro_rules!`) is skipped by brace matching.
+
+Supported types (DOCS 11.2) and their lowering to `ffi::CType` (16.4):
+
+| C / C++ | Rust | Parameter | Result |
+|---|---|---|---|
+| `char` `short` `int` `long` `long long` `unsigned …` `int8_t`…`uint64_t` `size_t` `ssize_t` `intptr_t` `uintptr_t` `ptrdiff_t` | `i8`…`i64` `u8`…`u64` `isize` `usize` | `Int{size,signed}` | same |
+| `float`, `double` | `f32`, `f64` | `F32` / `F64` | same |
+| `bool` | `bool` | `Bool` | `Bool` |
+| `const char*` | `&str` (any lifetime) | `Str` (C/C++: `null` allowed as NULL; Rust: non-null) | C/C++: `Str` (copied, never freed); Rust `&str`: unsupported |
+| `char*` | — | unsupported | `OwnedStr` (copied, then `__v2_free`d) |
+| `std::string`, `const std::string&` | `String` | `Str`, non-null (the shim builds the string) | `OwnedStr` (the shim returns a heap copy) |
+| `void` | `()` or none | — | `Void` |
+
+Everything else is unsupported: other pointers, references, arrays, structs, `long double`, `wchar_t`, Rust `char`/`i128`/`Option`/`Vec`/slices, and `-> !`. A non-null parameter given `null` is `FFIValueError: argument 1 ('s', std::string) of 'reversed': null is not a string`.
+
+### 15.4 Library mode: generated sources and shims
+
+Generated text is **position-independent**: it never contains the `.v2` path, absolute line numbers or any runtime value, so moving a block, or editing lines above it, keeps its cache key. Positions are applied when diagnostics or panics are reported, through the block's current `UnitLoc` (2.3).
+- **C/C++** (`unit.c`/`unit.cpp`): `#include "v2.h"`, `#line 1 "__v2_body"`, the body, `#line 1 "__v2_gen"`, in C++ `<string>` `<exception>` `<typeinfo>` `<cstdlib>` `<cstring>`, the shims, then `__v2_init`, `__v2_free` and `__v2_flush`.
+- **Rust** (`lib.rs`): the body on lines 1..N (Rust has no `#line`, and item order is free), then one crate-root wrapper per inner import, `mod v2`, the shims and the three `__v2_*` functions. Generated Rust uses absolute paths (`::std::ffi::CString`), so user `use` lines cannot clash.
+
+**Shims.** Each export `f` becomes `RET __v2x_f(P1 v2_a1, …, Pn v2_an, char** v2_err)` with the C ABI and the lowered types:
+- **C:** a `V2_EXTERN_C V2_EXPORT` function returning `f(v2_a1, …)`; it is in the same translation unit, so `static` functions work. `V2_EXPORT` is `__declspec(dllexport)` on Windows and `__attribute__((visibility("default")))` elsewhere, where builds pass `-fvisibility=hidden`, so only `__v2x_*` and `__v2_*` are exported.
+- **C++:** an `extern "C"` shim whose body is `try { … } catch (const std::exception& e) { … } catch (...) { … }`; a catch fills `*v2_err` and returns a zero value. `std::string` parameters are built from the `const char*`; `std::string` results are copied into a `malloc` buffer (one holding a NUL byte sets `V2:FFIValueError` instead).
+- **Rust:** `#[no_mangle] pub extern "C" fn` (edition 2021, where plain `#[no_mangle]` is valid on every stable rustc; `#[unsafe(no_mangle)]` needs 1.82), its body inside `std::panic::catch_unwind(AssertUnwindSafe(…))`. `&str` parameters come from `CStr::from_ptr(p).to_str()` (`String` adds `.to_owned()`); `String` results leave as `CString::new(s)` then `.into_raw()` (a NUL byte gives `V2:FFIValueError`).
+
+**Error slot.** `*v2_err` is a library-allocated string `TYPE "\n" LINE "\n" MESSAGE`:
+
+| Source | TYPE | MESSAGE |
+|---|---|---|
+| C++ `std::exception` | its type, demangled with `abi::__cxa_demangle` (libstdc++/libc++), or MSVC's `type_info::name()` minus `class `/`struct ` | `e.what()` |
+| C++ `catch (...)` | `unknown` | `unknown C++ exception` |
+| Rust panic | `panic` | the `&str`/`String` payload, else `Box<dyn Any>` |
+| returned string containing a NUL byte | `V2:FFIValueError` | the NUL's position |
+
+`LINE` is a Rust panic's body line, or empty. The host copies the string, releases it with the library's `__v2_free`, and raises the named V2 kind or `ForeignError{lang: "cpp"|"rust", foreign_type: TYPE, message}` with the frame `at f (main.v2:L, in @rust fast)` (2.5), where L is the mapped panic line, else the block's first line. The library stays loaded and usable.
+
+**Rust panics.** `__v2_init` installs a panic hook (`set_hook` affects only this cdylib's copy of std). While the thread is inside a shim, the hook prints nothing and records `location().line()` when `location().file()` is the generated `lib.rs`; elsewhere it prints the usual message. A user flag `-C panic=abort` defeats `catch_unwind`, and the process then aborts.
+
+**String ownership** (DOCS 11.2). Parameters are owned by the host and valid only during the call. A `const char*` result is copied and never freed, so it must stay live (a literal or a static buffer). A `char*` result is copied, then passed to `__v2_free` (`free` of the library's own CRT), so it must come from `malloc`. `std::string`/`String` results are heap copies made by the shim, freed the same way (Rust's `__v2_free` is `drop(CString::from_raw(p))`). NULL becomes `null`; invalid UTF-8 is `FFIValueError`.
+
+**`v2.h`** is generated per unit. Besides the code below, it includes `<stdint.h>`, `<stddef.h>`, `<stdlib.h>`, `<string.h>`, `<stdio.h>` and, in C, `<stdbool.h>`, and it defines `V2_EXPORT` and `V2_EXTERN_C`.
+
+```c
+#define V2_ABI_VERSION 1
+typedef struct v2_host_api {
+    uint32_t abi_version, reserved;       /* abi_version == V2_ABI_VERSION */
+    uint64_t unit;                        /* host token for this library's unit */
+    const char* (*call)(uint64_t unit, const char* route, const char* args_json);
+    const char* (*last_error)(void);
+} v2_host_api;
+static const v2_host_api* v2__api;
+static inline const char* v2_call(const char* name, const char* args_json) {
+    return v2__api ? v2__api->call(v2__api->unit, name, args_json) : NULL; }
+static inline const char* v2_last_error(void) {
+    return v2__api ? v2__api->last_error() : "V2 host API not initialized"; }
+/* one per inner @import item, named by its local name: */
+static inline const char* mean(const char* args_json) { return v2_call("mean", args_json); }
+```
+
+The generated tail defines `int32_t __v2_init(const v2_host_api*)` (returns 1 when `abi_version` differs, otherwise stores the pointer and returns 0), `void __v2_free(char*)`, and `void __v2_flush(void)`, which calls `fflush(NULL)` in the library's own CRT. Rust's `mod v2` mirrors this:
+- a `#[repr(C)] HostApi` and an `AtomicPtr<HostApi>` set by `__v2_init`; `__v2_flush` flushes `std::io::stdout()`, ignoring errors;
+- `pub fn call(name: &str, args_json: &str) -> Result<String, String>`: a NUL in either argument is `Err`, NULL becomes `Err(last_error)`, otherwise the result is copied at once;
+- per import, a crate-root `fn mean(args_json: &str) -> Result<String, String> { v2::call("mean", args_json) }`.
+
+### 15.5 Program mode (no `@export`)
+
+A block has a `main` when 15.3's scan finds a top-level function named `main` (a C/C++ definition head, or Rust `fn main`); it is then compiled as is (C/C++ behind `#line 1 "__v2_body"`). A block without `main` may contain statements only: if the scan finds any other top-level function definition (a 15.3 definition head; braced `if`/`for`/`while`/`switch` statements are not), it is `BuildError: @c block at main.v2:12 defines functions but no main — write main yourself to use helper functions`. Otherwise V2 wraps it:
+- **C/C++:** `#include <stdio.h>`, `<stdlib.h>`, `<string.h>`; each top-level `#include` line of the body, preceded by `#line K "__v2_body"`; `int main(void) {` and `#line 1 "__v2_body"`; the body with those `#include` lines blanked; `return 0; }`.
+- **Rust:** `fn main() {`, the body, `}`; the line map is "generated line − 1". `use` declarations are legal inside a function body, which matches keeping `use` lines at the top (DOCS 11.4).
+
+The executable runs from the cache entry through the run-engine process helper (17.3 steps 3–5 and 7), under 8.3's child rules:
+- stdin is null (DOCS 4.6); the working directory and environment are the host's.
+- **Statement position:** stdout streams to V2's stdout in program order, after the host has flushed its own stdout and all dirty native stdio (16.7). **Expression position:** stdout is captured and becomes the value, with one trailing `\n` or `\r\n` removed, decoded as in 17.3.
+- stderr streams live to the host's stderr, and the last 4 KiB is kept. The engine's `call_timeout` applies (watchdog, `EngineTimeout`, 8.5).
+- The program and everything it started are killed as a tree (8.3 `kill_tree`) when the block finishes, times out or V2 exits.
+
+A non-zero status raises `EngineExitError` exactly as for a run engine (17.3): `@c block exited with status 3`, the signal and hex-NTSTATUS forms, and `data = {status, signal, stderr}` holding the kept tail, which the message does not repeat.
+
+### 15.6 The build cache
+
+The key is `k = hex(sha256(serde_json::to_string(&key)))` over a struct, so the field order is fixed and there is no whitespace:
+
+```json
+{"v2abi":1,"engine":"rust","mode":"lib",
+ "compiler":{"kind":"rustc","path":"C:/Users/me/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin/rustc.exe",
+             "version":"rustc 1.91.1 (ed61e7d7e 2025-11-07)","target":"x86_64-pc-windows-msvc"},
+ "flags":["--crate-type","cdylib","--edition","2021","-C","opt-level=2","-C","target-feature=+crt-static",
+          "--crate-name","v2block","--error-format=json","{src}","-C","opt-level=3","-o","{out}"],
+ "prelude":"<sha256 of all generated text except the body>","source":"<dedented body>"}
+```
+
+`path` is 7.6's resolved `argv[0]` (for Rust the sysroot's `rustc`, not the rustup proxy); `version` is the first line of its version output; `target` comes from 7.6. `flags` is the exact argv including user flags, with the input and output paths replaced by `{src}`/`{out}`. `prelude` makes a generator change rebuild. The entry directory `~/.v2/cache/build/<k[0..2]>/<k>/` (created 0700 on Unix) holds:
+- the artifact: `v2_<k[0..16]>.dll|.so|.dylib`, or `prog[.exe]`, plus any load copies `v2_<k[0..16]>_<n>.<ext>` (15.8);
+- `exports.json`: `{"v2abi", "mode", "exports": [{"name", "symbol", "params", "ret"}], "imports"}`;
+- `build.log` (the argv, the full compiler output and any warnings) and `src/` (the generated sources).
+
+Lookup and build:
+1. Unless `--no-cache` is given, it is a hit if the artifact exists and `exports.json` matches the current exports.
+2. On a miss, build in `<run>/build/<k>/` (20.3). Copy the outputs into `<k[0..2]>/.tmp-<k>-<pid>-<rand>/`, on the entry's volume, and rename that to `<k>`; if `<k>` appeared in the meantime, keep it and delete ours. Failed builds are never cached.
+
+There is no lock: an entry appears only through one atomic rename, so concurrent builders may both compile, and the first rename wins.
+- **`--no-cache`** rebuilds and replaces: step 2 first renames an existing `<k>` to `.old-<k>-<rand>` and deletes it. On Windows that rename fails while another process has the DLL loaded; V2 then installs the new build as `.fresh-<k>-<pid>` in the same `<k[0..2]>` dir, loads it from there, and leaves the old entry alone.
+- **Sweeping.** `.tmp-*`, `.old-*` and `.fresh-*` dirs older than a day are deleted, best effort, at the start of every build in their `<k[0..2]>` dir. `v2 cache clean` (19.4) deletes entries one by one and reports those still in use.
+- **No usable `~/.v2`** (18.1): libraries load from `<run>/build/` and nothing is cached; `check` and `doctor` warn.
+
+### 15.7 Toolchains, command lines, diagnostics
+
+Resolution (7.2, 7.6) picks the compiler — on Windows MSVC `cl` first (from a Developer Prompt environment, else via vswhere with the captured vcvars environment), then gcc, then clang; elsewhere `cc`, `gcc`, `clang` for C and `c++`, `g++`, `clang++` for C++; `[engines.<tag>] command` overrides — and hands over 7.1's `ResolvedEngine`: `family` (Gcc, Clang, Msvc, Rustc), `argv`, `version`, `target` (a triple, or cl's `x64`/`arm64`) and `env` (cl's `INCLUDE`, `LIB`, `LIBPATH` and `PATH` prefix).
+
+**Target check** (part of 7.6's probe). The arch (normalized: `amd64`/`x64` → `x86_64`, `arm64` → `aarch64`) must equal `std::env::consts::ARCH`, and the OS must match: on Windows cl as is, gcc and clang only with a MinGW target (`*-w64-mingw32`, `*-windows-gnu`), rustc with `*-windows-msvc` or `*-windows-gnu*` (a clang targeting `*-windows-msvc` is skipped as `clang targets MSVC — use cl`; `*-cygwin` and `*-msys` are rejected, because their DLLs need `msys-2.0.dll`); on Linux `*-linux-*`; on macOS `*-apple-darwin*`. Auto-detected candidates that fail are skipped; a configured command that fails is `EngineNotFound: gcc at C:\mingw32\bin\gcc.exe targets i686, but v2 is x86_64 — install a 64-bit toolchain` (exit 3 if uncaught).
+
+**Process.** Compilers run in `<run>/build/<k>/` with relative file names and null stdin, under 8.3's child rules; stdout and stderr are read concurrently (8.3) and both kept (cl writes diagnostics to stdout). The compiler's own folder is prepended to `PATH` (MSYS2's `cc1.exe` loads DLLs from there), cl gets `env`, and diagnostics are forced to English with `LC_ALL=C` (gcc/clang) or `VSLANG=1033` (cl). A compiler that cannot be spawned is `EngineNotFound: could not start '<path>': <os error>` (8.3). In the table, `OUT` is `v2_<k[0..16]>` and `FLAGS` are the user's `[engines.<tag>] flags`:
+
+| Toolchain | Library mode | Program mode |
+|---|---|---|
+| gcc/clang, Linux | `-std=gnu11 -O2 -shared -fPIC -fvisibility=hidden -Wl,--no-undefined unit.c FLAGS -o OUT.so -lm` | `-std=gnu11 -O2 unit.c FLAGS -o prog -lm` |
+| clang, macOS | `-std=gnu11 -O2 -dynamiclib -fvisibility=hidden unit.c FLAGS -o OUT.dylib` | `-std=gnu11 -O2 unit.c FLAGS -o prog` |
+| gcc/clang, MinGW | `-std=gnu11 -O2 -shared unit.c FLAGS -o OUT.dll -static` | `-std=gnu11 -O2 unit.c FLAGS -o prog.exe -static` |
+| g++/clang++ | the C row with `-std=gnu++17`, `unit.cpp`, no `-lm` | same |
+| cl | `/nologo /LD /O2 /utf-8 /std:c11 /TC /Fe:OUT.dll unit.c FLAGS`; C++: `/std:c++17 /EHs /TP` and `unit.cpp` | no `/LD`; `/Fe:prog.exe` |
+| rustc | `--crate-type cdylib --edition 2021 -C opt-level=2 [-C target-feature=+crt-static] --crate-name v2block --error-format=json lib.rs FLAGS -o OUT.<ext>` | `--crate-type bin`, `main.rs`, `-o prog[.exe]` |
+
+- User flags come after V2's own flags, so they win (`-O3`, `-C opt-level=3`), and after the source, so `-lfoo` links. For cl, FLAGS come last because a `/link …` part must end the command line.
+- `-Wl,--no-undefined` turns a missing symbol into a link error instead of a later `dlopen` failure.
+- On MinGW, `-static` links libgcc, libstdc++ and winpthread into the artifact (`-static-libgcc -static-libstdc++` alone would leave a `libwinpthread-1.dll` import); system DLLs stay dynamic. A user DLL is linked through its import library with `-Wl,-Bdynamic -lfoo -Wl,-Bstatic`; at load it is found by 16.2's dependency search (the cache folder, then the system order including `PATH`), not in the `.v2` folder.
+- cl keeps its default static CRT (`/MT`), and rustc on `*-windows-msvc` gets `-C target-feature=+crt-static`, so no artifact needs a redistributable DLL. Each library therefore has its own heap and stdio, which is why `__v2_free` and `__v2_flush` are per library.
+- `/EHs` (not `/EHsc`) keeps the shim's `catch` effective around a user function declared `extern "C"`. `/std:c11` needs Visual Studio 2019 16.8 or later (7.2's minimum).
+
+**Diagnostics.** The full output always goes to `build.log`. For the error, V2 maps:
+- gcc/clang lines matching `^(__v2_body|__v2_gen):(\d+):(?:(\d+):)? (fatal error|error|warning|note): (.*)`;
+- cl lines matching `^(__v2_body|__v2_gen)\((\d+)(?:,(\d+))?\): (fatal error|error|warning) (\w+): (.*)`;
+- rustc stderr lines that parse as JSON with `"$message_type":"diagnostic"`: `level`, `message`, `code.code`, `rendered`, and the `is_primary` span's `file_name`/`line_start`/`column_start`.
+
+A body position maps to a `.v2` position as 2.3 says: line `body_first_line + line − 1`, column through `UnitLoc::col`. `__v2_gen` positions, and Rust lines past the body, are reported at the `@export`/`@import` item that produced them, as `in generated wrapper for 'f': …`. Lines about other files (system headers), span-less diagnostics and linker lines (`undefined reference to 'sqrt'`) are kept verbatim. Warnings are never printed. The resulting `BuildError` has the first mapped error as its span, the message `{block_name} failed to compile: <first error>` (`block 'fast' failed to compile: …`), and `data = {diagnostics: [{file, line, col, severity, message}], output: <raw output, at most 64 KiB>}`; uncaught, it prints up to 20 diagnostics (2.4).
+
+### 15.8 Loading, binding and calling
+
+```rust
+struct LoadedLib { path: PathBuf, lib: libloading::Library, compiled: Option<CompiledLib> }
+struct CompiledLib { token: u32, free: unsafe extern "C" fn(*mut c_char), flush: unsafe extern "C" fn() }
+```
+
+1. **Load** by absolute path as a full-path library (16.2): Windows `LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)`, Unix `dlopen(RTLD_NOW | RTLD_LOCAL)`. If another unit already loaded this artifact in this run (two blocks with identical text), V2 loads the byte copy `v2_<k[0..16]>_<n>.<ext>` from the same entry (written through a temp name and a rename if absent; the bytes are identical, so an existing copy is reused): a distinct file is a distinct module, so each block keeps its own `static`s (DOCS 11.3) and host-API token. A load failure is `FFILoadError` with the OS text (16.2).
+2. **Resolve** `__v2_init`, `__v2_free`, `__v2_flush` and every `__v2x_<name>`. If one is missing, evict the entry and rebuild once; if it is still missing, raise `FFISymbolError`.
+3. **Init.** `Box::leak` a `HostApi{abi_version: 1, unit: token, call: host_call, last_error: host_last_error}` and call `__v2_init`; a non-zero result is `BuildError: library ABI mismatch`. `token` indexes `Vec<CompiledUnit{routes, loc: UnitLoc, name, active: Cell<u32>}>`.
+4. **Bind** each export as `Value::Func(Rc<Callable::Native{lib, sym, sig}>)` (5.1) with `sig.err_slot = true`, registered like a bridged export (13.2). Calls take positional arguments only (5.7).
+
+Libraries are never unloaded. Because `lib.compiled` is `Some`, the call path (16.7) adds the error slot, `ACTIVE` and the unit's `active` count (15.9), the library's flush target and `__v2_free` for `OwnedStr` results.
+
+**MinGW libraries inside an MSVC-built v2** are safe because the two share only the x64 C ABI: scalars and pointers follow the Win64 convention; memory never crosses allocators (the host frees only its own argument copies and reverse-call results, and library strings go back through that library's `__v2_free`); stdio buffers are per CRT, hence the per-library `__v2_flush`; exceptions and panics never leave the shim.
+
+### 15.9 Reverse calls (`host_call`)
+
+`extern "C" fn host_call(unit, route, args_json) -> *const c_char` is wrapped whole in `catch_unwind` and runs these steps:
+1. **Guards** (DOCS 8.4). V2 may be called only from the thread that called into this library, while such a call is running: the thread-local `ACTIVE: Cell<*mut Interp>` must be non-null (it is null on another thread, and once the V2→native call has returned: an atexit handler, a stored pointer) and `units[unit].active` must be non-zero. Otherwise set the error `V2 can only be called from the thread that called into this library, while that call is running` and return NULL. If `PENDING_EXIT` is set, return NULL with `exit() was called`.
+2. Find `route` in `units[unit].routes`; if it is missing: `'x' is not imported by this block`.
+3. Decode `args_json` in `Mode::Plain` (10.1), NULL meaning `[]`: invalid JSON is `MarshalError: args_json is not valid JSON: <detail>`, a non-array `MarshalError: args_json must be a JSON array`; `"$v2"` is an ordinary key.
+4. Call the route as 13.6 does for `call {route}` (a `Pending` route resolves now or fails with its ImportError), with the span of the enclosing native call. This counts one level of 9.7's cross-language depth limit (64). No flush is needed first: the library is already dirty (16.7), and any V2 output flushes it.
+5. On `Ok(v)`, encode `v` in Plain mode; bytes, functions, handles, errors and non-finite floats fail as 10.1 says (`MarshalError: a handle cannot be returned to compiled code — convert it with value()`) and go to step 6. Store the text in the thread-local `LAST_RESULT: Option<CString>`, replacing the previous one, and return its pointer; it stays valid until the next V2 call on this thread (DOCS 11.6).
+6. On `Err(e)`, set `LAST_ERROR = "Type: message"` (e.g. `ForeignError: ZeroDivisionError: division by zero`) and return NULL. `exit(code)` also sets `PENDING_EXIT`, and a Rust panic inside the interpreter sets `PENDING_PANIC`.
+
+`host_last_error` returns `LAST_ERROR`, or `""`. After `Cif::call` returns, `call_native` re-raises a pending exit (the interpreter's exit signal, 6.5; no `finally` runs) or panic (`resume_unwind`, exit 101). A `host_call` further out turns it into NULL again, so neither crosses C frames and both reach the top.
+
+**Why this is sound.** The interpreter is single-threaded. Immediately before `Cif::call`, `call_native` saves `ACTIVE` and sets it to a raw pointer derived from its own `&mut Interp`, restoring it right after (a stack for nested calls). By then all arguments are in owned storage, every `RefCell` borrow is released and the callee's `Rc` is cloned, so no reference into interpreter state lives across the call, and the caller's `&mut Interp` stays unused until `Cif::call` returns. So the `&mut *ACTIVE` created in `host_call` is the only live access to interpreter state, and it ends before `host_call` returns. Other threads read null and never touch the interpreter.
+
+---
+
+## 16. Native FFI layer
+
+`extern` binds functions of an existing native library, described with C declarations, and calls them through libffi. Code: `ffi/cdecl.rs` (the declaration parser, shared with 15.3), `ffi/types.rs` (`CType` and platform sizes), `ffi/lib.rs` (library resolution and loading) and `ffi/call.rs` (the call path, shared with compiled blocks). Only the 64-bit targets of ch. 1 are supported: `ffi/types.rs` has `#[cfg(not(target_pointer_width = "64"))] compile_error!`.
+
+### 16.1 The `extern` statement
+
+The lexer raw-captures the body with the CLike(C) profile (3.9); the parser runs `cdecl::parse_extern` at once, filling 4.3's `Extern.decls`, and lowers each declaration to a `Sig` (16.4). So every declaration error, including a function declared twice in one body, is a `SyntaxError` at the exact token (2.4), reported before anything runs and by `v2 check`. Each time the statement is reached:
+1. Resolve and load the library (16.2), cached per (declaring file, spec) for the run.
+2. Look up every symbol (cached per library and name). All missing names go into one error: `FFISymbolError: not found in library 'm' (/lib/x86_64-linux-gnu/libm.so.6): cosf128, foo`. On any failure nothing is bound.
+3. Make one `Callable::Native{lib, sym, sig}` (5.1) per declaration (`lib.compiled` is `None`), cached per statement node.
+4. Bind. Without `as`, each name is declared like a `const` in the current block; a same-block redeclaration is a static `SyntaxError` (4.5). With `as ns`, `const ns` is a new dict `{name: func}` in declaration order, the module-namespace form (6.4): `win.MessageBoxA(…)` is member access plus a call, and because a key holding a function wins over dict methods (5.5), `ns.keys()` calls a C function named `keys`.
+
+`extern` is not hoisted: a name used before its `extern` ran is a `NameError`.
+
+### 16.2 Library resolution
+
+| Spec | Meaning | Candidates |
+|---|---|---|
+| `"c"` | C runtime | Windows `ucrtbase.dll`, `msvcrt.dll`; Linux `libc.so.6`, `libc.so`; macOS `/usr/lib/libSystem.B.dylib` |
+| `"m"` | math library | Windows, macOS: as `"c"`; Linux `libm.so.6`, `libm.so`, then the `"c"` list (musl keeps libm in libc) |
+| contains `/` or `\` | path | `file_dir.join(spec)` if relative (the `.v2` file's folder, never the cwd), else as is; loaded directly, no search, no suffixes |
+| ends in `.dll`, `.dylib`, `.so`, `.so.N…` | file name | `[spec]` |
+| otherwise | bare name `N` | Windows `N.dll`, `libN.dll`; Linux `libN.so`, `N.so`; macOS `libN.dylib`, `N.dylib` |
+
+`"c"` and `"m"` go straight to step 2; file names and bare names go through both steps:
+1. **Directories**, in order: each `[ffi] search_paths` entry (resolved per 18.1), the `.v2` file's folder, then the project root if there is one and it differs. The first `D/candidate` that is a file is loaded by full path, and the search **stops**: if that load fails, that failure is the error, so a present but broken library (e.g. a 32-bit one) is never silently replaced by another. On Linux, when no exact candidate exists in D, the highest-versioned `libN.so.<digits>[.<digits>…]` in D matches too.
+2. **System default search.**
+   - **Windows:** `LoadLibraryExW(candidate, NULL, 0)`: the standard order (the v2.exe folder, System32, the Windows folders, then `PATH`) without the current directory, which `main` removes at startup with `SetDllDirectoryW(L"")` (20.2).
+   - **Linux:** `dlopen(candidate)` (`LD_LIBRARY_PATH`, ld.so.cache, the default dirs), then the versioned match over `/lib/<triple>`, `/usr/lib/<triple>`, `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib` and `/usr/local/lib`, so `sqlite3` finds `libsqlite3.so.0` without the `-dev` symlink.
+   - **macOS:** `dlopen` of `/opt/homebrew/lib/<c>`, `/usr/local/lib/<c>` and `/usr/lib/<c>`, without existence checks, since system libraries live in the dyld shared cache. Bare-name `dlopen` is never used there: it searches the current directory.
+
+Paths are made absolute with `std::path::absolute`, not `canonicalize` (which adds a `\\?\` prefix on Windows). Full-path loads on Windows use `LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)`, so dependencies are searched in the library's own folder first, then in the system order above; every Windows load runs under `SetThreadErrorMode(SEM_FAILCRITICALERRORS)` (libloading does this), so a bad image never opens a dialog. Unix loads use `RTLD_NOW | RTLD_LOCAL`, so missing dependencies fail at load time. Every attempt is recorded and listed on failure:
+
+```text
+FFILoadError: cannot load library 'sqlite3'
+  C:\proj\native\bin\sqlite3.dll: not found
+  C:\proj\sqlite3.dll: not found
+  sqlite3.dll (system): The specified module could not be found. (os error 126)
+  libsqlite3.dll (system): The specified module could not be found. (os error 126)
+  hint: put the library next to the script or add its folder to [ffi] search_paths
+```
+
+On Windows, error 126 for a file that exists is reworded `found, but a library it depends on could not be loaded (os error 126)`, and error 193 `not a library for this machine — 32-bit or another architecture? (os error 193)`. On Unix the `dlerror()` text is kept as is (e.g. `wrong ELF class: ELFCLASS32`).
+
+Loaded libraries (`LIBS: HashMap<LibKey, Rc<LoadedLib>>`, keyed by absolute path or `system:<candidate>`) are **never unloaded**: function values outlive scopes, and libraries hold atexit handlers and thread-locals. `v2 check` walks step 1 as existence checks only and never loads anything, because loading runs library initializers (19.3 step 5).
+
+### 16.3 The C declaration parser (`ffi/cdecl`)
+
+Three callers: `extern` bodies (a list of prototypes) and `@export` prototype strings (one prototype, `;` optional), both at parse time (4.3), and compiled C/C++ definition heads at build time (15.3: parameter names optional; `static`, `inline` and `template` recorded). The C++ dialect adds `std::string`, `const std::string&`, `noexcept`, `[[…]]`, `extern "C"` and `::`. The tokenizer yields identifiers, integers, punctuation, `...` and literals; it skips comments and returns a preprocessor line as one token.
+
+```text
+decls      = { proto ";" }
+proto      = specs declarator
+specs      = { qual | ignored } base { qual | ignored }
+base       = "void" | "bool" | "_Bool" | int_words | "float" | "double"
+           | TYPEDEF | IDENT | ("struct" | "union" | "enum") IDENT
+int_words  = any C-valid mix of signed unsigned char short int long ("long long")
+declarator = { "*" { qual } } [ callconv ] IDENT "(" params ")"
+params     = "void" | "" | param { "," param }
+param      = specs { "*" { qual } } [ IDENT ] [ "[" [ INT ] "]" ]
+qual       = "const" | "volatile" | "restrict" | "__restrict" | "__restrict__"
+ignored    = "extern" | "static" | "inline" | "__inline" | "__extension__" | callconv
+           | "__declspec" "(" … ")" | "__attribute__" "((" … "))" | "WINBASEAPI" | "WINUSERAPI"
+callconv   = "__cdecl" | "_cdecl" | "__stdcall" | "_stdcall" | "WINAPI" | "WINAPIV" | "APIENTRY" | "CALLBACK"
+```
+
+Rules on top of the grammar:
+- Calling-convention words are ignored: x64 and arm64 each have a single C calling convention. `()` means no parameters, and array parameters decay to pointers.
+- An unknown `IDENT`, or `struct/union/enum X`, is allowed **only before `*`**, as an opaque pointee such as `sqlite3*` or `FILE*`.
+- Known typedefs are `int8_t`…`uint64_t`, `size_t`, `ssize_t`, `intptr_t`, `uintptr_t` and `ptrdiff_t`, plus these Windows names on every OS:
+
+| Typedef | Meaning |
+|---|---|
+| `BOOL`, `INT`, `LONG`, `HRESULT` | `int32_t` |
+| `DWORD`, `UINT`, `ULONG` | `uint32_t` |
+| `BYTE`, `UCHAR`; `CHAR` | `uint8_t`; `char` |
+| `WORD`, `USHORT`; `SHORT` | `uint16_t`; `int16_t` |
+| `LONGLONG`; `ULONGLONG`, `DWORD64` | `int64_t`; `uint64_t` |
+| `SIZE_T`, `WPARAM`, `UINT_PTR`, `ULONG_PTR`, `DWORD_PTR` | `uintptr_t` |
+| `LPARAM`, `LRESULT`, `INT_PTR`, `LONG_PTR` | `intptr_t` |
+| `HANDLE`, `HWND`, `HMODULE`, `HINSTANCE`, `LPVOID`, `LPCVOID`, `LPWSTR`, `LPCWSTR` | opaque pointer |
+| `LPSTR`; `LPCSTR` | `char*`; `const char*` |
+
+Errors are `SyntaxError`s in `extern` bodies and prototype strings; in a definition head the same rejection makes the head unreadable (15.2):
+
+| Input | Message |
+|---|---|
+| struct/union by value, or a `{` | `structs are not supported in extern — wrap the function in a @c block` |
+| `enum X` by value | `enum types are not supported by value — declare it as int` |
+| `...` | `variadic functions (like printf) are not supported — wrap the call in a @c block` |
+| `(*name)(…)` | `function pointers (callbacks) are not supported` |
+| `typedef` | `typedef is not supported in extern — use the underlying type` |
+| preprocessor line | `#include/#define are not supported in extern — copy the prototypes` |
+| no `(` (`extern int errno;`) | `only functions can be declared in extern` |
+| unknown identifier by value | `unknown type 'SQLITE_API' — remove macros from copied declarations` |
+| `long double`, `wchar_t`, `char16_t`, `_Complex`, `__int128` by value | `type 'long double' is not supported` |
+| `int a(void), b(void);` | `declare one function per declaration` |
+| K&R definitions, references, qualified names (`A::f`) | `cannot read this declaration` |
+
+### 16.4 `CType` and platform sizes
+
+```rust
+pub enum CType {
+    Void, Bool,                     // Bool: C _Bool / C++ bool / Rust bool, 1 byte
+    Int { size: u8, signed: bool }, // size 1, 2, 4, 8
+    F32, F64,
+    Str,      // const char*: V2 str in (temporary copy); result copied, never freed
+    OwnedStr, // compiled exports only: result copied, then freed by the library (15.4)
+    Ptr,      // any other pointer: opaque native pointer
+}
+pub struct Param { pub ty: CType, pub spelling: Rc<str>, pub name: Option<Rc<str>>, pub non_null: bool }
+pub struct Sig { pub name: Rc<str>, pub ret: CType, pub ret_spelling: Rc<str>,
+                 pub params: Vec<Param>, pub err_slot: bool, pub cif: OnceCell<Rc<Cif>> }
+```
+
+| C spelling | Windows (LLP64) | Linux, macOS (LP64) |
+|---|---|---|
+| `char`, `signed char`, `unsigned char`, `bool` | 1 | 1 |
+| `short` / `int` | 2 / 4 | 2 / 4 |
+| `long`, `unsigned long` | **4** | **8** |
+| `long long`, `int64_t` | 8 | 8 |
+| `size_t`, `ssize_t`, `intptr_t`, `uintptr_t`, `ptrdiff_t`, any pointer | 8 | 8 |
+| `float` / `double` | 4 / 8 | 4 / 8 |
+
+- Plain `char` is unsigned on aarch64 Linux and signed on every other supported target.
+- `const char*` is `Str`, and so are `char const*` and `const char* const`. Every other pointer is `Ptr` (`char*`, `unsigned char*`, `void*`, `char**`, `T*`), so a non-const `char*` in `extern` is an opaque pointer in both directions (DOCS 12). To get a copied string back, declare the function with `const char*`, e.g. `const char* getenv(const char*)`; this is ABI-identical.
+- `non_null` is set only for the compiled-block string parameters of 15.3 (`std::string`, `&str`, `String`); `const char*` takes `null` as NULL.
+
+### 16.5 Argument conversion (V2 → C)
+
+Arity is checked first: `ArityError: cos() takes 1 argument (2 given)`; named arguments are `ArityError: cos() takes positional arguments only` (5.7). An engine handle anywhere in the arguments is a `MarshalError`, as for any other engine (11.7): `MarshalError: cannot pass a py handle (datetime.date) to native code; convert it with value(h) first`. A conversion failure is `FFIValueError: argument 2 ('exponent', double) of 'pow': <reason>` (an unnamed parameter omits the name).
+
+| CType | Accepts | Rejects with |
+|---|---|---|
+| `Int{size,signed}` | `int` in range (unsigned: `0..=min(2^(8·size)−1, i64::MAX)`) | `300 does not fit in uint8_t (0..255)`; any other type |
+| `F32`, `F64` | `float`; `int` (converted `as f64`) | F32: finite values beyond `f32::MAX` (NaN and ±inf pass) |
+| `Bool` | `bool` | anything else |
+| `Str` | `str` → `CString` copy; `null` → NULL unless `non_null` | `string contains a NUL byte at index 5`; `null is not a string` |
+| `Ptr` | native pointer handle → its address; `null` → NULL | `expected a native pointer or null, got int`; for `char*`: `got str — declare the parameter const char* to pass a string` |
+
+Converted values live in `ArgStore { slots: Vec<Slot>, strings: Vec<CString> }`, filled completely before any `libffi::middle::Arg` is taken and dropped after the call returns. So strings are valid **for the call only**: an API that keeps the pointer (`sqlite3_bind_text` with `SQLITE_STATIC`, `setvbuf`) ends up with a dangling pointer, and avoiding that is the declaration author's responsibility (DOCS 16).
+
+### 16.6 Return conversion and native pointers
+
+| CType | V2 value |
+|---|---|
+| `Void` | `null` |
+| `Bool` | `bool` (non-zero = `true`) |
+| `Int` | `int`; a `uint64_t`/`size_t` above `i64::MAX` is `FFIValueError: return value 18446744073709551615 of 'f' does not fit in a V2 int` (never wrapped) |
+| `F32`, `F64` | `float` (F32 widened) |
+| `Str` | NULL → `null`; otherwise the bytes up to NUL, copied into a `str`; invalid UTF-8 → `FFIValueError`; never freed |
+| `OwnedStr` | as `Str`, then the library's `__v2_free(p)` (also on the UTF-8 error path) |
+| `Ptr` | NULL → `null`; otherwise a native pointer handle |
+
+A **native pointer handle** is a `Value::Handle(Rc<HandleRef>)` whose session is the reserved `SessionId::NATIVE`; no worker owns it, so nothing of ch. 11 that needs a worker (ops, releases) ever reaches it. Its `id` is the address, its `type_name` the declared pointee (`sqlite3*`), its repr `<native sqlite3* 0x000001d2c3e4f5a0>`, and `type(p)` is `"handle"`.
+- `==` compares addresses only. NULL is always `null`, so native handles stay truthy.
+- Dropping a handle sends nothing: V2 never frees native memory.
+- `.attr`, calls, indexing, `len` and iteration raise `TypeError: native pointers support no operations — pass them to extern functions`; `value(h)`, and passing a native handle to py or js code, are `MarshalError`.
+- Any native handle fits any `Ptr` parameter. There is no pointee check, because `void*` round trips need that.
+
+### 16.7 The call path (`ffi/call.rs`)
+
+The libffi types are: `Void` → void, `Bool` → u8, `Int` → i8…u64 by size and sign, `F32`/`F64` → f32/f64, and pointer for `Str`, `OwnedStr`, `Ptr` and the error slot. `Cif`s are cached in `CIFS: HashMap<(Vec<FfiKind>, FfiKind), Rc<Cif>>`, so `int f(int)` and `int32_t g(int32_t)` share one; the lookup is memoized in `Sig.cif`.
+
+**Output order (DOCS 4.6)** uses a lazy flush, so tight loops pay nothing per call:
+- `NATIVE_DIRTY` records flush targets: a compiled library's `__v2_flush`, or "C runtime" for `extern`.
+- `flush_native()` runs every dirty target and clears the set. "C runtime" means libc `fflush(NULL)` on Unix, and on Windows `fflush(NULL)` in `ucrtbase.dll` and `msvcrt.dll` if they are loaded (`GetModuleHandleW`, pointers cached).
+- It runs before every write to the host's stdout (`print`, forwarded `out` frames), before `input()` reads, before spawning a process that inherits stdout, and at exit.
+
+`call_native(interp, f, args, span)` runs these steps:
+1. Check arity and convert the arguments (16.5). Compiled exports get a trailing pointer to a local `err = NULL`.
+2. Flush the host's stdout buffer if it is non-empty. Add the callee's flush target to `NATIVE_DIRTY` before the call, so V2 output during a reverse call flushes it. Enter one level of 9.7's depth count. Compiled exports also save and set `ACTIVE` and increment their unit's `active` (15.9).
+3. Call `unsafe { cif.call::<R>(CodePtr(sym), &args) }`. For `Bool`/`Int`, `R = u64`, then truncate or sign-extend to the declared size: libffi widens small integer results to a full `ffi_arg`, so a narrower `R` would be overrun. Otherwise `R` is `f32`, `f64`, `*mut c_void` or `()`.
+4. Restore `ACTIVE`, decrement `active` and leave the depth level.
+5. Handle the error slot (15.4), convert the return value (16.6), then re-raise a pending panic or exit (15.9).
+
+In-process calls have no timeout (`call_timeout` cannot interrupt a thread running native code) and no crash guard: a fault ends the process with the OS status (DOCS 11.7, 16). Ctrl+C during a long native call ends the process with 130 through 6.5's hard path. A library that calls `exit()` ends the process without V2's shutdown; workers then see EOF on stdin, and the kill-on-close Job Objects or `PR_SET_PDEATHSIG` end the other children (8.3).
+
+---
+
+## 17. Custom engines
+
+A custom engine is any engine that isn't built in. It comes from an `[engines.<tag>]` table in `~/.v2/config.toml` or `v2.toml` (18.2), or from `register_engine(tag, spec)` at run time, and has one of two kinds:
+
+- **`run`** (`engines/runonly`): writes the block to a temp file, runs a command and returns its stdout (DOCS 13.1).
+- **`bridged`**: an adapter process that speaks VEP/1 through the same `engines/session` code as `py` and `js` (DOCS 13.2).
+
+Every custom tag is scanned with the Plain profile (3.8): braces are counted and foreign strings and comments are not understood, so code with unbalanced braces needs the fence form. Profiles come from the built-in table only; lexing never reads config (ch. 0).
+
+### 17.1 Specs and validation
+
+A custom spec is a 7.1 `EngineSpec` with `builtin: false`, profile `Plain`, no candidates and no minimum version, plus its `command`, its timeouts, the `base_dir` used for path rewriting and an origin (`UserConfig(path) | ProjectConfig(path) | Runtime(span)`) that messages and doctor print. TOML tables (the table of the winning layer, 18.3) and `register_engine` dicts go through one validator, `engines/spec::validate`:
+
+| Key | Kinds | Rule | Default |
+| --- | --- | --- | --- |
+| `kind` | both | `"run"` or `"bridged"` | required |
+| `command` | both | non-empty list of non-empty strings (in TOML a string is one element, 18.2). `run`: some element contains `{file}`; `bridged`: none may | required |
+| `ext` | run | `[A-Za-z0-9_]+` after dropping one leading `.` | the tag |
+| `aliases` | both | each a valid tag; no repeats; none equal to the tag | `[]` |
+| `startup_timeout` | bridged | seconds (int or float), finite, `>= 0`; 0 = no limit | 30 |
+| `call_timeout` | both | as `startup_timeout` | 0 |
+
+- **Tags and aliases** match `[a-z][a-z0-9_]{0,31}`; `v2`, `export` and `import` are reserved.
+- **`register_engine`:** a tag that isn't a `str`, or a spec that isn't a `dict`, is TypeError. Every other problem is ValueError `engine '{tag}': {problem}` (7.4), e.g. `command must contain {file}`, `invalid engine tag '{t}'`, `'{t}' is reserved`, `unknown key '{k}' (did you mean '{m}'?)`, `'{k}' does not apply to {kind} engines`, `'{k}' must be {expected}, got {type}`.
+- **Config:** the same problems are configuration errors in 18.5's format (exit 2, before anything runs), except unknown keys, which are warnings (18.5).
+
+**Command paths.** `base_dir` is the folder of the declaring config file, or of the `.v2` file that called `register_engine` (18.1).
+
+- A `command[0]` without a separator is found by V2's PATH walk (7.5), which skips relative entries such as `.`.
+- Every relative element that looks like a path (contains `/` or `\`, doesn't start with `-`, contains no `{`) is resolved against `base_dir`, so `["ruby", "adapters/v2_adapter.rb"]` works from any working directory.
+- Nothing else is rewritten: there is no shell, `{file}` is the only placeholder, and `~` and `$VAR` are not expanded.
+- `V2_ENGINE_<TAG>` and `--engine TAG=PATH` replace `command[0]` only (18.4).
+
+### 17.2 Registration
+
+The registry (7.1) maps every tag and alias to its spec; aliases canonicalize everywhere, as built-in ones do (7.3).
+
+**From config, at startup:**
+
+- A table named after a built-in tag or alias is an override table (18.2); `kind` or `aliases` in it is the config error `built-in engine '{tag}' can't change 'kind' or 'aliases'`. Every other table defines a custom engine; its table comes whole from the highest layer that declares it, with no key-by-key merge (18.3); `V2_ENGINE_<TAG>`/`--engine` then replace `command[0]` (18.4).
+- A name that two tables claim, as tag or alias, is the config error `engine name '{n}' is defined by both [engines.{a}] and [engines.{b}]`.
+
+**`register_engine(tag, spec)`:**
+
+1. Validate the spec into `S` (17.1); its origin is the call span.
+2. Check every name `N` of `S` (tag and aliases) before changing anything. It is EngineNameConflict when `N` is:
+   - a built-in tag or alias: `'{N}' is a built-in engine tag; configure it with [engines.{builtin}]`;
+   - declared in a config file, even with an identical spec: `engine tag '{N}' is already registered ({path})`;
+   - owned by an earlier registration `E` that differs from `S` (another tag, or a different kind, command after rewriting, ext, alias set or timeouts): `engine tag '{N}' is already registered ({E.origin}) with a different spec`.
+3. Insert the new names, apply any pending `V2_ENGINE_<TAG>`/`--engine` override (18.4) and return `null`. An identical re-registration inserts nothing. Nothing is resolved or started.
+
+A registration lasts for the rest of the run, applies in every module, is never persisted, and affects only blocks reached afterwards (an earlier reach already raised EngineUnknown, 7.3). `engine_available(tag)` is `false` for an unknown tag and, for a custom tag, `true` when `command[0]` resolves to an executable file; it never spawns anything. `v2 check` knows the tags declared in config and those passed as string literals to `register_engine` (shown `runtime`, 19.3).
+
+### 17.3 Run engines
+
+A reached run-engine block goes through 12.1: tag resolution, the step 3 check (a block with `@export` or an inner `@import` raises ImportError `@{tag} blocks cannot @export or @import — '{tag}' is a run engine` and does not run), and args left to right. Then:
+
+1. **Source.** The processed body (4.4: dedented, directive lines blanked, `@@export`/`@@import` unescaped) with `\n` line endings, UTF-8 without BOM, and nothing added. Line *k* of the file is `.v2` line `body_first_line + k − 1` (2.3). `bat`/`cmd` files get `\r\n` instead (D67; cmd.exe's label search misbehaves in LF files), which moves no lines.
+2. **File.** Create `<run>/run/{tag}-{n}.{ext}` with `create_new` and mode 0600 (20.3), write it, close it, and replace every `{file}` in `command` with its absolute path. The source reaches the command only through `{file}`; there is no stdin mode.
+3. **Spawn**, under the child rules of 8.3 (own process group or Job Object), after flushing host stdout and dirty native stdio (16.7). The working directory and environment are inherited, plus 17.4.
+   - **stdin** is the null device: `input()` owns user stdin (DOCS 4.6).
+   - **stdout** is inherited in statement position, which keeps program order, and piped and read by a second helper thread in expression position.
+   - **stderr** is piped; a helper thread copies each chunk to host stderr at once and keeps the last 4096 bytes.
+   - A spawn failure is EngineNotFound `could not start '{path}': {os error}` (8.3).
+4. **Timeout.** With `call_timeout` set, a `Call` timer (8.5) kills the process tree at the deadline and raises EngineTimeout `@{tag} block ran longer than call_timeout ({n}s) and was stopped`. `startup_timeout` doesn't apply.
+5. **Finish.** Observe the exit without reaping, `kill_tree`, join the reader threads, then reap (8.3). Background processes the block started therefore stop with it (DOCS 13.1) and can't hold stdout open; only a process that detached itself (`setsid`, `CREATE_BREAKAWAY_FROM_JOB`) escapes.
+6. **Cleanup.** Delete the temp file on every path, ignoring errors.
+7. **Result.** A non-zero status raises EngineExitError. Otherwise a statement gives `null`, and an expression gives the collected bytes minus one trailing `\n` or `\r\n`, decoded as strict UTF-8 (else MarshalError `output of @{tag} block is not valid UTF-8 (byte {k})`).
+
+**EngineExitError** (shared with compiled programs, 15.5):
+
+- **Message:** `@{tag} block exited with status {code}`; Windows statuses `>= 0x80000000` print in hex (`0xC0000005`). A POSIX signal gives `@{tag} block was killed by signal {n} ({SIGNAME})`.
+- **`lang`** is the tag; **`data`** is `{status, signal, stderr}`. `stderr` is the kept tail, decoded lossily; when more than 4096 bytes were written it starts after the first line break inside the window. The message doesn't repeat it, because it has already streamed live.
+
+**Traps.** Scripts that resolve paths from their own location (`require("./x")`, `$(dirname "$0")`) see the run dir, not the project. On Windows a bare `bash` usually resolves to `C:\Windows\System32\bash.exe`, the WSL launcher, which can't open the Windows temp path; configure Git Bash's full path (DOCS 13.1). Doctor check RUN2 exposes this.
+
+### 17.4 Block args as environment variables
+
+The child's environment is the inherited one, minus every `V2_ARG_*` variable (matched case-insensitively on Windows, so a nested `v2` can't leak its args), plus one `V2_ARG_<name>` per arg, named as written: `@sh(target: x)` sets `V2_ARG_target`. A `str` passes unchanged; `null`, `bool`, `int`, `float`, `list` and `dict` pass as compact `json_stringify` text (`null`, `42`, `1.0`, `[1,2]`, `{"a":1}`).
+
+| Problem | Error |
+| --- | --- |
+| name not `[A-Za-z_][A-Za-z0-9_]*` | ValueError `block arg '{name}' can't be used as an environment variable name` |
+| two names equal ignoring ASCII case (checked on every OS) | ValueError `block args '{a}' and '{b}' differ only in case; run engines pass args as environment variables, which are case-insensitive on Windows` |
+| `bytes`, `func`, `handle` or `error` at any depth | MarshalError `block arg '{name}': a {type} can't be passed to a run engine` |
+| NaN or ±inf at any depth | MarshalError `block arg '{name}': NaN and infinity have no JSON form` |
+| a NUL character in a `str` | MarshalError `block arg '{name}' contains a NUL character` |
+| `V2_ARG_{name}={value}` over 32767 bytes (the Windows per-variable limit, applied on every OS) | ValueError `block arg '{name}' is too large for an environment variable ({n} bytes, limit 32767)` |
+
+### 17.5 Bridged engines
+
+A bridged engine runs exactly like `py` and `js` (ch. 8, 9, 11, 13): one worker per tag per run, started lazily, with argv from the spec, the inherited working directory, environment and stderr, and stdin/stdout as the VEP pipes. Units, selectors, handles, re-entrancy, timeouts, crashes and line mapping behave as for built-in engines. The differences: nothing is written to the run dir, no environment variables are added, and the host gates features on the `caps` of `hello`, which must arrive within `startup_timeout` with `vep: 1` and `caps` a list of strings (8.4, 9.3; unknown caps are ignored). The built-in py adapter declares all four caps; js declares all but `kwargs`.
+
+| Cap | The adapter supports | Without it, the host |
+| --- | --- | --- |
+| `modules` | `module` frames: `@import {…} from {tag}.name`, `@import {tag}.name as m` | raises ImportError `engine '{tag}' cannot import packages` and sends nothing |
+| `handles` | `h` tags, `op` and `release` | never sends `op` or `release`; an `h` tag from the adapter is ProtocolError, so the adapter answers an unmappable result with `err` MarshalError |
+| `kwargs` | named args in `call` | raises ArityError `{tag} functions take positional arguments only (got '{kw}')` and sends nothing |
+| `reverse` | adapter-sent `call` frames: inner `@import`, V2 functions passed as args | raises ImportError `@import inside @{tag} blocks needs the 'reverse' capability` before `load`, and MarshalError `engine '{tag}' can't receive V2 functions (no 'reverse' capability)` for function args; a `call` frame from the adapter is ProtocolError |
+
+### 17.6 Adapter checklist
+
+What the host relies on (frame shapes: ch. 9; porting a built-in adapter: 14.5):
+
+1. **Framing.** One compact JSON object per line, `"t"` first, UTF-8, every control character escaped (use a real JSON encoder), ending in `\n`, written in binary mode; the host drops one `\r` before the `\n`. Split input on the `\n` byte only: never universal newlines, a `readline` that breaks on `\r`, or `splitlines`. Frames are at most 64 MiB in each direction; answer `err` MarshalError instead of sending a larger one.
+2. **Stdout is the protocol.** Before `hello` the host forwards non-JSON lines (interpreter startup noise) to stderr; after `hello` any line that isn't a frame is a fatal ProtocolError.
+3. **Replies.** Send `hello` before running user code. Answer every `init`, `load`, `module`, `call` and `op` with exactly one `ret` or `err` echoing its `id`, innermost first (9.7); `release` and `bye` get no reply. An unknown `t` gets `err` ProtocolError and the adapter keeps running. Catch every exception per request, so user code can't end the worker.
+4. **User I/O.** Before user code runs, move the protocol to a private non-inheritable descriptor, point fd 0 at the null device and fd 1 at fd 2 (where the language can't, keep user code off the protocol descriptors as 9.9 does for Node), and replace the language's stdin with one that raises and its stdout with a writer that makes `out` frames. Language-level output then reaches the host as `out` frames before the `ret`/`err` of the request that produced it; fd-level output and inheriting child processes land on stderr (DOCS 4.6). Output produced while idle is buffered and sent before the next frame (9.9).
+5. **Loading.** Each unit gets a fresh namespace with the block args bound. An action's `ret` carries its last expression's value (or `null`) with empty `exports` and `missing`; a definition reports undefined exports in `missing` (9.4) and keeps its namespace until `bye`.
+6. **Calls.** Look the target up by exact name in the unit's export table; never evaluate a name. A foreign exception becomes `err` with its foreign type, its message and a trace in `.v2` positions (12.6).
+7. **Values.** Encode per ch. 10. Never stringify an unmappable value: send a handle (with `handles`) or `err` MarshalError.
+8. **Re-entrancy (with `reverse`).** Serve incoming requests while waiting for your own reply. Call into V2 only while a host request to this adapter is executing, and only from the thread it arrived on; otherwise raise an error in the foreign language (DOCS 8.4, 9.8). Stored callbacks stay valid for later requests. The host can't enforce this rule, because it reads a worker's frames only while a request to that worker is pending.
+9. **Releases.** Finalizers only queue releases; the queue goes out just before the next outgoing frame (9.10).
+10. **Shutdown.** On `bye`, even while waiting for a reply, flush pending output and exit 0 within 1 s (9.10); on stdin EOF, exit quietly.
+
+### 17.7 `v2 doctor TAG` for custom engines
+
+This is 19.2's deep test for a custom tag. Doctor prints one line per check (`PASS` or `FAIL`, the check id, the check text; a failure adds the offending bytes or the stderr tail), then 19.2's last line, `{tag}: ok` or `{tag}: FAILED: <error>`. It exits 0 if every check passes, 1 on any FAIL, 3 if `command[0]` isn't found, and 2 for an unknown tag (19.2). BR2 is limited by `startup_timeout` and every other step by 10 s. After `hello`, a stdout line that isn't a frame fails the current step; noise before `hello` is listed, not failed.
+
+| Id | Check |
+| --- | --- |
+| RUN1 | the spec is valid (its origin is printed) and `command[0]` resolves (its path is printed) |
+| RUN2 | an empty block, run as an empty `<run>/probe.{ext}`, exits 0 with empty stdout |
+| BR1 | `command[0]` resolves |
+| BR2 | the first frame is a JSON object with `t = "hello"`; its fields and the handshake time are printed |
+| BR3 | `vep == 1` and `caps` is a list of strings; unknown caps are listed but don't fail |
+| BR4 | `init` gets a `ret` with the same `id` |
+| BR5 | loading an empty action unit gets a `ret` with `value` `null` and empty `exports` and `missing` |
+| BR6 | calling `__v2_doctor_missing` in that unit gets an `err` with a non-empty type and message, and the adapter stays alive |
+| BR7 | a request with `t = "x-doctor"` gets an `err` ProtocolError echoing its `id` |
+| BR8 | with `handles` only: a `release` of an unknown id gets no reply, and BR5 still passes afterwards |
+| BR9 | `bye` makes the adapter exit 0 within 1 s |
+
+Doctor can't exercise exports, callbacks or handles, which need code in the adapter's own language. Adapter authors cover checklist items 4–9 with their own `.v2` tests; the V2 repository covers the host side with `tests/custom` and the fake adapter (22.3).
+
+---
+
+## 18. Configuration
+
+Module `config/`. Config is loaded before any script is parsed; the lexer and parser never read it (D3).
+
+### 18.1 Files, project root and relative paths
+
+- **Files:** `~/.v2/config.toml` (user defaults) and the project's `v2.toml`; a missing file is an empty layer. `~` is `%USERPROFILE%` on Windows and `$HOME` elsewhere, read from exactly these variables (22.2). With no home folder the user layer is skipped and the `~/.v2` caches are off (7.7, 15.6); check and doctor warn.
+- **No ownership checks** (D70): V2 never refuses `v2.toml`, `config.toml` or `~/.v2` because of owner or permissions; it is a same-user tool (20.1).
+- **Project root:** start at the entry file's folder (`v2 FILE`, `v2 check FILE`) or the cwd (`v2 run`, `v2 doctor`), made absolute, and walk up; the first folder holding a regular file `v2.toml` is the root, else the start folder. One project per run: V2 modules imported from other folders use the entry's config.
+- **Relative paths** resolve against the folder of whatever declared them (DOCS 14): `v2.toml` → the project root; `config.toml` → `~/.v2`; `V2_ENGINE_*` and `--engine` → the cwd; a `register_engine` spec → the calling `.v2` file's folder. This covers `[project] entry`, `[python] venv`/`paths`, `[node] modules`/`paths`, `[ffi] search_paths` and engine commands:
+  - `command[0]` and a transpiler's `argv[0]`: with a separator, joined to that folder; without one, the `PATH` walk (7.5).
+  - Later `command` elements (D38) that are relative, contain `/` or `\`, do not start with `-` and contain no `{` are made absolute against that folder, so `["ruby", "adapters/v2_adapter.rb"]` works from any cwd. Nothing else is rewritten; `~` and `$VAR` are not expanded.
+  - Paths used by scripts are separate (D26): `read_file`/`write_file` use the cwd; `import` and `extern` the `.v2` file's folder.
+
+### 18.2 Schema
+
+`[engines.<tag>]` names are canonicalized (`[engines.python]` is `[engines.py]`; both in one file is an error). A built-in tag accepts only the built-in keys below; any other tag declares a custom engine, whose keys and messages are 17.1's (every key optional except `kind` and `command`, D37).
+
+| Key | Type | Default | Applies to; meaning and validation |
+|---|---|---|---|
+| `[project] name` | string | root folder name | shown by check and doctor |
+| `[project] entry` | path | none | what `v2 run` runs; must exist then |
+| `[engines.T] command` | array of strings (a string = one element, never split) | auto (7.6) | non-empty. Built-in: interpreter or compiler argv prefix, skipping auto-detection; custom: 17.1 (a `run` command must contain `{file}`; there is no `source` option, D65) |
+| `[engines.T] flags` | array of strings | `[]` | `c`, `cpp`, `rust`: extra compiler flags, after V2's own (15.7) |
+| `[engines.T] startup_timeout` | number, s | 30 | `py`, `js` (also for ts), custom bridged: spawn to `init` reply (8.4); finite, ≥ 0, 0 = none |
+| `[engines.T] call_timeout` | number, s | 0 = none | each request to a `py`/`js` worker or custom bridged engine, each run of a custom `run` engine or a `c`/`cpp`/`rust` program (8.5, D39); in-process calls (compiled exports, `extern`) ignore it |
+| `[engines.ts] transpiler` | `"node"`, string, array | `"node"` | 7.6 (D36) |
+| `[engines.T] kind`, `ext`, `aliases` | per 17.1 | 17.1 (`ext` = the tag) | custom engines only |
+| `[python] venv` | path | none | venv whose interpreter and packages are used (7.6) |
+| `[python] paths` | array of paths | `[]` | module folders after the `.v2` file's folder and the project root (9.3) |
+| `[node] modules` | path | `node_modules` | package folder, passed via `NODE_PATH` (8.3, D54) |
+| `[node] paths` | array of paths | `[]` | more folders after `modules` |
+| `[ffi] search_paths` | array of paths | `[]` | first step of the `extern` search, before the `.v2` file's folder, the project root and the system (16.2, D60) |
+
+`[engines.ts]` takes only `transpiler`: `command` there is an error with 18.4's message; `startup_timeout` and `call_timeout` are warnings (`ts runs in the js session; set it in [engines.js]`).
+
+### 18.3 Layers and merging
+
+L0 built-in < L1 `~/.v2/config.toml` < L2 `v2.toml` < L3 `V2_ENGINE_<TAG>` < L4 `--engine` (DOCS 14).
+- Per key the highest layer wins; arrays are replaced, never concatenated. Tables of built-in engines merge key by key (a `command` from L1 and a `call_timeout` from L2 both apply); a custom engine's table comes whole from the highest layer that declares it (17.2), and L3/L4 then replace its `command[0]`.
+- `[engines.py] command` and `[python] venv`: the higher layer wins; on a tie, `command`.
+- Validation runs on the merged result and names the file of the bad value.
+- Values are `Sourced<T> { value, from: ConfigSource }`, `ConfigSource = Default | Path | Vswhere | Venv | User(PathBuf) | Project(PathBuf) | Env(String) | Cli | Runtime(FileId)` (doctor's FROM column). `Config` holds the root and the files read, `[project]`, `engines: IndexMap<canonical tag, EngineCfg>` (fields `Option<Sourced<_>>`), `[python]`, `[node]`, `[ffi]`, `pending` overrides (18.4), `warnings` and `no_cache`.
+
+### 18.4 Environment and command-line overrides
+
+- `V2_ENGINE_<X>` (prefix case-insensitive on Windows; `X` lower-cased and canonicalized, so `V2_ENGINE_PYTHON` is py) holds one executable path, never split; empty = unset; two variables naming one engine are a configuration error. `--engine TAG=PATH` is repeatable (last wins) and TAG may be an alias. A relative PATH resolves against the cwd.
+- Effect: a built-in engine gets `command = [PATH]`, dropping any prefix such as `py -3` (a `cl.exe` path follows 7.6 step 3); a custom engine gets `command[0] = PATH`, the rest kept; ts is a configuration error: `ts has no executable of its own; use --engine js=PATH or [engines.ts] transpiler`. A tag unknown at startup goes to `pending`: applied if `register_engine` later registers it, else ignored (check and doctor warn).
+
+### 18.5 Parsing and validation
+
+- A leading UTF-8 BOM is dropped (invalid UTF-8 is an error); the `toml` crate parses each file into a `toml::Table`; validation is hand-written (1.4).
+- Errors exit 2 before anything runs. Syntax: `C:\proj\v2.toml:12:5: config error: <toml message>` (position from the error span). Wrong type or value (a `toml::Table` keeps no positions): `C:\proj\v2.toml: config error: [engines.py] startup_timeout: expected a non-negative number, got string "30s"`; custom engine tables use the same form with 17.1's problem text.
+- Warnings (`Config.warnings`, printed only by check and doctor): unknown sections and keys, also in custom engine tables, with did-you-mean (`warning: C:\proj\v2.toml: unknown key [engines.py] comand (did you mean 'command'?)`); keys that do not apply (`flags` on py, `transpiler` on js, `[project]` in `config.toml`); listed folders that do not exist.
+
+---
+
+## 19. CLI, doctor and check
+
+`cli/` is a hand-written argv parser; `doctor/` holds doctor and check.
+
+### 19.1 Commands and exit codes
+
+| Command | Does |
+|---|---|
+| `v2 [FLAGS] FILE [ARGS...]` | run FILE; ARGS become `args()` |
+| `v2 [FLAGS] run [ARGS...]` | run `[project] entry` (18.1); `no v2.toml found in C:\x or its parents` or `v2.toml has no [project] entry`: exit 2 |
+| `v2 [FLAGS] check FILE` | 19.3 |
+| `v2 [FLAGS] doctor [TAG]` | 19.2; the positional TAG (an alias works) selects the deep test (D34) |
+| `v2 cache clean` | 19.4 |
+| `v2 --version`, `v2 --help` | `v2 <crate version> (VEP/1)`; the command, flag and exit-code tables |
+
+FLAGS are `--engine TAG=PATH` (repeatable, 18.4) and `--no-cache` (19.4), read from `argv[1]` up to the first other word (`--` ends them). That word is a subcommand if it is exactly `run`, `check`, `doctor` or `cache`, else the script (`v2 ./doctor` runs a file named doctor); everything after FILE or `run` goes to `args()` untouched. check and doctor also take FLAGS after the subcommand. `--engine` without `=PATH` is a usage error (hint: `v2 doctor TAG` tests one engine). No arguments, an unknown flag, or a missing or unreadable FILE: a message on stderr, exit 2.
+
+| Exit | Meaning (D15) |
+|---|---|
+| 0 | success |
+| n | `exit(n)`: an int in i32 range; POSIX keeps the low 8 bits |
+| 1 | uncaught error or `SyntaxError` (`EngineUnknown` included); check found errors; a `doctor TAG` test failed |
+| 2 | usage or configuration error (18.5), before any V2 code runs |
+| 3 | uncaught `EngineNotFound`; check found a required engine missing (19.3); `doctor TAG` did not find the engine |
+| 130 | interrupted: Ctrl+C, Ctrl+Break, console close, SIGINT, SIGTERM, SIGHUP; always 130, never 128+signo; no `finally`, engines stopped, `<run>` removed (6.5, 8.7) |
+| 101 | internal panic, a V2 bug (6.5) |
+
+### 19.2 v2 doctor
+
+1. Load config from the cwd (18.1; error: exit 2); the registry is the built-ins, then the config's custom engines. Resolve every engine with fresh probes (7.7), rewriting the probe cache. Doctor executes toolchain commands, including project-configured ones (`v2.toml` commands, the venv python, vswhere and vcvarsall) (D69), so it is not an audit tool; `v2 check` is.
+2. Print a table to stdout, columns `ENGINE STATUS COMMAND VERSION FROM`, each as wide as its longest cell + 2 (DOCS 2). COMMAND: `shown` plus prefix args, space-joined, unquoted; ts: `(js engine, built-in type stripping)` or `(js engine, transpiler: <argv>)`; custom: the argv template, VERSION `-`. VERSION: the probed version (ts: Node's). FROM: `PATH`, `vswhere`, `venv`, `v2.toml`, `config.toml`, `V2_ENGINE_<TAG>`, `--engine` or `-` (ts: js's, or where its transpiler is set). STATUS: `ok`; `missing` (other columns `-`); `old` (only versions below the minimum; VERSION the newest; also ts on a Node without stripping); `broken` (probe failed or timed out, wrong target, or a configured command, venv or transpiler missing).
+3. Then `notes:` (skipped hits such as Store placeholders, 7.8 install hints, compiler family and target), the config files used and config warnings. Exit 0: missing engines are information, not failure.
+
+`v2 doctor TAG`: an unknown tag prints the `EngineUnknown` message, exit 2; an engine not found prints the 7.8 message, exit 3. Otherwise:
+- **py, js, ts:** start the session (8.3, 8.4), print the `hello` fields and the handshake time, run an action unit whose value must be the int `2` (`1 + 1`; ts: `const x: number = 1; x + 1` in the js session), shut down (8.7).
+- **c, cpp, rust:** compile, never served from the cache (15.6's `--no-cache` path), a synthetic block exporting `add` (`int add(int a, int b)` / `fn add(a: i32, b: i32) -> i32`), call `add(2, 3)` through libffi and require `5`; build an action program printing `ok` and compare its stdout; print each compiler command line and its time.
+- **Custom engines:** 17.7's checks (RUN1–RUN2 for run engines, BR1–BR9 for bridged), with 17.7's output and exit codes.
+
+The last line is `py: ok` or `py: FAILED: <error>`; exit 0, or 1 on any failure.
+
+### 19.3 v2 check
+
+Check executes nothing (no engine, compiler, probe, transpiler, `xcode-select`, `vswhere`, or library load, which would run initializers) and writes nothing (no probe cache, no `<run>`); it only reads files and metadata (D69, 20.1).
+1. Load config (18.1, from FILE's folder; error: exit 2). Parse FILE and, transitively, every `import "…"` target once (paths are literals, so imports inside `if` count too); a cycle gives the run-time `ImportError` text (6.4); a file that fails to parse is reported and its imports are skipped.
+2. **Errors per file:** every `SyntaxError` (D1; format 2.4) of chapters 3, 4 and 16.1, such as directive syntax, duplicate labels, block args on a compiled tag (D32), `@import SEL as NAME` without a package selector (D10), a definition block used as a value, `extern` declarations, and quoted `@export` prototypes in compiled blocks that `ffi::cdecl` cannot read (16.3). Check adds: `@export`/`@import` in a block of a config-declared `run` engine (17.3); in a compiled block, `@import` without `@export` (D57) and `@import { * }` or `@import SEL as h` (15.2); explicit export items whose function cannot be exported (15.2).
+3. **Engines:** every tag in block headers and selectors, plus `register_engine("<literal>", …)` tags (shown `runtime`). Unknown: an `EngineUnknown` error with did-you-mean (a warning instead if a checked file calls `register_engine` with a non-literal tag). Known: resolved by 7.6 without executing (a configured command or venv interpreter must exist; `PATH` is walked); versions and skips come from matching probe-cache entries (ts from the cached Node version, D33), else VERSION is `not probed` and a `WindowsApps` alias `unverified`.
+4. **Packages:** each module selector, its first use, and a location if a stat finds one (py: `x.py` or `x/__init__.py` in the script folder, the project root, `[python] paths` or the venv's `site-packages`; js: `node_modules/<name>/package.json` walking up from the script folder, then `[node] modules` and `[node] paths`), else `(resolved by python/node at run time)`. Never an error.
+5. **Libraries:** each `extern "lib"` through 16.2's search order (D60) as existence checks. A missing path library is an error (the `FFILoadError` text); `"c"` and `"m"` show `system (not verified)`; a bare name with no hit is a warning (`not found in <folders>; the system loader may still find it`): ld.so.cache, the dyld cache and system DLLs cannot be checked without loading.
+6. **Compiled blocks:** export signatures are parsed (15.2, 15.3) without compiling; check lists each export with its V2 types and the functions `@export { * }` leaves out, with the reason (D56).
+7. Diagnostics go to stderr (2.4); the inventory to stdout: `check main.v2: 2 files, 0 errors, 1 warning`, then sections `ENGINES` (tag, status, command, version, uses like `main.v2:12 stats`), `PACKAGES`, `LIBRARIES`, `COMPILED`.
+8. Exit 1 on any error; else 3 if a used engine is missing, not counting `runtime` tags and tags named by a literal `engine_available("<tag>")` in the checked files (DOCS 10's skip pattern, shown `optional`); else 0.
+
+### 19.4 v2 cache clean and --no-cache
+
+- `v2 cache clean` deletes everything under `~/.v2/cache/` (`build/`, `toolchains.json`) entry by entry, never `config.toml`, and prints `removed 118 files (43.2 MB) from C:\Users\me\.v2\cache`; files it cannot delete (on Windows, libraries a running V2 has loaded) are skipped and counted (15.6). Exit 0, or 2 if the home folder is unknown.
+- `--no-cache` applies to runs: compiled blocks are always rebuilt, never served from the build cache, and the fresh build replaces the cache entry (15.6); the probe cache is not read, so probes run fresh (7.7). Doctor already probes fresh; check ignores the flag.
+
+---
+
+## 20. Security model
+
+### 20.1 Trust boundary
+
+V2 is a same-user tool. Everything a `.v2` file contains runs with the user's rights: its blocks, compiled blocks, `extern` libraries and the engine commands its config names. The mitigations in 20.2 keep three promises:
+
+- **Data stays data.** V2 values never become code: block args and call arguments travel as data, and V2 never inserts values into foreign source (DOCS 4.1, 4.4).
+- **No code the user didn't choose.** A downloaded project or another local user can't get code run through the working directory, `PATH`, DLL planting or the build cache.
+- **Inert audit.** `v2 check` executes nothing and writes nothing (19.3).
+
+Out of scope: sandboxing, permission prompts, signature checks, defending against the user's own other processes, and the config files themselves. A `v2.toml` found by the upward search, or `~/.v2/config.toml`, is trusted like the script: V2 checks neither its owner nor its permissions, and `v2 doctor` lists the config files it read (19.2).
+
+### 20.2 Threats and mitigations
+
+| Threat | Mitigation | Where |
+| --- | --- | --- |
+| Running an untrusted `.v2` file or project | No sandbox (DOCS 16). The audit path is `v2 check` (19.3): it parses and resolves commands by path lookup only (stat, no `--version`), and never starts a worker, runs a compiler or transpiler, loads an `extern` library (loading runs its initializers) or calls `register_engine`. `v2 doctor` *does* run toolchain commands, including those a project's `v2.toml` configures (19.2) | cli/, doctor/ |
+| Temp-file and symlink races | Temporary files live only in the private run dir (20.3) or in a temp dir inside the owner-only build cache (15.6). Files are created with `create_new` (`O_CREAT` + `O_EXCL`, which also refuses a planted symlink) and mode 0600. V2 never opens a predictable path in the shared temp dir and never writes into the project | engines/runonly, engines/session, build/ |
+| Tampered adapter | `py.py` and `js.js` are embedded (`include_str!`) and written create-new into `<run>/adapters/` when their session first spawns (14.1); they are never read from the project, `PATH` or `~/.v2` | adapters/ |
+| Data breaking the frame stream (the old `\r` desync) | Frames are written only by serde_json and each language's JSON encoder, which escape every control character. Readers split on the `\n` byte only and drop one `\r` before it, so `\r`, U+0085, U+2028 or `\x1c` inside a string can't end a frame. Frames over 64 MiB are refused in both directions; after `hello` a line that isn't a frame is a fatal ProtocolError (9.11) | codec/json, engines/vep |
+| User code or its children reaching the protocol | Before user code runs, each adapter guards the protocol (9.9). Python moves it to private non-inheritable fds, points fd 0 at the null device and fd 1 at fd 2 (14.3). Node has no `dup2`, so the protocol stays on fds 0 and 1: frames are written with a saved `fs.writeSync(1, …)` and read with `fs.readSync(0, …)`, and the adapter wraps `process.stdout`, `process.stdin`, `console`, `fs` calls on fds 0–2 and `child_process` stdio (14.4). Child processes can neither read nor write frames, and fd-level output lands on stderr (DOCS 4.6). Remaining gap: a native addon, or code that reopens `/dev/stdout` or bypasses the wrappers, can still corrupt the stream (fatal ProtocolError, 9.11) | adapters/ |
+| Evaluating names | Calls resolve through the unit's export table, never by evaluating text from a frame (the old JS worker did `eval(req.fn)`); the only generated code is 12.4's `(() => NAME)` getter, built for a name that passed the identifier test. Python names: `str.isidentifier()` and not `keyword.iskeyword()`, per dotted segment for module names (13.5). JS export names: `/^[\p{ID_Start}$_][\p{ID_Continue}$\u200C\u200D]*$/u` and not reserved; JS specifiers reach `require`/`import()` as strings. Block args are bound as values (DOCS 4.4) | adapters/, engines/units |
+| Module shadowing | The search order is documented (DOCS 5, 7), and a local `statistics.py` shadowing the stdlib is intended, as in plain Python. Adapters import their own dependencies before user folders join the module path and remove their own folder from it (9.3, 14.3), so user files can't replace adapter internals. The cwd is never added as such | adapters/ |
+| Build-cache poisoning | The cache lives only in `~/.v2/cache/build` (mode 0700), never in the project, so a cloned repo can't ship a library that V2 would load (DOCS 11.5, 16). The key covers the source, the compiler's path, version and target, the flags and the generated prelude; an entry appears only through one atomic rename of a same-volume temp dir (15.6) | build/cache |
+| Command and library hijack | V2's own PATH walk skips relative and empty entries such as `.` (7.5), and children are spawned by absolute path. `extern` libraries are searched in `[ffi] search_paths`, the `.v2` file's folder, the project root, then the system default (16.2). Windows: `SetDllDirectoryW(L"")` at startup removes the current directory from the DLL search order while `PATH` stays in it, and a library resolved to a full path is loaded with `LoadLibraryExW(path, LOAD_WITH_ALTERED_SEARCH_PATH)`, so its dependencies come from its own folder first. POSIX: relative library paths are made absolute against the `.v2` folder before `dlopen`; macOS never uses bare-name `dlopen`, which searches the cwd | ffi/lib, engines/resolve |
+| Processes outliving their block or the run | Every child runs in its own session on Unix (`setsid()` in `pre_exec`: no controlling terminal, so terminal signals never reach it and a `/dev/tty` prompt fails at once instead of stopping it), and in its own process group (`CREATE_NEW_PROCESS_GROUP`, which blocks Ctrl+C only: Ctrl+Break and console close reach every process on the console; adapters ignore SIGBREAK, and the host's handler sets `INTERRUPTED` first, so child failures that event causes are never reported) plus a Job Object on Windows (8.3). Run-engine and compiled-program trees are killed when their block finishes or times out (17.3), workers as trees at shutdown (8.7); kill-on-close Job Objects (Windows) and `PR_SET_PDEATHSIG` (Linux) also cover a host that dies | engines/session, engines/runonly |
+| Environment inheritance | Engines inherit the environment and cwd (DOCS 16), including `PYTHONPATH`, `NODE_OPTIONS` and `LD_PRELOAD`: the user's own settings, trusted. V2 adds only `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8` (py), `NODE_PATH` (js, 14.1), compiler locale and vcvars variables (15.7) and `V2_ARG_*` (run engines, after removing inherited ones). No channel token or other secret travels in the environment. Args passed as env vars can be read by the user's other processes (`/proc/<pid>/environ`) | engines/session, engines/runonly |
+| Memory safety of FFI and compiled code | Trusted and unsandboxed (DOCS 11.7, 12). V2 checks only what it converts: integer ranges, NUL in strings, `null` for non-null string parameters, unsigned results above `i64::MAX`, UTF-8 of returned strings (16.5, 16.6). Pointers are opaque values that come only from native returns or `null`; there is no int-to-pointer conversion. `const char*` arguments live for the call only. V2 never frees memory returned by `extern` functions; strings returned by a compiled block are freed with that library's own `__v2_free` (same CRT). A native crash kills the process: there is no crash handler | ffi/, build/shims |
+
+### 20.3 The private run directory
+
+- **Path.** `<run>` = `temp_dir()/v2-{pid}-{32 hex}`, the hex being 16 bytes from the OS RNG. It is created on first need, so a pure-host script never makes one.
+- **POSIX.** Create it with `mkdir` and mode 0700. If the name exists, draw a new one; after 8 tries, raise IOError `cannot create a private temp folder in {base}`. Then `lstat` must show a real directory (not a symlink) owned by the euid, with mode 0700.
+- **Windows.** Create it with `CreateDirectoryW` and a protected DACL that grants full control only to the current user's SID (from `GetTokenInformation(TokenUser)`): SDDL `D:P(A;OICI;FA;;;{sid})`.
+- **Contents.** `run/{tag}-{n}.{ext}` (17.3); `adapters/` (14.1); `build/<k>/` for every build (15.6), from which libraries and their 15.8 copies are loaded only when `~/.v2` is unusable; otherwise the copies live in the cache entry (15.6, 15.8). Every file is created with `create_new`.
+- **Removal.** On every exit path (normal end, uncaught error, `exit()`, interrupts), after workers and child trees have stopped (6.5); errors are ignored. A host killed outright (SIGKILL, `TerminateProcess`, a native crash), or a library that still pins a file, leaves the folder behind; it stays in the temp dir, owner-only.
+
+---
+
+## 21. Failure-mode matrix
+
+### 21.1 Conventions
+
+- **Placeholders.** `{tag}` is the canonical tag, `{name}` the called or imported name, `{sel}` the selector as written, and `{block}` the full `block_name(b)` output (12.1, D31): `block 'stats'` when labeled, `@py block at main.v2:12` otherwise. A section number in the Message column points at the defining text.
+- **Dead.** The worker has exited or been killed; every unit, Proxy and handle of its session is invalid, and engines are never restarted. The use that observes the death raises the matching "exited", "timeout" or "protocol" row; every later use raises 8.2's `engine '{tag}' is not running (…); engines are not restarted` (8.2, 9.11), except a session that never started (Dead(SpawnFailed): spawn failure, a `hello` version below the minimum, Windows status 9009 at startup), whose later uses re-raise the stored EngineNotFound (exit 3 if uncaught).
+- **SyntaxError** is a diagnostic, not a value: `{file}:{line}:{col}: SyntaxError: {msg}` with the source line and a caret (2.4), reported before anything runs, exit 1, uncatchable in its own file. In an `import`ed module it reaches the importer as ImportError (message: the first diagnostic; `data`: all of them; 6.4).
+- **Exit codes** (6.5, 19.1): 0 success; `n` for `exit(n)`; 1 uncaught error (EngineUnknown included) or SyntaxError; 2 usage or configuration error, before anything runs; 3 uncaught EngineNotFound, `v2 check` finding a required engine missing, or `v2 doctor TAG` not finding its engine; 130 any interrupt, never 128 + signal; 101 internal panic.
+
+### 21.2 Matrix
+
+| Trigger | Detected by | Kind | Message | State after |
+| --- | --- | --- | --- | --- |
+| **Setup** | | | | |
+| Unknown tag (`@pyhton`) | registry when the block is reached; `v2 check` statically | EngineUnknown | 7.3 `unknown engine '@pyhton' (did you mean '@py'?)` | nothing started; later reaches fail the same way unless `register_engine` runs first |
+| Toolchain missing or too old; only the Store placeholder `python.exe` (exits 9009) found | engines/resolve at first use (7.6, 7.7) | EngineNotFound | 7.8 `engine 'py' (Python) not found` plus `tried:`, `skipped:` and `install:` lines | failure memoized for the run (7.1); exit 3 if uncaught |
+| Configured command, venv or transpiler missing; Node too old for `@ts` stripping | engines/resolve | EngineNotFound | 7.6 (`engine 'py' command 'C:/Python312/python.exe' not found (set by C:\proj\v2.toml)`, `@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found …) — upgrade Node or set [engines.ts] transpiler`); custom: 7.4 `'lua' not found on PATH (engine declared in C:\proj\v2.toml)` | as above; never falls back to auto-detection |
+| Executable can't start | spawn | EngineNotFound | 8.3 `could not start '{path}': {os error}` | Dead (SpawnFailed); later uses re-raise this EngineNotFound |
+| `hello` reports a version below the minimum | engines/session | EngineNotFound | 8.4 `Python 3.6.8 at {path} is too old (needs 3.8+)` | killed; Dead (SpawnFailed); later uses re-raise this EngineNotFound |
+| No `hello` and `init` reply within `startup_timeout` | watchdog | EngineTimeout | 8.4 `engine 'py' did not start within 30 s ({path}); raise [engines.py] startup_timeout if it is only slow` | killed; Dead |
+| Worker exits before `hello`; `init` answered with `err` | engines/session | EngineCrashed | 8.4 `engine 'py' exited during startup (exit code 1); see its error output above` / `engine 'py' failed to start: {message}` | Dead |
+| Non-JSON lines before `hello` (`sitecustomize`, `NODE_OPTIONS` preloads) | engines/vep | none | forwarded to stderr | startup continues |
+| A JSON frame other than a valid `hello` (including `out`) before `hello`; `vep` other than 1 | engines/session | ProtocolError | 8.4 `engine '{tag}' sent '{t}' before hello`; 9.3 `engine '{tag}' speaks VEP/{n}; this V2 speaks VEP/1` | killed; Dead |
+| Invalid config file or custom engine table | config/, engines/spec | configuration error | 18.5 | exit 2 |
+| Bad `register_engine` arguments | engines/spec | TypeError, ValueError | 17.1 | registry unchanged |
+| Built-in, config-declared or differently registered engine name | engines/registry | EngineNameConflict | 17.2 | registry unchanged |
+| **Blocks and imports** | | | | |
+| Exception while a definition block loads, foreign syntax errors included | adapter at `load` | ForeignError (`foreign_type` e.g. `SyntaxError`) or the reported kind | the foreign message at its `.v2` line, with a source excerpt (2.4) | unit `Failed`: every later reach re-raises the same stored error without running code or evaluating args (12.1) |
+| The same in an action block | adapter | ForeignError | as above | nothing kept; the next reach runs the block again |
+| `@export` lists a name the block doesn't define | adapter (`missing`, 9.4) | ImportError | 12.2 `@export lists 'typo' but block 'geometry' does not define it` | unit `Failed` |
+| Definition block reached again during its own load | engines/units | ImportError | 12.1 `block 'stats' is still loading (reached again during its own load)` | the load continues |
+| `@export` or `@import` in a run-engine block | engines/units (12.1 step 3); `v2 check` for config engines | ImportError | `@{tag} blocks cannot @export or @import — '{tag}' is a run engine` | block not run |
+| Name not exported by the selected blocks | engines/imports | ImportError | `'{name}' is not exported by '{sel}' (did the block @export it?)` | nothing bound |
+| Ambiguous name, named or `*` | engines/imports | ImportError | 13.3 `Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats' and 'calc') — use @py.stats or @py.calc` | nothing from that `@import` bound |
+| Selector matches no definition block | engines/imports | ImportError | `No engine exports found for selector '{sel}'` | nothing bound |
+| V2-level `@import` from a block not reached yet / still loading | engines/imports | ImportError | `{block} has not run yet — move this @import below it` / 13.3 `… is still loading …` | nothing bound |
+| `@import` from a `Failed` block | engines/imports | ImportError | `{block} failed to load: {message}` | nothing bound |
+| Inner `@import` stub called before its target block loads | host on `call {route}` (13.6) | ImportError, raised into the calling engine | 13.7 `block 'b' has not run yet — 'f' can't be called before it loads` | route stays pending |
+| Foreign package not found | adapter on `module` | ImportError (`lang`, `foreign_type` set) | the foreign message (`No module named 'pandas'`) | session fine |
+| Invalid Python module name | engines/imports, before sending | ImportError | 13.5 `'my-mod' is not a valid Python module name` | nothing sent |
+| Module selector on a compiled or run engine; adapter without `modules` | engines/imports | ImportError | 13.5 `module imports need a bridged engine — 'c' is compiled`; 17.5 `engine '{tag}' cannot import packages` | nothing sent |
+| Whole-module handle into another engine's block | engines/imports | ImportError | 13.7 | block not loaded |
+| Constant export from a compiled block | build/ | ImportError | 15.2 `block 'fastmath' exports 'x', but does not define it as a function` | unit `Failed` |
+| **Calls and values** | | | | |
+| Foreign exception | adapter `err` | ForeignError | the foreign message; uncaught: `ForeignError: {foreign_type}: {message}` at the innermost mapped `.v2` frame, with an excerpt (2.4) | session fine |
+| Python `sys.exit()` / JS `process.exit()` in a block | adapter (9.7) | ForeignError `SystemExit` / a JS `Error` thrown in the block | 9.7 | worker keeps running |
+| V2 error thrown inside a callback | host replies `err` with `v2`; the adapter re-raises it | its original kind | its original message | session fine |
+| Named args to js/ts, compiled or `extern` functions, or a bridged engine without `kwargs` | host, before sending | ArityError | `{tag} functions take positional arguments only (got '{kw}')`; native: 5.7 `{name}() takes positional arguments only` | nothing sent |
+| Handle passed to another engine, compiled code or `extern` | codec | MarshalError | another engine: 11.7 `this handle belongs to engine 'py' and can't be passed to 'js' — convert it with value(h) first`; compiled code and `extern`: 16.5 `cannot pass a py handle (datetime.date) to native code; convert it with value(h) first` | nothing sent |
+| Arithmetic, ordering, `in` or slicing on a handle | runtime | TypeError | 5.2, 11.7, with the "do it inside a block / `value(h)`" hint | handle still valid |
+| `value(h)` can't convert | adapter on `op value` | MarshalError | 11.5 `value(): can't convert datetime.date to V2 data` | handle still valid |
+| Value nested deeper than 256, cyclic, or holding an unpaired surrogate | codec, adapter | MarshalError | 10.4, 10.5 | nothing sent |
+| Outgoing frame over 64 MiB | codec | MarshalError | 9.1 `value too large to send to engine 'py' (70 MiB, limit 64 MiB)` | nothing sent |
+| Coroutine or Promise returned inside a nested cross-language call | adapter | Error | 9.8 | session fine |
+| Callback into V2 while its engine is idle (timer, thread, late event handler), or from another thread | adapter stub (9.8); compiled code: `host_call` (15.9) | Error raised in the foreign language; compiled: NULL and `v2_last_error()` | 9.8; 15.9 `V2 can only be called from the thread that called into this library, while that call is running` | V2 function not run; session fine; the callback stays valid for later requests |
+| 65th nested cross-language call | host, before sending or when an inbound `call` arrives | RecursionError | `cross-language call depth limit (64) exceeded` | unwinds back to V2 with its kind |
+| Worker dies during a call | engines/session: EOF, pipe error or exit | EngineCrashed | 8.6 `engine 'py' (pid 4242) exited during a call to 'ratio' (exit code 3221225477 = 0xC0000005); see its error output above`; Unix `killed by signal 11 (SIGSEGV)` | Dead |
+| Worker died while idle | the next write (`EPIPE`) or read | EngineCrashed | 8.6, raised by the next use | Dead |
+| Any later use of a Dead session or its handles (Dead(SpawnFailed): 21.1) | host | EngineCrashed | 8.2 `engine 'py' is not running (…); engines are not restarted`; handles: 11.7 | Dead |
+| Bridged call exceeds `call_timeout` | watchdog, timing the innermost pending host→worker request (paused while V2 serves a reverse call, 8.5) | EngineTimeout | 8.5 `call to 'slow' in engine 'py' exceeded call_timeout (5 s); the engine was stopped` | killed; Dead |
+| Non-frame line after `hello`, corrupt frame, unknown `t`, bad `$v2` tag, out-of-order reply, frame over 64 MiB | engines/vep (9.11) | ProtocolError | 9.11 `engine 'py' broke the protocol: <what> (got: <first 80 bytes, escaped>)`; 9.7 `engine 'py' broke the protocol: reply to request 7, which is not the innermost pending request` | killed; Dead (later uses: 9.11) |
+| Worker `call` with an unknown `route` or `fn` id | host | `err` ProtocolError to the worker | 9.5 `unknown callable id 42` | session fine |
+| Block output below the language level (C extension, `os.write(1, …)`, a child inheriting stdout) | adapter fd setup (9.9) | none | none | text appears on stderr, not stdout (DOCS 4.6); protocol intact |
+| Block code reads stdin | adapter stdin replacement (9.9) | ForeignError | 9.9 | session fine |
+| Rust panic or C++ exception in an exported function | generated shim (15.4) | ForeignError | the panic payload (`foreign_type` `panic`) / `what()` (`foreign_type` the exception type, `unknown` for `catch (...)`) | library stays loaded |
+| Native crash, or native code calling `exit()`/`abort()` | OS | none | the OS message and status | process gone without V2's shutdown; workers see stdin EOF; kill-on-close jobs and `PDEATHSIG` stop children; run dir left |
+| Run engine or compiled program exits non-zero | engines/runonly | EngineExitError | 17.3 | `data.stderr` holds the tail |
+| Run engine or compiled program exceeds `call_timeout` | watchdog | EngineTimeout | 17.3 | process tree killed |
+| Captured block output isn't UTF-8 | engines/runonly | MarshalError | `output of @{tag} block is not valid UTF-8 (byte {k})` | temp file removed |
+| Block arg unusable as a `V2_ARG_*` variable | engines/runonly | ValueError, MarshalError | 17.4 | nothing spawned |
+| **Build** | | | | |
+| Compiler error | build/ | BuildError | 15.7 `{block} failed to compile: {first error}` (`block 'fast' failed to compile: …`), positions mapped to the `.v2` file | nothing cached; a definition unit is `Failed` |
+| No compiler | engines/resolve | EngineNotFound | 7.8 (c, cpp and rust hints) | exit 3 if uncaught |
+| Export with an unreadable signature, an unsupported type or several definitions | build/, before compiling | BuildError | 15.2 | block not built |
+| `@import` inside a compiled program-mode block | engines/units (12.1 step 3); `v2 check` | BuildError | 15.2 `@import in a compiled block needs @export — a compiled program runs as a separate process` | block not built |
+| Configured compiler targets another architecture; compiler can't be spawned | engines/resolve (15.7's target check); the spawn | EngineNotFound | 15.7 `gcc at C:\mingw32\bin\gcc.exe targets i686, but v2 is x86_64 — install a 64-bit toolchain`; 8.3 `could not start '{path}': {os error}` | block not built; exit 3 if uncaught |
+| Library ABI mismatch | build/ | BuildError | 15.8 `library ABI mismatch` | block not loaded |
+| **FFI** | | | | |
+| Library not found, or found but fails to load | ffi/lib when the `extern` statement runs | FFILoadError | 16.2 `cannot load library '{lib}'`, one line per attempt, and a hint; the first existing candidate's failure is final | no names bound |
+| Declared symbols missing | ffi/lib, all declarations eagerly | FFISymbolError | 16.1 `not found in library 'm' ({path}): cosf128, foo` | no names bound |
+| Argument doesn't fit: range, NUL, wrong type, `null` for `std::string`/`&str`/`String` | ffi/types, on each call | FFIValueError | 16.5 `argument 2 ('exponent', double) of 'pow': {reason}`; 15.3 | call not made |
+| Unsigned result above `i64::MAX`; returned string not valid UTF-8 | ffi/types | FFIValueError | 16.6 `return value 18446744073709551615 of 'f' does not fit in a V2 int` | an owned string is still freed |
+| Unreadable C declaration | ffi/cdecl, at parse time | SyntaxError (`extern` bodies and `@export` prototype strings) | 16.3 | file doesn't run |
+| Any operation on a native pointer | runtime | TypeError | 16.6 `native pointers support no operations — pass them to extern functions` | pointer still valid |
+| **Syntax** (all SyntaxError; the file doesn't run) | | | | |
+| Block never closed | syntax/scan | SyntaxError at the opening line | 3.7 `@py block 'stats' is never closed` (unlabeled `@py block is never closed`), with the fence hint | |
+| `{` or fence not on the line of the header's last token | syntax/lexer | SyntaxError | 3.7 `the { that opens a block must be on the same line as @py` | |
+| Multi-line block whose closing `}` isn't first on its line, or is followed by anything but `)` `]` `}` `,` `;` or a comment | syntax/scan | SyntaxError | 3.7 (C1, C2), with the fence hint | |
+| Duplicate block label | parser | SyntaxError | 4.5 `duplicate block label 'stats'`, with a note at the first | |
+| Tabs and spaces mixed in block indentation | syntax/directives | SyntaxError | 4.4 `block indentation mixes tabs and spaces` | |
+| Definition block used as a value | parser | SyntaxError | 4.5 | |
+| Block args on `c`, `cpp`, `rust` or an alias | parser | SyntaxError | `compiled blocks take no args — @export a function and call it with arguments` | |
+| Bad number literal (`0b1`, `007`, `12abc`, beyond i64) | lexer | SyntaxError | 3.4 | |
+| Assignment through `?.`; `@import SEL as x` without a package selector; a name declared twice in one body (parameters, loop variables and catch names included) | parser | SyntaxError | 4.1, 4.5 | |
+| **Host** | | | | |
+| Circular `import` | runtime/module | ImportError | 6.4 `circular import: a.v2 -> b.v2 -> a.v2` | no module of the cycle runs twice |
+| Missing module file | runtime/module | ImportError | 6.4 `cannot find module './util.v2' (looked for …)` | a later import retries |
+| Call depth over 10,000, or the stack guard | runtime/interp | RecursionError | 5.9 `maximum call depth (10000) exceeded` | unwinds to the nearest `catch` |
+| Integer overflow | runtime/interp | ValueError | `integer overflow in '{op}'` | operands unchanged |
+| Division or `%` by zero; zero to a negative power | runtime/interp | ValueError | `division by zero` | |
+| Member access on `null` without `?.` | runtime/interp | TypeError | 5.5 `cannot read 'name' of null (use ?.)`; with `?.` the whole postfix chain is `null` (4.1) | |
+| Failed write to stdout (closed pipe) | runtime/builtins | IOError | 5.10 | |
+| Interrupt: Ctrl+C, Ctrl+Break, console close, SIGINT, SIGTERM, SIGHUP | signal handler / `SetConsoleCtrlHandler` sets `INTERRUPTED`; the watchdog does the rest (6.5). Unix children run in their own session (`setsid`, 8.3), so terminal signals never reach them; Windows `CREATE_NEW_PROCESS_GROUP` keeps only Ctrl+C from children: Ctrl+Break and console close reach every process on the console (adapters ignore SIGBREAK, 14.3, 14.4), and child failures they cause are never reported | none (not catchable) | none | 6.5: child trees killed, temp dir removed, exit 130; no `finally` runs |
+| `exit(code)`, even inside a nested cross-language or native call | runtime/builtins (from native code via 15.9's `PENDING_EXIT`) | none | none | no `finally` runs; pending foreign calls abandoned; sessions get `bye`, then are killed after 1 s (8.7); temp dir removed; exit `code` |
+| Host panic (a V2 bug) | panic hook | none | 6.5 `v2: internal error: <panic message>` | children killed; exit 101 |
+
+---
+
+## 22. Testing and conformance
+
+### 22.1 Layout
+
+```text
+tests/
+  run.rs                  harness: every .v2 test plus the multi-step cases (cargo test --test run)
+  v2.toml                 empty [project]; stops the upward config search inside the repo
+  host/                   host language, modules, builtins; host/syntax/ for diagnostics
+  engines/py/ js/ ts/     bridged engines, each with fixtures/
+  cross/  imports/        multi-engine programs; selectors, ambiguity, aliases
+  compiled/c/ cpp/ rust/
+  ffi/
+  custom/                 run and bridged custom engines
+examples/fake_adapter.rs  scripted VEP/1 adapter for tests/custom (a Cargo example; not shipped)
+src/**                    #[cfg(test)] unit and protocol tests
+```
+
+### 22.2 The `.v2` harness
+
+- **Discovery.** Every `tests/**/*.v2` outside a `fixtures/` folder is a test. It runs as `v2 <file>` (`CARGO_BIN_EXE_v2`) with its own folder as the cwd, stdin from `<name>.in` or an empty closed pipe, and stdout and stderr captured, so output is always redirected. A test that needs settings has its own `v2.toml` beside it.
+- **Headers.** Leading `//` comments: `// requires: py js`, `// exit: 1` (default 0), `// stderr: <text>` (repeatable; each must appear, in order), `// args: a b`, `// platform: windows|unix`, `// timeout: 60`.
+- **Expected output.** Stdout must equal `<name>.out` after CRLF-to-LF conversion. A test with neither a `.out` file nor a `stderr:` line is rejected.
+- **SKIP.** Once per harness run, a generated probe prints `engine_available(t)` for every tag named in `requires:`. A test that needs a missing tag reports `SKIP {file} (engine {tag} not available)` and never counts as a pass; when `V2_TEST_REQUIRE=py,js,…` is set (CI), a SKIP for a listed tag is a FAIL.
+- **Isolation.** `HOME` and `USERPROFILE` point at a fresh temporary home (18.1 reads `~` from exactly these), so `~/.v2` config and caches start empty; `RUSTUP_HOME` and `CARGO_HOME` keep their original values so `rustc` still works. Inherited `V2_ENGINE_*` variables are removed, and `V2_ENGINE_FAKE` is set to the built `fake_adapter` for `tests/custom`.
+- **Summary.** `{p} passed, {f} failed, {s} skipped`, listing every skip with its reason; `cargo test` fails when f > 0.
+- **Lint.** A constant assertion matching `check\([^,]+,\s*true,\s*true\)` fails the run.
+
+### 22.3 Rust unit and protocol tests
+
+| Module | Cases |
+| --- | --- |
+| `syntax/scan` | per profile: Python `"}"`, `'{'`, `"""}"""`, `# }`, `f"{x}"`, raw strings; C-like `'{'`, `"}"`, `// }`, `/* } */`, C++ `R"(})"`, Rust `r#"}"#` and lifetimes `'a` (not char literals), JS templates containing `${…}`; Plain and the fence form; C1 and C2 violations; an unterminated block reported at its opening line |
+| `syntax/directives` | `@export` matches as an exact token (`@exporter`, `@export_json` untouched); `@@export`/`@@import` lose one `@`; lists spanning lines; line counts preserved; mixed indentation is an error; NBSP indentation doesn't panic |
+| `codec/json` | `1.0` stays `1.0`; `-0.0`; `i64::MIN`, `i64::MAX`; NaN and ±inf as `$v2` tags; `"\r\n\u2028\0"`; a dict with a `"$v2"` key; `bytes`; lone surrogates (10.4); the old `json_quote` cases |
+| `ffi/cdecl` | accepts `double cos(double x);`, `const char* sqlite3_libversion(void);`, unnamed parameters, `unsigned long long`, `void*`; rejects structs by value, `...`, function pointers and `#include`, each with its 16.3 message |
+| `engines/spec`, `engines/registry` | every 17.1 message; the 17.2 conflicts (built-in, alias, config-declared, different spec); identical re-registration; reserved and invalid tags |
+| `engines/resolve` (injected probes) | R41; relative and empty `PATH` entries skipped; `PATHEXT` order; Windows C/C++ order `cl` (Developer Prompt environment, else vswhere) → gcc → clang; skipped candidates recorded |
+| `engines/vep`, `engines/session` (generic over `BufRead`/`Write`, driven by an in-process scripted adapter thread) | replies echo ids and `out` arrives before `ret`; nesting to depth 64, depth 65 → RecursionError; releases batched onto the next frame, never sent from a drop path; non-JSON lines before `hello` forwarded to stderr, a non-frame line after it → ProtocolError; one `\r` before `\n` dropped; frames over 64 MiB refused in both directions; EOF → EngineCrashed; the watchdog paused while V2 serves a reverse call |
+| `examples/fake_adapter.rs` | a real child process for crash and timeout cases. Its "language" is one JSON object per block, e.g. `{"answer": 42, "echo": "$0", "fail": "!boom", "say": "@out:hi"}`; `FAKE_MODE` selects `ok`, `garbage`, `vep2`, `nohello`, `noise` (startup lines before `hello`), `crash`, `slow`, `nocaps` or `idlecall` |
+
+### 22.4 Mandatory regression list
+
+| ID | Test | Asserts |
+| --- | --- | --- |
+| R01 | `engines/{py,js}/cr_args.v2` | `echo("a\rb\r\nc\u{2028}d")` returns the identical 8-character string; the next 50 calls `echo(i)` return `i` (no reply off by one) |
+| R02 | `engines/{py,js}/float_kind.v2` | through py, `type(echo(1.0)) == "float"` and `@py(x: 1.0) { type(x).__name__ }` is `"float"`; through js, `echo(1.0)` is the int `1` and `@js { 1.5 }` is a float |
+| R03 | `engines/{py,js}/nonfinite.v2` | NaN from `@py { float("nan") }` and from `@js { NaN }` satisfies `x != x`; ±inf round-trips through `echo` unchanged |
+| R04 | `engines/py/nonstr_keys.v2` | `let h = @py { {1: "a"} }` gives `type(h) == "handle"` and `h[1] == "a"`; `value(h)` raises MarshalError `value(): can't convert dict to V2 data (key 1 is not a str)` (11.5 key rule); `value` of `{(1, 2): "a"}` raises MarshalError |
+| R05 | `engines/py/decorators.v2` | decorator lines `@exporter` and `@export_json` reach Python untouched and the block stays an action block; lines `@@export { x }` and `@@import y` inside a triple-quoted string print as `@export { x }` and `@import y` |
+| R06 | `engines/py/braces.v2`, `engines/js/braces.v2`, `compiled/c/braces.v2` | `@py { print("}") }` prints `}`; a JS template literal containing `${"}"}` works; `@c { char c = '{'; printf("%c", c); }` has value `"{"` |
+| R07 | `host/syntax/unterminated.v2` | exit 1; stderr starts `unterminated.v2:3:` and contains `SyntaxError: @py block is never closed`, then the source line and a caret; stdout is empty although line 1 prints |
+| R08 | `engines/py/def_in_loop.v2` | a definition block, its `@import` and `print(bump())` inside `for i in 0..3` print `loaded` once, then `1`, `2`, `3` |
+| R09 | `host/try_locals.v2` | inside a function, locals declared before `try` survive a caught `throw`; a name declared inside `try` is gone after it; name lookup still works after 1000 caught throws |
+| R10 | `engines/{py,js}/kwargs.v2` | `f(1, sep: "-")` arrives as a Python keyword argument; an unknown keyword raises ForeignError `TypeError`; a named arg to a JS function raises ArityError `js functions take positional arguments only (got 'sep')` |
+| R11 | `engines/{js,py}/async.v2` | an exported `async function` returning 42 gives `42`; a rejected Promise raises ForeignError; a Python coroutine is awaited; a Promise returned in a nested call raises 9.8's Error |
+| R12 | `engines/js/packages/` | `@import { join } from js.path` works; with `[node] modules = "fixtures/node_modules"`, `@import { twice } from js."v2-test-pkg"` loads the committed package (no network); a missing package raises ImportError carrying Node's message |
+| R13 | `cross/tour.v2` | DOCS 17.1 verbatim, with `math_ops.py`, prints `22`, `20`, `44`, `47` |
+| R14 | `engines/py/callbacks.v2` | DOCS 8.2 prints `["Linus", "Ada", "Grace"]`; DOCS 17.5 prints `1/3`, `2/3`, `3/3` before `process` returns; a ValueError thrown in the V2 callback is caught in V2 as ValueError |
+| R15 | `engines/py/datetime.v2` | with `d = @py { import datetime; datetime.date(2024, 2, 29) }`: `type(d) == "handle"`, `d.year == 2024`, `str(d) == "2024-02-29"`, `d.isoformat()` equal; `d.replace(year: 2025)` raises ForeignError `ValueError`; `d == d`; `d + 1` raises TypeError; `len(d)` raises ForeignError `TypeError` |
+| R16 | `engines/{py,js}/trace_lines.v2` | an exception raised on `.v2` line 12, inside a block opened on line 10, gives `e.line == 12` and a frame `(trace_lines.v2:12, in @py risky)`; uncaught, the header, source excerpt and caret have DOCS 10's shape |
+| R17 | `cross/order/` | with stdout captured, program order holds for all of: V2 `print`, `@py` `print`, `@py` `sys.stdout.write("x")` with no newline, `@js` `console.log`, a `@c` action block, an exported `@c` function that calls `printf`, and a run-engine block |
+| R18 | `engines/py/crash.v2` | a call running `os._exit(3)` raises EngineCrashed naming status 3; the next call raises EngineCrashed `is not running`; the script continues |
+| R19 | `engines/py/timeout/` | with `call_timeout = 1`, `time.sleep(30)` raises EngineTimeout in under 5 s; the next call raises EngineCrashed |
+| R20 | `compiled/c/cache/` (run.rs: two runs with one HOME) | DOCS 11.1 `hypot3(1, 2, 2)` prints `3.0`; the second run leaves every file under `~/.v2/cache/build` unchanged (paths, sizes, mtimes); with the cached library truncated to 0 bytes, a `--no-cache` run still prints `3.0` |
+| R21 | `compiled/rust/panic.v2` | `count_primes(100000) == 9592`; an export that panics with `boom` raises ForeignError with `lang == "rust"`, `foreign_type == "panic"` and `boom` in the message; the next call works |
+| R22 | `compiled/cpp/exception.v2` | `reversed("stressed") == "desserts"`; `reversed(null)` raises FFIValueError; `throw std::runtime_error("bad")` raises ForeignError with message `bad` and a `foreign_type` containing `runtime_error`; `throw 42` gives `foreign_type == "unknown"` |
+| R23 | `ffi/libc_libm.v2` | through `extern "m"`, `cos(0) == 1.0` and `pow(2, 10) == 1024.0`; through `extern "c"`, `strlen("héllo") == 6` |
+| R24 | `ffi/range.v2` | `abs(2147483648)` raises FFIValueError naming argument 1, `int` and `-2147483648..2147483647`; a `@c` `unsigned char id8(unsigned char x)` called with 300 raises FFIValueError; `strlen("a\0b")` raises the NUL FFIValueError; a `@c` export returning `UINT64_MAX` as `uint64_t` raises FFIValueError `return value 18446744073709551615 of '…' does not fit in a V2 int` |
+| R25 | `ffi/not_found.v2` | `extern "v2_no_such_lib"` raises FFILoadError listing exactly this platform's 16.2 search order; on Windows (run.rs), a DLL present only in the cwd, with the script elsewhere, is not found |
+| R26 | `imports/ambiguity.v2` | with two `@py` blocks exporting `mean`, a named import and a `*` import from `@py` both raise the DOCS 6.3 message; `@py.stats` resolves; an `@export { * }` block can be imported selectively |
+| R27 | `imports/aliases.v2` | `@python stats` is reachable as `stats`, `@py.stats` and `@python.stats`; `python.statistics` is `py.statistics`; a `@python` block and a `@py` block share one process (a `sys` attribute set in one is visible in the other) |
+| R28 | `host/syntax/dup_label.v2` | `@py stats` followed by `@js stats` is a SyntaxError at the second block, with a note at the first |
+| R29 | `engines/js/bigint.v2` | `echo(2**60) == 2**60` through JS; `@js(x: 2**60) { typeof x }` is `"bigint"`; `@js(x: 2**53 - 1) { typeof x }` is `"number"`; `@js { 1e20 }` follows chapter 10 without overflow |
+| R30 | `engines/js/proto_key.v2` | `@js(d: {"__proto__": {"x": 1}}) { d.x === undefined && Object.keys(d).length === 1 }` is `true`; `echo` returns an equal dict |
+| R31 | `engines/{py,js}/surrogates.v2` | a lone surrogate from `@py { "\ud800" }` or `@js { "\ud800" }` follows chapter 10, with no panic; the session keeps working |
+| R32 | `host/stdin_owner.v2` with `.in` = `a\nb\n` | `@py { import sys; sys.stdin.read() }` raises ForeignError (9.9's stdin error) and `@js { require("fs").readFileSync(0) }` throws; then `input()` returns `a`, then `b`, then `null` |
+| R33 | `engines/js/idle_timer.v2` | a `setImmediate` callback scheduled during a call, calling an imported V2 function, runs in the event-loop turn after that call's reply (14.4) and throws 9.8's idle-call Error in JS; the V2 function never runs; the stored callback still works during a later call |
+| R34 | `engines/py/subprocess.v2` | in a block, `subprocess.run([sys.executable, "-c", "print('child')"])` and `os.write(1, b"x\n")` put `child` and `x` on stderr, not stdout; the next call works (protocol intact) |
+| R35 | `custom/run/` (requires js) | with `[engines.nd]` set to `kind = "run"`, `command = ["node", "{file}"]`, `ext = "js"`: statement output is in order; `@nd(t: "x y", n: [1, 2]) { process.stdout.write(process.env.V2_ARG_t + process.env.V2_ARG_n + "\r\n") }` has value `x y[1,2]`; `console.error("bad"); process.exit(3)` raises EngineExitError with `e.data.status == 3` and `bad` in `e.data.stderr`; `@nd(p: 1, P: 2) {}` raises ValueError; `@export` inside raises ImportError |
+| R36 | `custom/register.v2` | `register_engine` with `"py"`, `"python"` or a tag declared in the test's `v2.toml` raises EngineNameConflict; `"v2"` and `"Lua"` raise ValueError; an identical re-registration returns `null`; a different spec raises EngineNameConflict; a block reached before registration raises EngineUnknown, one reached after it runs; a misspelled key raises ValueError with a did-you-mean |
+| R37 | `custom/bridged/` (run.rs) | `v2 doctor fake` passes every check; export, call, `out` and `err` work; `FAKE_MODE` values `garbage`, `vep2`, `nohello`, `crash` and `nocaps` each produce their chapter 21 row; `noise` still starts, with the noise on stderr |
+| R38 | `cross/depth.v2` | V2↔py mutual recursion reaching depth 64 succeeds; depth 65 raises RecursionError, which V2 catches |
+| R39 | `host/bom_crlf.v2` | stored with a BOM and CRLF line endings (`.gitattributes`: `-text`); it runs, and a `@py` error in it reports the right line |
+| R40 | `engines/py/interrupt/` (run.rs, unix) | SIGINT, and separately SIGTERM, sent to the host during a sleeping py call exits 130 within 2 s; the worker pid is gone and the run dir is removed |
+| R41 | `engines/resolve` unit test | a WindowsApps `python.exe` whose probe exits 9009 is skipped and the next candidate is used; one whose probe prints `Python 3.12.1` is kept |
+| R42 | `engines/ts/strip.v2`, `engines/ts/old_node.v2` | a `@ts t` block exporting `function dbl(x: number): number` gives `dbl(21) == 42`, and a `@js` block imports `dbl` from `t`; on Node below 22.13 without a transpiler (minimum-version jobs), `engine_available("ts")` is `false` and a `@ts` block raises EngineNotFound naming 22.13 |
+| R43 | `engines/{py,js}/export_star.v2` | `@export { * }` exports the block's `def`s/`function`s and classes, but not a name brought in by `from math import sqrt` (py) |
+| R44 | `imports/module_names.v2` | `@import { x } from py."os; print(1)"` raises the invalid-module-name ImportError and prints nothing |
+| R45 | `host/optchain.v2`, `host/syntax/optchain_assign.v2` | with `let a = null`: `a?.b.c(f())` is `null` and `f` never runs; `(a?.b).c` raises TypeError; `{"b": null}?.b.c` raises TypeError; `{}?.x` raises KeyError; `a?.b = 1` is a SyntaxError |
+| R46 | `engines/py/def_fail.v2` | a definition block that prints `loading` and then raises ValueError, reached twice in a loop inside `try`: both catches get ForeignError `ValueError` and the same error value (`e1 == e2`), and `loading` prints once; `@import` from it raises ImportError `block 'bad' failed to load: …` |
+| R47 | `custom/run/tree_kill.v2` (requires js) | a run-engine block that starts a non-detached child which would write a marker file after 1 s returns at once; 2 s later the marker doesn't exist |
+| R48 | `host/exit_codes/` (run.rs) | `exit(7)` exits 7 without running an enclosing `finally`; a SyntaxError exits 1; an invalid `v2.toml` exits 2; an uncaught EngineNotFound (`[engines.py] command` naming a missing file) exits 3, and so does `v2 check` on that file; `exit(2**40)` raises ValueError |
+| R49 | `host/import_syntax.v2` | importing a module with two syntax errors raises ImportError at the `import`, with the first diagnostic as its message and both in `e.data` |
+
+### 22.5 Seed and cleanup
+
+- Port `old/v2/testsuite/test_engines.v2` to `tests/engines/py/seed_engines.v2`; the appendix lists the changes.
+- Don't port the other old test files. They test removed features and contain tautologies such as `check("custom lang engines", true, true)` (`old/v2/testsuite/ch_test2.v2:245`) and `check("embedded lang engines", true, true)` (`test_batch21.v2:515`); the 22.2 lint keeps new ones out.
+
+### 22.6 CI matrix
+
+| Job | Python | Node | C / C++ | `V2_TEST_REQUIRE` |
+| --- | --- | --- | --- | --- |
+| windows-latest, MSVC | 3.13 | 22 (≥ 22.13) | `cl` found via vswhere, outside a Developer Prompt | py,js,ts,c,cpp,rust |
+| windows-latest, MinGW | 3.8 | 18 | MinGW-w64 UCRT gcc/g++, set by `V2_ENGINE_C`/`V2_ENGINE_CPP` (`cl` would win otherwise) | py,js,c,cpp,rust |
+| ubuntu-latest | 3.13 | 22 (≥ 22.13) | gcc/g++ | py,js,ts,c,cpp,rust |
+| ubuntu-22.04, minimum versions | 3.8 | 18 | clang/clang++, set by `V2_ENGINE_C`/`V2_ENGINE_CPP` | py,js,c,cpp,rust |
+| macos-latest | 3.13 | 22 (≥ 22.13) | Apple clang | py,js,ts,c,cpp,rust |
+
+- **Build and test.** Every job builds V2 with stable Rust and runs `cargo test`. On Windows the host target is `x86_64-pc-windows-msvc`, which also proves that libffi builds with MSVC. `@rust` blocks use stable `rustc`.
+- **Unusual paths.** The MSVC job checks out the repo and sets `HOME`/`USERPROFILE` under a path with a space and a non-ASCII character (`C:\v2 tést\`).
+- **MinGW runtime.** The MinGW job runs `tests/compiled` with MinGW's `bin` folder removed from `PATH`, proving the static runtime linking of 15.7.
+- **`ts` on minimum versions.** Built-in type stripping needs Node 22.13+ (or 23.2+), so Node 18 jobs don't require `ts` and run R42's old-Node case instead.
+
+---
+
+## 23. Build order
+
+Each phase is done when its chapter 22 tests pass on the whole CI matrix. Nothing from a later phase is stubbed: a builtin that doesn't exist yet is a NameError, and an unregistered tag is EngineUnknown.
+
+| Phase | Build | Done when |
+| --- | --- | --- |
+| 0. Host core | `syntax/*` (spans, tokens, lexer with BOM/CRLF, scan profiles, fence, directives, parser, AST, static checks); `runtime/*` (values, environments, interpreter, call binding, errors and their rendering, modules, builtins); `codec/json`, which also backs `json_parse` and `json_stringify`; `config/` (TOML layers and precedence); `cli/` (`v2 FILE`, `run`, host-only `check`, `--version`, `--help`, exit codes and the interrupt path of 6.5). Reaching a block raises EngineUnknown, because the registry is empty | `tests/host`; the scan, directives and codec unit tests; R07, R09, R28, R39 (host part), R45, R48 (host part), R49; the chapter 21 Syntax and Host rows |
+| 1. py, js, ts | `engines/{spec, registry, resolve, session, vep, units, imports, handles}`; `adapters/{py.py, js.js}`; the watchdog timers (8.5); error line mapping; `[engines.*]`, `[python]`, `[node]`; `doctor/` (the table and `v2 doctor TAG` for built-in bridged engines); the full `check` inventory; `value` and `engine_available` | `tests/engines/{py,js,ts}`, `tests/cross`, `tests/imports`, the seed and the protocol tests; R01–R05, R06 (py/js), R08, R10–R16, R17 (py/js), R18, R19, R26, R27, R29–R34, R38, R40–R44, R46, R48; the chapter 21 Setup, Blocks and imports, and Calls and values rows |
+| 2. Compiled blocks and `extern` | `build/{mod, cache, c, cpp, rust, shims}` (MSVC and MinGW); `ffi/{cdecl, types, lib, call}`; `v2.h` and the Rust `v2` module with `host_call` reverse calls (15.9); the `engines/runonly` process helper that program mode uses (spawn, capture, tree kill, EngineExitError, 15.5); `v2 doctor TAG` for c, cpp, rust; `v2 cache clean` and `--no-cache` | `tests/compiled` and `tests/ffi`; R06 (C), R17 (native part), R20–R25; the Build and FFI rows |
+| 3. Custom engines | run engines on that helper (17.3, 17.4); bridged custom specs through `engines/session`; `register_engine`; `v2 doctor TAG` for custom tags; `examples/fake_adapter.rs` | `tests/custom`; R17 (run-engine part), R35–R37, R47; the custom-engine rows |
+
+---
+
+## Appendix: salvage map from old/
+
+All paths are under `old/v2/src/` unless they say otherwise.
+
+**Port, with changes:**
+
+| Old code | New home | Changes |
+| --- | --- | --- |
+| `engines.rs:64-80` `dedent` | syntax/directives | Computes the common whitespace prefix by characters instead of slicing by a byte count, so multibyte whitespace (NBSP) no longer panics. The mixed-indentation error and the trailing newline follow 4.4. Runs after CRLF-to-LF |
+| `engines.rs:86-119` `extract_directives` | syntax/directives | Matches exact tokens only: `@export`/`@import` followed by whitespace, `{` or the end of the line, so `@exporter` is left untouched. Lists may span lines. `@@export`/`@@import` lose one `@`. `@import` is parsed, not stripped with a warning. Names are validated. Each directive line becomes an empty line, so line numbering holds |
+| `engines.rs:21-43` `normalize_lang` | engines/spec | Becomes the built-in data table (7.2): py/python, js/javascript, ts/typescript, c, cpp/cxx, rust/rs only. `canonical_tag` (46-60) and its `"other"` bucket are dropped |
+| `engines.rs:396-404` `Drop for EngineWorker` | engines/session | Same order (announce shutdown, stop, wait, delete files), but it sends `bye`, waits up to 1 s and only then runs `kill_tree` (8.7). The old code killed right after writing `exit` |
+| `engines.rs:185`, `engines.rs:340` Python env | engines/session (py spawn) | `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, unchanged |
+| `lexer.rs:13-14` BOM strip | syntax/lexer | Adds CRLF and lone-CR to LF normalization (3.1). Spans are computed on the normalized text |
+| `native.rs:14-34` `find_cc`, plus the `cl` branch at `native.rs:44-60` | engines/resolve, build/c, build/cpp | The probe parses `--version` output (it feeds the cache key) instead of only checking `is_ok()`. Candidate order follows 7.2: on Windows `cl` first, then gcc, then clang. `cl` comes from a Developer Prompt environment, else from vswhere with the captured vcvars environment (7.6), not bare PATH. Library mode builds a shared library (`/LD`, `-shared`; 15.7) instead of an exe. `tcc` is dropped. `.obj` cleanup is kept, inside the build's work dir (15.6) |
+| `environment.rs:169-208` `did_you_mean`, `levenshtein` | runtime/error | Becomes optimal-string-alignment distance over any iterator of candidate names, serving NameError, EngineUnknown tags, config keys and engine-spec keys; thresholds per 5.9 (tags: 7.3) |
+| `engines.rs:406-422` `json_quote`, `interpreter.rs:6938-6995` `json_unescape` | none (serde_json) | Not ported. Their inputs (`\r`, `\u0001`, quotes, surrogate pairs) become `codec/json` unit tests |
+| `hashing.rs:361-434` `sha256` | none (`sha2` crate) | Not ported |
+| `old/v2/testsuite/test_engines.v2:1-111` | tests/engines/py/seed_engines.v2 | `var` becomes `let`. The probe `try`/`catch` becomes `// requires: py`. `caught.contains(x)` becomes `x in caught`, and `str(e)` becomes `e.message`. The missing-export check asserts `e.type == "ImportError"` and the 12.2 message |
+
+**Do not port:**
+
+| Old code | Why |
+| --- | --- |
+| `compiler.rs`, `vm.rs`, `bytecode.rs`, `serialize.rs` | The bytecode VM is removed (DOCS 1, 18); V2 has one tree-walking interpreter |
+| `interpreter.rs:12014-12063` `__*` stub catch-all, `interpreter.rs:633-637` `make_stub_module`, and the `build_std_*_module` builders | They fabricate return values, and `std.*` is removed. V2 fails loudly instead |
+| `interpreter.rs:7089-7110` `value_to_json`, `interpreter.rs:6997-7087` `parse_json_value` and its helpers | Lossy: `1.0` becomes `1`, NaN breaks, `\r` is sent raw. Replaced by `codec/json` on serde_json |
+| `engines.rs:426-444` `extract_json_string_array` | A substring scan. `hello` is parsed by serde_json |
+| `parser.rs:1061-1088` legacy embedded-block path; `lexer.rs:24-99` `ENGINE_TAGS` and naive brace capture | A fixed tag list and brace counting. Replaced by runtime tag lookup (7.3) and scan profiles (3.8) |
+| `engines.rs:232-279` worker suffixes; `engines.rs:121-230` temp paths, commands and run-only prelude | An id-less protocol using `eval(fn)`, predictable temp names, hard-coded commands (including `-ExecutionPolicy Bypass`), and a cwd `sys.path` insert. Replaced by the VEP/1 adapters, the private run dir and the resolver |
+| `native.rs:72-893` V2-to-C transpiler; `fault.rs` | Not polyglot, and v1 has no native crash handler (DOCS 11.7) |

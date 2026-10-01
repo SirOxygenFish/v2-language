@@ -54,8 +54,10 @@ v2 list / v2 remove / v2 publish / v2 search
 ```
 
 The [`registry/`](registry/) folder in this repo _is_ the reference registry — an `index/`
-mapping package names to sources plus 62 `packages/std-*` implementations of the I/O-, network-,
+mapping package names to sources plus 62 `packages/std-*` packages for the I/O-, network-,
 and hardware-bound modules that aren't baked into the `v2` binary (see [`registry/README.md`](registry/README.md)).
+**These packages are API skeletons only:** every function body is a `// TODO` that returns
+`null` (the package-manager plumbing works; the libraries themselves are unwritten).
 See [`PACKAGES.md`](PACKAGES.md) for the full package-manager guide.
 
 ## Project layout
@@ -117,7 +119,9 @@ Language Engines" in [`DOCS.md`](DOCS.md)).
 don't execute): native FFI (`extern`/`cimport`/`std.ffi` return `null`), the WASM backend,
 compiled-language blocks (`@c`/`@rust`/`@go`), real parallelism (threads/actors run on a
 single-threaded model), pattern macros, and sized-int overflow modes. The 62 larger I/O-,
-network-, and hardware-bound modules (`std.http`, `std.db`, `std.ui`, `std.gpu`, …) ship as
-installable [`registry/`](registry/) packages rather than being baked into the binary.
+network-, and hardware-bound modules (`std.http`, `std.db`, `std.ui`, `std.gpu`, …) are
+installable [`registry/`](registry/) packages, but those packages are unimplemented skeletons
+(`// TODO` bodies returning `null`) — V2 currently has no native networking, database, GUI,
+or hardware access.
 [`NOT_YET_IMPLEMENTED.md`](NOT_YET_IMPLEMENTED.md) is the authoritative list — when in doubt,
 trust it over any other doc (including this one).

@@ -6,6 +6,10 @@ package name to its source; each `packages/<name>/` is a V2 package.
 It hosts the **reference (non-core) standard library** — the modules that are not
 built into the `v2` binary and are instead delivered as installable packages.
 
+> **Status:** every package here is an API skeleton. Each function body is a
+> `// TODO: implement ...` that returns `null`; installing and importing works, but
+> none of these libraries do anything yet.
+
 ## Use it
 
 ```bash
