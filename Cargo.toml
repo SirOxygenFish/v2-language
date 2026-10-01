@@ -1,0 +1,28 @@
+[package]
+name = "v2"
+version = "0.1.0"
+edition = "2021"
+description = "V2: a small glue language built around embedded Python, JS/TS, C, C++ and Rust"
+publish = false
+
+[[bin]]
+name = "v2"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip", "unbounded_depth"] }
+toml = "1.1"
+indexmap = "2.14"
+libloading = "0.9"
+libffi = "5.2"
+sha2 = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
+
+# The previous implementation lives in old/ as its own crate.
+[workspace]
+exclude = ["old"]

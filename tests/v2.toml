@@ -1,0 +1,2 @@
+# Stops V2's upward search for a project file inside the test tree (INTERNALS 22.1).
+[project]

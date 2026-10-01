@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 0: Host core |
-| **Next task** | 0.1 Project skeleton |
-| **Last update** | 2026-10-01: design docs finished, old implementation archived in `old/` |
+| **Next task** | 0.2 Walking skeleton: `print("hi")` end to end |
+| **Last update** | 2026-10-01: 0.1 project skeleton done (CI written, not yet run) |
 
 ## Rules
 
@@ -36,21 +36,25 @@ The small V2 language on its own, without any foreign engines. At the end, every
 DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknown`.
 
 ### 0.1 Project skeleton
-- [ ] Cargo crate at the repo root (`Cargo.toml`, `src/`, `tests/`, `examples/`) with
-      `[workspace] exclude = ["old"]` so the archived crate stays separate (§1)
-- [ ] Dependencies from §1.4: `serde_json` (preserve_order, float_roundtrip, unbounded_depth),
-      `toml`, `indexmap`, `libloading`, `libffi`, `sha2`, `libc`, `windows-sys`
-- [ ] Module tree from §1.2 (`cli/ config/ syntax/ runtime/ codec/ engines/ adapters/ build/
+- [x] Cargo crate at the repo root (`Cargo.toml`, `src/`, `tests/`) with
+      `[workspace] exclude = ["old"]` so the archived crate stays separate (§1). (`examples/`
+      arrives in Phase 3 with its first file, `fake_adapter.rs`.)
+- [x] Dependencies from §1.4: `serde_json` (preserve_order, float_roundtrip, unbounded_depth),
+      `toml`, `indexmap`, `libloading`, `libffi`, `sha2`, `libc`, `windows-sys` — the vendored
+      libffi builds under MSVC and a mixed int/float call passes (`ffi::call` smoke test)
+- [x] Module tree from §1.2 (`cli/ config/ syntax/ runtime/ codec/ engines/ adapters/ build/
       ffi/ doctor/`), empty but compiling
-- [ ] Threads per §1.3: main thread, interpreter thread with a big stack, watchdog
-- [ ] `v2 --version`, `v2 --help`
-- [ ] Test harness `tests/run.rs` (§22.2): discovers `tests/**/*.v2`, headers (`exit`,
+- [x] Threads per §1.3: main thread, interpreter thread (256 MiB stack), watchdog; panic → 101
+- [x] `v2 --version`, `v2 --help`, the full §19.1 argument grammar with usage errors → exit 2
+- [~] Test harness `tests/run.rs` (§22.2): discovers `tests/**/*.v2`, headers (`exit`,
       `stderr`, `args`, `platform`, `timeout`), `.out` comparison, isolated `HOME`, tautology
-      lint. (`requires:` and SKIP come in 1.1, when `engine_available` exists.)
-- [ ] CI on GitHub Actions: `cargo build` + `cargo test` on Windows, Ubuntu and macOS (§22.6).
-      The engine columns of the matrix are added as Phases 1 and 2 land. Runs once the branch is
-      pushed.
-- **Done when:** `cargo build` and `cargo test` pass locally on Windows
+      lint, visible summary. Header parsing and the lint are tested; the first real `.v2` test
+      runs through it in 0.2. (`requires:` and SKIP come in 1.1, when `engine_available` exists.)
+- [~] CI on GitHub Actions: `cargo build` + `cargo test` on Windows, Ubuntu and macOS (§22.6).
+      Written; runs once the branch is pushed. The engine columns of the matrix are added as
+      Phases 1 and 2 land.
+- **Done when:** `cargo build` and `cargo test` pass locally on Windows — **passed 2026-10-01**
+  (14 tests, 0 warnings)
 
 ### 0.2 Walking skeleton: `print("hi")` end to end
 - [ ] `FileId`, `SourceMap`, `Span`, `UnitLoc` (§2.1–2.3)
@@ -312,3 +316,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | --- | --- |
 | 2026-09-30 | Evaluation of old V2; decision to reboot around the polyglot system |
 | 2026-10-01 | Old project archived in `old/`; DOCS.md and INTERNALS.md written and cross-checked; branch `v2-reboot` created; this roadmap written |
+| 2026-10-01 | 0.1: crate, dependencies (libffi verified on MSVC), module tree, threads, CLI parser, test harness, CI file; reviewed (6 findings fixed) |

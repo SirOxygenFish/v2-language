@@ -4,13 +4,11 @@ venv/
 __pycache__/
 *.pyc
 
-# Rust build artifacts (old implementation, archived in old/)
+# Rust build artifacts
+/target/
 /old/v2/target/
 /old/v2/v2_modules
 v2.lock
-
-# V2 project-local state (new implementation)
-.v2/
 
 # OS / editor cruft
 .DS_Store
