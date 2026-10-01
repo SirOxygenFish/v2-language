@@ -1,0 +1,26 @@
+// Import errors (INTERNALS 6.4): missing files, cycles, and a module that throws.
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        return e
+    }
+}
+show(lambda() {
+    import "./fixtures/nope.v2" as nope
+})
+show(lambda() {
+    import "./fixtures/cyc_a.v2" as a
+})
+let first = show(lambda() {
+    import "./fixtures/boom.v2" as boom
+})
+print(first.trace)
+let second = show(lambda() {
+    import "./fixtures/boom.v2" as boom
+})
+print(first == second)
+show(lambda() {
+    import "./errors.v2" as me
+})

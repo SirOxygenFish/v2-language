@@ -1,0 +1,4 @@
+// Imported by util.v2 with a path relative to util.v2's folder.
+func shout(s) {
+    return s.upper() + "!"
+}

@@ -4,6 +4,8 @@
 //! is a local `Env` dropped on every exit path (5.8). The only interpreter-level stack is
 //! `calls`.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
@@ -13,11 +15,12 @@ use super::call::{bind, bind_spec, Named, Param};
 use super::env::{self, declare, lookup, new_frame, AssignError, Env};
 use super::error::{fail, type_error, with_suggestion, ErrorValue, Exec, Flow};
 use super::methods::{self, index_error, key_error, normalize};
+use super::module::{self, Parsed};
 use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
 use crate::syntax::ast::*;
-use crate::syntax::span::{SourceMap, Span};
+use crate::syntax::span::{FileId, SourceMap, Span};
 
 /// Past this many nested calls a call raises `RecursionError` (5.9).
 const MAX_CALLS: usize = 10_000;
@@ -28,18 +31,29 @@ enum MethodTarget {
     Method(&'static methods::MethodDef),
 }
 
-/// One active call of a V2 function (or, from 0.8, a module import) (5.8).
+/// One active call of a V2 function, or a module import (nameless) (5.8).
 struct CallRecord {
     name: Option<Rc<str>>,
     call_site: Span,
 }
 
-pub struct Interp<'a> {
-    pub sm: &'a SourceMap,
+/// A module's state for the run (6.4): its top level runs at most once.
+enum ModuleState {
+    Running,
+    Done(Value),
+    Failed(Rc<ErrorValue>),
+}
+
+pub struct Interp {
+    pub sm: SourceMap,
     pub out: Out,
     pub chars: CharCache,
     calls: Vec<CallRecord>,
     builtins: Env,
+    /// Files parsed at startup and not imported yet (6.1 step 2).
+    parsed: HashMap<PathBuf, Parsed>,
+    modules: HashMap<PathBuf, ModuleState>,
+    import_stack: Vec<PathBuf>,
     /// Address of a local at the start of the interpreter thread, and how many bytes below it
     /// the stack guard allows (5.9).
     stack_base: usize,
@@ -53,9 +67,10 @@ fn stack_here() -> usize {
     std::hint::black_box(&marker) as *const u8 as usize
 }
 
-impl<'a> Interp<'a> {
-    /// `stack_size` is the size of the thread this runs on; the guard trips at 7/8 of it.
-    pub fn new(sm: &'a SourceMap, stack_size: usize) -> Interp<'a> {
+impl Interp {
+    /// `parsed` holds the files the entry file's imports name (6.1 step 2); `stack_size` is the
+    /// size of the thread this runs on, and the guard trips at 7/8 of it.
+    pub fn new(sm: SourceMap, parsed: HashMap<PathBuf, Parsed>, stack_size: usize) -> Interp {
         let builtins = new_frame(None);
         for def in BUILTINS {
             declare(&builtins, def.name.into(), Value::func(Callable::Builtin(def)), false);
@@ -66,19 +81,119 @@ impl<'a> Interp<'a> {
             chars: CharCache::default(),
             calls: Vec::new(),
             builtins,
+            parsed,
+            modules: HashMap::new(),
+            import_stack: Vec::new(),
             stack_base: stack_here(),
             stack_limit: stack_size / 8 * 7,
         }
     }
 
-    /// Run a file's top level in a new module frame (6.1 step 3).
-    pub fn run(&mut self, program: &[Stmt]) -> Exec<()> {
+    /// Run the entry file's top level (6.1 step 3); it counts as a running module, so importing
+    /// it is a circular import.
+    pub fn run(&mut self, file: FileId, program: &[Stmt]) -> Exec<()> {
+        let path = self.sm.file(file).path.clone();
+        self.modules.insert(path.clone(), ModuleState::Running);
+        self.import_stack.push(path);
+        self.run_top_level(program).map(|_| ())
+    }
+
+    /// A file's top level in a new module frame whose parent is the builtins frame.
+    fn run_top_level(&mut self, program: &[Stmt]) -> Exec<Env> {
         let module = new_frame(Some(&self.builtins));
         self.hoist(program.iter(), &module);
         for s in program {
             self.exec(s, &module)?;
         }
-        Ok(())
+        Ok(module)
+    }
+
+    /// `import "spec" as name` (6.4): the module's namespace dict.
+    fn import(&mut self, spec: &str, at: Span) -> Exec<Value> {
+        let target = module::resolve(&self.sm, at.file, spec);
+        let Some(path) = module::canonical(&target) else {
+            let msg = format!("cannot find module '{spec}' (looked for {})", module::shown(&target));
+            return self.fail_at("ImportError", msg, at);
+        };
+        match self.modules.get(&path) {
+            Some(ModuleState::Done(ns)) => return Ok(ns.clone()),
+            // A module's top level never runs twice: the same error again (it keeps its
+            // location and trace).
+            Some(ModuleState::Failed(e)) => return Err(Flow::Error(e.clone())),
+            Some(ModuleState::Running) => {
+                let first = self.import_stack.iter().position(|p| *p == path).unwrap_or(0);
+                let chain: Vec<String> = self.import_stack[first..]
+                    .iter()
+                    .chain(std::iter::once(&path))
+                    .map(|p| module::shown(p).to_string())
+                    .collect();
+                return self.fail_at("ImportError", format!("circular import: {}", chain.join(" -> ")), at);
+            }
+            None => {}
+        }
+        let parsed = match self.parsed.remove(&path) {
+            Some(p) => p,
+            // Not there at startup, there now: parse it now (6.4 step 1).
+            None => match module::parse_file(&mut self.sm, &path) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = match e {
+                        crate::syntax::span::LoadError::Io(m) => m,
+                        crate::syntax::span::LoadError::NotUtf8 { .. } => "file is not valid UTF-8".into(),
+                    };
+                    return self.fail_at("ImportError", format!("cannot import '{spec}': {msg}"), at);
+                }
+            },
+        };
+        let program = match parsed {
+            Parsed::Ok { program, .. } => program,
+            Parsed::Failed(diags) => {
+                let d = &diags[0];
+                let msg = format!("cannot import '{spec}': {}:{}:{}: SyntaxError: {}", d.display, d.line, d.col, d.message);
+                let data = diags
+                    .iter()
+                    .map(|d| {
+                        let mut m = IndexMap::new();
+                        m.insert(Rc::from("file"), Value::Str(d.display.clone()));
+                        m.insert(Rc::from("line"), Value::Int(d.line as i64));
+                        m.insert(Rc::from("col"), Value::Int(d.col as i64));
+                        m.insert(Rc::from("message"), Value::str(&d.message));
+                        Value::dict(m)
+                    })
+                    .collect();
+                let e = Rc::new(ErrorValue::with_data("ImportError".into(), msg.into(), Value::list(data)));
+                let flow = self.raise(Flow::Error(e.clone()), at);
+                self.modules.insert(path, ModuleState::Failed(e));
+                return Err(flow);
+            }
+        };
+        self.modules.insert(path.clone(), ModuleState::Running);
+        self.import_stack.push(path.clone());
+        self.calls.push(CallRecord { name: None, call_site: at });
+        let r = self.run_top_level(&program);
+        self.calls.pop();
+        self.import_stack.pop();
+        match r {
+            Ok(frame) => {
+                // The namespace: a snapshot of the module's bindings, without `_` names (6.4 step 3).
+                let ns: IndexMap<Rc<str>, Value> = frame
+                    .borrow()
+                    .vars
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .map(|(k, slot)| (k.clone(), slot.value.clone()))
+                    .collect();
+                let ns = Value::dict(ns);
+                self.modules.insert(path, ModuleState::Done(ns.clone()));
+                env::leave(frame);
+                Ok(ns)
+            }
+            Err(Flow::Error(e)) => {
+                self.modules.insert(path, ModuleState::Failed(e.clone()));
+                Err(Flow::Error(e))
+            }
+            Err(other) => Err(other),
+        }
     }
 
     // -- errors ---------------------------------------------------------------------------------
@@ -231,7 +346,10 @@ impl<'a> Interp<'a> {
             StmtKind::For { first, second, iter, body } => self.exec_for(first, second.as_ref(), iter, body, env)?,
             StmtKind::Try { body, catch, finally } => self.exec_try(body, catch.as_ref(), finally.as_ref(), env)?,
             StmtKind::Func(_) => {} // hoisted on entry to its body
-            StmtKind::Import { .. } => return Err(self.not_yet("import (roadmap 0.8)", s.span)),
+            StmtKind::Import { path, alias } => {
+                let ns = self.import(path, s.span)?;
+                declare(env, alias.text.clone(), ns, false);
+            }
             StmtKind::EngineImport(imp) => return Err(self.not_yet("@import (roadmap phase 1)", imp.span)),
             StmtKind::Extern(_) => return Err(self.not_yet("extern (roadmap phase 2)", Span { hi: s.span.lo + 6, ..s.span })),
             StmtKind::Block(b) => return Err(self.engine_unknown(b)),

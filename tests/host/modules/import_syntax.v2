@@ -1,0 +1,11 @@
+// R49: a module with two syntax errors raises ImportError at the import, with the first
+// diagnostic as its message and both in e.data (INTERNALS 6.4).
+print("main runs")
+try {
+    import "./fixtures/two_errors.v2" as bad
+} catch (e) {
+    print(e.type)
+    print(e.message)
+    print(e.line, e.data.len())
+    print(e.data[1])
+}

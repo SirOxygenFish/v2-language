@@ -1,0 +1,2 @@
+print("boom runs once")
+throw error("ValueError", "boom")

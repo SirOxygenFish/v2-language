@@ -1,0 +1,13 @@
+// A module for modules/basics.v2: it prints once, when it first runs.
+print("util runs")
+func slug(text) {
+    return text.lower().replace(" ", "-")
+}
+let _cache = {}
+let counter = 0
+func bump() {
+    counter += 1
+    return counter
+}
+const VERSION = "1.0"
+import "./sub/helper.v2" as helper

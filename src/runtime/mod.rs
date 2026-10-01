@@ -11,6 +11,7 @@ pub mod ops;
 pub mod strings;
 pub mod value;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::syntax::span::{LoadError, SourceMap};
@@ -47,14 +48,18 @@ pub fn run_script(path: &str, _args: Vec<String>) -> i32 {
         }
         return 1;
     }
-    let mut interp = Interp::new(&sm, crate::INTERP_STACK_BYTES);
-    let result = interp.run(&program);
+    // Every file the import literals name, depth-first; their diagnostics wait for the
+    // import that reaches them (6.1 step 2).
+    let mut parsed = HashMap::new();
+    module::parse_graph(&mut sm, file, &program, &mut parsed);
+    let mut interp = Interp::new(sm, parsed, crate::INTERP_STACK_BYTES);
+    let result = interp.run(file, &program);
     // Program output comes before the error that ended it (5.10).
     interp.out.flush();
     match result {
         Ok(()) => 0,
         Err(Flow::Error(e)) => {
-            eprint!("{}", render_error(&sm, &e));
+            eprint!("{}", render_error(&interp.sm, &e));
             1
         }
         Err(Flow::Return(_) | Flow::Break | Flow::Continue) => {

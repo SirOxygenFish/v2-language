@@ -1,0 +1,8 @@
+// exit: 1
+// stderr: fixtures/boom.v2:2:1: ValueError: boom
+// stderr: at fixtures/boom.v2:2
+// stderr: at uncaught.v2:7
+// An error raised by a module's top level shows the module line, then the import site.
+print("before")
+import "./fixtures/boom.v2" as boom
+print("never")
