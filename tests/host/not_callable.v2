@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: not_callable.v2:4:4: TypeError: 'str' is not callable
+// stderr: "x"()
+"x"()

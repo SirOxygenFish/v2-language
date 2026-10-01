@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 0: Host core |
-| **Next task** | 0.2 Walking skeleton: `print("hi")` end to end |
-| **Last update** | 2026-10-01: 0.1 project skeleton done (CI written, not yet run) |
+| **Next task** | 0.4 Block scanning and directives |
+| **Last update** | 2026-10-01: 0.2 walking skeleton and 0.3 lexer done (CI written, not yet run) |
 
 ## Rules
 
@@ -46,10 +46,10 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
       ffi/ doctor/`), empty but compiling
 - [x] Threads per §1.3: main thread, interpreter thread (256 MiB stack), watchdog; panic → 101
 - [x] `v2 --version`, `v2 --help`, the full §19.1 argument grammar with usage errors → exit 2
-- [~] Test harness `tests/run.rs` (§22.2): discovers `tests/**/*.v2`, headers (`exit`,
+- [x] Test harness `tests/run.rs` (§22.2): discovers `tests/**/*.v2`, headers (`exit`,
       `stderr`, `args`, `platform`, `timeout`), `.out` comparison, isolated `HOME`, tautology
-      lint, visible summary. Header parsing and the lint are tested; the first real `.v2` test
-      runs through it in 0.2. (`requires:` and SKIP come in 1.1, when `engine_available` exists.)
+      lint, visible summary; real `.v2` tests run through it since 0.2. (`requires:` and SKIP
+      come in 1.1, when `engine_available` exists.)
 - [~] CI on GitHub Actions: `cargo build` + `cargo test` on Windows, Ubuntu and macOS (§22.6).
       Written; runs once the branch is pushed. The engine columns of the matrix are added as
       Phases 1 and 2 land.
@@ -57,24 +57,29 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
   (14 tests, 0 warnings)
 
 ### 0.2 Walking skeleton: `print("hi")` end to end
-- [ ] `FileId`, `SourceMap`, `Span`, `UnitLoc` (§2.1–2.3)
-- [ ] Diagnostics: `file:line:col: Kind: message`, excerpt, caret, stack frames (§2.4, §2.5)
-- [ ] Just enough lexer, parser and interpreter for string literals, calls and `print` via `Out`
-      (§5.10), plus `v2 FILE` and exit codes 0/1/2 (§1.2, §19.1)
-- [ ] An uncaught error and a `SyntaxError` render per §2.4 and exit 1
+- [x] `FileId`, `SourceMap`, `Span` (§2.1, §2.2); `UnitLoc` moved to 0.4, where block bodies need it
+- [x] Diagnostics: `file:line:col: Kind: message`, excerpt, caret, stack frames, notes, hints,
+      long-line windowing (§2.4, §2.5)
+- [x] Just enough parser and interpreter for literals, names, f-strings, calls with named args
+      and `print` via `Out` (§5.10), plus `v2 FILE` and exit codes 0/1/2 (§1.2, §19.1);
+      NameError with did-you-mean (§5.6, §5.9), `TypeError: 'str' is not callable` (§5.7)
+- [x] An uncaught error and a `SyntaxError` render per §2.4 and exit 1
 - **Done when:** a harness test printing `hi` passes, and a harness test with a syntax error
-  checks the exact stderr and exit code
+  checks the exact stderr and exit code — **passed 2026-10-01** (`tests/host/hello.v2`,
+  `tests/host/syntax/*.v2`)
 
 ### 0.3 Lexer
-- [ ] Tokens, keywords (DOCS 18), BOM strip, CRLF → LF (§3.1, §3.2)
-- [ ] Where statements end: open brackets, trailing operators, leading `.`/`?.` (§3.3)
-- [ ] Numbers: decimal with `_`, hex; i64 overflow and `0b`/`0o`/leading zeros are SyntaxErrors (§3.4)
-- [ ] Strings: strict escapes, raw `r""`, bytes `b""`, f-strings with `${expr}` and `:.Nf`,
-      triple-quoted with the closing-line dedent rule (§3.5)
-- [ ] Comments `//` and `/* */`
-- **Done when:** lexer unit tests pass, including every DOCS 3.1 and 3.5 example
+- [x] Tokens, keywords (DOCS 18), BOM strip, CRLF → LF (§3.1, §3.2)
+- [x] Where statements end: open brackets, trailing operators, leading `.`/`?.` (§3.3)
+- [x] Numbers: decimal with `_`, hex; i64 overflow and `0b`/`0o`/leading zeros are SyntaxErrors (§3.4)
+- [x] Strings: strict escapes, raw `r""`, bytes `b""`, f-strings with `${expr}` and `:.Nf`,
+      triple-quoted with the closing-line dedent rule (§3.5); `${…}` nesting limited to 256
+- [x] Comments `//` and `/* */`
+- **Done when:** lexer unit tests pass, including every DOCS 3.1 and 3.5 example — **passed
+  2026-10-01** (reviewed; 6 findings fixed, each with a regression test)
 
 ### 0.4 Block scanning and directives
+- [ ] `UnitLoc` (§2.3)
 - [ ] Block heads `@tag [label] [(args)]` with `{` on the header's last line, and the fence
       form (§3.6, §3.7)
 - [ ] Scan profiles: python, c-like (c/cpp/rust/js/ts), plain for custom tags; guards C1/C2 (§3.8)
@@ -317,3 +322,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-09-30 | Evaluation of old V2; decision to reboot around the polyglot system |
 | 2026-10-01 | Old project archived in `old/`; DOCS.md and INTERNALS.md written and cross-checked; branch `v2-reboot` created; this roadmap written |
 | 2026-10-01 | 0.1: crate, dependencies (libffi verified on MSVC), module tree, threads, CLI parser, test harness, CI file; reviewed (6 findings fixed) |
+| 2026-10-01 | 0.2 + 0.3: SourceMap, error rendering, full lexer, `print` end to end; `v2 hello.v2` runs; reviewed (6 findings fixed with regression tests) |

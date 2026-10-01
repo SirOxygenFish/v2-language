@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: bad_escape.v2:4:15: SyntaxError: unknown escape \d
+// stderr: hint: write \\ for a backslash, or use a raw string r"…"
+print("digits \d")

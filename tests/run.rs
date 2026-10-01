@@ -374,11 +374,41 @@ fn usage_errors_exit_2() {
         (&["--frobnicate", "x.v2"][..], "unknown flag `--frobnicate`"),
         (&["--engine", "py", "x.v2"][..], "v2 doctor TAG"),
         (&["check"][..], "needs a FILE"),
+        (&["no_such_script.v2"][..], "cannot read 'no_such_script.v2'"),
     ] {
         let out = v2(args);
         assert_eq!(out.status.code(), Some(2), "args {args:?}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(needle), "args {args:?}: stderr {err:?} lacks {needle:?}");
+    }
+}
+
+#[test]
+fn invalid_utf8_is_a_syntax_error_at_its_line() {
+    // LF, CRLF and lone-CR line endings all count lines the same way (INTERNALS 3.1).
+    for bytes in [
+        &b"print(1)\nprint(\"\xff\")\n"[..],
+        &b"print(1)\r\nprint(\"\xff\")\r\n"[..],
+        &b"print(1)\rprint(2)\r\xff\r"[..],
+    ] {
+        let home = TempHome::new();
+        std::fs::write(home.0.join("bad.v2"), bytes).unwrap();
+        let child = v2_command(&home.0)
+            .arg("bad.v2")
+            .current_dir(&home.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start v2");
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let expected_line = if bytes.contains(&b'\n') { 2 } else { 3 };
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("bad.v2:{expected_line}:1: SyntaxError: file is not valid UTF-8\n")
+        );
+        assert!(out.stdout.is_empty());
     }
 }
 

@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: paren_callee.v2:5:2: TypeError: print() argument 'sep' must be a str, got int
+// Parentheses don't move the caret off the name (INTERNALS 2.2).
+(print)("ok")
+(print)(1, sep: 2)
