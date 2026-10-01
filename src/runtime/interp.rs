@@ -24,6 +24,7 @@ impl<'a> Interp<'a> {
                     self.eval(e)?;
                 }
                 StmtKind::Block(b) => return Err(self.engine_unknown(b)),
+                _ => return Err(self.not_yet(stmt.span)),
             }
         }
         Ok(())
@@ -37,6 +38,11 @@ impl<'a> Interp<'a> {
             e.trace = vec![format!("{display}:{}", span.line)];
         }
         e
+    }
+
+    /// Temporary while roadmap 0.6/0.7 build the rest of the interpreter.
+    fn not_yet(&self, span: Span) -> ErrorValue {
+        self.raise(ErrorValue::new("Error", "the interpreter doesn't run this yet (roadmap 0.6/0.7)"), span)
     }
 
     /// Phase 0 has no engine registry, so reaching any block is `EngineUnknown` (INTERNALS 23).
@@ -65,6 +71,19 @@ impl<'a> Interp<'a> {
                 }
             },
             ExprKind::Block(b) => return Err(self.engine_unknown(b)),
+            ExprKind::List(_)
+            | ExprKind::Dict(_)
+            | ExprKind::Unary(..)
+            | ExprKind::Binary(..)
+            | ExprKind::And(..)
+            | ExprKind::Or(..)
+            | ExprKind::Coalesce(..)
+            | ExprKind::Ternary(..)
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Member { .. }
+            | ExprKind::OptChain(_)
+            | ExprKind::Lambda(_) => return Err(self.not_yet(e.span)),
             ExprKind::Call { callee, args, paren } => {
                 let f = self.eval(callee)?;
                 let mut pos = Vec::new();
@@ -73,6 +92,7 @@ impl<'a> Interp<'a> {
                     match a {
                         Arg::Pos(x) => pos.push(self.eval(x)?),
                         Arg::Named(n, x) => named.push((n.clone(), self.eval(x)?)),
+                        Arg::Spread(x) => return Err(self.not_yet(x.span)),
                     }
                 }
                 // The caret goes at the callee's name, else at the `(` (2.2).

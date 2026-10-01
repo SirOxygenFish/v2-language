@@ -111,9 +111,9 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
     let code: Vec<usize> = (0..lines.len())
         .filter(|&k| !lines[k].header_line && lines[k].in_code && !blank(&lines[k].text))
         .collect();
-    for k in 0..lines.len() {
-        if !lines[k].header_line && lines[k].in_code && blank(&lines[k].text) {
-            lines[k].text.clear();
+    for line in lines.iter_mut() {
+        if !line.header_line && line.in_code && blank(&line.text) {
+            line.text.clear();
         }
     }
     let m = code.iter().map(|&k| lead_of(&lines[k].text)).min().unwrap_or(0);

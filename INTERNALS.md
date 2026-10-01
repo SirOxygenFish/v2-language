@@ -301,7 +301,7 @@ Other rules:
 - Inside a `Body` the stack top is `Body`, so a `lambda(x) { … }` inside a call still separates its statements.
 - A run of line breaks produces one `Newline`, and none comes before the first token. `;` is a `Semi` token.
 - The parser ends a statement at `Newline`, at `Semi`, before `}` and at `Eof`. It skips `Newline`s before `elif`, `else`, `catch` and `finally`.
-- A line that starts with a binary-only operator does not continue the previous one: `+ b` fails with the hint "end the previous line with the operator".
+- A line that starts with a binary-only operator (`+ * / % ** == != < > <= >= && || ?? ?`, `in`, `not in`) does not continue the previous one: `+ b` fails with the hint "end the previous line with the operator". After an `if`, `elif`, `while` or `for` head the error is `expected {, found `&&` on the next line`, with the same hint.
 - **A body `{` must be on its header's line.** This applies to `if`, `elif`, `else`, `while`, `for`, `func`, `lambda`, `try`, `catch` and `finally`. After a `Newline`, a `{` is a Dict brace, so the parser reports `expected {` with the hint "put { at the end of the if line".
 ### 3.4 Numbers
 - **Integers.** `0`, `[1-9][0-9_]*`, or `0x` followed by hex digits. `_` is allowed only between two digits. These are errors: leading zeros (`007`), `0b`, `0o`, and a number followed directly by an identifier character (`12abc`, `0x`, `0X1`, `1f`).
@@ -432,6 +432,7 @@ entry     = ( NAME | STRING | "[" expr "]" ) ":" expr
 - **Blocks.** A statement that starts with `@TAG` is a block statement, ended by `SEP`, `}` or `EOF`.
   - Anywhere else, a block is a whole `expr` (a `let` value, an argument, an element, a parenthesized operand), and it must be an action block (4.5).
   - An operator or postfix after a block value is rejected. On the same line, C2 catches it (3.7). On the next line, where `.m()` continues the statement by 3.3 rule 3, the parser reports `a block value must be in parentheses here: (@py { … }).m()`.
+  - A block in operand position (`1 + @py { 2 }`, `-@py { 2 }`, `a ?? @py { 1 }`, a `for` head) reaches `primary`, which has no block: `a block value must be in parentheses here`, at the `@`.
 - **Assignment** is a statement, not an expression. Targets are NAME, `postfix "." NAME` and `postfix "[" expr "]"`. Any other target is `cannot assign to this expression`, and a target chain that contains `?.` is `cannot assign through ?.`.
 - **Optional chains.** The parser wraps a postfix chain that contains `?.` in `OptChain`. The chain runs to the end of the postfix sequence, and parentheses end it: `(a?.b).c` leaves `.c` outside.
   - When a `?.` finds `null`, the whole chain is `null`, and its remaining steps are not evaluated, arguments included. So `a?.b.c()` with `a == null` is `null`, as in JS.
@@ -440,7 +441,7 @@ entry     = ( NAME | STRING | "[" expr "]" ) ":" expr
   - `-2 ** 2` is `-(2 ** 2)`, and `2 ** -1` is valid.
   - Named args come after all positional and spread args. A named arg is `NAME` then `:` (two-token lookahead), so `f(c ? a : b)` is positional.
   - The block arg `nums` is short for `nums: nums`.
-  - Past 256 levels of nested expressions, bodies and interpolations, the parser stops with `nested too deeply`. This protects the host stack from generated input.
+  - Past 256 levels of nested expressions, bodies and interpolations, the parser stops with `nested too deeply`. Left-associative chains (`a + b + …`, `a && b && …`, `a.b.c…`, `f()()…`) build a tree as deep as the chain is long, so the tree's binary-operator and postfix nodes are counted separately: when a node would sit more than 10,000 such nodes deep, counting the operands already under it (a parenthesized group, a tighter chain) and the expression it is part of (an enclosing chain, a lambda body's expression), the parser stops with `expression too long` (hint: split it into several statements with let). Both limits protect the host stack from generated input; every later pass (4.5, ch. 5) may recurse over the tree.
 
 ### 4.2 Precedence
 The grammar encodes DOCS 3.4's table, from lowest to highest:
@@ -501,7 +502,7 @@ pub enum Selector {            // as written: @py | @py.stats | stats, "odd-name
 pub struct Extern { pub lib: Name, pub alias: Option<Name>, pub decls: Vec<ffi::Sig>, pub body_span: Span }
 ```
 - **Selectors.** `Selector` keeps tags and path segments exactly as written. Ch. 13 canonicalizes them (`@python.stats` is `@py.stats`) and joins module paths.
-- **When C declarations are parsed.** `extern` declarations are parsed at parse time (3.9). The quoted `@export` items of `c`, `cpp`, `cxx`, `rust` and `rs` blocks are parsed as prototypes by `ffi::cdecl` at parse time too; one it cannot read is a `SyntaxError` with the messages of 16.3 (4.5). An unsupported type or a missing function is still a `BuildError` when the block is reached (15.2).
+- **When C declarations are parsed.** `extern` declarations are parsed at parse time (3.9). The quoted `@export` items of `c`, `cpp`, `cxx`, `rust` and `rs` blocks are parsed as prototypes by `ffi::cdecl` at parse time too, `cpp` and `cxx` ones in its C++ dialect (16.3: `std::string`, `const std::string&`); one it cannot read is a `SyntaxError` with the messages of 16.3 (4.5). An unsupported type or a missing function is still a `BuildError` when the block is reached (15.2).
 ### 4.4 Block bodies: lines, directives, dedent
 `syntax/directives.rs` turns a `RawBody` into `body`, `loc` (2.3) and `directives`. The result is what engines receive: the code as written, with directive lines blanked and the common indentation removed (DOCS 4.1).
 
@@ -2238,7 +2239,7 @@ Errors are `SyntaxError`s in `extern` bodies and prototype strings; in a definit
 | `(*name)(…)` | `function pointers (callbacks) are not supported` |
 | `typedef` | `typedef is not supported in extern — use the underlying type` |
 | preprocessor line | `#include/#define are not supported in extern — copy the prototypes` |
-| no `(` (`extern int errno;`) | `only functions can be declared in extern` |
+| no `(` (`extern int errno;`, `struct tm;`) | `only functions can be declared in extern` |
 | unknown identifier by value | `unknown type 'SQLITE_API' — remove macros from copied declarations` |
 | `long double`, `wchar_t`, `char16_t`, `_Complex`, `__int128` by value | `type 'long double' is not supported` |
 | `int a(void), b(void);` | `declare one function per declaration` |

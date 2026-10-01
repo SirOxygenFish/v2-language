@@ -33,8 +33,8 @@ fn osa(a: &[char], b: &[char]) -> usize {
     for (i, row) in d.iter_mut().enumerate() {
         row[0] = i;
     }
-    for j in 0..=m {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=n {
         for j in 1..=m {
@@ -51,7 +51,7 @@ fn osa(a: &[char], b: &[char]) -> usize {
 /// The closest candidate, compared lower-cased, if within `max(1, min(3, (len + 2) / 3))`.
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let target: Vec<char> = name.to_lowercase().chars().collect();
-    let limit = 1usize.max(3usize.min((target.len() + 2) / 3));
+    let limit = 1usize.max(3usize.min(target.len().div_ceil(3)));
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {
         if c == name {

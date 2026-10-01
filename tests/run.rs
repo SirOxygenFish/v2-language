@@ -412,6 +412,40 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
     }
 }
 
+#[test]
+fn generated_input_never_overflows_the_stack() {
+    // A million-term chain is a SyntaxError, not a crash (INTERNALS 4.1).
+    for (name, src) in [
+        ("plus.v2", format!("let x = 1{}\n", " + 1".repeat(1_000_000))),
+        ("member.v2", format!("let a = 1\nlet x = a{}\n", ".b".repeat(1_000_000))),
+        ("nested.v2", format!("let x = {}1{}\n", "(".repeat(100_000), ")".repeat(100_000))),
+        // Groups of 9,999-link chains, each under the next one's chain.
+        ("groups.v2", {
+            let mut s = "a".to_string();
+            for _ in 0..250 {
+                s = format!("({s}{})", " + a".repeat(9_999));
+            }
+            format!("let x = {s}\n")
+        }),
+    ] {
+        let home = TempHome::new();
+        std::fs::write(home.0.join(name), src).unwrap();
+        let child = v2_command(&home.0)
+            .arg(name)
+            .current_dir(&home.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start v2");
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(60)).unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name}: {err}");
+        let message = if name == "nested.v2" { "SyntaxError: nested too deeply" } else { "SyntaxError: expression too long" };
+        assert!(err.contains(message), "{name}: {err}");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The harness checks itself
 
