@@ -1,0 +1,53 @@
+// List and dict errors (INTERNALS 5.5, 5.11).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let d = {name: 1}
+show(lambda() => d.nmae)
+show(lambda() => d["x"])
+show(lambda() => d[1])
+show(lambda() => d.remove("zzz"))
+show(lambda() => d.get(1))
+show(lambda() => d.frobnicate())
+show(lambda() => {[1]: 2})
+show(lambda() => [1].len)
+show(lambda() => [1].append(2))
+show(lambda() => [].pop())
+show(lambda() => [1, 2][5])
+show(lambda() => [1, 2][-3])
+show(lambda() => [1, 2]["0"])
+show(lambda() => [1, 2].remove_at(-3))
+show(lambda() => [1, 2].get("a"))
+show(lambda() => [1, "a"].sort())
+show(lambda() => [[1]].sort())
+show(lambda() => [1].map(lambda(a, b) => a))
+show(lambda() => [1].join(0))
+show(lambda() => null.x)
+show(lambda() => null.x())
+show(lambda() => null[0])
+let n = 5
+show(lambda() => n.x)
+show(lambda() => n.x())
+show(lambda() => n[0])
+show(lambda() => n[0:1])
+let xs = [1, 2]
+try {
+    xs[2] = 3
+} catch (e) {
+    print(e.type + ": " + e.message, xs)
+}
+try {
+    n.field = 1
+} catch (e) {
+    print(e.type + ": " + e.message)
+}
+let nothing = null
+try {
+    nothing.field = 1
+} catch (e) {
+    print(e.type + ": " + e.message)
+}

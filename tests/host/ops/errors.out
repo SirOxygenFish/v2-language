@@ -1,0 +1,20 @@
+ValueError: integer overflow in '+'
+ValueError: integer overflow in '-'
+ValueError: integer overflow in '*'
+ValueError: integer overflow in '**'
+ValueError: integer overflow in '-'
+ValueError: division by zero
+ValueError: division by zero
+ValueError: division by zero
+ValueError: division by zero
+TypeError: unsupported operand types for +: 'str' and 'int' — use f"...${x}" or str(x)
+TypeError: unsupported operand types for -: 'int' and 'str'
+TypeError: unsupported operand types for *: 'list' and 'str'
+TypeError: cannot compare list and list with '<'
+TypeError: cannot compare str and int with '<'
+TypeError: bad operand type for unary -: 'str'
+TypeError: 'in' needs a list, dict, str or bytes on the right, got int
+TypeError: 'in' on a str needs a str, got int
+TypeError: 'in' on a dict needs a str key, got int
+ValueError: repetition result too large
+ValueError: integer overflow in '+' 9223372036854775807

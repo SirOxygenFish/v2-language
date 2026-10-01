@@ -1,0 +1,16 @@
+Ada
+7
+true
+none Ada null
+["name", "favorite number", "email"] 3 3
+{"name": "Grace", "favorite number": 7, "email": "ada@example.com"}
+ada@example.com {"name": "Grace", "favorite number": 7}
+2 3
+{"dyn": 1, "dyn2": 2, "a": 3, "for": 4, "if": 5} 4 5
+["dyn", "dyn2", "a", "for", "if", "z"]
+my keys 3 42 99
+a 1
+b 2
+x
+{"a": 2, "b": 1}
+{"list": [1, 2]}

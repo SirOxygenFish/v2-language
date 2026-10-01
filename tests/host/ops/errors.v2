@@ -1,0 +1,33 @@
+// Operator errors (INTERNALS 5.3): overflow and division by zero are ValueErrors.
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+show(lambda() => 9223372036854775807 + 1)
+show(lambda() => -9223372036854775807 - 2)
+show(lambda() => 4611686018427387904 * 2)
+show(lambda() => 2 ** 63)
+show(lambda() => -(-9223372036854775807 - 1))
+show(lambda() => 1 / 0)
+show(lambda() => 1 % 0)
+show(lambda() => 1.5 % 0.0)
+show(lambda() => 0 ** -1)
+show(lambda() => "a" + 1)
+show(lambda() => 1 - "a")
+show(lambda() => [1] * "a")
+show(lambda() => [1] < [2])
+show(lambda() => "a" < 1)
+show(lambda() => -"a")
+show(lambda() => 1 in 5)
+show(lambda() => 1 in "abc")
+show(lambda() => 1 in {a: 1})
+show(lambda() => "ab" * 9223372036854775807)
+let total = 9223372036854775807
+try {
+    total += 1
+} catch (e) {
+    print(e.type + ": " + e.message, total)
+}

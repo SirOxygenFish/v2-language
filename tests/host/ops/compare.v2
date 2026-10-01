@@ -1,0 +1,17 @@
+// Equality, ordering and membership (DOCS 3.4, INTERNALS 5.2, 5.3).
+print(1 == 1.0, 1 == true, "a" == "a", [1, [2]] == [1, [2.0]], {a: 1, b: 2} == {b: 2, a: 1})
+print(null == null, null == false, 0 == false, [] == [], {} == {}, [1] == [1, 2], {a: 1} == {a: 2})
+print(1 != 2, "a" != "a", b"x" == b"x", b"x" == "x")
+print(1 < 2, 2 <= 2, 3 > 2, 2 >= 3, "B" < "a", "abc" < "abd", 1 < 1.5, -1 > -1.5)
+print(9007199254740993 == 9007199254740992.0, 9007199254740993 > 9007199254740992.0)
+print(9223372036854775807 < 9223372036854775807.0, -9223372036854775808 == -9223372036854775808.0)
+let inf = 1e308 * 10
+let nan = inf - inf
+print(inf, -inf, nan, nan == nan, nan != nan, nan < 1, 1 < nan, nan >= nan)
+print(2 in [1, 2, 3], 2.0 in [1, 2], "x" in {x: 1}, "ell" in "hello", "" in "abc")
+print(0 in b"\x00", 300 in b"\x00", b"el" in b"hello", 4 not in [1, 2], "y" not in {y: 1})
+let f = lambda() => 1
+let g = f
+print(f == g, f == lambda() => 1, print == print)
+let e = error("E", "m")
+print(e == e, e == error("E", "m"))

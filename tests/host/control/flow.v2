@@ -1,0 +1,54 @@
+// Control flow (DOCS 3.7, INTERNALS 5.8).
+let score = 80
+if score >= 90 {
+    print("A")
+} elif score >= 75 {
+    print("B")
+} else {
+    print("keep going")
+}
+if score < 0 { print("never") }
+elif score < 50 { print("never") }
+else { print("else on its own line") }
+let queue = [1, 2, 3]
+while queue.len() > 0 {
+    print(queue.pop())
+}
+for name in ["ada", "grace"] { print(name) }
+for i in 0..3 { print(i) }
+for i, name in ["ada", "grace"] { print(i, name) }
+for key, value in {a: 1, b: 2} { print(key, value) }
+for ch in "héllo" { print(ch) }
+for i in 5..2 { print("never") }
+for i in -2..0 { print(i) }
+for b in b"AB" { print(b) }
+let xs = [1, 2, 3]
+for x in xs {
+    xs.push(x * 10)
+    if x == 2 { continue }
+    print("seen", x)
+}
+print(xs)
+let n = 0
+while true {
+    n += 1
+    if n > 3 { break }
+}
+print(n)
+if (score > 0) { print("parens ok") }
+for i in 0..3 {
+    for j in 0..3 {
+        if j == 1 { break }
+        print(i, j)
+    }
+}
+let x = 1
+if true {
+    let x = 2
+    print("inner", x)
+}
+print("outer", x)
+let total = 0
+for i in 0..5 { total += i }
+print(total)
+print(score > 50 ? "pass" : "fail", null ?? "default", 0 ?? "zero stays", false || "or", 1 && "and")

@@ -1,0 +1,66 @@
+// Functions (DOCS 3.8, INTERNALS 5.6, 5.7).
+print(greet("Ada"))                          // hoisted: callable before its line
+func greet(name, greeting = "Hello") {
+    return f"${greeting}, ${name}!"
+}
+print(greet("Ada", greeting: "Welcome"))
+print(greet(greeting: "Hi", name: "Bob"))
+func total(...nums) {
+    let sum = 0
+    for n in nums { sum += n }
+    return sum
+}
+print(total(1, 2, 3), total(...[4, 5]), total(), total(1, ...[2, 3], 4))
+let double = lambda(x) => x * 2
+let shout = lambda(s) {
+    return s.upper() + "!"
+}
+print(double(21), shout("hey"))
+func nothing() { }
+func bare() { return }
+print(nothing(), bare())
+func defaults(a, b = a * 2, c = b + 1) { return [a, b, c] }
+print(defaults(1), defaults(1, 5), defaults(1, c: 0))
+func stamp(items = []) {
+    items.push(1)
+    return items
+}
+print(stamp(), stamp())
+func counter() {
+    let n = 0
+    return lambda() {
+        n += 1
+        return n
+    }
+}
+let c1 = counter()
+let c2 = counter()
+print(c1(), c1(), c2())
+let fs = []
+for i in 0..3 { fs.push(lambda() => i) }
+print(fs.map(lambda(f) => f()))
+func fact(n) { return n <= 1 ? 1 : n * fact(n - 1) }
+print(fact(20))
+func apply(f, ...args) { return f(...args) }
+print(apply(lambda(a, b) => a - b, 10, 3))
+let ops = {add: lambda(a, b) => a + b}
+print(ops.add(2, 3), [lambda() => "in a list"][0]())
+func outer() {
+    return inner()
+    func inner() { return "inner is hoisted too" }
+}
+print(outer())
+func even(n) { return n == 0 ? true : odd(n - 1) }
+func odd(n) { return n == 0 ? false : even(n - 1) }
+print(even(10), odd(7))
+func make_adders() {
+    let adders = {}
+    for k in [1, 10] {
+        adders[str_of(k)] = lambda(x) => x + k
+    }
+    return adders
+}
+func str_of(k) { return f"${k}" }
+let adders = make_adders()
+print(adders["1"](5), adders["10"](5))
+print(greet, double, print)

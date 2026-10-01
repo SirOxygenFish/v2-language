@@ -412,6 +412,39 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
     }
 }
 
+/// Run generated source in a fresh temp home; returns (exit code, stdout, stderr).
+fn run_generated(name: &str, src: &str) -> (Option<i32>, String, String) {
+    let home = TempHome::new();
+    std::fs::write(home.0.join(name), src).unwrap();
+    let child = v2_command(&home.0)
+        .arg(name)
+        .current_dir(&home.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(120)).unwrap();
+    (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn deep_recursion_then_a_long_chain_is_a_recursion_error() {
+    // The stack guard covers every expression node, so a 9,990-term chain evaluated near the
+    // bottom of a deep recursion raises RecursionError instead of overflowing (INTERNALS 5.9).
+    let chain = " + 1".repeat(9_990);
+    for depth in [0, 500, 1000, 1500] {
+        let src = format!(
+            "func plain(m) {{ if m == 0 {{ return deep(100) }}; return plain(m - 1) }}\n\
+             func deep(n) {{\n    if n == 0 {{ return 0 }}\n    return deep(n - 1){chain}\n}}\n\
+             try {{ print(plain({depth})) }} catch (e) {{ print(e.type) }}\n"
+        );
+        let (code, stdout, stderr) = run_generated("chain.v2", &src);
+        assert_eq!(code, Some(0), "depth {depth}: {stderr}");
+        assert!(stdout == "RecursionError\n" || stdout.trim().parse::<i64>().is_ok(), "depth {depth}: {stdout:?}");
+    }
+}
+
 #[test]
 fn generated_input_never_overflows_the_stack() {
     // A million-term chain is a SyntaxError, not a crash (INTERNALS 4.1).

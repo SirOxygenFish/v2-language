@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: op_caret.v2:7:11: TypeError: unsupported operand types for +: 'int' and 'str'
+// stderr: let b = a + "x"
+// stderr: ^
+// The caret points at the failing operator (INTERNALS 2.2).
+let a = 1
+let b = a + "x"

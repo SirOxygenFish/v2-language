@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: assign_builtin.v2:7:1: TypeError: cannot assign to builtin 'print' — shadow it with let
+// The builtins frame is read-only (INTERNALS 5.6); a let shadows a builtin instead.
+func f() { let print = "shadowed"
+ return print }
+print(f())
+print = 1

@@ -461,13 +461,13 @@ The grammar encodes DOCS 3.4's table, from lowest to highest:
 pub struct Name { pub text: Rc<str>, pub span: Span }      pub struct Stmt { pub kind: StmtKind, pub span: Span }
 pub enum StmtKind {
     Let(Name, Option<Expr>), Const(Name, Expr), Expr(Expr), Break, Continue, Return(Option<Expr>), Throw(Expr),
-    Assign { target: Target, op: Option<BinOp>, value: Expr },        // op None = plain `=`
+    Assign { target: Target, op: Option<(BinOp, Span)>, value: Expr },  // op None = plain `=`; Span: the operator
     If { arms: Vec<(Expr, Body)>, else_: Option<Body> }, While { cond: Expr, body: Body },
     For { first: Name, second: Option<Name>, iter: ForIter /* Value(Expr) | Range(Expr, Expr) */, body: Body },
     Try { body: Body, catch: Option<(Option<Name>, Body)>, finally: Option<Body> },
     Func(Rc<FuncDecl>), Import { path: Rc<str>, alias: Name }, EngineImport(Rc<EngineImport>), Extern(Rc<Extern>), Block(Rc<EngineBlock>),
 }
-pub enum Target { Name(Name), Member(Box<Expr>, Name), Index(Box<Expr>, Box<Expr>) }
+pub enum Target { Name(Name), Member(Box<Expr>, Name), Index(Box<Expr>, Box<Expr>, Span /* the `[` */) }
 pub struct Body { pub stmts: Vec<Stmt>, pub funcs: Vec<usize> /* hoisted */, pub span: Span }
 pub struct FuncDecl { pub name: Option<Name>, pub params: Vec<(Name, Option<Expr>)>, pub rest: Option<Name>,
                       pub body: FuncBody /* Block(Body) | Expr(Expr) */, pub span: Span }
@@ -585,8 +585,8 @@ These are checked later, not here:
 ```rust
 pub enum Value {
     Null, Bool(bool), Int(i64), Float(f64), Str(Rc<str>), Bytes(Rc<[u8]>),
-    List(Rc<RefCell<Vec<Value>>>), Dict(Rc<RefCell<IndexMap<Rc<str>, Value>>>),
-    Func(Rc<Callable>), Handle(Rc<HandleRef>), Error(Rc<ErrorValue>),
+    List(List), Dict(Dict), Func(Func),        // Rc<RefCell<Vec<Value>>>, Rc<RefCell<IndexMap<Rc<str>, Value>>>,
+    Handle(Rc<HandleRef>), Error(Rc<ErrorValue>),  // Rc<Callable>, each freed iteratively (below)
 }
 pub enum Callable {
     Closure { decl: Rc<FuncDecl>, env: Env, file: Rc<FileScope> },  // file: the declaring file (6.2)
@@ -603,6 +603,7 @@ pub struct ErrorValue {
 ```
 
 - `Value::clone` is O(1): assigning, passing, returning or storing a list or dict shares it; `str`, `bytes`, `func`, `handle` and `error` are immutable. `.copy()` is shallow: a new `Vec`/`IndexMap`, nested containers shared.
+- **Freeing is iterative.** The `List`, `Dict` and `Func` handles wrap their `Rc` in a type whose `Drop` moves the contents of the last reference (a closure's frame slots, when nothing else holds the frame) into a thread-local queue that the outermost drop empties one value at a time; `ErrorValue`'s `Drop` queues its `data` the same way. So a value nested a million levels deep (`for i in 0..1000000 { v = [v] }`) never overflows the stack when it goes away.
 - `type(x)` is one of `null bool int float str bytes list dict func handle error`. Every `Callable` is `"func"`, including names bound by `@import`; foreign functions, bound methods and classes *returned as values* are callable handles, type `"handle"` (11.6). Native pointers are handles in the native pseudo-session (16.6).
 - `Closure.file` makes blocks and `@import`s in a function body resolve against the declaring file, whichever file calls it.
 
@@ -634,11 +635,11 @@ pub struct ErrorValue {
 | `/` | both to f64; always a float | f64 | divisor `0` or `0.0` → `ValueError: division by zero` |
 | `%` | floor: `r = a.wrapping_rem(b); if r != 0 && (r < 0) != (b < 0) { r += b }` | same fix-up on f64 `%` | divisor `0` or `0.0` → `ValueError: division by zero` |
 | `**` | `e >= 0`: `checked_pow` (`e > u32::MAX` overflows unless the base is 0, 1 or -1); `e < 0`: a float | `powf` | zero base (int or float) with a negative exponent → `ValueError: division by zero` |
-| `-x` | `checked_neg` | negate | TypeError |
+| `-x` | `checked_neg` | negate | `TypeError: bad operand type for unary -: 'str'` |
 
 - Integer overflow raises `ValueError: integer overflow in '*'` (the operator). Float `+ - * **` follow IEEE and may give `inf`/`nan`.
 - `x op= y` always means `x = x op y`, with the target's container and key evaluated once: `xs += [1]` makes a new list and rebinds `xs` (other names keep the old list). `&&`/`||` short-circuit and return an operand; `??` returns its left operand unless it is `null`.
-- `x in y`: list → an element `eq` to `x`; dict → key lookup, `x` must be a `Str`; str → substring, `x` must be a `Str`; bytes → a `Bytes` subsequence or an `Int` byte (outside 0–255 → `false`); otherwise TypeError. `not in` negates.
+- `x in y`: list → an element `eq` to `x`; dict → key lookup, `x` must be a `Str`; str → substring, `x` must be a `Str`; bytes → a `Bytes` subsequence or an `Int` byte (outside 0–255 → `false`); otherwise TypeError (`'in' needs a list, dict, str or bytes on the right, got int`; `'in' on a str needs a str, got int`). `not in` negates.
 - Handles take only `==`/`!=`: `in`, slicing, arithmetic, unary `-` and ordering raise the TypeErrors of 11.7, whose hint says to do it inside a block or convert with `value(h)`.
 
 ### 5.4 Strings and bytes
@@ -654,13 +655,13 @@ A `Str` is always valid UTF-8 (lone surrogates never enter, 10.4); user-visible 
 
 | Receiver | `r.name` | `r.name(args)` | `r[k]` | `r.name = v` / `r[k] = v` |
 | --- | --- | --- | --- | --- |
-| dict | key; missing → KeyError | key `name` holding a `Func` → call it; otherwise the dict method | `Str` key (else TypeError); missing → KeyError | insert or replace (a replaced key keeps its position) |
-| list | `TypeError: list has no field 'len'` | list method | `Int`, negative from the end; IndexError | index assignment; IndexError, never grows |
-| str, bytes | TypeError | method (5.11) | code point / byte | `TypeError: str is immutable` |
+| dict | key; missing → `KeyError: key 'name' not found` + did-you-mean over the keys | key `name` holding a `Func` → call it; otherwise the dict method | `Str` key (else `TypeError: dict keys must be str, got int`); missing → KeyError | insert or replace (a replaced key keeps its position) |
+| list | `TypeError: list has no field 'len'` | list method | `Int` (else `TypeError: list index must be an int, got float`), negative from the end; IndexError | index assignment; IndexError, never grows; `r.name = v` is the field TypeError |
+| str, bytes | `TypeError: str has no field 'x'` | method (5.11) | code point / byte (`string index …`, `bytes index …`) | `TypeError: str is immutable` |
 | handle | `op getattr` | `call {h, method}` | `op getitem` | `op setattr` / `op setitem` (11.3; native pointers: TypeError, 16.6) |
-| error | field (5.9) | TypeError | TypeError | `TypeError: error values are read-only` |
-| null | `TypeError: cannot read 'name' of null (use ?.)` | same | `TypeError: cannot index null` | same |
-| other | `TypeError: int has no field 'x'` | `TypeError: int has no method 'x'` | TypeError | TypeError |
+| error | field (5.9) | `TypeError: error has no method 'x'` | `TypeError: cannot index error` | `TypeError: error values are read-only` |
+| null | `TypeError: cannot read 'name' of null (use ?.)` | same | `TypeError: cannot index null` | `TypeError: cannot set 'name' of null` / `TypeError: cannot index null` |
+| other | `TypeError: int has no field 'x'` | `TypeError: int has no method 'x'` | `TypeError: cannot index int` | `TypeError: int has no field 'x'` / `TypeError: cannot index int` |
 
 - A dict dispatches `d.name(args)` on its key first **only when that key holds a `Func`**: module namespaces (6.4), `extern … as ns` dicts (16.1) and dicts of lambdas work like objects (`ns.keys(…)` calls a C function named `keys`), while JSON data with a `"values"` key keeps the dict methods. A float index (even `1.0`) or bool index is a TypeError; a computed literal key `[e]: v` must be a `Str`.
 - **Optional chains.** The parser wraps a postfix chain containing `?.` in `OptChain` (4.1). A `?.` step whose receiver is `null` ends the **whole chain** at once with `null`, as in JS: `a?.b.c()` with a null `a` evaluates neither `.b`, `.c` nor the call's arguments. Parentheses end the chain, so `(a?.b).c` fails when `a` is null. Only a null receiver of `?.` is guarded: `a?.b.c` with a non-null `a` and a null `b` fails at `.c`, and a missing dict key is still a KeyError. Assigning through `?.` is a SyntaxError (4.1). `eval_chain` returns `Ok(None)` for the short-circuit, and only `OptChain` turns it into `null`.
@@ -669,14 +670,14 @@ A `Str` is always valid UTF-8 (lone surrogates never enter, 10.4); user-visible 
 
 `Env = Rc<RefCell<Frame>>`; `Frame { vars: IndexMap<Rc<str>, Slot { value, is_const: bool }>, parent: Option<Env>, closures: u32 }`.
 
-- **Frames:** builtins frame (shared, read-only) ← one module frame per file ← call frames ← block frames. Each `if`/`elif`/`else` arm and `try`/`catch`/`finally` body gets a new frame; loops get **one fresh frame per iteration**, holding a `for`'s variables, in which the body runs directly; a call frame holds the parameters and is the body's top-level frame; a catch body's frame holds the catch name. Parameters, loop variables and the catch name are therefore declared in the body they introduce (4.5); inner blocks may shadow. Lookup walks `parent`; a `RefCell` borrow is held only while one slot is read or written.
+- **Frames:** builtins frame (shared, read-only: assigning to a builtin's name is `TypeError: cannot assign to builtin 'print' — shadow it with let`) ← one module frame per file ← call frames ← block frames. Each `if`/`elif`/`else` arm and `try`/`catch`/`finally` body gets a new frame; loops get **one fresh frame per iteration**, holding a `for`'s variables, in which the body runs directly; a call frame holds the parameters and is the body's top-level frame; a catch body's frame holds the catch name. Parameters, loop variables and the catch name are therefore declared in the body they introduce (4.5); inner blocks may shadow. Lookup walks `parent`; a `RefCell` borrow is held only while one slot is read or written.
 - **Declarations:** `let x = e` evaluates `e`, then declares `x` (`let x = x + 1` in an inner block reads the outer `x`); `let x` binds `null`. `const`, `@import` names (13.4) and `extern` names (16.1) are const slots: assigning → `TypeError: cannot assign to constant 'LIMIT'` (shallow: a const list can still `push`). A name declared twice in one body is a static SyntaxError (4.5). Only `@import { * }` declares names the parser cannot see; there `Frame::declare` raises `NameError: 'x' is already declared in this block`. An undeclared name → `NameError: 'x' is not declared` + did-you-mean (an assignment adds `— declare it with let`).
 - **Hoisting:** entering a body turns each `func` statement directly inside it into a `Closure` over that frame before the first statement runs; reaching the statement later does nothing. **Closures** capture the `Env`, so `lambda() => i` made in a loop keeps its iteration's `i`.
 - **Cycle trimming:** a closure stored in the frame it captures (every local `func`, `let f = lambda …`) is an `Rc` cycle, counted in `Frame.closures`. When such a frame goes out of scope, let `k` = its slots holding a `Closure` over it with `Rc::strong_count == 1`; if `Rc::strong_count(&frame) == 1 + k`, nothing else reaches it and its `vars` are cleared (releasing held handles). Cycles through containers are not trimmed.
 
 ### 5.7 Calls
 
-The callee is evaluated first, then the arguments left to right; `...xs` must be a list (`TypeError: spread argument must be a list, got dict`) and expands in place. `Closure` and `Builtin` (a `&'static [ParamSpec]`) share one binder:
+The callee is evaluated first, then the arguments left to right; for `r.name(args)` the callee is resolved first too (the `Func` under a dict key, or the method, or the null-receiver / unknown-method TypeError of 5.5), so an argument that changes `r` can't change what is called; `...xs` must be a list (`TypeError: spread argument must be a list, got dict`) and expands in place. `Closure` and `Builtin` (a `&'static [ParamSpec]`) share one binder:
 
 1. Positional args fill the parameters before the rest parameter; extras go to the rest list, or without one → `ArityError: greet() takes 2 positional arguments but 3 were given`.
 2. Named args match by name: unknown → `ArityError: greet() got an unexpected argument 'greting' — did you mean 'greeting'?`; already bound → `… got multiple values for argument 'name'`; the rest parameter → `… cannot take rest parameter 'nums' by name`.
@@ -686,7 +687,7 @@ The callee is evaluated first, then the arguments left to right; `...xs` must be
 
 - `Proxy`, handle calls `h(…)` and `HandleMethod` forward positional and named args as given (`call`, 9.5). Named args to a session without the `kwargs` cap (js, ts; custom engines per 17.5) → `ArityError: {tag} functions take positional arguments only (got '{kw}')`, raised before sending (10.8, 17.5).
 - `Native` (compiled exports, `extern`) takes positional args only (`ArityError: {name}() takes positional arguments only`, D63), counted against the C signature (16.5), and runs in-process (16.7).
-- A non-function → `TypeError: 'int' is not callable`. A lambda is named `lambda@main.v2:12` in messages and `str()`; its trace frame prints `<lambda>` (2.5).
+- A non-function → `TypeError: 'int' is not callable`. A lambda is named `lambda@main.v2:12` in messages, `str()` and its trace frame (`lambda@main.v2:12 (main.v2:14)`, 2.5).
 - V2 functions called from foreign code (`fn` and `route` calls, 11.8, 13.6; compiled `host_call`, 15.9) go through the same binder on the interpreter thread, inside the host's wait for that engine (9.7). They can arrive only while V2 has a request outstanding to that engine (9.8); a stored callback stays valid for later requests.
 
 ### 5.8 Control flow and frame discipline
@@ -707,7 +708,7 @@ Statements return `Exec<()>`, expressions `Exec<Value>`: `type Exec<T> = Result<
 - **Raising.** `throw v` throws an `Error` as is, turns a `Str` into `error("Error", v)`, else `TypeError: throw expects an error or a str, got int`. `span` and `trace` are filled when the error is first raised: by `throw` (the `throw` keyword), by a failing node (operator, call, index, member; spans per 2.2), or on surfacing from an engine (the mapped foreign location, 12.6). `error()` leaves both empty; a rethrow keeps them (`OnceCell`), so `==` still holds and the uncaught header points at the first `throw`.
 - **Trace** (innermost first): `loc` = raise span; for each `CallRecord` from the top, emit `(record.name, loc)`, then `loc = record.call_site`; finally `(None, loc)`. A proxy call's record emits the reply's mapped foreign frames (12.6) instead. Frame strings are 2.5; rendering and elision of long traces are 2.4 (`e.trace` keeps every frame).
 - **Fields:** `type message file line col trace data lang foreign_type`; any other → `TypeError: error has no field 'x'` + did-you-mean. `file`/`line`/`col` are `null` until raised (`file` is the display path, 2.1); `trace` is a new list of strings on each read. `cause` is not a field; an uncaught error prints it as `caused by:` (2.4).
-- **RecursionError:** a call that takes `calls.len()` past **10,000** → `RecursionError: maximum call depth (10000) exceeded` at its span. A stack guard also covers deep expressions and nested foreign callbacks: each call and each nested `eval` of a call, block or container literal compares a local's address (`std::hint::black_box`) with the one recorded at thread start and raises the same error past 7/8 of the stack size. Cross-language nesting has its own limit of 64 (9.7).
+- **RecursionError:** a call that takes `calls.len()` past **10,000** → `RecursionError: maximum call depth (10000) exceeded` at its span. A stack guard also covers deep expressions and nested foreign callbacks: each call and each `eval` of an expression node compares a local's address (`std::hint::black_box`) with the one recorded at thread start and raises the same error past 7/8 of the stack size. Cross-language nesting has its own limit of 64 (9.7).
 - **Did-you-mean** (names, keys, fields, methods, named args; tags use 7.3): optimal string alignment distance on lowercased names, accepted when `d <= max(1, min(3, (len + 2) / 3))`; the smallest wins, ties → innermost frame, then declaration order.
 
 ### 5.10 Builtins
@@ -719,7 +720,7 @@ Statements return `Exec<()>`, expressions `Exec<Value>`: `type Exec<T> = Result<
 | `print` | `str()` of each value joined by `sep`, then `end` (both `Str`, else TypeError); one write to `Out`. |
 | `input` | Writes `str(prompt)`, flushes (see Output), reads one line from the host's stdin and strips `\n` and one `\r` before it. End of input before any byte → `null`; a last line without `\n` is returned; invalid UTF-8 → IOError. |
 | `len`, `type`, `bool` | `len`: chars (5.4), bytes, list items, dict entries, a handle's `op len` (11.3), else TypeError. `type`: 5.1. `bool`: 5.2 truthiness (no round trip). |
-| `str` | A `Str` is returned unchanged; others get the canonical form: `null`, `true`, `42`; floats by Rust `{:?}` (`2.0`, `0.1`, `1e20`) plus `nan`, `inf`, `-inf`; strings inside containers double-quoted with `\" \\ \n \r \t` and `\u{..}` for other control chars (`[1, "a"]`, `{"k": 1}`, `b"\x00A"`); `<func greet>`, `<func lambda@main.v2:3>`, `<func spread (py)>`, `<func fast_sum (rust)>`, `<func cos (extern)>`, `<builtin print>`; errors `ValueError: msg` or `ForeignError: ZeroDivisionError: msg`; handles via `op str` (11.3; a dead session raises EngineCrashed, 8.2, 11.7); native pointers `<native sqlite3* 0x…>` (16.6). |
+| `str` | A `Str` is returned unchanged; others get the canonical form: `null`, `true`, `42`; floats by Rust `{:?}` (`2.0`, `0.1`, `1e20`) plus `nan`, `inf`, `-inf`; strings inside containers double-quoted with `\" \\ \n \r \t` and `\u{..}` for other control chars (`[1, "a"]`, `{"k": 1}`); bytes as `b"\x00A\xff"` (printable ASCII as is, `\" \\ \n \r \t`, other bytes as lowercase `\xNN`); `<func greet>`, `<func lambda@main.v2:3>`, `<func spread (py)>`, `<func fast_sum (rust)>`, `<func cos (extern)>`, `<builtin print>`; errors `ValueError: msg` or `ForeignError: ZeroDivisionError: msg`; handles via `op str` (11.3; a dead session raises EngineCrashed, 8.2, 11.7); native pointers `<native sqlite3* 0x…>` (16.6). |
 | `int`, `float` | `int`: a float truncates toward zero (NaN, inf, out of range → ValueError); a str must be `[+-]?[0-9]+` after trimming (else `ValueError: invalid int: 'abc'`; beyond i64 → `ValueError: int out of range: '…'`); bool → 0/1. `float`: int → nearest f64, bool → 0.0/1.0, a trimmed str via `f64::from_str` (also `nan`, `inf`, `infinity`, any case), failure → ValueError. Other types → TypeError. |
 | `range` | 1–3 positional `Int`s; `range(a)` = `range(0, a)`; the length is computed first with checked arithmetic and the list reserved with `try_reserve_exact` (failure → `ValueError: range too large`); `step == 0` → ValueError. |
 | `json_parse` | The codec in plain mode (10.1) straight into `Value`: integer tokens that fit i64 → `Int`; integer tokens outside i64 → `ValueError: invalid JSON at line L column C: integer does not fit in 64 bits`, raised by the 10.1 pre-parse byte scan, since serde_json would already have made them `f64` (never the nearest `Float`, 0.1; 10.2); tokens with `.`, `e` or `E` → `Float` (`1.0` stays a float); duplicate keys: the last value wins at the first key's position; `$v2` keys are plain data. Syntax errors, lone `\uD800` escapes and nesting past 1,000 levels (10.1) → `ValueError: invalid JSON at line L column C: …`. |
@@ -734,16 +735,16 @@ Statements return `Exec<()>`, expressions `Exec<Value>`: `type Exec<T> = Result<
 
 ### 5.11 Methods
 
-Arguments bind as for builtins. `push`, `insert`, `sort`, `reverse` return `null`; `pop`, `remove_at` and dict `remove` return the removed item. Unknown method → `TypeError: list has no method 'append'` + did-you-mean.
+Arguments bind as for builtins, and messages name the method with its type: `ArityError: list.get() takes 2 positional arguments but 3 were given`, `TypeError: str.split() argument 'sep' must be a str, got int`. `push`, `insert`, `sort`, `reverse` return `null`; `pop`, `remove_at` and dict `remove` return the removed item. Unknown method → `TypeError: list has no method 'append'` + did-you-mean. Methods are not values: `xs.len` without a call is the field TypeError of 5.5.
 
 | Type | Methods |
 | --- | --- |
-| str | `len()`; `upper()`, `lower()` (full Unicode mapping); `trim()` (`char::is_whitespace`); `split(sep)` (non-empty `Str`, keeps empty parts); `lines()` (Rust `str::lines`: `\n` or `\r\n`, no trailing empty line); `replace(old, new)` (all matches, left to right; empty `old` → ValueError); `starts_with(p)`, `ends_with(p)`; `find(sub)` (code-point index or `-1`); `encode()` |
+| str | `len()`; `upper()`, `lower()` (full Unicode mapping); `trim()` (`char::is_whitespace`); `split(sep)` (non-empty `Str`, else `ValueError: str.split() separator must not be empty`; keeps empty parts); `lines()` (Rust `str::lines`: `\n` or `\r\n`, no trailing empty line); `replace(old, new)` (all matches, left to right; empty `old` → `ValueError: str.replace() argument 'old' must not be empty`); `starts_with(p)`, `ends_with(p)`; `find(sub)` (code-point index or `-1`); `encode()` |
 | bytes | `decode()`, `hex()` (5.4) |
 | list | `push(x)`; `pop()` (empty → `IndexError: pop from empty list`); `get(i, default = null)` (`Int`, negative from the end; out of range → `default`); `insert(i, x)` (negative `i` adds the length, then clamps to `[0, len]`); `remove_at(i)` (negative from the end; IndexError); `sort()`; `reverse()`; `map(f)`, `filter(f)` (over a snapshot; `f` gets exactly one argument; new list); `join(sep)` (`str()` of each item); `index_of(x)` (first `eq`, or `-1`); `len()`; `copy()` (shallow) |
 | dict | `keys()`, `values()` (new lists, insertion order); `get(k, default = null)`; `remove(k)` (`shift_remove`, the rest keeps its order; missing → KeyError); `len()`; `copy()` (shallow). `get`/`remove` keys must be `Str` (TypeError). |
 
-`sort()` is stable and in place; it first checks that the elements are all numbers or all strings (else `TypeError: cannot sort a list mixing int and str`); numbers use 5.2's exact order with NaN last, so the comparator is total and runs no user code. **Borrow rule:** no `RefCell` borrow of a list, dict or frame is held across user code or a session round trip (a callback may mutate the same list; `op str` for `str(h)` may call back into V2), so `map`, `filter`, `join` and `str()` of containers clone the element values out first.
+`sort()` is stable and in place; it first checks that the elements are all numbers or all strings (else `TypeError: cannot sort a list mixing int and str`, or `… containing list (only numbers or strings)`); numbers use 5.2's exact order with NaN last, so the comparator is total and runs no user code. **Borrow rule:** no `RefCell` borrow of a list, dict or frame is held across user code or a session round trip (a callback may mutate the same list; `op str` for `str(h)` may call back into V2), so `map`, `filter`, `join` and `str()` of containers clone the element values out first.
 
 ---
 
@@ -2243,6 +2244,7 @@ Errors are `SyntaxError`s in `extern` bodies and prototype strings; in a definit
 | unknown identifier by value | `unknown type 'SQLITE_API' — remove macros from copied declarations` |
 | `long double`, `wchar_t`, `char16_t`, `_Complex`, `__int128` by value | `type 'long double' is not supported` |
 | `int a(void), b(void);` | `declare one function per declaration` |
+| type words that don't make one type (`int int`, `unsigned double`, `int DWORD`) | `cannot read the type 'unsigned double'` |
 | K&R definitions, references, qualified names (`A::f`) | `cannot read this declaration` |
 
 ### 16.4 `CType` and platform sizes

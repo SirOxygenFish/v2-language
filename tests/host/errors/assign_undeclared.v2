@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: assign_undeclared.v2:4:1: NameError: 'total' is not declared — declare it with let
+// There are no accidental globals (DOCS 3.3).
+total = 1

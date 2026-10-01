@@ -67,6 +67,9 @@ pub fn parse_prototype(text: &str, dialect: Dialect) -> Result<Sig, CdeclError> 
         return Err(p.err_here("expected a C prototype, like \"int add(int a, int b)\""));
     }
     let (sig, _, _) = p.proto()?;
+    if matches!(p.peek(), Some(CT::Punct(','))) {
+        return Err(p.err_here("declare one function per declaration"));
+    }
     if matches!(p.peek(), Some(CT::Punct(';'))) {
         p.pos += 1;
     }
@@ -222,6 +225,12 @@ const QUALS: &[&str] = &["const", "volatile", "restrict", "__restrict", "__restr
 const CALLCONV: &[&str] = &["__cdecl", "_cdecl", "__stdcall", "_stdcall", "WINAPI", "WINAPIV", "APIENTRY", "CALLBACK"];
 const IGNORED: &[&str] = &["extern", "static", "inline", "__inline", "__extension__", "WINBASEAPI", "WINUSERAPI"];
 const INT_WORDS: &[&str] = &["signed", "unsigned", "char", "short", "int", "long"];
+/// C keywords that are not type words: never a function name.
+const C_KEYWORDS: &[&str] = &[
+    "auto", "break", "case", "continue", "default", "do", "else", "for", "goto", "if", "register", "return", "sizeof",
+    "switch", "typedef", "while", "_Alignas", "_Alignof", "_Atomic", "_Generic", "_Noreturn", "_Static_assert",
+    "_Thread_local",
+];
 const UNSUPPORTED: &[&str] = &["wchar_t", "char16_t", "char32_t", "__int128", "_Complex"];
 
 struct P<'a> {
@@ -236,8 +245,6 @@ struct P<'a> {
 struct Specs {
     base: Base,
     is_const: bool,
-    /// `std::string&` (C++ dialect).
-    reference: bool,
     spelling: String,
     lo: usize,
     hi: usize,
@@ -346,6 +353,14 @@ impl<'a> P<'a> {
         }
     }
 
+    /// Whether `&` comes next, past qualifiers.
+    fn amp_follows(&self, mut k: usize) -> bool {
+        while matches!(self.kind_at(k), Some(CT::Ident(w)) if QUALS.contains(&w)) {
+            k += 1;
+        }
+        matches!(self.kind_at(k), Some(CT::Punct('&')))
+    }
+
     /// C++ `[[…]]` at the cursor: skip it.
     fn skip_attribute(&mut self) -> Result<(), CdeclError> {
         let start = self.pos;
@@ -402,6 +417,7 @@ impl<'a> P<'a> {
         }
         let name_i = self.pos;
         let name = match self.peek() {
+            Some(CT::Ident(n)) if C_KEYWORDS.contains(&n) => return Err(self.err_here("cannot read this declaration")),
             Some(CT::Ident(n)) => n,
             // `struct tm;`, `int;`: no function here.
             Some(CT::Punct(';')) | None => return Err(CdeclError::new("only functions can be declared in extern", specs.lo, specs.hi)),
@@ -447,6 +463,10 @@ impl<'a> P<'a> {
                 match kind {
                     // `const std::string&`
                     CT::Punct('&') if matches!(base, Some(Base::CppString)) => {
+                        if !is_const || matches!(self.peek_at(1), Some(CT::Punct('&'))) {
+                            // `std::string&`, `std::string&&`: the references row (16.3).
+                            return Err(self.err_tok(self.pos + usize::from(is_const), "cannot read this declaration"));
+                        }
                         reference = true;
                         span = span.map(|(lo, _)| (lo, t.hi));
                         self.pos += 1;
@@ -499,6 +519,11 @@ impl<'a> P<'a> {
             } else if INT_WORDS.contains(&w) && base.is_none() {
                 words.push(w);
             } else if base.is_some() || !words.is_empty() {
+                if type_word(w) {
+                    let mut all = spelled.clone();
+                    all.push(w);
+                    return Err(self.err_tok(self.pos, format!("cannot read the type '{}'", all.join(" "))));
+                }
                 break; // the declarator's name
             } else {
                 base = Some(match w {
@@ -536,6 +561,14 @@ impl<'a> P<'a> {
                         }
                         // An unknown name is a valid pointee only before `*`.
                         None if self.star_follows(self.pos + 1) => Base::Opaque(w.into()),
+                        // A C++ reference to it: the references row (16.3).
+                        None if self.cpp && self.amp_follows(self.pos + 1) => {
+                            let mut k = self.pos + 1;
+                            while !matches!(self.kind_at(k), Some(CT::Punct('&'))) {
+                                k += 1;
+                            }
+                            return Err(self.err_tok(k, "cannot read this declaration"));
+                        }
                         None => {
                             return Err(self.err_tok(self.pos, format!("unknown type '{w}' — remove macros from copied declarations")))
                         }
@@ -566,7 +599,7 @@ impl<'a> P<'a> {
         if reference {
             spelling.push('&');
         }
-        Ok(Specs { base, is_const, reference, spelling, lo, hi })
+        Ok(Specs { base, is_const, spelling, lo, hi })
     }
 
     /// `__declspec(…)` / `__attribute__((…))`: skip a balanced parenthesized group.
@@ -615,7 +648,10 @@ impl<'a> P<'a> {
             k += 1;
             match self.kind_at(k) {
                 Some(CT::Punct(',')) => k += 1,
-                Some(CT::Punct(')')) => return matches!(self.kind_at(k + 1), Some(CT::Ident(_) | CT::Punct('{'))),
+                Some(CT::Punct(')')) => {
+                    return matches!(self.kind_at(k + 1), Some(CT::Punct('{')))
+                        || matches!(self.kind_at(k + 1), Some(CT::Ident(w)) if type_word(w) || w == "register")
+                }
                 _ => return false,
             }
         }
@@ -660,6 +696,17 @@ impl<'a> P<'a> {
                 }
                 self.pos += 1;
                 stars += 1;
+            }
+            match self.peek() {
+                // `int...` (C++): the same as `int, ...`.
+                Some(CT::Ellipsis) => {
+                    return Err(self.err_here("variadic functions (like printf) are not supported — wrap the call in a @c block"))
+                }
+                // `int cb(int)`: a function parameter is a function pointer.
+                Some(CT::Punct('(')) if name.is_some() => {
+                    return Err(self.err_here("function pointers (callbacks) are not supported"))
+                }
+                _ => {}
             }
             let ty = resolve(&specs, stars, false).map_err(|m| CdeclError::new(m, specs.lo, specs.hi))?;
             // A C++ string parameter can't be null: the shim builds the string (15.3).
@@ -733,7 +780,6 @@ fn resolve(specs: &Specs, stars: u32, is_return: bool) -> Result<CType, String> 
         Base::Opaque(n) => return Err(format!("unknown type '{n}' — remove macros from copied declarations")),
         Base::Struct => return Err("structs are not supported in extern — wrap the function in a @c block".into()),
         Base::Enum => return Err("enum types are not supported by value — declare it as int".into()),
-        Base::CppString if specs.reference && !specs.is_const => return Err("type 'std::string&' is not supported".into()),
         Base::CppString if is_return => CType::OwnedStr,
         Base::CppString => CType::Str,
         Base::Unsupported(n) => return Err(format!("type '{n}' is not supported")),
@@ -902,11 +948,47 @@ mod tests {
         assert_eq!((r.params[0].ty, r.params[0].non_null), (CType::Str, true));
         assert!(cpp("[[nodiscard]] int f(int a) noexcept(true) [[gnu::pure]]").is_ok());
         assert!(cpp("extern \"C\" int f(int a)").is_ok());
-        assert_eq!(cpp("void f(std::string& s)").unwrap_err().message, "type 'std::string&' is not supported");
+        assert_eq!(cpp("void f(std::string& s)").unwrap_err().message, "cannot read this declaration");
         assert_eq!(cpp("int f(int& x)").unwrap_err().message, "cannot read this declaration");
         assert_eq!(cpp("int A::f(void)").unwrap_err().message, "cannot read this declaration");
         // The C dialect has none of these.
         assert_eq!(parse_prototype("std::string f(void)", Dialect::C).unwrap_err().message, "cannot read this declaration");
+    }
+
+    #[test]
+    fn round2_0_5_regressions() {
+        let cpp = |t: &str| parse_prototype(t, Dialect::Cpp).unwrap_err();
+        let at_cpp = |t: &str| {
+            let e = cpp(t);
+            (e.message, t[e.lo..e.hi].to_string())
+        };
+        // Prototype strings use the 16.3 comma row too.
+        assert_eq!(parse_prototype("int a(void), b(void)", Dialect::C).unwrap_err().message, "declare one function per declaration");
+        // A C++ trailer or an attribute after `)` is not a K&R declaration list.
+        assert_eq!(cpp("int f(Foo) noexcept").message, "unknown type 'Foo' — remove macros from copied declarations");
+        assert_eq!(err("int f(x) __attribute__((pure));"), "unknown type 'x' — remove macros from copied declarations");
+        assert_eq!(err("int f(a) register int a;"), "cannot read this declaration");
+        // References: only `const std::string&` reads.
+        assert_eq!(at_cpp("void f(std::string&& s)"), ("cannot read this declaration".into(), "&".into()));
+        assert_eq!(at_cpp("void f(const std::string&& s)"), ("cannot read this declaration".into(), "&".into()));
+        assert_eq!(at_cpp("int f(const Foo& x)"), ("cannot read this declaration".into(), "&".into()));
+        assert_eq!(at_cpp("Foo& f(void)"), ("cannot read this declaration".into(), "&".into()));
+        assert!(parse_prototype("int f(std::string const& s)", Dialect::Cpp).is_ok());
+        // A type word after a complete type is never a name.
+        assert_eq!(at("int double f(void);"), ("cannot read the type 'int double'".into(), "double".into()));
+        assert_eq!(err("double float(void);"), "cannot read the type 'double float'");
+        assert_eq!(err("int f(DWORD int);"), "cannot read the type 'DWORD int'");
+        assert_eq!(err("unsigned size_t f(void);"), "cannot read the type 'unsigned size_t'");
+        assert_eq!(err("int return(int x);"), "cannot read this declaration");
+        assert_eq!(cpp("std::string int f(void)").message, "cannot read the type 'std::string int'");
+        // `int...` and function-typed parameters get their own rows.
+        assert_eq!(cpp("int f(int...)").message, "variadic functions (like printf) are not supported — wrap the call in a @c block");
+        assert_eq!(cpp("int f(const char* fmt...)").message, "variadic functions (like printf) are not supported — wrap the call in a @c block");
+        assert_eq!(err("void f(int cb(int));"), "function pointers (callbacks) are not supported");
+        assert_eq!(
+            err("void qsort(void* b, size_t n, size_t s, int compar(const void*, const void*));"),
+            "function pointers (callbacks) are not supported"
+        );
     }
 
     #[test]

@@ -1,0 +1,22 @@
+// Deep recursion is a catchable RecursionError, never a crash (DOCS 3.8, INTERNALS 5.9).
+func down(n) {
+    return down(n + 1)
+}
+try {
+    down(0)
+} catch (e) {
+    print(e.type + ": " + e.message)
+}
+func deep(n) {
+    return n == 0 ? 0 : 1 + deep(n - 1)
+}
+print(deep(5000))
+func nested(n) {
+    return n == 0 ? [] : [nested(n - 1)]
+}
+let v = nested(1500)
+try {
+    print(v == nested(1500))
+} catch (e) {
+    print(e.type + ": " + e.message)
+}

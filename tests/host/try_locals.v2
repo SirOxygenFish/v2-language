@@ -1,0 +1,77 @@
+// R09 (INTERNALS 5.8): an error caught inside a function leaves the caller's frame intact.
+func f() {
+    throw error("ValueError", "boom")
+}
+
+func g() {
+    let local = 7
+    try {
+        f()
+    } catch (e) {
+    }
+    return local
+}
+print(g())
+
+// The same in a for body and in a lambda.
+for i in 0..2 {
+    let before = i * 10
+    try {
+        f()
+    } catch {
+    }
+    print(before)
+}
+let h = lambda() {
+    let kept = "kept"
+    try { f() } catch (e) { }
+    return kept
+}
+print(h())
+
+// A name declared inside try is gone after it.
+func scoped() {
+    try {
+        let inner = 1
+        f()
+    } catch (e) {
+    }
+    try {
+        return inner
+    } catch (e) {
+        return e.type
+    }
+}
+print(scoped())
+
+// return and break out of try ... finally.
+func early() {
+    try {
+        return "returned"
+    } finally {
+        print("finally ran")
+    }
+}
+print(early())
+for i in 0..3 {
+    try {
+        if i == 1 { break }
+        print("loop", i)
+    } finally {
+        print("cleanup", i)
+    }
+}
+
+// Name lookup still works after 1000 caught throws.
+func many() {
+    let count = 0
+    for i in 0..1000 {
+        try {
+            f()
+        } catch (e) {
+            count += 1
+        }
+    }
+    return count
+}
+print(many())

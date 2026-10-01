@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: optchain_assign.v2:5:1: SyntaxError: cannot assign through ?.
+// R45: assigning through `?.` is a SyntaxError (INTERNALS 4.1).
+let a = null
+a?.b = 1
