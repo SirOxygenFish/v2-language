@@ -1,0 +1,2 @@
+# Stored byte for byte: this test needs its BOM and CRLF line endings.
+tests/host/bom_crlf.v2 -text

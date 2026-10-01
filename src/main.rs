@@ -74,8 +74,8 @@ fn main() {
 
 /// Runs on the interpreter thread and returns the process exit code.
 fn run(invocation: Invocation) -> i32 {
-    let what = match &invocation.command {
-        Command::Script { .. } => "running a script",
+    let what = match invocation.command {
+        Command::Script { file, args } => return runtime::run_script(&file, args),
         Command::RunProject { .. } => "`v2 run`",
         Command::Check { .. } => "`v2 check`",
         Command::Doctor { .. } => "`v2 doctor`",

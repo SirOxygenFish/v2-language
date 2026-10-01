@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: name_error.v2:6:1: NameError: 'pritn' is not declared — did you mean 'print'?
+// stderr: pritn("x")
+// stderr: at name_error.v2:6
+print("before")
+pritn("x")
+print("never")

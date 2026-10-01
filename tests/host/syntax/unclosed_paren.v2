@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: unclosed_paren.v2:5:6: SyntaxError: `(` is never closed
+// A syntax error stops the file before anything runs, so line 4 prints nothing.
+print("not printed")
+print(
