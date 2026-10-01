@@ -26,6 +26,37 @@ impl Span {
     }
 }
 
+/// Where a block body sits in its `.v2` file, for mapping foreign positions back (2.3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnitLoc {
+    pub file: FileId,
+    /// `.v2` line of body line 1.
+    pub body_first_line: u32,
+    /// `.v2` column of body line 1, column 1.
+    pub body_col: u32,
+    /// Chars removed from each dedented line (4.4).
+    pub dedent_width: u32,
+    /// Lines in the processed body.
+    pub line_count: u32,
+    /// Body lines left undedented (4.4 step 3), sorted.
+    pub kept: Rc<[u32]>,
+}
+
+impl UnitLoc {
+    /// The `.v2` column of foreign column `fcol` on `body_line` (both 1-based); without a
+    /// column, the caller uses the first non-blank column of the line (2.3).
+    #[allow(dead_code)] // used by foreign error mapping (roadmap 1.8)
+    pub fn col(&self, body_line: u32, fcol: u32) -> u32 {
+        if body_line == 1 {
+            self.body_col + fcol - 1
+        } else if self.kept.binary_search(&body_line).is_ok() {
+            fcol
+        } else {
+            self.dedent_width + fcol
+        }
+    }
+}
+
 pub struct SourceFile {
     /// Canonical path without the `\\?\` prefix: the dedupe key.
     #[allow(dead_code)] // read by module loading (roadmap 0.8)

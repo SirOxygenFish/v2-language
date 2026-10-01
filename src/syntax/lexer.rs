@@ -1,11 +1,13 @@
 //! The lexer (INTERNALS ch. 3): normalized text in, one `Vec<Token>` out.
 //!
-//! Covers 3.1-3.5: tokens, keywords, operators, comments, where statements end, numbers and
-//! every string form. Embedded blocks and `extern` bodies (3.6-3.9) arrive in roadmap 0.4;
-//! until then `@` is an unexpected character.
+//! Covers 3.1-3.9: tokens, keywords, operators, comments, where statements end, numbers, every
+//! string form, the `@` sigil, embedded block heads and raw bodies, and `extern` bodies.
 
+use std::rc::Rc;
+
+use super::scan::{self, Dialect, Profile};
 use super::span::{FileId, SourceMap, Span};
-use super::token::{BraceKind, FPartTok, Kw, Op, Tok, Token};
+use super::token::{BraceKind, Delim, FPartTok, Kw, Op, RawBody, Tok, Token};
 use super::Diag;
 
 /// Past this many nested `${…}`, lexing stops with `nested too deeply` (4.1).
@@ -19,12 +21,14 @@ enum Open {
     Dict,
     Body,
     Interp,
+    /// The `( … )` args of a block head; closing it opens the block body (3.7).
+    BlockArgs,
 }
 
 impl Open {
     fn opener(self) -> &'static str {
         match self {
-            Open::Paren => "(",
+            Open::Paren | Open::BlockArgs => "(",
             Open::Bracket => "[",
             Open::Dict | Open::Body => "{",
             Open::Interp => "${",
@@ -44,6 +48,7 @@ pub fn lex(sm: &SourceMap, file: FileId) -> Result<Vec<Token>, Diag> {
         stack: Vec::new(),
         interp_newlines: true,
         interp_depth: 0,
+        heads: Vec::new(),
     };
     lx.run()?;
     Ok(lx.toks)
@@ -61,6 +66,32 @@ struct Lexer<'a> {
     interp_newlines: bool,
     /// Nesting of `${…}`, limited like the parser's depth (4.1) to protect the host stack.
     interp_depth: u32,
+    /// Block heads whose `( … )` args are being lexed.
+    heads: Vec<Head>,
+}
+
+/// A block head waiting for its body (3.7).
+#[derive(Clone)]
+struct Head {
+    tag: Rc<str>,
+    label: Option<Rc<str>>,
+    /// The `@`.
+    at: Mark,
+}
+
+impl Head {
+    /// `@py block 'stats'` / `@py block`, as messages name it.
+    fn name(&self) -> String {
+        match &self.label {
+            Some(l) => format!("@{} block '{l}'", self.tag()),
+            None => format!("@{} block", self.tag()),
+        }
+    }
+
+    /// The tag in canonical form, as messages print it (2.5).
+    fn tag(&self) -> &str {
+        scan::canonical_tag(&self.tag)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +258,7 @@ impl<'a> Lexer<'a> {
                 '#' => {
                     return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint("comments start with //"))
                 }
+                '@' => self.at_sign(m)?,
                 _ => self.operator(m)?,
             }
         }
@@ -271,7 +303,7 @@ impl<'a> Lexer<'a> {
         if matches!(last.tok, Tok::Newline) {
             return Ok(());
         }
-        if matches!(self.stack.last(), Some((Open::Paren | Open::Bracket | Open::Dict | Open::Interp, _))) {
+        if matches!(self.stack.last(), Some((Open::Paren | Open::Bracket | Open::Dict | Open::Interp | Open::BlockArgs, _))) {
             return Ok(());
         }
         if continues_line(&last.tok) {
@@ -339,7 +371,7 @@ impl<'a> Lexer<'a> {
             return Err(Diag::new(format!("unmatched `{c}`"), here));
         };
         let matches = match c {
-            ')' => open == Open::Paren,
+            ')' => matches!(open, Open::Paren | Open::BlockArgs),
             ']' => open == Open::Bracket,
             _ => matches!(open, Open::Body | Open::Dict | Open::Interp),
         };
@@ -360,6 +392,11 @@ impl<'a> Lexer<'a> {
         match (c, open) {
             ('}', Open::Interp) => return Ok(Some(None)),
             ('}', _) => self.push(Tok::RBrace, m),
+            (')', Open::BlockArgs) => {
+                self.push(Tok::Op(Op::RParen), m);
+                let head = self.heads.pop().expect("a block head for these args");
+                self.block_open(&head)?;
+            }
             (')', _) => self.push(Tok::Op(Op::RParen), m),
             _ => self.push(Tok::Op(Op::RBracket), m),
         }
@@ -415,11 +452,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let c = self.peek().unwrap_or(' ');
-        let mut d = Diag::new(format!("unexpected character '{c}'"), self.span_here(1));
-        if c == '@' {
-            d = d.hint("embedded blocks (@py { … }) are not available in this build yet");
-        }
-        Err(d)
+        Err(Diag::new(format!("unexpected character '{c}'"), self.span_here(1)))
     }
 
     // -- words: identifiers, keywords, string prefixes ----------------------------------------
@@ -453,7 +486,11 @@ impl<'a> Lexer<'a> {
             Some(k) if !after_dot => Tok::Kw(k),
             _ => Tok::Ident(w.into()),
         };
+        let is_extern = matches!(tok, Tok::Kw(Kw::Extern));
         self.push(tok, m);
+        if is_extern {
+            self.extern_head(m)?;
+        }
         Ok(())
     }
 
@@ -854,6 +891,343 @@ impl<'a> Lexer<'a> {
     }
 }
 
+const DECORATOR_HINT: &str = "V2 has no decorators: @tag starts an embedded block of another language";
+
+const FENCE_HINT: &str = "if the block's code has braces V2 can't match, use the fence form: put ``` after the header and close it with ``` on its own line";
+
+/// Embedded blocks, selectors, directives and `extern` bodies (3.6, 3.7, 3.9).
+impl<'a> Lexer<'a> {
+    /// `@import`, `@export`, a selector tag, or a block head (3.6).
+    fn at_sign(&mut self, m: Mark) -> Result<(), Diag> {
+        for (word, tok) in [("@import", Tok::DirImport), ("@export", Tok::DirExport)] {
+            let r = self.rest();
+            if r.starts_with(word) && !r[word.len()..].chars().next().is_some_and(is_ident_continue) {
+                self.bump_n(word.len());
+                self.push(tok, m);
+                return Ok(());
+            }
+        }
+        let after = &self.rest()[1..];
+        let tag_len = after
+            .char_indices()
+            .take_while(|&(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+            .count();
+        if tag_len == 0 {
+            return Err(Diag::new("expected an engine tag after @", self.span_here(1)));
+        }
+        let tag: Rc<str> = after[..tag_len].into();
+        if matches!(self.toks.last().map(|t| &t.tok), Some(Tok::Kw(Kw::From) | Tok::DirImport)) {
+            self.bump_n(1 + tag_len);
+            self.push(Tok::AtTag(tag), m);
+            return Ok(());
+        }
+        self.bump_n(1 + tag_len);
+        self.block_head(m, tag)
+    }
+
+    /// `@` TAG [LABEL] [`(` args `)`] then `{` or a fence (3.7).
+    fn block_head(&mut self, at: Mark, tag: Rc<str>) -> Result<(), Diag> {
+        self.skip_blanks();
+        let mut label = None;
+        let lm = self.mark();
+        match self.peek() {
+            Some(c) if is_ident_start(c) => {
+                while self.peek().is_some_and(is_ident_continue) {
+                    self.bump();
+                }
+                let w = &self.src[lm.pos..self.pos];
+                let shown_tag = scan::canonical_tag(&tag);
+                if w == "func" {
+                    return Err(Diag::new(format!("expected {{ or a ``` fence after @{shown_tag}"), self.span_of_mark(at, 1 + tag.len()))
+                        .hint(DECORATOR_HINT));
+                }
+                if Kw::from_word(w).is_some() {
+                    return Err(Diag::new(format!("a block label can't be the keyword `{w}`"), self.span_from(lm))
+                        .hint(format!("quote it: @{shown_tag} \"{w}\" {{")));
+                }
+                label = Some((Rc::<str>::from(w), self.span_from(lm)));
+            }
+            Some(q @ ('"' | '\'')) => {
+                let parts = self.one_line_body(StrKind::Plain, q)?;
+                let text: String = parts
+                    .iter()
+                    .map(|p| match p {
+                        RawPart::Lit(raw) => decode(raw),
+                        RawPart::Interp { .. } => String::new(),
+                    })
+                    .collect();
+                if text.is_empty() {
+                    return Err(Diag::new("a block label can't be empty", self.span_from(lm)));
+                }
+                label = Some((Rc::<str>::from(text), self.span_from(lm)));
+            }
+            _ => {}
+        }
+        let head = Head { tag: tag.clone(), label: label.as_ref().map(|(l, _)| l.clone()), at };
+        self.push(Tok::BlockHead { tag, label }, at);
+        self.skip_blanks();
+        if self.peek() == Some('(') {
+            let m = self.mark();
+            self.bump();
+            self.push(Tok::Op(Op::LParen), m);
+            let span = self.span_from(m);
+            self.stack.push((Open::BlockArgs, span));
+            self.heads.push(head);
+            return Ok(()); // the main loop lexes the args; their `)` calls block_open
+        }
+        self.block_open(&head)
+    }
+
+    /// After the head (and args): a `{` or a fence on the same line, then the raw body.
+    fn block_open(&mut self, head: &Head) -> Result<(), Diag> {
+        self.skip_blanks();
+        let profile = scan::profile_for(&head.tag);
+        if self.rest().starts_with("```") {
+            let body = self.capture_fence(head, profile)?;
+            let span = body.text_span;
+            self.toks.push(Token { tok: Tok::BlockBody(Box::new(body)), span });
+            return Ok(());
+        }
+        if self.peek() == Some('{') {
+            let body = self.capture_brace(profile, &head.name(), head.at, false)?;
+            let span = body.text_span;
+            self.toks.push(Token { tok: Tok::BlockBody(Box::new(body)), span });
+            return Ok(());
+        }
+        let shown = match &head.label {
+            Some(l) => format!("@{} {l}", head.tag()),
+            None => format!("@{}", head.tag()),
+        };
+        // Brace on the next line?
+        if matches!(self.peek(), None | Some('\n')) || self.rest().starts_with("//") || self.rest().starts_with("/*") {
+            let header_line = self.line;
+            if let Some(target) = self.next_code_line_start() {
+                let line = &self.src[target..];
+                let head_span = self.span_of_mark(head.at, 1 + head.tag.len());
+                if line.starts_with('{') {
+                    return Err(Diag::new(
+                        format!("the {{ that opens a block must be on the same line as @{}", head.tag()),
+                        self.span_at(target, 1),
+                    )
+                    .note("the block starts here", head_span)
+                    .hint(format!("move {{ to the end of line {header_line}")));
+                }
+                let starts_func = line.strip_prefix("func").is_some_and(|r| !r.chars().next().is_some_and(is_ident_continue));
+                if starts_func {
+                    return Err(Diag::new(format!("expected {{ or a ``` fence after {shown}"), head_span).hint(DECORATOR_HINT));
+                }
+            }
+        }
+        Err(Diag::new(format!("expected {{ or a ``` fence after {shown}"), self.span_here(1)))
+    }
+
+    /// Byte offset of the first non-blank char on the next line that isn't blank or a comment.
+    fn next_code_line_start(&self) -> Option<usize> {
+        let mut i = self.pos + self.rest().find('\n')? + 1;
+        loop {
+            let line_end = self.src[i..].find('\n').map(|k| i + k).unwrap_or(self.src.len());
+            let line = &self.src[i..line_end];
+            let trimmed = line.trim_start_matches([' ', '\t']);
+            if !trimmed.is_empty() && !trimmed.starts_with("//") {
+                return Some(i + (line.len() - trimmed.len()));
+            }
+            if line_end >= self.src.len() {
+                return None;
+            }
+            i = line_end + 1;
+        }
+    }
+
+    /// A brace-form body, `{` included; checks guards C1 and C2 (3.7). `is_extern`: an `extern`
+    /// body, which has no fence form and is never a value (3.9).
+    fn capture_brace(&mut self, profile: Profile, what: &str, at: Mark, is_extern: bool) -> Result<RawBody, Diag> {
+        let open = self.span_here(1);
+        self.bump();
+        let body_start = self.pos;
+        let body_mark = self.mark();
+        let scanned = match scan::scan_braces(self.src, body_start, profile) {
+            Ok(s) => s,
+            Err(un) => {
+                let mut d = Diag::new(format!("{what} is never closed"), self.span_of_mark(at, 1));
+                if !is_extern {
+                    d = d.hint(FENCE_HINT);
+                }
+                if let Some(off) = un.open_brace {
+                    d = d.note("this { inside the block is still open", self.span_at(off, 1));
+                }
+                if let Some((off, name)) = un.open_construct {
+                    d = d.note(format!("this {name} never closes"), self.span_at(off, 1));
+                }
+                return Err(d);
+            }
+        };
+        let close = scanned.close;
+        let text = &self.src[body_start..close];
+        // C1: a multi-line body closes at a `}` that starts its line. Reported at the opening
+        // line (DOCS 4 Errors), with a note at the `}`.
+        let what_short = what.split(" '").next().unwrap_or(what);
+        if text.contains('\n') {
+            let line_start = self.src[..close].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            if !self.src[line_start..close].trim_matches([' ', '\t']).is_empty() {
+                let d = Diag::new(format!("{what_short} closes at a }} that does not start its line"), self.span_of_mark(at, 1))
+                    .note("the } that closes it", self.span_at(close, 1));
+                return Err(if is_extern {
+                    d.hint("put the } that closes an extern block on its own line")
+                } else {
+                    d.hint(FENCE_HINT)
+                });
+            }
+        }
+        self.advance_to(close);
+        let text_span = self.span_from(body_mark);
+        let close_span = self.span_here(1);
+        self.bump();
+        // C2: only blanks, a comment, or `) ] } , ;` may follow on the closing line.
+        let line_rest = self.rest().split('\n').next().unwrap_or("");
+        let after = line_rest.trim_start_matches([' ', '\t']);
+        let ok = after.is_empty()
+            || after.starts_with("//")
+            || after.starts_with("/*")
+            || after.starts_with([')', ']', '}', ',', ';']);
+        if !ok {
+            let d = Diag::new(format!("unexpected text after the }} that closes the {what_short}"), close_span);
+            return Err(if is_extern {
+                d.hint("an extern block is a statement: end the line after its }")
+            } else {
+                d.hint(format!(
+                    "{FENCE_HINT}; to use a block value in an expression, put it in parentheses: ({} {{ 1 }}) + 2",
+                    what_short.trim_end_matches(" block")
+                ))
+            });
+        }
+        Ok(RawBody {
+            text: text.into(),
+            text_span,
+            open,
+            close: close_span,
+            delim: Delim::Brace,
+            starts_in_code: scanned.starts_in_code,
+        })
+    }
+
+    /// A fenced body: N >= 3 backticks, then every line up to a line holding exactly N backticks.
+    fn capture_fence(&mut self, head: &Head, profile: Profile) -> Result<RawBody, Diag> {
+        let n = self.rest().chars().take_while(|c| *c == '`').count();
+        let open = self.span_here(n);
+        self.bump_n(n);
+        let line_rest = self.rest().split('\n').next().unwrap_or("");
+        if !line_rest.trim_matches([' ', '\t']).is_empty() {
+            return Err(Diag::new("nothing may follow the opening ``` fence on its line", self.span_here(1))
+                .hint("the block's tag already names the language"));
+        }
+        self.advance_to(self.pos + line_rest.len());
+        if self.peek().is_none() {
+            return Err(Diag::new(format!("{} is never closed", head.name()), self.span_of_mark(head.at, 1)));
+        }
+        self.bump(); // the line break after the fence
+        let body_mark = self.mark();
+        let fence = "`".repeat(n);
+        let mut line_start = self.pos;
+        loop {
+            if line_start >= self.src.len() {
+                return Err(Diag::new(format!("{} is never closed", head.name()), self.span_of_mark(head.at, 1))
+                    .note("the fence opens here", open));
+            }
+            let line_end = self.src[line_start..].find('\n').map(|i| line_start + i).unwrap_or(self.src.len());
+            if self.src[line_start..line_end].trim_matches([' ', '\t']) == fence {
+                let text = &self.src[body_mark.pos..line_start];
+                self.advance_to(line_start);
+                let text_span = Span { hi: line_start as u32, ..self.span_from(body_mark) };
+                let close_mark = self.mark();
+                self.advance_to(line_end);
+                let close = self.span_from(close_mark);
+                return Ok(RawBody {
+                    text: text.into(),
+                    text_span,
+                    open,
+                    close,
+                    delim: Delim::Fence(n.min(255) as u8),
+                    starts_in_code: scan::line_states(text, profile),
+                });
+            }
+            line_start = line_end + 1;
+        }
+    }
+
+    /// After `extern`: a library string, optional `as NAME`, and `{` on the same line (3.9).
+    fn extern_head(&mut self, kw: Mark) -> Result<(), Diag> {
+        self.skip_blanks();
+        let m = self.mark();
+        let quote_next = matches!(self.peek_at(1), Some('"' | '\''));
+        match self.peek() {
+            Some('"' | '\'') => self.string(StrKind::Plain, m)?,
+            // A raw string suits Windows paths: extern r"C:\libs\x.dll" (16.2).
+            Some('r') if quote_next => {
+                self.bump();
+                self.string(StrKind::Raw, m)?
+            }
+            Some('f' | 'b') if quote_next => {
+                return Err(Diag::new("the library name must be a plain \"…\" or raw r\"…\" string", self.span_here(1)))
+            }
+            _ => return Err(Diag::new("expected a library name in quotes after extern, as in extern \"m\" { … }", self.span_here(1))),
+        }
+        self.skip_blanks();
+        if self.rest().starts_with("as") && !self.rest()[2..].chars().next().is_some_and(is_ident_continue) {
+            let am = self.mark();
+            self.bump_n(2);
+            self.push(Tok::Kw(Kw::As), am);
+            self.skip_blanks();
+            let nm = self.mark();
+            if !self.peek().is_some_and(is_ident_start) {
+                return Err(Diag::new("expected a name after `as`", self.span_here(1)));
+            }
+            while self.peek().is_some_and(is_ident_continue) {
+                self.bump();
+            }
+            let name = &self.src[nm.pos..self.pos];
+            if Kw::from_word(name).is_some() {
+                return Err(Diag::new(format!("expected a name after `as`, found keyword `{name}`"), self.span_from(nm)));
+            }
+            self.push(Tok::Ident(name.into()), nm);
+            self.skip_blanks();
+        }
+        if self.peek() != Some('{') {
+            return Err(Diag::new("expected { on the same line as extern", self.span_here(1)));
+        }
+        let body = self.capture_brace(Profile::CLike(Dialect::C), "extern block", kw, true)?;
+        let span = body.text_span;
+        self.toks.push(Token { tok: Tok::ExternBody(Box::new(body)), span });
+        Ok(())
+    }
+
+    fn skip_blanks(&mut self) {
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.bump();
+        }
+    }
+
+    /// Move forward to byte offset `target`, keeping line and column right.
+    fn advance_to(&mut self, target: usize) {
+        while self.pos < target && self.bump().is_some() {}
+    }
+
+    /// A span of `len` chars at byte offset `offset` (at or after the current position, or
+    /// anywhere: line and column are computed from the start of the text).
+    fn span_at(&self, offset: usize, len: usize) -> Span {
+        let before = &self.src[..offset];
+        let line = before.matches('\n').count() as u32 + 1;
+        let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col = self.src[line_start..offset].chars().count() as u32 + 1;
+        let hi: usize = offset + self.src[offset..].chars().take(len).map(char::len_utf8).sum::<usize>();
+        Span { file: self.file, lo: offset as u32, hi: hi as u32, line, col }
+    }
+
+    fn span_of_mark(&self, m: Mark, len: usize) -> Span {
+        let hi: usize = m.pos + self.src[m.pos..].chars().take(len).map(char::len_utf8).sum::<usize>();
+        Span { file: self.file, lo: m.pos as u32, hi: hi as u32, line: m.line, col: m.col }
+    }
+}
+
 /// `_` only between two digits (3.4).
 fn check_underscores(digits: &str) -> Result<(), &'static str> {
     if digits.starts_with('_') || digits.ends_with('_') || digits.contains("__") {
@@ -939,6 +1313,13 @@ mod tests {
                 Tok::LBrace(BraceKind::Body) => "{B".into(),
                 Tok::LBrace(BraceKind::Dict) => "{D".into(),
                 Tok::RBrace => "}".into(),
+                Tok::DirImport => "@import".into(),
+                Tok::DirExport => "@export".into(),
+                Tok::AtTag(t) => format!("@{t}"),
+                Tok::BlockHead { tag, label: Some((l, _)) } => format!("HEAD({tag},{l})"),
+                Tok::BlockHead { tag, label: None } => format!("HEAD({tag})"),
+                Tok::BlockBody(b) => format!("BODY({:?})", &*b.text),
+                Tok::ExternBody(b) => format!("EXTERN({:?})", &*b.text),
                 Tok::Newline => "NL".into(),
                 Tok::Semi => ";".into(),
                 Tok::Eof => "EOF".into(),
@@ -1040,6 +1421,93 @@ let n = names
             kinds("let total = a +\n            b +\n            c"),
             "LET total = a + b + c EOF"
         );
+    }
+
+    #[test]
+    fn block_heads_and_bodies() {
+        assert_eq!(kinds("@py { x }"), r#"HEAD(py) BODY(" x ") EOF"#);
+        assert_eq!(kinds("@py stats {\n  x\n}\nprint(1)"), r#"HEAD(py,stats) BODY("\n  x\n") NL print ( 1 ) EOF"#);
+        assert_eq!(
+            kinds("let v = @py(nums, k: 3) { sum(nums) }"),
+            r#"LET v = HEAD(py) ( nums , k : 3 ) BODY(" sum(nums) ") EOF"#
+        );
+        // Args may span lines; the `{` goes after their `)`.
+        assert_eq!(kinds("@py(\n  a,\n  b\n) { x }"), r#"HEAD(py) ( a , b ) BODY(" x ") EOF"#);
+        assert_eq!(kinds("@py \"odd name\" { x }"), r#"HEAD(py,odd name) BODY(" x ") EOF"#);
+        assert_eq!(kinds("@py stats{ x }"), r#"HEAD(py,stats) BODY(" x ") EOF"#);
+        // Fence form: nothing inside is scanned for its end.
+        assert_eq!(kinds("@py ```\nx = '{'\n```\nprint(1)"), r#"HEAD(py) BODY("x = '{'\n") NL print ( 1 ) EOF"#);
+        // Block values inside calls end at `,` and `)` (C2 allows them).
+        assert_eq!(kinds("f(@py { 1 }, 2)"), r#"f ( HEAD(py) BODY(" 1 ") , 2 ) EOF"#);
+        // Selectors and directives.
+        assert_eq!(kinds("@import { a } from @py.stats"), "@import {D a } FROM @py . stats EOF");
+        assert_eq!(kinds("@import py.numpy as np"), "@import py . numpy AS np EOF");
+        // `@exporter` is not the `@export` directive: it is a block head (with no body here).
+        assert_eq!(err("@exporter"), "expected { or a ``` fence after @exporter");
+    }
+
+    #[test]
+    fn extern_bodies() {
+        assert_eq!(
+            kinds("extern \"m\" as m { double cos(double x); }"),
+            r#"EXTERN "m" AS m EXTERN(" double cos(double x); ") EOF"#
+        );
+        assert_eq!(kinds("extern 'c' {\n  int puts(const char* s); // }\n}"), "EXTERN \"c\" EXTERN(\"\\n  int puts(const char* s); // }\\n\") EOF");
+        assert_eq!(err("extern \"m\"\n{ }"), "expected { on the same line as extern");
+        assert_eq!(err("extern m {}"), "expected a library name in quotes after extern, as in extern \"m\" { … }");
+        assert_eq!(err("extern \"m\" {\n int f(); }"), "extern block closes at a } that does not start its line");
+        assert_eq!(kinds("h.extern"), "h . extern EOF");
+    }
+
+    #[test]
+    fn block_errors() {
+        assert_eq!(err("@py\n{ x }"), "the { that opens a block must be on the same line as @py");
+        assert_eq!(err("@py stats"), "expected { or a ``` fence after @py stats");
+        assert_eq!(err("@memo\nfunc f() {}"), "expected { or a ``` fence after @memo");
+        assert_eq!(err("@ {"), "expected an engine tag after @");
+        assert_eq!(err("@py for { }"), "a block label can't be the keyword `for`");
+        assert_eq!(err("@py \"\" { }"), "a block label can't be empty");
+        assert_eq!(err("@py {\n x }"), "@py block closes at a } that does not start its line");
+        assert_eq!(err("@py { 1 } + 2"), "unexpected text after the } that closes the @py block");
+        assert_eq!(err("@py ```python\n```"), "nothing may follow the opening ``` fence on its line");
+        assert_eq!(err("@py stats ```\nx\n"), "@py block 'stats' is never closed");
+    }
+
+    #[test]
+    fn review_0_4_regressions() {
+        // A decorator on the same line as func, or before it with a comment between.
+        assert_eq!(err("@memo func f() {}"), "expected { or a ``` fence after @memo");
+        assert_eq!(err("@memo\n// note\nfunc f() {}"), "expected { or a ``` fence after @memo");
+        let mut sm = SourceMap::new();
+        let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), "@memo func f() {}");
+        let d = lex(&sm, id).unwrap_err();
+        assert!(d.hint.as_deref().unwrap_or("").contains("no decorators"));
+        // Messages print canonical tags; C1 points at the opening line with a note at the `}`.
+        let (msg, line, col) = err_at("let x = 1\n@python stats {\n  x = 1 }");
+        assert_eq!((msg.as_str(), line, col), ("@py block closes at a } that does not start its line", 2, 1));
+        assert_eq!(err("@javascript\n{ 1 }"), "the { that opens a block must be on the same line as @js");
+        // extern: raw-string paths, no fence advice, no keyword alias.
+        assert!(lex_str("extern r\"C:\\libs\\foo.dll\" { int f(void); }").is_ok());
+        assert_eq!(err("extern b\"m\" { }"), "the library name must be a plain \"…\" or raw r\"…\" string");
+        assert_eq!(err("extern \"m\" as for { }"), "expected a name after `as`, found keyword `for`");
+        let id = sm.add(PathBuf::from("e.v2"), "e.v2".into(), "extern \"m\" {\n  double cos(double x); }");
+        let d = lex(&sm, id).unwrap_err();
+        assert!(!d.hint.as_deref().unwrap_or("").contains("fence"), "extern has no fence form");
+        let id = sm.add(PathBuf::from("e2.v2"), "e2.v2".into(), "extern \"m\" { double cos(double x); } junk");
+        let d = lex(&sm, id).unwrap_err();
+        assert!(!d.hint.as_deref().unwrap_or("").contains("parentheses"));
+    }
+
+    #[test]
+    fn unterminated_block_points_at_the_at_with_notes() {
+        let mut sm = SourceMap::new();
+        let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), "print(1)\n\n@py {\n    d = {\n    s = \"\"\"\n");
+        let d = lex(&sm, id).unwrap_err();
+        assert_eq!(d.message, "@py block is never closed");
+        assert_eq!((d.span.line, d.span.col), (3, 1));
+        let notes: Vec<&str> = d.notes.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(notes, vec!["this { inside the block is still open", "this string never closes"]);
+        assert!(d.hint.as_deref().unwrap_or("").contains("fence form"));
     }
 
     #[test]

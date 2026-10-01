@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 0: Host core |
-| **Next task** | 0.4 Block scanning and directives |
-| **Last update** | 2026-10-01: 0.2 walking skeleton and 0.3 lexer done (CI written, not yet run) |
+| **Next task** | 0.5 Parser, AST and static checks |
+| **Last update** | 2026-10-01: 0.4 block scanning and directives done (CI written, not yet run) |
 
 ## Rules
 
@@ -79,14 +79,17 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
   2026-10-01** (reviewed; 6 findings fixed, each with a regression test)
 
 ### 0.4 Block scanning and directives
-- [ ] `UnitLoc` (§2.3)
-- [ ] Block heads `@tag [label] [(args)]` with `{` on the header's last line, and the fence
+- [x] `UnitLoc` (§2.3)
+- [x] Block heads `@tag [label] [(args)]` with `{` on the header's last line, and the fence
       form (§3.6, §3.7)
-- [ ] Scan profiles: python, c-like (c/cpp/rust/js/ts), plain for custom tags; guards C1/C2 (§3.8)
-- [ ] `@export` / `@import` directive extraction: exact tokens, multi-line lists, `@@` escapes,
+- [x] Scan profiles: python, c-like (c/cpp/rust/js/ts), plain for custom tags; guards C1/C2 (§3.8)
+- [x] `@export` / `@import` directive extraction: exact tokens, multi-line lists, `@@` escapes,
       blank lines kept so line numbers hold; dedent with the mixed-indentation error (§4.4)
-- [ ] `extern "lib" { }` bodies captured with the c-like profile (§3.9)
-- **Done when:** the `syntax/scan` and `syntax/directives` unit tests (§22.3) and R07 pass
+- [x] `extern "lib" { }` bodies captured with the c-like profile (§3.9)
+- [x] Ahead of 0.5: blocks as statements and values in the parser, block args, the block rows of
+      the §4.5 static checks; reaching a block raises `EngineUnknown` (no engines until Phase 1)
+- **Done when:** the `syntax/scan` and `syntax/directives` unit tests (§22.3) and R07 pass —
+  **passed 2026-10-01** (reviewed; 13 confirmed findings fixed, each with a regression test)
 
 ### 0.5 Parser, AST and static checks
 - [ ] Recursive-descent parser for the DOCS 18 grammar, precedence table (§4.1, §4.2)
@@ -323,3 +326,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-01 | Old project archived in `old/`; DOCS.md and INTERNALS.md written and cross-checked; branch `v2-reboot` created; this roadmap written |
 | 2026-10-01 | 0.1: crate, dependencies (libffi verified on MSVC), module tree, threads, CLI parser, test harness, CI file; reviewed (6 findings fixed) |
 | 2026-10-01 | 0.2 + 0.3: SourceMap, error rendering, full lexer, `print` end to end; `v2 hello.v2` runs; reviewed (6 findings fixed with regression tests) |
+| 2026-10-01 | 0.4: embedded-block syntax (scan profiles for py/js/ts/c/cpp/rust, fences, C1/C2 guards, unterminated notes), `@export`/`@import` directives, dedent, `UnitLoc`, `extern` bodies; blocks parse and raise EngineUnknown when reached; reviewed (13 findings fixed) |

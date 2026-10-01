@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: definition_as_value.v2:4:7: SyntaxError: a block with @export is a definition block and cannot be used as a value
+// stderr: note: the @export that makes it one (definition_as_value.v2:6:5)
+print(@py {
+    def f(): pass
+    @export { f }
+})
