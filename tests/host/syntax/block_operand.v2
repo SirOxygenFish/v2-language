@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: block_operand.v2:6:13: SyntaxError: a block value must be in parentheses here
+// stderr: hint: wrap the block: (@py { … })
+// A block used as an operand is a SyntaxError (exit 1), never an internal error (exit 101)
+// (INTERNALS 4.1, DOCS 4.5).
+let x = 1 + @py { 2 }

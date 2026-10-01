@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 0: Host core |
-| **Next task** | 0.5 Parser, AST and static checks |
-| **Last update** | 2026-10-01: 0.4 block scanning and directives done (CI written, not yet run) |
+| **Next task** | 0.6 Values and operators, with 0.7 (they share the interpreter core) |
+| **Last update** | 2026-10-01: 0.5 parser, AST, static checks and C declaration parser done (CI written, not yet run) |
 
 ## Rules
 
@@ -92,15 +92,20 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
   **passed 2026-10-01** (reviewed; 13 confirmed findings fixed, each with a regression test)
 
 ### 0.5 Parser, AST and static checks
-- [ ] Recursive-descent parser for the DOCS 18 grammar, precedence table (§4.1, §4.2)
-- [ ] AST incl. `EngineBlock`, `EngineImport`, `Extern`, selectors (§4.3)
-- [ ] `?.` whole-chain short-circuit; assigning through `?.` is a SyntaxError (§4.1, §5.5)
-- [ ] C declaration parser `ffi/cdecl` with its CType lowering, because the parser needs it:
-      unreadable `extern` declarations and `@export` prototypes are SyntaxErrors (§16.3, §16.4)
-- [ ] Static checks (§4.5): duplicate labels, redeclaration rules incl. params and loop variables,
+- [x] Recursive-descent parser for the DOCS 18 grammar, precedence table (§4.1, §4.2); nesting
+      (256) and expression-height (10,000) limits, so generated input never overflows the stack
+- [x] AST incl. `EngineBlock`, `EngineImport`, `Extern`, selectors (§4.3)
+- [x] `?.` whole-chain short-circuit in the AST (`OptChain`); assigning through `?.` is a
+      SyntaxError (§4.1, §5.5). Evaluating the chain is 0.6.
+- [x] C declaration parser `ffi/cdecl` with its CType lowering, because the parser needs it:
+      unreadable `extern` declarations and `@export` prototypes are SyntaxErrors with the 16.3
+      messages; `@cpp` prototype strings use the C++ dialect (§16.3, §16.4)
+- [x] Static checks (§4.5): duplicate labels, redeclaration rules incl. params and loop variables,
       args on compiled blocks, `a..b` only in `for`, definition blocks not usable as
-      expressions, whole-module `@import` only with package selectors
-- **Done when:** R28, the parser unit tests and the `ffi/cdecl` unit tests (§22.3) pass
+      expressions, whole-module `@import` only with package selectors; all reported in source order
+- **Done when:** R28, the parser unit tests and the `ffi/cdecl` unit tests (§22.3) pass —
+  **passed 2026-10-01** (reviewed twice: 14 confirmed findings, then 11 in the fixes; all fixed
+  with regression tests)
 
 ### 0.6 Values and operators
 - [ ] `Value` enum: null, bool, int (i64), float, str, bytes, list, dict, func, handle, error (§5.1)
@@ -327,3 +332,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-01 | 0.1: crate, dependencies (libffi verified on MSVC), module tree, threads, CLI parser, test harness, CI file; reviewed (6 findings fixed) |
 | 2026-10-01 | 0.2 + 0.3: SourceMap, error rendering, full lexer, `print` end to end; `v2 hello.v2` runs; reviewed (6 findings fixed with regression tests) |
 | 2026-10-01 | 0.4: embedded-block syntax (scan profiles for py/js/ts/c/cpp/rust, fences, C1/C2 guards, unterminated notes), `@export`/`@import` directives, dedent, `UnitLoc`, `extern` bodies; blocks parse and raise EngineUnknown when reached; reviewed (13 findings fixed) |
+| 2026-10-01 | 0.5: full parser and AST, static checks (all violations, in source order), `ffi/cdecl` with the 16.3 messages and the C++ dialect for `@cpp` prototype strings, expression-height limit; reviewed, fixes re-reviewed (25 findings fixed with regression tests) |

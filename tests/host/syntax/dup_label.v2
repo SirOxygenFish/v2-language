@@ -1,0 +1,10 @@
+// exit: 1
+// stderr: dup_label.v2:8:5: SyntaxError: duplicate block label 'stats'
+// stderr: note: first used here (dup_label.v2:4:5)
+@py stats {
+    x = 1
+}
+
+@js stats {
+    let x = 1;
+}

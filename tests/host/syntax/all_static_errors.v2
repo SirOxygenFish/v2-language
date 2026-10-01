@@ -1,0 +1,11 @@
+// exit: 1
+// stderr: all_static_errors.v2:7:5: SyntaxError: 'a' is already declared in this block
+// stderr: all_static_errors.v2:8:1: SyntaxError: break outside a loop
+// stderr: all_static_errors.v2:10:5: SyntaxError: return outside a function
+// Every static check runs, and all violations are reported in source order (INTERNALS 4.5).
+let a = 1
+let a = 2
+break
+if a > 1 {
+    return a
+}

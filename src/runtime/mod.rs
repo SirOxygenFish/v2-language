@@ -11,7 +11,7 @@ pub mod value;
 use std::path::Path;
 
 use crate::syntax::span::{LoadError, SourceMap};
-use crate::syntax::{lexer, parser};
+use crate::syntax::{check, lexer, parser};
 use error::{render_diag, render_error};
 use interp::Interp;
 
@@ -36,6 +36,14 @@ pub fn run_script(path: &str, _args: Vec<String>) -> i32 {
             return 1;
         }
     };
+    // Static checks report every violation, in source order (4.5).
+    let diags = check::check(&program);
+    if !diags.is_empty() {
+        for d in &diags {
+            eprint!("{}", render_diag(&sm, d));
+        }
+        return 1;
+    }
     let mut interp = Interp::new(&sm);
     let result = interp.run(&program);
     interp.out.flush();
