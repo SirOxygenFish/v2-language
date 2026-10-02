@@ -66,6 +66,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
         f: |it, _, _| Ok(Value::list(it.args.iter().map(|a| Value::str(a)).collect())),
     },
     BuiltinDef { name: "exit", params: &[ParamSpec::opt("code", || Value::Int(0))], f: exit },
+    BuiltinDef { name: "engine_available", params: &[ParamSpec::req("tag")], f: engine_available },
 ];
 
 /// The only writer of the host's stdout: buffered, flushed after every write when stdout is a
@@ -93,6 +94,13 @@ impl Out {
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.w.flush()
     }
+}
+
+/// `engine_available(tag)`: false for an unknown tag, else whether the engine resolves; it may
+/// probe (cached) but never starts a session (7.3).
+fn engine_available(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let tag = str_arg(&args[0], "engine_available", "tag")?;
+    Ok(Value::Bool(it.registry.engine_available(&tag)))
 }
 
 fn io_error<T>(message: String) -> Exec<T> {

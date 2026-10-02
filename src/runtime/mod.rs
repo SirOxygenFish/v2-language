@@ -13,14 +13,17 @@ pub mod value;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 
+use crate::engines::registry::Registry;
+use crate::engines::resolve::CacheMode;
 use crate::syntax::span::{os_message, LoadError, SourceMap};
 use crate::syntax::{check, lexer, parser};
 use error::{render_diag, render_error, Flow};
 use interp::Interp;
 
 /// `v2 FILE [ARGS...]` on the interpreter thread; returns the exit code (6.1, 6.5).
-pub fn run_script(path: &str, args: Vec<String>) -> i32 {
+pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>) -> i32 {
     let mut sm = SourceMap::new();
     let file = match sm.load(Path::new(path)) {
         Ok(id) => id,
@@ -52,7 +55,8 @@ pub fn run_script(path: &str, args: Vec<String>) -> i32 {
     // import that reaches them (6.1 step 2).
     let mut parsed = HashMap::new();
     module::parse_graph(&mut sm, file, &program, &mut parsed);
-    let mut interp = Interp::new(sm, parsed, crate::INTERP_STACK_BYTES);
+    let mode = if cfg.no_cache { CacheMode::Refresh } else { CacheMode::ReadWrite };
+    let mut interp = Interp::new(sm, parsed, crate::INTERP_STACK_BYTES, Registry::real(cfg, mode));
     interp.args = args;
     let result = interp.run(file, &program);
     // Program output comes before the error that ended it (5.10). Output that can't be written
@@ -65,7 +69,12 @@ pub fn run_script(path: &str, args: Vec<String>) -> i32 {
         Ok(()) => 0,
         Err(Flow::Error(e)) => {
             stderr!("{}", render_error(&interp.sm, &e));
-            1
+            // No usable toolchain is exit 3 (6.5, 19.1).
+            if &*e.kind == "EngineNotFound" {
+                3
+            } else {
+                1
+            }
         }
         Err(Flow::Exit(code)) => code,
         Err(Flow::Return(_) | Flow::Break | Flow::Continue) => {

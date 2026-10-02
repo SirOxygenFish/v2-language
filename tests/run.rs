@@ -13,11 +13,13 @@
 //! ```
 //!
 //! Stdout must equal `<name>.out` (CRLF converted to LF). A test with neither a `.out` file nor a
-//! `stderr:` line is rejected. `requires:` (engine-gated tests) arrives with `engine_available`
-//! in roadmap 1.1; until then a test that uses it fails instead of silently skipping.
+//! `stderr:` line is rejected. `// requires: py js` skips a test when an engine is missing: one
+//! generated probe per run asks `engine_available` for every tag named; a skip is listed in the
+//! summary and never counts as a pass, and with `V2_TEST_REQUIRE=py,js` it is a failure.
 //!
 //! The command-line cases (`--version`, `--help`, usage errors) are ordinary Rust tests below.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -211,7 +213,7 @@ fn wait_with_timeout(mut child: Child, input: Vec<u8>, timeout: Duration) -> Res
     Ok(Output { status, stdout: out_t.join().unwrap_or_default(), stderr: err_t.join().unwrap_or_default() })
 }
 
-fn run_test(path: &Path) -> Outcome {
+fn run_test(path: &Path, engines: &Engines) -> Outcome {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(format!("cannot read test: {e}")),
@@ -228,8 +230,10 @@ fn run_test(path: &Path) -> Outcome {
             return Outcome::Skip(format!("platform {p} only"));
         }
     }
-    if !header.requires.is_empty() {
-        return Outcome::Fail("`requires:` needs engine_available (roadmap 1.1)".into());
+    match skip_reason(&header.requires, engines) {
+        Ok(None) => {}
+        Ok(Some(why)) => return Outcome::Skip(why),
+        Err(why) => return Outcome::Fail(why),
     }
     let dir = path.parent().expect("test has a folder");
     let name = path.file_name().expect("test has a name").to_string_lossy().into_owned();
@@ -307,15 +311,105 @@ fn discover(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// `requires:` (INTERNALS 22.2)
+
+/// Which engines this machine has, and which ones `V2_TEST_REQUIRE` insists on.
+struct Engines {
+    available: Result<HashMap<String, bool>, String>,
+    required: Vec<String>,
+}
+
+/// One generated probe for every tag named in a `requires:` header (INTERNALS 22.2).
+fn engine_availability(tags: &[String]) -> Result<HashMap<String, bool>, String> {
+    if tags.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if let Some(bad) = tags.iter().find(|t| t.is_empty() || !t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')) {
+        return Err(format!("bad `requires:` tag {bad:?}"));
+    }
+    let src: String = tags.iter().map(|t| format!("print(engine_available(\"{t}\"))\n")).collect();
+    let home = TempHome::new();
+    std::fs::write(home.0.join("probe.v2"), src).map_err(|e| e.to_string())?;
+    let child = v2_command(&home.0)
+        .arg("probe.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start v2: {e}"))?;
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(120))?;
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    let lines: Vec<&str> = stdout.lines().collect();
+    if out.status.code() != Some(0) || lines.len() != tags.len() {
+        return Err(format!("the engine_available probe failed: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(tags.iter().cloned().zip(lines.iter().map(|l| *l == "true")).collect())
+}
+
+/// `Ok(Some(why))`: skip; `Err(why)`: fail (a required engine is missing, or the probe failed).
+fn skip_reason(requires: &[String], engines: &Engines) -> Result<Option<String>, String> {
+    if requires.is_empty() {
+        return Ok(None);
+    }
+    let available = engines.available.as_ref().map_err(|e| e.clone())?;
+    for tag in requires {
+        if !available.get(tag).copied().unwrap_or(false) {
+            if engines.required.contains(tag) {
+                return Err(format!("engine {tag} not available, and V2_TEST_REQUIRE requires it"));
+            }
+            return Ok(Some(format!("engine {tag} not available")));
+        }
+    }
+    Ok(None)
+}
+
+#[test]
+fn requires_skip_rules() {
+    let engines = |avail: &[(&str, bool)], required: &[&str]| Engines {
+        available: Ok(avail.iter().map(|(t, a)| (t.to_string(), *a)).collect()),
+        required: required.iter().map(|t| t.to_string()).collect(),
+    };
+    let req = |tags: &[&str]| tags.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+    let e = engines(&[("py", true), ("js", false)], &[]);
+    assert_eq!(skip_reason(&req(&[]), &e), Ok(None));
+    assert_eq!(skip_reason(&req(&["py"]), &e), Ok(None));
+    assert_eq!(skip_reason(&req(&["py", "js"]), &e), Ok(Some("engine js not available".into())));
+    let e = engines(&[("py", true), ("js", false)], &["js"]);
+    assert!(skip_reason(&req(&["js"]), &e).is_err(), "a required engine that is missing fails");
+    let broken = Engines { available: Err("probe failed".into()), required: Vec::new() };
+    assert_eq!(skip_reason(&req(&["py"]), &broken), Err("probe failed".into()));
+    assert_eq!(skip_reason(&req(&[]), &broken), Ok(None), "only tests that need engines care");
+}
+
 #[test]
 fn v2_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut tests = Vec::new();
     discover(&root, &mut tests);
+    let mut tags: Vec<String> = Vec::new();
+    for path in &tests {
+        let header = std::fs::read_to_string(path).ok().and_then(|src| parse_header(&src).ok());
+        for tag in header.map(|h| h.requires).unwrap_or_default() {
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    let engines = Engines {
+        available: engine_availability(&tags),
+        required: std::env::var("V2_TEST_REQUIRE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    };
     let (mut passed, mut failed, mut skipped) = (0, Vec::new(), Vec::new());
     for path in &tests {
         let shown = path.strip_prefix(&root).unwrap_or(path).display().to_string();
-        match run_test(path) {
+        match run_test(path, &engines) {
             Outcome::Pass => passed += 1,
             Outcome::Fail(why) => failed.push(format!("FAIL {shown}: {why}")),
             Outcome::Skip(why) => skipped.push(format!("SKIP {shown} ({why})")),
@@ -981,6 +1075,115 @@ fn without_a_watchdog_an_interrupt_still_ends_the_run() {
     }
     #[cfg(windows)]
     assert_eq!(out.status.code(), Some(0xC000_013Au32 as i32), "STATUS_CONTROL_C_EXIT: {:?}", out.status);
+}
+
+/// `v2 ARGS` in a fresh home with `files` (path, text) written there; (code, stdout, stderr).
+fn run_with_files(files: &[(&str, &str)], args: &[&str]) -> (Option<i32>, String, String, TempHome) {
+    let home = TempHome::new();
+    for (path, text) in files {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let child = v2_command(&home.0)
+        .args(args)
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(120)).unwrap();
+    let text = |b: &[u8]| normalize(&String::from_utf8_lossy(b));
+    (out.status.code(), text(&out.stdout), text(&out.stderr), home)
+}
+
+/// The rows of `v2 doctor`'s table by engine: (status, command, version, from).
+fn doctor_rows(stdout: &str) -> HashMap<String, Vec<String>> {
+    let mut lines = stdout.lines();
+    let header = lines.next().unwrap_or_default();
+    assert!(header.split_whitespace().eq(["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"]), "{stdout}");
+    let starts: Vec<usize> = ["STATUS", "COMMAND", "VERSION", "FROM"].iter().map(|h| header.find(h).unwrap()).collect();
+    let mut rows = HashMap::new();
+    for line in lines.take_while(|l| !l.starts_with("notes:") && !l.starts_with("config files:")) {
+        let cell = |i: usize| -> String {
+            let from = starts[i];
+            let to = starts.get(i + 1).copied().unwrap_or(line.len()).min(line.len());
+            line.get(from..to).unwrap_or_default().trim().to_string()
+        };
+        let id = line[..starts[0]].trim().to_string();
+        rows.insert(id, (0..4).map(cell).collect());
+    }
+    rows
+}
+
+#[test]
+fn doctor_prints_the_engine_table() {
+    // INTERNALS 19.2: one row per registered engine, in order; exit 0 even when some are missing.
+    let probe = "print(engine_available(\"py\"), engine_available(\"js\"), engine_available(\"ts\"))\n";
+    let (code, stdout, stderr, home) = run_with_files(&[("probe.v2", probe)], &["probe.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let available: Vec<bool> = stdout.split_whitespace().map(|w| w == "true").collect();
+    let (code, stdout, stderr, _) = run_with_files(&[], &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let ids: Vec<&str> = stdout.lines().skip(1).take(3).map(|l| l.split_whitespace().next().unwrap_or_default()).collect();
+    assert_eq!(ids, ["py", "js", "ts"], "{stdout}");
+    let rows = doctor_rows(&stdout);
+    for (id, avail) in ["py", "js", "ts"].iter().zip(available) {
+        let row = &rows[*id];
+        assert!(["ok", "missing", "old", "broken"].contains(&row[0].as_str()), "{stdout}");
+        assert_eq!(row[0] == "ok", avail, "{id}: doctor and engine_available agree:\n{stdout}");
+        if row[0] == "missing" {
+            assert_eq!(&row[1..], ["-", "-", "-"], "{stdout}");
+        }
+    }
+    assert!(stdout.contains("config files: none"), "{stdout}");
+    drop(home);
+}
+
+#[test]
+fn doctor_writes_the_probe_cache() {
+    let (code, stdout, stderr, home) = run_with_files(&[], &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let probed = doctor_rows(&stdout).values().any(|r| r[0] == "ok" || r[0] == "old");
+    let cache = home.0.join(".v2").join("cache").join("toolchains.json");
+    assert_eq!(cache.is_file(), probed, "{stdout}");
+    if probed {
+        let text = std::fs::read_to_string(&cache).unwrap();
+        assert!(text.starts_with("{\"format\":1,\"entries\":{"), "{text}");
+    }
+}
+
+#[test]
+fn doctor_reports_configured_problems() {
+    // A configured command never falls back to auto-detection (7.6): broken, FROM its source.
+    let files = [("v2.toml", "[engines.py]\ncommand = \"missing/python.exe\"\n")];
+    let (code, stdout, stderr, home) = run_with_files(&files, &["--engine", "js=missing/node.exe", "doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let rows = doctor_rows(&stdout);
+    assert_eq!((rows["py"][0].as_str(), rows["py"][3].as_str()), ("broken", "v2.toml"), "{stdout}");
+    assert!(rows["py"][1].ends_with("python.exe"), "{stdout}");
+    assert_eq!((rows["js"][0].as_str(), rows["js"][3].as_str()), ("broken", "--engine"), "{stdout}");
+    assert_eq!(rows["ts"][0], "broken", "ts follows js:\n{stdout}");
+    let toml = home.0.join("v2.toml");
+    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", home.0.join("missing/python.exe").display(), toml.display())), "{stdout}");
+    assert!(stdout.contains(&format!("config files:\n  {}", toml.display())), "{stdout}");
+}
+
+#[test]
+fn an_uncaught_engine_not_found_exits_3() {
+    // R48 (run half) and INTERNALS 6.5: no usable toolchain is exit 3; it is catchable.
+    let script = "print(\"before\")\n@py {\n    x = 1\n}\n";
+    let (code, stdout, stderr, _) = run_with_files(&[("main.v2", script)], &["--engine", "py=missing/python.exe", "main.v2"]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert_eq!(stdout, "before\n");
+    assert!(stderr.starts_with("main.v2:2:1: EngineNotFound: engine 'py' command '") && stderr.contains("not found (set by --engine)"), "{stderr}");
+    let files = [("v2.toml", "[engines.py]\ncommand = \"missing/python.exe\"\n"), ("main.v2", script)];
+    let (code, _, stderr, _) = run_with_files(&files, &["main.v2"]);
+    assert_eq!(code, Some(3), "{stderr}");
+    let caught = "try {\n    @py {\n        x = 1\n    }\n} catch (e) {\n    print(e.type)\n}\n";
+    let (code, stdout, stderr, _) = run_with_files(&[("main.v2", caught)], &["--engine", "py=missing/python.exe", "main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "EngineNotFound\n"), "{stderr}");
 }
 
 #[test]
