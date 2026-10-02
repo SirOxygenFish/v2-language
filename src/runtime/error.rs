@@ -20,14 +20,17 @@ pub struct ErrorValue {
     pub span: OnceCell<Span>,
     /// Frame strings, innermost first (2.5).
     pub trace: OnceCell<Rc<[Rc<str>]>>,
+    /// The error this one was raised from (a foreign exception's cause, 9.6), or `null`.
+    pub cause: Value,
 }
 
-/// An error's `data` is freed through the same queue as containers (5.1), so a chain of
-/// errors (`e = error("E", "m", e)`, a million times) can't overflow the stack.
+/// An error's `data` and `cause` are freed through the same queue as containers (5.1), so a
+/// chain of errors (`e = error("E", "m", e)`, a million times) can't overflow the stack.
 impl Drop for ErrorValue {
     fn drop(&mut self) {
         let data = std::mem::replace(&mut self.data, Value::Null);
-        super::value::release(vec![data]);
+        let cause = std::mem::replace(&mut self.cause, Value::Null);
+        super::value::release(vec![data, cause]);
     }
 }
 
@@ -45,11 +48,13 @@ impl ErrorValue {
             foreign_type: None,
             span: OnceCell::new(),
             trace: OnceCell::new(),
+            cause: Value::Null,
         }
     }
 }
 
 /// How a statement or expression ended other than normally (5.8).
+#[derive(Debug)]
 pub enum Flow {
     Error(Rc<ErrorValue>),
     Return(Value),
