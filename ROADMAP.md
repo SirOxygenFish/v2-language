@@ -10,7 +10,7 @@ says *in what order* and *what's done*.
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
 | **Next task** | 1.1 Engine registry and toolchain discovery |
-| **Last update** | 2026-10-02: Phase 0 complete (0.9 + 0.10 done; CI written, not yet run) |
+| **Last update** | 2026-10-02: 1.0 child processes and the watchdog done (CI written, not yet run) |
 
 ## Rules
 
@@ -174,79 +174,97 @@ R45, R48 (host part), R49 and the ch. 21 Syntax and Host rows pass (INTERNALS 23
 ## Phase 1: Python, JavaScript, TypeScript
 
 The polyglot core: worker processes, the VEP/1 protocol, `@export`/`@import`, packages, handles,
-callbacks and errors that cross languages. Most regression tests need several of these pieces at
-once, so they are collected in 1.10.
+callbacks and errors that cross languages. The registry holds py, js and ts; c, cpp and rust
+join in Phase 2 with their toolchains, so until then `@c` is `EngineUnknown` (INTERNALS 23).
+Order note (2026-10-02): 1.0 was added because probes, workers and transpilers all need the
+child-process rules first; the wire (1.2) comes before sessions (1.3) because the handshake
+needs frames; handles come before imports because R04/R15 need only action blocks.
+
+### 1.0 Child processes and the watchdog
+- [x] `engines/process`: child rules (own session on Unix with `PR_SET_PDEATHSIG` on Linux;
+      `CREATE_SUSPENDED` + process group + kill-on-close Job Object on Windows), `kill_tree`,
+      exit observed without reaping, reaping, `run_captured` with concurrent pipes (§8.3)
+- [x] The watchdog moved here from `session`: timer stack with pause/resume, timers that kill
+      a child's tree, every running child killed on the interrupt path (§1.3, §6.5, §8.5)
+- **Done when:** the `engines/process` unit tests (§22.3) pass on Windows and Linux and the
+  exit-path tests still pass — **passed 2026-10-02**
 
 ### 1.1 Engine registry and toolchain discovery
-- [ ] `EngineSpec`, built-in table, aliases, runtime tag resolution with did-you-mean (§7.1–7.3)
-- [ ] Finding executables: PATH walk without relative entries, Windows Store python stub,
-      `py -3` (§7.5, §7.6)
-- [ ] Version probes and `~/.v2/cache/toolchains.json` (§7.7); `EngineNotFound` messages (§7.8)
+- [ ] `EngineSpec`, the py/js/ts table, aliases, runtime tag resolution with did-you-mean
+      (§7.1–7.3); blocks resolve their tag through the registry (EngineUnknown /
+      EngineNotFound, exit 3 when uncaught: R48's run half)
+- [ ] Finding executables: PATH walk without relative entries, `PATHEXT`, Windows Store python
+      stub, `py -3`; configured `command`, `[python] venv`, `[engines.ts] transpiler`, `V2_ENGINE_*`
+      and `--engine` (§7.5, §7.6, §18.2)
+- [ ] Version probes and `~/.v2/cache/toolchains.json`, also `--no-cache` for probes (§7.7, §19.4);
+      `EngineNotFound` messages (§7.8)
 - [ ] `engine_available(tag)` (§7.3); harness `requires:` headers and SKIP (§22.2)
 - [ ] `v2 doctor` table (§19.2)
-- **Done when:** R41 and the `engines/resolve` and `engines/registry` unit tests pass; `v2 doctor`
-  shows py/js/ts on this PC
+- **Done when:** R41 and the `engines/spec`, `engines/registry` and `engines/resolve` unit tests
+  pass; `v2 doctor` shows py/js/ts on this PC
 
-### 1.2 Worker processes
-- [ ] Private run directory: create, owner-only permissions, remove on every exit path (§20.3)
+### 1.2 The VEP/1 wire
+- [ ] Framing: NDJSON, 64 MiB limit both ways, pre-`hello` noise, one `\r` dropped (§9.1)
+- [ ] Frame types and their checks, `ProtocolError` for every fatal case (§9.2–9.6, §9.11)
+- [ ] Codec VEP mode: numbers, `$v2` tags, base64, depth and cycle checks (§10.1–10.5)
+- [ ] Host `HandleRef`, release queue and the callable table (§11.2, §11.8)
+
+### 1.3 Sessions
 - [ ] Session state machine, lazy spawn, env (`PYTHONUTF8`, `NODE_PATH`), cwd (§8.1–8.3)
-- [ ] Process trees: `setsid` on Unix, Job Objects on Windows, tree kill (§8.3)
-- [ ] Handshake (§8.4), watchdog timers paused during reverse calls (§8.5)
+- [ ] Handshake (§8.4); the re-entrant request loop with depth limit 64 (§9.7); when a worker may
+      call V2, host side (§9.8); `release`/`bye` (§9.10)
+- [ ] Call and startup timers, paused during reverse calls (§8.5)
 - [ ] Crash detection → EngineCrashed; shutdown with `bye`, grace, kill (§8.6, §8.7)
-
-### 1.3 The VEP/1 protocol and codec
-- [ ] Framing: NDJSON, 64 MiB limit, pre-`hello` noise to stderr, one `\r` dropped (§9.1)
-- [ ] All frame types, ids and the re-entrant wait loop with depth limit 64 (§9.2–9.7)
-- [ ] When a worker may call V2 (§9.8); worker stdio rules (§9.9); `release`/`bye` (§9.10);
-      `ProtocolError` (§9.11)
-- [ ] Marshaling for Python and JS: numbers, `$v2` tags, strings, containers, named args (§10.2–10.8)
+- [ ] Private run directory: create, owner-only permissions, remove on every exit path (§20.3)
 - **Done when (1.2 + 1.3):** the `engines/vep` and `engines/session` protocol tests against the
-  scripted in-process adapter (§22.3) pass
+  scripted adapter, in process and as a real child (§22.3), pass on Windows and Linux
 
 ### 1.4 Python engine
 - [ ] `adapters/py.py`: launch, fd rewiring, `out` frames, dispatch loop (§14.1–14.3)
 - [ ] Reaching a block, the `load` frame, Python load: module per unit, line offsets,
       last-expression value, block args (§12.1–12.3)
 - [ ] Action vs definition blocks: load once, failed loads re-raise (§12.1)
-- **Done when:** R05, R06 (py) and R34 pass
+- [ ] Python marshaling and the worker handle table (§10.6, §11.1); worker stdio rules (§9.9);
+      `[python] paths` in `init`
+- **Done when:** R05, R06 (py), R34 and R40 pass; the run dir is removed on every exit path
 
 ### 1.5 JavaScript and TypeScript engine
 - [ ] `adapters/js.js`: sync stdin reads, wrapped stdout/console/fs/child_process (§14.4)
 - [ ] JavaScript load with `vm`, completion value, no `import` statements (§12.4)
 - [ ] TypeScript via `module.stripTypeScriptTypes` (Node 22.13+) or a transpiler (§12.5)
-- [ ] Promises awaited only at depth 0; idle-callback errors (§9.8)
+- [ ] JS marshaling (§10.7); promises awaited only at depth 0; idle-callback errors (§9.8)
 - **Done when:** R06 (js) and R32 pass
 
-### 1.6 Imports, packages and cross-language calls
+### 1.6 Handles
+- [ ] Operations, iteration and `value(h)` (§11.3–11.5)
+- [ ] Callable handles, identity, invalid uses, leaks (§11.6, §11.7, §11.9)
+- **Done when:** R04 and R15 pass
+
+### 1.7 Imports, packages and cross-language calls
 - [ ] Selectors, per-file export registry, resolving names, binding (§13.1–13.4)
 - [ ] Package imports `py.x` / `js.x`, `*`, module handles, ESM fallback (§13.5)
 - [ ] Routes, imports inside blocks, the `v2` selector (§13.6, §13.7)
 - [ ] V2 callables inside workers (callbacks both ways) (§11.8)
 - [ ] Named args → Python kwargs; ArityError for JS (§10.8)
-
-### 1.7 Handles
-- [ ] Worker table, host `HandleRef`, release batching (§11.1, §11.2, §9.10)
-- [ ] Operations, iteration and `value(h)` (§11.3–11.5)
-- [ ] Callable handles, identity, invalid uses, leaks (§11.6, §11.7, §11.9)
+- **Done when:** R08, R10, R12, R13, R14 (first two parts), R18, R19, R26, R27, R38, R43, R44
+  and R46 pass
 
 ### 1.8 Errors and output across languages
 - [ ] Foreign tracebacks mapped to `.v2` lines and columns (§2.3, §12.6)
 - [ ] Output order with captured stdout (§1.3, §9.9)
+- **Done when:** R16, R39 (`@py` line part), R14 (V2 error part) and R17 (py/js) pass
 
-### 1.9 Config, check and doctor for engines
-- [ ] `[engines.py|js|ts]` (command, timeouts, transpiler), `[python] venv/paths`,
-      `[node] modules/paths` (§18.2)
+### 1.9 Check and doctor for engines
 - [ ] Full `v2 check` inventory for engines (§19.3); `v2 doctor TAG` for py/js/ts (§19.2)
 - [ ] Port `old/v2/testsuite/test_engines.v2` as `tests/engines/py/seed_engines.v2` (§22.5)
+- **Done when:** the seed passes, plus R48's check half and the `doctor TAG` tests
 
 ### 1.10 Phase 1 test sweep
-- [ ] R01, R02, R03, R04, R08, R10, R11, R12, R13, R14, R15, R16, R17 (py/js), R18, R19, R26,
-      R27, R29, R30, R31, R33, R38, R39 (`@py` line part), R40, R42, R43, R44, R46, R48 (engine
-      part)
-- [ ] ch. 21 rows: Setup, Blocks and imports, Calls and values
+- [ ] R01, R02, R03, R11, R29, R30, R31, R33, R42, and every R of 1.4–1.9 again
+- [ ] ch. 21 rows for bridged engines: Setup, Blocks and imports, Calls and values
 
 **Phase 1 complete when:** `tests/engines/{py,js,ts}`, `tests/cross`, `tests/imports`, the seed
-and protocol tests, and every R listed in 1.4, 1.5 and 1.10 pass (INTERNALS 23).
+and protocol tests, and every R listed in 1.1–1.10 pass (INTERNALS 23).
 
 ---
 
@@ -255,8 +273,8 @@ and protocol tests, and every R listed in 1.4, 1.5 and 1.10 pass (INTERNALS 23).
 C, C++ and Rust blocks compiled to cached libraries, and `extern` for existing libraries.
 
 ### 2.1 Process helper
-- [ ] `engines/runonly`: spawn, stdout streaming or capture, stderr tail, tree kill,
-      EngineExitError (§15.5, §17.3)
+- [ ] `engines/runonly` on `engines/process`: temp file, stdout inherited or captured, 4 KiB
+      stderr tail, EngineExitError (§15.5, §17.3)
 
 ### 2.2 Native FFI (`extern`)
 - [ ] The `extern` statement and library resolution per platform, `SetDllDirectoryW(L"")` on
@@ -356,3 +374,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-01 | 0.8: `import` with the startup parse of the import graph, run-once modules, namespace snapshots, circular-import chains, ImportError for syntax errors in modules (R49) |
 | 2026-10-02 | 0.9: the JSON codec (plain mode) and every engine-free builtin; reviewed together with 0.8 (about 9 findings fixed) |
 | 2026-10-02 | 0.10: config layers with validation on the merged result, `v2 run`, host-only `v2 check`, exit paths (closed streams, late interrupts, ignored signals, panic → 101); three review rounds, 28 findings fixed with regression tests (each new test shown to fail without its fix); the Phase 0 exit audit (ch. 21 rows, R-tests, DOCS ch. 3 examples) closed 8 test gaps and found `range(end: n)` and float `-6.0 % 3` mismatches, both fixed. **Phase 0 complete.** Linux verified in WSL |
+| 2026-10-02 | 1.0: `engines/process` (child rules, Job Objects / sessions, tree kill, exit before reaping, captured runs) and the watchdog's timer stack; Phase 1 re-ordered (1.0 added, wire before sessions, handles before imports); Node 24.11.1 installed in WSL for Linux JS tests |
