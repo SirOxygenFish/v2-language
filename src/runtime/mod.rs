@@ -81,7 +81,14 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
             unreachable!("return, break and continue are placed statically (4.5)")
         }
     };
-    if flushed.is_err() && code == 0 {
+    // Then the engines stop: `bye`, one shared grace period that still forwards their output,
+    // kill and reap; late output is flushed too (6.5, 8.7).
+    interp.shutdown_sessions();
+    let late = interp.out.flush();
+    if let (Ok(()), Err(e)) = (&flushed, &late) {
+        stderrln!("v2: cannot write to stdout: {}", os_message(e));
+    }
+    if (flushed.is_err() || late.is_err()) && code == 0 {
         1
     } else {
         code

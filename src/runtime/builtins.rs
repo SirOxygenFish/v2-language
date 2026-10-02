@@ -72,7 +72,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
 /// The only writer of the host's stdout: buffered, flushed after every write when stdout is a
 /// terminal, and at the end of the run (5.10).
 pub struct Out {
-    w: BufWriter<StdoutLock<'static>>,
+    w: BufWriter<Box<dyn Write>>,
     tty: bool,
 }
 
@@ -80,7 +80,25 @@ impl Out {
     pub fn new() -> Out {
         let stdout = std::io::stdout();
         let tty = stdout.is_terminal();
-        Out { w: BufWriter::with_capacity(64 * 1024, stdout.lock()), tty }
+        let lock: StdoutLock<'static> = stdout.lock();
+        Out { w: BufWriter::with_capacity(64 * 1024, Box::new(lock)), tty }
+    }
+
+    /// An `Out` that collects into a shared buffer (tests).
+    #[cfg(test)]
+    pub fn capture() -> (Out, std::rc::Rc<std::cell::RefCell<Vec<u8>>>) {
+        struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        (Out { w: BufWriter::new(Box::new(Shared(buf.clone()))), tty: true }, buf)
     }
 
     pub fn write_str(&mut self, s: &str) -> Exec<()> {
