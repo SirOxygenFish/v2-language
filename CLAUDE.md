@@ -74,7 +74,9 @@ it is loaded automatically into every session and every subagent.
 - `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders), `engines/handles.rs`
   (`HandleRef`: Drop only queues the release; `CallableTable`), `engines/session.rs`
   (`Interp.sessions: Vec<Session>`, `start_session`/`attach_session`, handshake, `request`
-  re-entrant loop serving reverse calls with the timer paused, `shutdown_sessions`).
+  re-entrant loop serving reverse calls with the timer paused, `shutdown_sessions`: one reader
+  thread per worker, so readers are `Box<dyn Read + Send>`). Session state stays Handshaking
+  until `init`'s `ret`. Reaping a child also drops its timers (`process::unregister`).
   `session/tests.rs`: scripted workers over `std::io::pipe()` or as a real child (`V2_WORKER`;
   `worker_main` writes a newline first because libtest's "test ... " line has none).
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.

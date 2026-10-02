@@ -354,15 +354,12 @@ fn skip_reason(requires: &[String], engines: &Engines) -> Result<Option<String>,
         return Ok(None);
     }
     let available = engines.available.as_ref().map_err(|e| e.clone())?;
-    for tag in requires {
-        if !available.get(tag).copied().unwrap_or(false) {
-            if engines.required.contains(tag) {
-                return Err(format!("engine {tag} not available, and V2_TEST_REQUIRE requires it"));
-            }
-            return Ok(Some(format!("engine {tag} not available")));
-        }
+    let missing: Vec<&String> = requires.iter().filter(|t| !available.get(*t).copied().unwrap_or(false)).collect();
+    // Any required tag that is missing fails the test, whatever the header's order.
+    if let Some(tag) = missing.iter().find(|t| engines.required.contains(t)) {
+        return Err(format!("engine {tag} not available, and V2_TEST_REQUIRE requires it"));
     }
-    Ok(None)
+    Ok(missing.first().map(|tag| format!("engine {tag} not available")))
 }
 
 #[test]
@@ -378,6 +375,8 @@ fn requires_skip_rules() {
     assert_eq!(skip_reason(&req(&["py", "js"]), &e), Ok(Some("engine js not available".into())));
     let e = engines(&[("py", true), ("js", false)], &["js"]);
     assert!(skip_reason(&req(&["js"]), &e).is_err(), "a required engine that is missing fails");
+    let e = engines(&[("py", false), ("js", false)], &["js"]);
+    assert!(skip_reason(&req(&["py", "js"]), &e).is_err(), "also after a missing tag that is not required");
     let broken = Engines { available: Err("probe failed".into()), required: Vec::new() };
     assert_eq!(skip_reason(&req(&["py"]), &broken), Err("probe failed".into()));
     assert_eq!(skip_reason(&req(&[]), &broken), Ok(None), "only tests that need engines care");
@@ -1280,4 +1279,76 @@ fn tautology_lint() {
     assert!(has_tautology("check(x,true ,  true )"));
     assert!(!has_tautology(r#"check("a", f(), true)"#));
     assert!(!has_tautology("check(, true, true)"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mutation kills
+
+/// `v2 ARGS` in an existing home, with extra environment.
+fn run_in_home(home: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> (Option<i32>, String, String) {
+    let mut cmd = v2_command(home);
+    cmd.args(args).current_dir(home).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+    let text = |b: &[u8]| normalize(&String::from_utf8_lossy(b));
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+#[test]
+fn doctor_and_no_cache_probe_afresh() {
+    let home = TempHome::new();
+    std::fs::write(home.0.join("probe.v2"), "print(engine_available(\"py\"), engine_available(\"js\"))\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["probe.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, "true true\n", "this test needs py and js");
+    let cache = home.0.join(".v2").join("cache").join("toolchains.json");
+    // Every usable entry now claims 99.0.0, a version no real probe prints.
+    let tamper = || {
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        for e in v["entries"].as_object_mut().unwrap().values_mut() {
+            if e["ok"] == true {
+                e["version"] = "99.0.0".into();
+            }
+        }
+        std::fs::write(&cache, v.to_string()).unwrap();
+    };
+    let tampered = || std::fs::read_to_string(&cache).unwrap().contains("99.0.0");
+    tamper();
+    assert_eq!(run_in_home(&home.0, &["probe.v2"], &[]).1, "true true\n");
+    assert!(tampered(), "a run reads the cache and keeps its hits (7.7)");
+    assert_eq!(run_in_home(&home.0, &["--no-cache", "probe.v2"], &[]).1, "true true\n");
+    assert!(!tampered(), "--no-cache probes afresh and overwrites (7.7, 19.4)");
+    tamper();
+    let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &[]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(!stdout.contains("99.0.0") && !tampered(), "doctor probes afresh (19.2):\n{stdout}");
+}
+
+#[test]
+fn doctor_columns_are_longest_cell_plus_two() {
+    let (code, stdout, stderr, _) = run_with_files(&[], &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().take_while(|l| !l.starts_with("notes:") && !l.starts_with("config files:")).collect();
+    let header = lines[0];
+    let starts: Vec<usize> = ["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].iter().map(|h| header.find(h).unwrap()).collect();
+    for c in 0..4 {
+        let longest = lines.iter().map(|l| l.get(starts[c]..starts[c + 1]).unwrap_or_default().trim_end().chars().count()).max().unwrap();
+        assert_eq!(starts[c + 1] - starts[c], longest + 2, "column {c}:\n{stdout}");
+    }
+}
+
+#[test]
+fn doctor_without_engines_notes_install_hints() {
+    let home = TempHome::new();
+    let empty = home.0.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[("PATH", empty.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let rows = doctor_rows(&stdout);
+    for id in ["py", "js", "ts"] {
+        assert_eq!(rows[id], ["missing", "-", "-", "-"], "{stdout}");
+        assert!(stdout.contains(&format!("\n  {id}: not found; install: ")), "{stdout}");
+    }
 }

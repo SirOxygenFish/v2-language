@@ -256,17 +256,14 @@ impl Wire<'_> {
         let text = |member: &str| m.get(member).and_then(Json::as_str).ok_or_else(|| format!("an 'error' tag with a bad '{member}'"));
         let optional = |member: &str| m.get(member).and_then(Json::as_str).map(Rc::<str>::from);
         let data = match m.get("data") {
-            Some(d) => self.decode_at(d, depth + 1)?,
+            Some(d) => self.decode_at(d, depth)?,
             None => Value::Null,
         };
         let mut e = ErrorValue::with_data(text("type")?.into(), text("message")?.into(), data);
         e.lang = optional("lang");
         e.foreign_type = optional("foreign_type");
         if let Some(c) = m.get("cause").filter(|c| !c.is_null()) {
-            if depth >= MAX_DEPTH {
-                return Err(format!("value nested deeper than {MAX_DEPTH} levels"));
-            }
-            e.cause = self.decode_at(c, depth + 1)?;
+            e.cause = self.decode_at(c, depth)?;
         }
         let file = optional("file").and_then(|f| self.sm.id_of(std::path::Path::new(&*f)));
         let line = m.get("line").and_then(Json::as_u64).and_then(|n| u32::try_from(n).ok());
@@ -285,6 +282,28 @@ impl Wire<'_> {
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// The callable ids of every `fn` tag in an encoded frame, one per tag: what a frame that was
+/// never sent must give back to the callable table (10.1, 11.8).
+pub fn fn_ids(frame: &Json) -> Vec<u64> {
+    fn walk(j: &Json, out: &mut Vec<u64>) {
+        match j {
+            Json::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            Json::Object(m) => match m.get("$v2").and_then(Json::as_str) {
+                Some("fn") => out.extend(m.get("id").and_then(Json::as_u64)),
+                // A `dict` tag's `v` holds the user's own keys, which may include "$v2".
+                Some("dict") => m.get("v").and_then(Json::as_object).iter().flat_map(|v| v.values()).for_each(|v| walk(v, out)),
+                Some("error") => ["data", "cause"].iter().filter_map(|k| m.get(*k)).for_each(|v| walk(v, out)),
+                Some(_) => {}
+                None => m.values().for_each(|v| walk(v, out)),
+            },
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(frame, &mut out);
+    out
+}
 
 /// Standard, padded base64 (10.1).
 pub fn base64_encode(bytes: &[u8]) -> String {
@@ -547,5 +566,60 @@ mod tests {
         ] {
             assert_eq!(dec(text).err().as_deref(), Some(what), "{text}");
         }
+    }
+
+    #[test]
+    fn error_tags_are_not_a_level() {
+        // An error whose data is 256 lists deep goes out, and comes back unchanged (9.6, 10.5).
+        let mut data = Value::Null;
+        for _ in 0..256 {
+            data = Value::list(vec![data]);
+        }
+        let e = Value::Error(Rc::new(ErrorValue::with_data("ValueError".into(), "deep".into(), data)));
+        let mut f = Fixture::new();
+        let j = f.wire(ALL).encode(&e, "value").expect("256 levels go out");
+        assert!(f.wire(ALL).decode(&j).is_ok(), "and come back");
+    }
+
+    #[test]
+    fn dict_tags_fit_the_frame_scan() {
+        // 140 dicts keyed "$v2" are 140 levels but 280 brackets: frames allow 1,000 (10.1).
+        let mut v = Value::Null;
+        for _ in 0..140 {
+            let mut m = IndexMap::new();
+            m.insert(Rc::from("$v2"), v);
+            v = Value::dict(m);
+        }
+        let mut f = Fixture::new();
+        let j = f.wire(ALL).encode(&v, "value").unwrap();
+        let frame = json!({"t":"ret","id":1,"value":j}).to_string();
+        let parsed = std::thread::Builder::new().stack_size(64 << 20).spawn(move || crate::engines::vep::parse_frame(frame.as_bytes(), ALL).is_ok());
+        assert!(parsed.unwrap().join().unwrap());
+    }
+
+    #[test]
+    fn fn_ids_count_tags_not_user_keys() {
+        let print = Value::Func(Func::new(Callable::Builtin(BUILTINS.iter().find(|b| b.name == "print").unwrap())));
+        let mut lookalike = IndexMap::new();
+        lookalike.insert(Rc::from("$v2"), Value::str("fn"));
+        lookalike.insert(Rc::from("id"), Value::Int(99));
+        lookalike.insert(Rc::from("f"), print.clone());
+        let e = Value::Error(Rc::new(ErrorValue::with_data("ValueError".into(), "x".into(), print.clone())));
+        let v = Value::list(vec![print.clone(), Value::dict(lookalike), e]);
+        let mut f = Fixture::new();
+        let j = f.wire(ALL).encode(&v, "value").unwrap();
+        let ids = fn_ids(&json!({"t":"ret","id":1,"value":j}));
+        assert_eq!(ids.len(), 3, "in the list, in the dict, in the error: {ids:?}");
+        assert!(ids.iter().all(|&i| i == ids[0] && i != 99), "{ids:?}");
+    }
+
+    #[test]
+    fn dicts_count_toward_depth_and_negative_safe_ints_are_plain() {
+        let text = |n: usize| format!("{}null{}", "{\"a\":".repeat(n), "}".repeat(n));
+        assert!(dec(&text(256)).is_ok());
+        assert_eq!(dec(&text(257)).err().unwrap(), "value nested deeper than 256 levels");
+        assert_eq!(enc(&Value::Int(-((1 << 53) - 1))), "-9007199254740991");
+        assert_eq!(enc(&Value::Int(-(1 << 53))), r#"{"$v2":"int","v":"-9007199254740992"}"#);
+        assert_eq!(enc(&Value::Int(-5)), "-5");
     }
 }

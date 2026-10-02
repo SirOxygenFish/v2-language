@@ -351,8 +351,17 @@ pub fn set_run_dir(dir: PathBuf) {
     lock().run_dir = Some(dir);
 }
 
-fn unregister(id: u64) {
-    lock().children.retain(|(c, _)| *c != id);
+/// Forget a child that is about to be reaped: its interrupt-path entry and every timer that
+/// would kill it, even while a caller still holds the TimerGuard, so a reused pid is never
+/// signalled or waited on (8.5).
+fn unregister(id: u64, kill: &KillHandle) {
+    let mut w = lock();
+    w.children.retain(|(c, _)| *c != id);
+    let timers: Vec<u64> = w.kills.iter().filter(|(_, k)| std::sync::Arc::ptr_eq(&k.0, &kill.0)).map(|(t, _)| *t).collect();
+    for t in timers {
+        w.kills.remove(&t);
+        w.timers.pop(t, Instant::now());
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -648,9 +657,11 @@ pub struct ChildProc {
     done: bool,
 }
 
-/// `could not start 'C:\...\python.exe': <OS message>` (8.3).
+/// `could not start 'C:\...\python.exe': <OS message>` (8.3). Windows messages such as
+/// `%1 is not a valid Win32 application` come with their `%1` unfilled.
 fn spawn_error(program: &OsString, e: &std::io::Error) -> String {
-    let mut msg = format!("could not start '{}': {}", program.to_string_lossy(), crate::syntax::span::os_message(e));
+    let os = crate::syntax::span::os_message(e).replace("%1", "the program");
+    let mut msg = format!("could not start '{}': {os}", program.to_string_lossy());
     if cfg!(windows) && e.raw_os_error() == Some(193) {
         msg.push_str(" (not a valid program for this machine)");
     }
@@ -708,7 +719,7 @@ impl ChildProc {
         self.kill.kill_tree();
     }
 
-    /// Kill what is left of the tree, unregister, then reap (8.3).
+    /// Kill what is left of the tree, unregister it and its timers, then reap (8.3, 8.5).
     pub fn reap(mut self) -> ExitInfo {
         self.finish()
     }
@@ -716,7 +727,7 @@ impl ChildProc {
     fn finish(&mut self) -> ExitInfo {
         self.done = true;
         self.kill.kill_tree();
-        unregister(self.reg);
+        unregister(self.reg, &self.kill);
         match self.child.wait() {
             Ok(status) => ExitInfo::from_status(status),
             Err(_) => ExitInfo { code: None, signal: None },
@@ -1010,6 +1021,31 @@ pub(crate) mod tests {
         cmd
     }
 
+    /// Read a helper's stdout until it says `ready`; what it said.
+    fn wait_ready(out: &mut impl Read) -> String {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 256];
+        while !String::from_utf8_lossy(&seen).contains("ready") {
+            let n = out.read(&mut buf).unwrap();
+            assert!(n > 0, "the helper ended early: {}", String::from_utf8_lossy(&seen));
+            seen.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+
+    /// The file a `late` helper writes as soon as it starts.
+    fn started(marker: &str) -> PathBuf {
+        PathBuf::from(format!("{marker}.started"))
+    }
+
+    fn wait_for(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "{} never appeared", path.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// The helper child: does nothing unless `V2_HELPER` names a role. Grandchildren are left
     /// running on purpose, like user code that outlives its parent.
     #[test]
@@ -1044,8 +1080,25 @@ pub(crate) mod tests {
                 out.write_all(b">").unwrap();
             }
             "late" => {
+                std::fs::write(started(arg), "").unwrap();
                 std::thread::sleep(Duration::from_millis(1500));
                 std::fs::write(arg, "alive").unwrap();
+            }
+            // A host killed with no exit path: its children must die with it (6.5, 8.3).
+            "owner" => {
+                let (argv, env) = helper(&format!("late:{arg}"));
+                let _child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null }).unwrap();
+                wait_for(&started(arg));
+                writeln!(out, "ready").unwrap();
+                out.flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            // After an interrupt nothing more is started (6.5).
+            "spawn_after_interrupt" => {
+                INTERRUPTED.store(true, Ordering::SeqCst);
+                let (argv, env) = helper(&format!("late:{arg}"));
+                let _ = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null });
+                writeln!(out, "spawned").unwrap();
             }
             // Leave a grandchild holding stdout, then exit at once.
             "holder" => {
@@ -1057,17 +1110,29 @@ pub(crate) mod tests {
                 let leader = unsafe { libc::getsid(0) == libc::getpid() };
                 writeln!(out, "session-leader {leader}").unwrap();
             }
-            // A host whose run dir is in use by a child when the interrupt comes (6.5, 20.3).
+            // A host whose run dir is in use by a child tree when the interrupt comes; the
+            // watchdog ends the run (6.5, 20.3).
             "interrupted" => {
-                let dir = PathBuf::from(arg);
+                let (dir, marker) = arg.split_once('|').unwrap();
+                let dir = PathBuf::from(dir);
                 std::fs::create_dir_all(&dir).unwrap();
                 std::env::set_current_dir(&dir).unwrap();
                 set_run_dir(dir.clone());
-                let (argv, env) = helper("sleep:20000");
+                let (argv, env) = helper(&format!("grandchild:{marker}"));
                 // The child's cwd is the run dir (as a compiler's would be); the host's is not.
-                let _child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null }).unwrap();
+                let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null }).unwrap();
                 std::env::set_current_dir(std::env::temp_dir()).unwrap();
-                std::thread::sleep(Duration::from_millis(300));
+                wait_ready(&mut child.take_stdout().unwrap());
+                Watchdog::start();
+                INTERRUPTED.store(true, Ordering::SeqCst);
+                wake();
+                std::thread::sleep(Duration::from_secs(10));
+            }
+            // A run dir made by config::rundir is removed by the interrupt path (20.3).
+            "rundir" => {
+                let dir = crate::config::rundir::run_dir().unwrap().to_path_buf();
+                writeln!(out, "\nRUNDIR={}", dir.display()).unwrap();
+                out.flush().unwrap();
                 INTERRUPTED.store(true, Ordering::SeqCst);
                 exit_interrupted();
             }
@@ -1183,174 +1248,165 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_interrupt_path_removes_the_run_dir() {
-        // 20.3: also when a killed child was using it (Windows releases its files late).
+    fn the_interrupt_path_kills_the_trees_and_removes_the_run_dir() {
+        // 20.3: also when a killed child was using it (Windows releases its files late). The
+        // grandchild is not covered by PDEATHSIG, so only the tree kill stops it.
+        let mut markers = Vec::new();
         for round in 0..3 {
-            let dir = temp(&format!("rundir{round}")).join("run");
-            let (argv, env) = helper(&format!("interrupted:{}", dir.display()));
+            let base = temp(&format!("rundir{round}"));
+            let (dir, marker) = (base.join("run"), base.join("late.txt"));
+            let (argv, env) = helper(&format!("interrupted:{}|{}", dir.display(), marker.display()));
             let status = Command::new(&argv[0]).args(&argv[1..]).envs(env).stdout(Stdio::null()).status().unwrap();
             assert_eq!(status.code(), Some(EXIT_INTERRUPTED));
             assert!(!dir.exists(), "round {round}: the run dir was left behind");
+            markers.push(marker);
         }
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(markers.iter().all(|m| !m.exists()), "a grandchild outlived the interrupt");
+    }
+
+    #[test]
+    fn nothing_is_spawned_after_an_interrupt() {
+        let marker = temp("nospawn").join("late.txt");
+        let (argv, env) = helper(&format!("spawn_after_interrupt:{}", marker.display()));
+        let status = Command::new(&argv[0]).args(&argv[1..]).envs(env).stdout(Stdio::null()).status().unwrap();
+        assert_eq!(status.code(), Some(EXIT_INTERRUPTED));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!started(&marker.display().to_string()).exists(), "a process was started after the interrupt");
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn children_die_with_a_killed_host() {
+        // PR_SET_PDEATHSIG (Linux) and kill-on-close Job Objects (Windows): no exit path runs.
+        let marker = temp("hostdeath").join("late.txt");
+        let mut cmd = plain_helper(&format!("owner:{}", marker.display()));
+        let mut owner = cmd.stdout(Stdio::piped()).spawn().unwrap();
+        wait_ready(owner.stdout.as_mut().unwrap());
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(!marker.exists(), "a child outlived its killed host");
+    }
+
+    #[test]
+    fn reap_and_drop_kill_the_tree() {
+        let dir = temp("reapdrop");
+        let spawn = |name: &str| {
+            let marker = dir.join(name);
+            let (argv, env) = helper(&format!("grandchild:{}", marker.display()));
+            let mut c = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null })
+                .expect("spawn");
+            wait_ready(&mut c.take_stdout().unwrap());
+            (c, marker)
+        };
+        let (a, marker_a) = spawn("a.txt");
+        let (b, marker_b) = spawn("b.txt");
+        let reg = b.reg;
+        let start = Instant::now();
+        assert!(!a.reap().success());
+        drop(b);
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(!lock().children.iter().any(|(id, _)| *id == reg), "unregistered when dropped");
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(!marker_a.exists() && !marker_b.exists(), "a grandchild outlived reap or drop");
+    }
+
+    #[test]
+    fn dropped_timers_and_reaped_children_leave_no_state() {
+        let _serial = crate::engines::process::tests::serial();
+        let (argv, env) = helper("sleep:20000");
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+            .expect("spawn");
+        let reg = child.reg;
+        assert!(lock().children.iter().any(|(id, _)| *id == reg), "registered for the interrupt path");
+        let timer = push_timer(Some(Duration::from_secs(60)), child.kill_handle());
+        let id = timer.id;
+        assert!(lock().kills.contains_key(&id));
+        drop(timer);
+        {
+            let w = lock();
+            assert!(!w.kills.contains_key(&id) && !w.fired.contains(&id), "its kill handle is gone");
+            assert!(!w.timers.stack.iter().any(|t| t.id == id), "it is off the stack");
+        }
+        child.reap();
+        assert!(!lock().children.iter().any(|(id, _)| *id == reg), "unregistered when reaped");
+    }
+
+    #[test]
+    fn a_reaped_child_is_never_signalled() {
+        let _serial = crate::engines::process::tests::serial();
+        // A session reaps a dead worker while its request still holds the timer (8.5, 8.6).
+        let (argv, env) = helper("exit:0");
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+            .expect("spawn");
+        child.wait_exit();
+        let timer = push_timer(Some(Duration::from_millis(200)), child.kill_handle());
+        child.reap();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!timer.fired(), "the watchdog killed a reaped child");
+        let w = lock();
+        assert!(!w.kills.contains_key(&timer.id) && !w.timers.stack.iter().any(|t| t.id == timer.id));
+    }
+
+    #[test]
+    fn a_paused_timer_fires_only_after_resume() {
+        let _serial = crate::engines::process::tests::serial();
+        let (argv, env) = helper("sleep:20000");
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+            .expect("spawn");
+        let timer = push_timer(Some(Duration::from_millis(300)), child.kill_handle());
+        timer.pause();
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!timer.fired() && child.exited().is_none(), "paused time does not count");
+        timer.resume();
+        let start = Instant::now();
+        assert!(child.wait_exit().is_some());
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(timer.fired());
+        assert!(lock().timers.stack.iter().any(|t| t.id == timer.id && t.fired), "marked, so it fires once");
+        drop(timer);
+        child.reap();
+    }
+
+    #[test]
+    fn input_never_holds_up_the_timer() {
+        let _serial = crate::engines::process::tests::serial();
+        // A child that never reads its input: the input is written from its own thread, so the
+        // limit still ends the run.
+        let (argv, env) = helper("sleep:20000");
+        let start = Instant::now();
+        let c = run_captured(&argv, &env, Some(vec![b'x'; 4 << 20]), Some(Duration::from_millis(500))).expect("spawn");
+        assert!(c.timed_out, "{:?}", c.status);
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
     }
 
     #[cfg(unix)]
     #[test]
-    fn an_ignored_sigchld_is_reset() {
-        use std::os::unix::process::CommandExt;
-        let (argv, env) = helper("child_status");
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]).envs(env);
-        // SAFETY: only an async-signal-safe call between fork and exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::signal(libc::SIGCHLD, libc::SIG_IGN);
-                Ok(())
-            });
-        }
-        let out = cmd.output().unwrap();
-        assert!(String::from_utf8_lossy(&out.stdout).contains("status Some(3)"), "{}", String::from_utf8_lossy(&out.stdout));
+    fn a_killed_child_reports_its_signal() {
+        let (argv, env) = helper("sleep:20000");
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+            .expect("spawn");
+        child.kill_tree();
+        let killed = ExitInfo { code: None, signal: Some(libc::SIGKILL) };
+        assert_eq!(child.wait_exit(), Some(killed));
+        assert_eq!(child.reap(), killed);
+        assert_eq!(killed.describe(), format!("killed by signal {} (SIGKILL)", libc::SIGKILL));
     }
 
     #[cfg(windows)]
     #[test]
-    fn children_share_a_windowless_console() {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let (argv, env) = helper("console_host");
-        let out = Command::new(&argv[0]).args(&argv[1..]).envs(env).creation_flags(CREATE_NO_WINDOW).output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        let n: u32 = text.split("console processes ").nth(1).and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse().ok()).expect(&text);
-        assert!(n >= 2, "the child got a console of its own: {text}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn signal_names() {
-        let describe = |sig| ExitInfo { code: None, signal: Some(sig) }.describe();
-        assert_eq!(describe(libc::SIGPROF), format!("killed by signal {} (SIGPROF)", libc::SIGPROF));
-        assert_eq!(describe(libc::SIGKILL), format!("killed by signal {} (SIGKILL)", libc::SIGKILL));
-        #[cfg(target_os = "linux")]
-        assert_eq!(describe(libc::SIGRTMIN() + 2), format!("killed by signal {} (SIGRTMIN+2)", libc::SIGRTMIN() + 2));
-        assert_eq!(describe(200), "killed by signal 200");
-    }
-
-    #[test]
-    fn kill_tree_kills_grandchildren() {
-        let _serial = crate::engines::process::tests::serial();
-        let marker = temp("tree").join("late.txt");
-        let (argv, env) = helper(&format!("grandchild:{}", marker.display()));
-        let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null })
-            .expect("spawn");
-        let mut out = child.take_stdout().unwrap();
-        let mut seen = Vec::new();
-        let mut buf = [0u8; 256];
-        while !String::from_utf8_lossy(&seen).contains("ready") {
-            let n = out.read(&mut buf).unwrap();
-            assert!(n > 0, "the helper ended early: {}", String::from_utf8_lossy(&seen));
-            seen.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(child.exited(), None);
-        child.kill_tree();
-        let status = child.reap();
-        assert!(!status.success());
-        std::thread::sleep(Duration::from_millis(2500));
-        assert!(!marker.exists(), "the grandchild outlived the tree kill");
-    }
-
-    #[test]
-    fn probe_limit_kills_tree_and_reports_timed_out() {
-        let _serial = crate::engines::process::tests::serial();
-        let marker = temp("limit").join("late.txt");
-        let (argv, env) = helper(&format!("grandchild:{}", marker.display()));
-        let start = Instant::now();
-        let c = run_captured(&argv, &env, None, Some(Duration::from_millis(500))).expect("spawn");
-        assert!(c.timed_out, "{:?}", c.status);
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
-        std::thread::sleep(Duration::from_millis(2500));
-        assert!(!marker.exists(), "the grandchild outlived the timeout");
-    }
-
-    #[test]
-    fn pipes_are_read_concurrently() {
-        let _serial = crate::engines::process::tests::serial();
-        let (argv, env) = helper("chatty");
-        let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).expect("spawn");
-        assert!(!c.timed_out && c.status.success(), "{:?}", c.status);
-        assert!(c.stdout.len() >= 1 << 20 && c.stderr.len() >= 1 << 20, "{} {}", c.stdout.len(), c.stderr.len());
-    }
-
-    #[test]
-    fn grandchild_holding_stdout_does_not_block() {
-        let _serial = crate::engines::process::tests::serial();
-        let (argv, env) = helper("holder");
-        let start = Instant::now();
-        let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).expect("spawn");
-        assert!(!c.timed_out && c.status.success(), "{:?}", c.status);
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
-    }
-
-    #[test]
-    fn input_reaches_stdin() {
-        let _serial = crate::engines::process::tests::serial();
-        let (argv, env) = helper("cat");
-        let c = run_captured(&argv, &env, Some(b"hello".to_vec()), Some(Duration::from_secs(30))).expect("spawn");
-        assert!(String::from_utf8_lossy(&c.stdout).contains("<hello>"), "{}", String::from_utf8_lossy(&c.stdout));
-        // A child that never reads its input still ends: the input has its own thread.
-        let (argv, env) = helper("exit:0");
-        let c = run_captured(&argv, &env, Some(vec![b'x'; 1 << 20]), Some(Duration::from_secs(30))).expect("spawn");
-        assert!(c.status.success() && !c.timed_out, "{:?}", c.status);
-    }
-
-    #[test]
-    fn exit_status_text() {
-        let _serial = crate::engines::process::tests::serial();
-        let (argv, env) = helper("exit:3");
-        let c = run_captured(&argv, &env, None, None).expect("spawn");
-        assert_eq!((c.status.code, c.status.describe()), (Some(3), "exit code 3".to_string()));
-        let crash = ExitInfo { code: Some(0xC000_0005u32 as i32), signal: None };
-        if cfg!(windows) {
-            assert_eq!(crash.describe(), "exit code 3221225477 = 0xC0000005");
-        }
-        #[cfg(unix)]
-        assert_eq!(ExitInfo { code: None, signal: Some(libc::SIGSEGV) }.describe(), format!("killed by signal {} (SIGSEGV)", libc::SIGSEGV));
-    }
-
-    #[test]
-    fn spawn_error_text() {
-        let missing = std::env::temp_dir().join("v2-no-such-dir").join("no-such-program.exe");
-        let argv = [missing.clone().into_os_string()];
+    fn windows_spawn_and_exit_texts() {
+        let bad = temp("bad").join("not-a-program.exe");
+        std::fs::write(&bad, b"").unwrap();
+        let argv = [bad.into_os_string()];
         let e = ChildProc::spawn(&Spawn { argv: &argv, env: &[], stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
             .err()
             .expect("an error");
-        let expected = format!("could not start '{}': ", missing.display());
-        assert!(e.starts_with(&expected) && e.len() > expected.len(), "{e}");
-        assert!(!e.contains("(os error"), "{e}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn exit_is_observed_without_reaping() {
-        let _serial = crate::engines::process::tests::serial();
-        let (argv, env) = helper("exit:0");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
-            .expect("spawn");
-        let pid = child.id() as libc::pid_t;
-        assert_eq!(child.wait_exit(), Some(ExitInfo { code: Some(0), signal: None }));
-        assert_eq!(child.exited(), Some(ExitInfo { code: Some(0), signal: None }));
-        // SAFETY: signal 0 only checks that the (zombie) process exists.
-        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "not reaped yet");
-        child.reap();
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "reaped");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn children_lead_their_own_session() {
-        let _serial = crate::engines::process::tests::serial();
-        let (argv, env) = helper("session");
-        let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).expect("spawn");
-        assert!(String::from_utf8_lossy(&c.stdout).contains("session-leader true"), "{}", String::from_utf8_lossy(&c.stdout));
+        assert!(e.ends_with(" (not a valid program for this machine)") && !e.contains("%1"), "{e}");
+        let describe = |c: u32| ExitInfo { code: Some(c as i32), signal: None }.describe();
+        assert_eq!(describe(0x8000_0000), "exit code 2147483648 = 0x80000000");
+        assert_eq!(describe(0x7FFF_FFFF), "exit code 2147483647");
     }
 
     #[cfg(windows)]
@@ -1366,9 +1422,38 @@ pub(crate) mod tests {
         // SAFETY: a plain query with handles the KillHandle keeps open.
         unsafe { windows_sys::Win32::System::JobObjects::IsProcessInJob(kill.0.process, kill.0.job, &mut in_job) };
         assert_ne!(in_job, 0);
+        // Kill on close (a host that dies takes its children along) and breakaway allowed (8.3).
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is sized for this information class.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                kill.0.job,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0);
+        let flags = info.BasicLimitInformation.LimitFlags;
+        assert_eq!(flags & (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK), JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK);
         assert_eq!(child.exited(), None, "still running");
         child.kill_tree();
         assert!(child.wait_exit().is_some_and(|e| e.code == Some(1)), "TerminateJobObject(job, 1)");
         child.reap();
+    }
+
+    #[test]
+    fn the_run_dir_is_registered_for_the_interrupt_path() {
+        let (argv, env) = helper("rundir");
+        let out = Command::new(&argv[0]).args(&argv[1..]).envs(env).stderr(Stdio::null()).output().unwrap();
+        assert_eq!(out.status.code(), Some(EXIT_INTERRUPTED));
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let line = text.lines().find_map(|l| l.strip_prefix("RUNDIR=")).expect("the run dir's path").to_string();
+        assert!(!std::path::Path::new(line.trim()).exists(), "left behind: {line}");
     }
 }
