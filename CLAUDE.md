@@ -11,7 +11,8 @@ it is loaded automatically into every session and every subagent.
   `§n.m` = its sections). **ROADMAP.md** = order + what's done ("Where we are", progress log).
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: Phase 0 (host core, 0.1–0.10) is complete. Next: Phase 1, starting with 1.1.
+- Status: Phase 0 complete; Phase 1 under way (see ROADMAP "Where we are"). The owner asked to
+  stop after the foundation (1.0–1.3) and report before 1.4.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -64,17 +65,14 @@ it is loaded automatically into every session and every subagent.
 - `engines/session.rs`: watchdog + `INTERRUPTED`, `interrupted()`, `stop_if_interrupted()`
   (interp thread stops where it would run catch/finally or print), `exit_interrupted()`
   (`_exit(130)` on Unix). Handler only installed if the watchdog spawned; inherited SIG_IGN kept.
-- `ffi/cdecl` is done (parser needs it); rest of `ffi/`, `build/`, `engines/*` mostly empty.
-
-## Where I stopped (2026-10-02, usage limit)
-- Plan: `C:\Users\SirOxygen\.claude\plans\wild-wobbling-creek.md` (Phase 1 foundation = 1.0–1.3,
-  then report to the owner). 1.0 (`engines/process.rs`) is committed; its adversarial review
-  was stopped before finishing — re-run it, fix findings, then do 1.1.
-- 1.1 drafts (not yet in the repo): `%TEMP%\claude\C--Users-SirOxygen-Desktop-v2-language\
-  01e93e21-6252-4f4b-b948-9df871d7b845\scratchpad\draft11\` — spec.rs, resolve.rs (+
-  resolve_tests.rs to append), registry.rs, doctor_fn.rs, edit_harness.py (requires:/SKIP).
-  Still to write: interp/builtins/main/run_script wiring, exit 3, .v2 + run.rs tests, docs.
-- Node 24.11.1 is installed in WSL (`~/.local/node`, on PATH via `~/.local/bin`).
+- `engines/spec.rs` (py/js/ts table, `Version`), `engines/resolve.rs` (`Lookup`, `find_program`,
+  `Prober`/`RealProber`, `ProbeCache` + `CacheMode`, `Resolver`, `ResolvedEngine`, `NotFound` +
+  `Status`, `Origin`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
+  `engine_available`). `Interp.registry`; a reached block resolves its tag, then `not_yet` until
+  1.4/1.5. Uncaught EngineNotFound exits 3. `doctor::doctor` prints the table.
+- `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
+  `V2_TEST_REQUIRE`. `run_with_files` / `doctor_rows` helpers for CLI tests.
+- `ffi/cdecl` is done (parser needs it); rest of `ffi/`, `build/`, most of `engines/*` empty.
 
 ## Reminders for later phases
 - Interrupt path (6.5): once `INTERRUPTED` is set the interpreter prints nothing, runs no

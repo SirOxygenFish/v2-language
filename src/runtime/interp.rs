@@ -20,6 +20,7 @@ use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
 use crate::engines::process::stop_if_interrupted;
+use crate::engines::registry::Registry;
 use crate::syntax::ast::*;
 use crate::syntax::span::{FileId, SourceMap, Span};
 
@@ -47,6 +48,8 @@ enum ModuleState {
 
 pub struct Interp {
     pub sm: SourceMap,
+    /// The engines of this run (7.1).
+    pub registry: Registry,
     pub out: Out,
     pub chars: CharCache,
     calls: Vec<CallRecord>,
@@ -73,13 +76,14 @@ fn stack_here() -> usize {
 impl Interp {
     /// `parsed` holds the files the entry file's imports name (6.1 step 2); `stack_size` is the
     /// size of the thread this runs on, and the guard trips at 7/8 of it.
-    pub fn new(sm: SourceMap, parsed: HashMap<PathBuf, Parsed>, stack_size: usize) -> Interp {
+    pub fn new(sm: SourceMap, parsed: HashMap<PathBuf, Parsed>, stack_size: usize, registry: Registry) -> Interp {
         let builtins = new_frame(None);
         for def in BUILTINS {
             declare(&builtins, def.name.into(), Value::func(Callable::Builtin(def)), false);
         }
         Interp {
             sm,
+            registry,
             out: Out::new(),
             chars: CharCache::default(),
             calls: Vec::new(),
@@ -253,10 +257,16 @@ impl Interp {
         Ok(())
     }
 
-    /// Phase 0 has no engine registry, so reaching any block is `EngineUnknown` (INTERNALS 23).
-    fn engine_unknown(&self, b: &EngineBlock) -> Flow {
-        let msg = format!("unknown engine '@{}' — this build has no engines yet", b.tag.text);
-        self.raise(Flow::Error(Rc::new(ErrorValue::new("EngineUnknown", msg))), b.tag.span)
+    /// Reaching a block resolves its engine: `EngineUnknown` or `EngineNotFound` (7.3, 7.8).
+    /// Running it arrives with the engines (roadmap 1.4, 1.5).
+    fn reach_block(&self, b: &EngineBlock) -> Flow {
+        match self.registry.resolve_tag(&b.tag.text) {
+            Err(flow) => self.raise(flow, b.tag.span),
+            Ok(e) => {
+                let milestone = if &*e.spec.id == "py" { "1.4" } else { "1.5" };
+                self.not_yet(&format!("@{} blocks (roadmap {milestone})", e.spec.id), b.tag.span)
+            }
+        }
     }
 
     /// Temporary until the roadmap milestone named in `what` lands.
@@ -360,7 +370,7 @@ impl Interp {
             }
             StmtKind::EngineImport(imp) => return Err(self.not_yet("@import (roadmap phase 1)", imp.span)),
             StmtKind::Extern(_) => return Err(self.not_yet("extern (roadmap phase 2)", Span { hi: s.span.lo + 6, ..s.span })),
-            StmtKind::Block(b) => return Err(self.engine_unknown(b)),
+            StmtKind::Block(b) => return Err(self.reach_block(b)),
         }
         Ok(())
     }
@@ -631,7 +641,7 @@ impl Interp {
             }
             ExprKind::OptChain(x) => self.chain(x, env)?.unwrap_or(Value::Null),
             ExprKind::Lambda(decl) => self.closure(decl, env),
-            ExprKind::Block(b) => return Err(self.engine_unknown(b)),
+            ExprKind::Block(b) => return Err(self.reach_block(b)),
         })
     }
 

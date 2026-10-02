@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.1 Engine registry and toolchain discovery |
-| **Last update** | 2026-10-02: 1.0 child processes and the watchdog done (CI written, not yet run) |
+| **Next task** | 1.2 The VEP/1 wire |
+| **Last update** | 2026-10-02: 1.1 engine registry, discovery and `v2 doctor` done (CI written, not yet run) |
 
 ## Rules
 
@@ -190,18 +190,21 @@ needs frames; handles come before imports because R04/R15 need only action block
   exit-path tests still pass — **passed 2026-10-02**
 
 ### 1.1 Engine registry and toolchain discovery
-- [ ] `EngineSpec`, the py/js/ts table, aliases, runtime tag resolution with did-you-mean
+- [x] `EngineSpec`, the py/js/ts table, aliases, runtime tag resolution with did-you-mean
       (§7.1–7.3); blocks resolve their tag through the registry (EngineUnknown /
       EngineNotFound, exit 3 when uncaught: R48's run half)
-- [ ] Finding executables: PATH walk without relative entries, `PATHEXT`, Windows Store python
+- [x] Finding executables: PATH walk without relative entries, `PATHEXT`, Windows Store python
       stub, `py -3`; configured `command`, `[python] venv`, `[engines.ts] transpiler`, `V2_ENGINE_*`
       and `--engine` (§7.5, §7.6, §18.2)
-- [ ] Version probes and `~/.v2/cache/toolchains.json`, also `--no-cache` for probes (§7.7, §19.4);
+- [x] Version probes and `~/.v2/cache/toolchains.json`, also `--no-cache` for probes (§7.7, §19.4);
       `EngineNotFound` messages (§7.8)
-- [ ] `engine_available(tag)` (§7.3); harness `requires:` headers and SKIP (§22.2)
-- [ ] `v2 doctor` table (§19.2)
+- [x] `engine_available(tag)` (§7.3); harness `requires:` headers and SKIP (§22.2)
+- [x] `v2 doctor` table (§19.2)
 - **Done when:** R41 and the `engines/spec`, `engines/registry` and `engines/resolve` unit tests
-  pass; `v2 doctor` shows py/js/ts on this PC
+  pass; `v2 doctor` shows py/js/ts on this PC — **passed 2026-10-02** (Windows and Linux).
+  `v2 doctor` here: py ok `C:\Program Files\Python311\python.exe` 3.11.6, js ok node 24.11.1,
+  ts ok (built-in type stripping); notes: the WindowsApps `python3.exe` skipped as the Microsoft
+  Store placeholder
 
 ### 1.2 The VEP/1 wire
 - [ ] Framing: NDJSON, 64 MiB limit both ways, pre-`hello` noise, one `\r` dropped (§9.1)
@@ -375,3 +378,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-02 | 0.9: the JSON codec (plain mode) and every engine-free builtin; reviewed together with 0.8 (about 9 findings fixed) |
 | 2026-10-02 | 0.10: config layers with validation on the merged result, `v2 run`, host-only `v2 check`, exit paths (closed streams, late interrupts, ignored signals, panic → 101); three review rounds, 28 findings fixed with regression tests (each new test shown to fail without its fix); the Phase 0 exit audit (ch. 21 rows, R-tests, DOCS ch. 3 examples) closed 8 test gaps and found `range(end: n)` and float `-6.0 % 3` mismatches, both fixed. **Phase 0 complete.** Linux verified in WSL |
 | 2026-10-02 | 1.0: `engines/process` (child rules, Job Objects / sessions, tree kill, exit before reaping, captured runs) and the watchdog's timer stack; Phase 1 re-ordered (1.0 added, wire before sessions, handles before imports); Node 24.11.1 installed in WSL for Linux JS tests |
+| 2026-10-02 | 1.1: engine registry (py, js, ts), executable lookup (PATHEXT, WindowsApps placeholder, `py -3`, configured commands and venv), version probes with `toolchains.json`, `EngineNotFound` (exit 3), `engine_available`, the `requires:`/SKIP harness and the `v2 doctor` table |

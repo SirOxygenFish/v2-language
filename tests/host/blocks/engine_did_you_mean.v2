@@ -1,0 +1,8 @@
+// exit: 1
+// stderr: engine_did_you_mean.v2:6:1: EngineUnknown: unknown engine '@pyhton' (did you mean '@py'?)
+// stderr: at engine_did_you_mean.v2:6
+// A misspelled tag is caught when the block is reached (INTERNALS 7.3).
+print("before")
+@pyhton {
+    x = 1
+}
