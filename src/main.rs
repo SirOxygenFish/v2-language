@@ -101,6 +101,8 @@ fn main() {
         }
     };
     watchdog.stop();
+    // The run dir goes on every exit path; the interrupt path removes it itself (6.5, 20.3).
+    config::rundir::remove();
     // An interrupt that came while the run was ending still ends it with 130 (6.5).
     if engines::process::interrupted() {
         engines::process::exit_interrupted();

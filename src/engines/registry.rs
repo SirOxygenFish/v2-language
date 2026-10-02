@@ -37,6 +37,10 @@ impl Registry {
         Registry::new(cfg, Box::new(RealProber), Lookup::from_env(), cache)
     }
 
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
     pub fn specs(&self) -> &[Rc<EngineSpec>] {
         &self.specs
     }

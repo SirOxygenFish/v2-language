@@ -8,6 +8,8 @@
 
 #![allow(dead_code)] // most settings are read by the engines (roadmap Phase 1)
 
+pub mod rundir;
+
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;

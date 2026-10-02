@@ -1,0 +1,595 @@
+//! Session tests (INTERNALS 22.3): a scripted worker drives the host's side of VEP/1, in
+//! process over pipes, or as a real child process (this test binary re-run with `V2_WORKER`).
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::thread::JoinHandle;
+
+use super::*;
+use crate::config::{Config, Sourced};
+use crate::engines::registry::Registry;
+use crate::engines::resolve::{Lookup, Origin, ProbeCache, ProbeOutcome, Prober};
+use crate::engines::spec::builtins;
+use crate::runtime::builtins::{BuiltinDef, Out};
+use crate::runtime::call::ParamSpec;
+use crate::runtime::value::{Callable, Func};
+use crate::syntax::span::{FileId, SourceMap};
+
+const ALL_CAPS: [&str; 4] = ["modules", "handles", "kwargs", "reverse"];
+
+/// The worker's end of a session.
+struct Worker<R: Read, W: Write> {
+    r: FrameReader<R>,
+    w: W,
+}
+
+impl<R: Read, W: Write> Worker<R, W> {
+    fn recv(&mut self) -> Json {
+        let line = self.r.read_line().expect("a host frame").expect("not the end of input");
+        serde_json::from_slice(&line).expect("a JSON frame")
+    }
+
+    fn recv_t(&mut self, t: &str) -> Json {
+        let f = self.recv();
+        assert_eq!(f["t"], t, "{f}");
+        f
+    }
+
+    /// The end of input: the host closed its side.
+    fn recv_end(&mut self) {
+        assert!(matches!(self.r.read_line(), Ok(None)), "the host's side closed");
+    }
+
+    fn send(&mut self, j: Json) {
+        let mut b = serde_json::to_vec(&j).unwrap();
+        b.push(b'\n');
+        self.raw(&b);
+    }
+
+    fn raw(&mut self, b: &[u8]) {
+        self.w.write_all(b).unwrap();
+        self.w.flush().unwrap();
+    }
+
+    fn hello(&mut self, version: &str) {
+        self.send(json!({"t":"hello","vep":1,"engine":"py","impl":"Test","version":version,"pid":4242,"caps":ALL_CAPS}));
+    }
+
+    fn start(&mut self) {
+        self.hello("3.12.1");
+        let init = self.recv_t("init");
+        self.send(json!({"t":"ret","id":init["id"],"value":null}));
+    }
+
+    fn ret(&mut self, request: &Json, value: Json) {
+        self.send(json!({"t":"ret","id":request["id"],"value":value}));
+    }
+}
+
+struct NoProbe;
+
+impl Prober for NoProbe {
+    fn probe(&self, _: &[OsString], _: &[(OsString, OsString)]) -> ProbeOutcome {
+        ProbeOutcome::SpawnFailed("no probes in session tests".into())
+    }
+}
+
+fn py() -> Rc<ResolvedEngine> {
+    let spec = builtins().into_iter().next().map(Rc::new).unwrap();
+    Rc::new(ResolvedEngine {
+        spec,
+        origin: Origin::Path,
+        argv: vec!["python".into()],
+        version: Some(Version(3, 12, 1)),
+        skipped: Vec::new(),
+        ts: None,
+    })
+}
+
+/// An interpreter with one source file, an empty config and captured stdout.
+fn interp() -> (Interp, Rc<RefCell<Vec<u8>>>) {
+    let mut cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
+    cfg.python_paths = Some(Sourced { value: vec![PathBuf::from("C:/proj/lib")], from: crate::config::ConfigSource::Default });
+    let reg = Registry::new(Rc::new(cfg), Box::new(NoProbe), Lookup::default(), ProbeCache::off());
+    let mut it = Interp::new(SourceMap::new(), HashMap::new(), 2 << 20, reg);
+    it.sm.add(PathBuf::from("C:/proj/main.v2"), "main.v2".into(), "x\n");
+    let (out, buf) = Out::capture();
+    it.out = out;
+    (it, buf)
+}
+
+fn at() -> Span {
+    Span { file: FileId(0), lo: 0, hi: 1, line: 1, col: 1 }
+}
+
+fn no_timeouts() -> Timeouts {
+    Timeouts { startup: None, call: None }
+}
+
+type PipeWorker = Worker<std::io::PipeReader, std::io::PipeWriter>;
+
+/// A scripted step and what the host should then raise.
+type Case = (fn(&mut PipeWorker), &'static str, &'static str);
+type Violation = (fn(&mut PipeWorker, &Json), &'static str);
+
+/// A session whose worker is `script`, on its own thread, over pipes.
+fn scripted(it: &mut Interp, script: impl FnOnce(PipeWorker) + Send + 'static) -> (SessionId, JoinHandle<()>) {
+    let (host_r, worker_w) = std::io::pipe().unwrap();
+    let (worker_r, host_w) = std::io::pipe().unwrap();
+    let t = std::thread::spawn(move || script(Worker { r: FrameReader::new(worker_r), w: worker_w }));
+    let s = it.attach_session(py(), Box::new(host_r), Box::new(host_w), None, no_timeouts());
+    (s, t)
+}
+
+fn call(name: &str) -> Json {
+    json!({"t":"call","target":{"unit":"0:0","name":name},"args":[],"kwargs":{}})
+}
+
+fn err_of<T>(r: Exec<T>) -> Rc<ErrorValue> {
+    match r {
+        Err(Flow::Error(e)) => e,
+        Err(other) => panic!("not an error: {other:?}"),
+        Ok(_) => panic!("not an error"),
+    }
+}
+
+#[test]
+fn handshake_and_init() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.raw(b"preload noise from sitecustomize\n");
+        w.hello("3.12.1");
+        let init = w.recv_t("init");
+        assert_eq!(init["project_root"], "C:/proj");
+        assert_eq!(init["paths"], json!(["C:/proj", "C:/proj/lib"]), "py: the root, then [python] paths");
+        w.ret(&init, Json::Null);
+        w.recv_t("bye");
+        w.recv_end();
+    });
+    it.handshake(s, at()).expect("ready");
+    assert!(matches!(it.sessions[s].state, State::Ready));
+    assert_eq!(it.sessions[s].hello.as_ref().map(|h| h.pid), Some(4242));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn handshake_failures() {
+    let cases: Vec<Case> = vec![
+        (|w| w.send(json!({"t":"ret","id":1,"value":null})), "ProtocolError", "engine 'py' sent 'ret' before hello"),
+        (
+            |w| w.send(json!({"t":"hello","vep":2,"engine":"py","impl":"x","version":"1","pid":1,"caps":[]})),
+            "ProtocolError",
+            "engine 'py' broke the protocol: speaks VEP/2; this V2 speaks VEP/1",
+        ),
+        (|w| w.hello("3.6.8"), "EngineNotFound", "Python 3.6.8 at python is too old (needs 3.8+)"),
+        (
+            |w| {
+                w.hello("3.12.1");
+                let init = w.recv_t("init");
+                w.send(json!({"t":"err","id":init["id"],"error":{"type":"ImportError","message":"boom","trace":[]}}));
+            },
+            "EngineCrashed",
+            "engine 'py' failed to start: boom",
+        ),
+        (|_| {}, "EngineCrashed", "engine 'py' exited during startup (an unknown exit status); see its error output above"),
+    ];
+    for (script, kind, message) in cases {
+        let (mut it, _) = interp();
+        let (s, t) = scripted(&mut it, move |mut w| script(&mut w));
+        let e = err_of(it.handshake(s, at()));
+        assert_eq!((&*e.kind, e.message.split(" (got:").next().unwrap()), (kind, message));
+        assert!(matches!(it.sessions[s].state, State::Dead(_)));
+        t.join().unwrap();
+        // Every later use fails without contacting the worker; a failed start re-raises.
+        let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+        if kind == "EngineNotFound" {
+            assert_eq!(&*again.message, message);
+        } else {
+            assert!(again.message.starts_with("engine 'py' is not running (stopped earlier: "), "{}", again.message);
+        }
+    }
+}
+
+#[test]
+fn replies_echo_ids_and_out_comes_first() {
+    let (mut it, stdout) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        assert_eq!(c["id"], 2, "init was request 1");
+        w.send(json!({"t":"out","stream":"stdout","text":"hi\n"}));
+        w.send(json!({"t":"out","stream":"stderr","text":"to stderr\n"}));
+        w.ret(&c, json!({"$v2":"int","v":"9007199254740993"}));
+        let c = w.recv_t("call");
+        w.ret(&c, json!([1.0, "x"]));
+        w.recv_t("bye");
+        w.send(json!({"t":"out","stream":"stdout","text":"after bye\n"}));
+    });
+    it.handshake(s, at()).unwrap();
+    let r = it.request(s, call("f"), "a call to 'f'", at()).unwrap();
+    assert!(matches!(r.value, Value::Int(9007199254740993)));
+    assert_eq!(String::from_utf8_lossy(&stdout.borrow()), "hi\n", "out before ret");
+    let r = it.request(s, call("g"), "a call to 'g'", at()).unwrap();
+    assert!(matches!(r.value, Value::List(_)));
+    assert!(matches!(it.sessions[s].state, State::Ready));
+    it.shutdown_sessions();
+    assert!(String::from_utf8_lossy(&stdout.borrow()).ends_with("after bye\n"), "output after bye is drained");
+    assert!(matches!(it.sessions[s].state, State::Closed));
+    t.join().unwrap();
+}
+
+#[test]
+fn protocol_violations_are_fatal_then_not_running() {
+    let scripts: Vec<Violation> = vec![
+        (|w, c| w.send(json!({"t":"ret","id":c["id"].as_u64().unwrap() + 7,"value":null})), "reply to request 9, which is not the innermost pending request"),
+        (|w, _| w.raw(b"not a frame\n"), "not valid JSON (expected ident at line 1 column 2)"),
+        (|w, _| w.raw(b"[1]\n"), "a line that is not a JSON object"),
+        (|w, _| w.send(json!({"t":"load","id":1})), "a 'load' frame, which a worker may not send"),
+        (|w, c| w.ret(c, json!({"$v2":"nope"})), "an unknown '$v2' tag 'nope'"),
+    ];
+    for (script, what) in scripts {
+        let (mut it, _) = interp();
+        let (s, t) = scripted(&mut it, move |mut w| {
+            w.start();
+            let c = w.recv_t("call");
+            script(&mut w, &c);
+            w.recv_end();
+        });
+        it.handshake(s, at()).unwrap();
+        let e = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+        assert_eq!(&*e.kind, "ProtocolError");
+        assert!(e.message.starts_with(&format!("engine 'py' broke the protocol: {what} (got: ")), "{}", e.message);
+        let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+        assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: broke the protocol); engines are not restarted");
+        t.join().unwrap();
+    }
+}
+
+#[test]
+fn eof_is_engine_crashed() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        w.recv_t("call");
+    });
+    it.handshake(s, at()).unwrap();
+    let e = err_of(it.request(s, call("ratio"), "a call to 'ratio'", at()));
+    assert_eq!(&*e.kind, "EngineCrashed");
+    assert_eq!(&*e.message, "engine 'py' (pid 4242) exited during a call to 'ratio' (an unknown exit status); see its error output above");
+    let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: exited during a call to 'ratio' at main.v2:1); engines are not restarted");
+    t.join().unwrap();
+}
+
+fn add(_: &mut Interp, args: Vec<Value>, _: Span) -> Exec<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+        _ => fail("ValueError", "add() wants two ints"),
+    }
+}
+
+static ADD: BuiltinDef = BuiltinDef { name: "add", params: &[ParamSpec::req("a"), ParamSpec::req("b")], f: add };
+
+fn quit(_: &mut Interp, _: Vec<Value>, _: Span) -> Exec<Value> {
+    Err(Flow::Exit(7))
+}
+
+static QUIT: BuiltinDef = BuiltinDef { name: "quit", params: &[], f: quit };
+
+fn func(def: &'static BuiltinDef) -> Value {
+    Value::Func(Func::new(Callable::Builtin(def)))
+}
+
+/// `call` with one V2 function as its argument, encoded for session `s`.
+fn call_with(it: &mut Interp, s: SessionId, f: &Value) -> Json {
+    let arg = it.wire(s).encode(f, "args[0]").unwrap();
+    json!({"t":"call","target":{"unit":"0:0","name":"apply"},"args":[arg],"kwargs":{}})
+}
+
+#[test]
+fn callbacks_into_v2() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        let f = c["args"][0].clone();
+        assert_eq!((f["$v2"].as_str(), f["name"].as_str()), (Some("fn"), Some("add")));
+        let id = f["id"].as_u64().unwrap();
+        // A call with an unknown id gets an err; the session stays usable (9.5).
+        w.send(json!({"t":"call","id":1,"target":{"fn":77},"args":[],"kwargs":{}}));
+        let r = w.recv_t("err");
+        assert_eq!((r["id"].as_u64(), r["error"]["type"].as_str(), r["error"]["message"].as_str()), (Some(1), Some("ProtocolError"), Some("unknown callable id 77")));
+        // Positional and named arguments.
+        w.send(json!({"t":"call","id":2,"target":{"fn":id},"args":[2],"kwargs":{"b":3}}));
+        let r = w.recv_t("ret");
+        assert_eq!((r["id"].as_u64(), r["value"].as_i64()), (Some(2), Some(5)));
+        // A V2 error goes back with its tag (9.6) ...
+        w.send(json!({"t":"call","id":3,"target":{"fn":id},"args":["x", 1],"kwargs":{}}));
+        let r = w.recv_t("err");
+        assert_eq!(r["error"]["type"], "ValueError");
+        let tag = r["error"]["v2"].clone();
+        assert_eq!(tag["$v2"], "error");
+        // ... and comes back unchanged when the foreign code doesn't catch it.
+        w.send(json!({"t":"err","id":c["id"],"error":{"type":"ValueError","message":"add() wants two ints","trace":[],"v2":tag}}));
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let frame = call_with(&mut it, s, &func(&ADD));
+    let e = err_of(it.request(s, frame, "a call to 'apply'", at()));
+    assert_eq!((&*e.kind, &*e.message), ("ValueError", "add() wants two ints"));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn exit_in_a_callback_sends_no_reply() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        w.send(json!({"t":"call","id":1,"target":{"fn":c["args"][0]["id"]},"args":[],"kwargs":{}}));
+        // No reply to the call: the next frame is bye (6.5, 9.7).
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let frame = call_with(&mut it, s, &func(&QUIT));
+    assert!(matches!(it.request(s, frame, "a call to 'apply'", at()), Err(Flow::Exit(7))));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn cross_language_depth_limit_both_ways() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        let id = c["args"][0]["id"].clone();
+        // The host is at depth 64 while it waits: a call into V2 would be the 65th.
+        w.send(json!({"t":"call","id":1,"target":{"fn":id},"args":[1, 2],"kwargs":{}}));
+        let r = w.recv_t("err");
+        assert_eq!((r["error"]["type"].as_str(), r["error"]["message"].as_str()), (Some("RecursionError"), Some("cross-language call depth limit (64) exceeded")));
+        w.ret(&c, Json::Null);
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let frame = call_with(&mut it, s, &func(&ADD));
+    it.xdepth = MAX_XDEPTH - 1;
+    it.request(s, frame, "a call to 'apply'", at()).expect("the 64th crossing is fine");
+    it.xdepth = MAX_XDEPTH;
+    let e = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!((&*e.kind, &*e.message), ("RecursionError", "cross-language call depth limit (64) exceeded"));
+    it.xdepth = 0;
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn releases_ride_the_next_frame_or_go_alone_at_256() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        let handles: Vec<Json> = (1..=3).map(|i| json!({"$v2":"h","id":i,"type":"Thing"})).collect();
+        w.ret(&c, Json::Array(handles));
+        // The three dropped handles come before the next request, in one frame.
+        let r = w.recv_t("release");
+        assert_eq!(r["h"], json!([1, 2, 3]));
+        let c = w.recv_t("call");
+        let many: Vec<Json> = (10..266).map(|i| json!({"$v2":"h","id":i,"type":"Thing"})).collect();
+        w.ret(&c, Json::Array(many));
+        let r = w.recv_t("release");
+        assert_eq!(r["h"].as_array().map(Vec::len), Some(256), "a standalone release");
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let r = it.request(s, call("f"), "a call to 'f'", at()).unwrap();
+    drop(r);
+    let r = it.request(s, call("g"), "a call to 'g'", at()).unwrap();
+    drop(r);
+    it.flush_releases();
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn worker_command_and_env() {
+    let mut cfg = Config { root: PathBuf::from("/proj"), ..Config::default() };
+    let adapter = PathBuf::from("/run/adapters/py.py");
+    let (argv, env) = worker_command(&py(), &cfg, &adapter);
+    assert_eq!(argv, [OsString::from("python"), "-B".into(), "-u".into(), adapter.clone().into_os_string()]);
+    assert!(env.contains(&("PYTHONUTF8".into(), "1".into())) && env.contains(&("PYTHONIOENCODING".into(), "utf-8".into())));
+    assert!(!env.iter().any(|(k, _)| k == "NODE_PATH"));
+    let js_spec = builtins().into_iter().nth(1).map(Rc::new).unwrap();
+    let js = ResolvedEngine { spec: js_spec, origin: Origin::Path, argv: vec!["node".into()], version: None, skipped: Vec::new(), ts: None };
+    cfg.node_paths = Some(Sourced { value: vec![PathBuf::from("/extra")], from: crate::config::ConfigSource::Default });
+    let (argv, env) = worker_command(&js, &cfg, &adapter);
+    assert_eq!(argv, [OsString::from("node"), adapter.into_os_string()]);
+    let node_path = env.iter().find(|(k, _)| k == "NODE_PATH").map(|(_, v)| v.clone()).expect("NODE_PATH");
+    let dirs: Vec<PathBuf> = std::env::split_paths(&node_path).collect();
+    assert_eq!(&dirs[..2], [PathBuf::from("/proj").join("node_modules"), PathBuf::from("/extra")]);
+}
+
+#[test]
+fn exit_phrases() {
+    assert_eq!(exit_phrase(Some(&ExitInfo { code: Some(1), signal: None })), "exited with code 1");
+    assert_eq!(exit_phrase(None), "exited");
+    assert_eq!(secs(Duration::from_secs(5)), "5 s");
+    assert_eq!(secs(Duration::from_millis(300)), "0.3 s");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Real worker processes: this test binary re-run as the worker
+
+/// argv and env that run this test binary as the worker named `script` (`worker_main`).
+fn worker(script: &str) -> (Vec<OsString>, Vec<(OsString, OsString)>) {
+    let exe = std::env::current_exe().expect("the test binary");
+    let argv = ["--exact", "engines::session::tests::worker_main", "--nocapture", "--test-threads=1"];
+    let argv = std::iter::once(exe.into_os_string()).chain(argv.into_iter().map(OsString::from)).collect();
+    (argv, vec![("V2_WORKER".into(), script.into())])
+}
+
+/// The worker process: does nothing unless `V2_WORKER` names a script. libtest's
+/// "running 1 test" line comes before `hello`: preload noise for the host (9.3).
+#[test]
+fn worker_main() {
+    let Ok(script) = std::env::var("V2_WORKER") else { return };
+    let mut w = Worker { r: FrameReader::new(std::io::stdin()), w: std::io::stdout() };
+    // libtest has printed "test ...worker_main ... " without a line end: finish that line, so
+    // it is noise and `hello` gets a line of its own.
+    w.raw(b"\n");
+    match script.as_str() {
+        "serve" => {
+            w.start();
+            loop {
+                let f = w.recv();
+                match f["t"].as_str() {
+                    Some("call") => w.ret(&f, json!(f["target"]["name"])),
+                    Some("bye") => std::process::exit(0),
+                    _ => std::process::exit(2),
+                }
+            }
+        }
+        "crash" => {
+            w.start();
+            w.recv_t("call");
+            std::process::exit(3);
+        }
+        "slow" => {
+            w.start();
+            let f = w.recv_t("call");
+            if f["target"]["name"] == "reverse" {
+                // Call V2 back, which takes 600 ms: not this worker's time (8.5).
+                w.send(json!({"t":"call","id":1,"target":{"fn":f["args"][0]["id"]},"args":[],"kwargs":{}}));
+                w.recv_t("ret");
+                w.ret(&f, json!("done"));
+                w.recv_t("call");
+            }
+            std::thread::sleep(Duration::from_secs(20));
+        }
+        "late" => {
+            std::thread::sleep(Duration::from_secs(20));
+        }
+        "ignore_bye" => {
+            w.start();
+            w.recv_t("bye");
+            std::thread::sleep(Duration::from_secs(20));
+        }
+        "placeholder" => std::process::exit(9009),
+        other => panic!("unknown worker script {other}"),
+    }
+}
+
+fn start(it: &mut Interp, script: &str, timeouts: Timeouts) -> Exec<SessionId> {
+    let (argv, env) = worker(script);
+    let engine = ResolvedEngine { argv: argv.clone(), ..clone_engine(&py()) };
+    it.start_session(Rc::new(engine), &argv, &env, timeouts, at())
+}
+
+fn clone_engine(e: &ResolvedEngine) -> ResolvedEngine {
+    ResolvedEngine {
+        spec: e.spec.clone(),
+        origin: e.origin.clone(),
+        argv: e.argv.clone(),
+        version: e.version,
+        skipped: e.skipped.clone(),
+        ts: e.ts.clone(),
+    }
+}
+
+#[test]
+fn spawned_worker_lifecycle() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let s = start(&mut it, "serve", no_timeouts()).expect("started");
+    let r = it.request(s, call("hello"), "a call to 'hello'", at()).unwrap();
+    assert!(matches!(r.value, Value::Str(v) if &*v == "hello"));
+    it.shutdown_sessions();
+    assert!(matches!(it.sessions[s].state, State::Closed));
+}
+
+#[test]
+fn a_crash_during_a_call_names_the_exit_code() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let s = start(&mut it, "crash", no_timeouts()).expect("started");
+    let e = err_of(it.request(s, call("ratio"), "a call to 'ratio'", at()));
+    assert_eq!(&*e.message, "engine 'py' (pid 4242) exited during a call to 'ratio' (exit code 3); see its error output above");
+    let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: exited with code 3 during a call to 'ratio' at main.v2:1); engines are not restarted");
+}
+
+static SLEEPY: BuiltinDef = BuiltinDef { name: "sleepy", params: &[], f: sleepy };
+
+fn sleepy(_: &mut Interp, _: Vec<Value>, _: Span) -> Exec<Value> {
+    std::thread::sleep(Duration::from_millis(600));
+    Ok(Value::Null)
+}
+
+#[test]
+fn call_timeout_counts_only_the_workers_time() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let timeouts = Timeouts { startup: Some(Duration::from_secs(30)), call: Some(Duration::from_millis(300)) };
+    let s = start(&mut it, "slow", timeouts).expect("started");
+    // 600 ms in a V2 callback do not count against the 300 ms limit (8.5).
+    let mut frame = call_with(&mut it, s, &func(&SLEEPY));
+    frame["target"]["name"] = json!("reverse");
+    let r = it.request(s, frame, "a call to 'reverse'", at()).expect("the timer was paused");
+    assert!(matches!(r.value, Value::Str(v) if &*v == "done"));
+    let started = Instant::now();
+    let e = err_of(it.request(s, call("slow"), "a call to 'slow'", at()));
+    assert_eq!((&*e.kind, &*e.message), ("EngineTimeout", "a call to 'slow' in engine 'py' exceeded call_timeout (0.3 s); the engine was stopped"));
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert!(again.message.contains("stopped earlier: exceeded call_timeout (0.3 s)"), "{}", again.message);
+}
+
+#[test]
+fn startup_timeout() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let started = Instant::now();
+    let e = err_of(start(&mut it, "late", Timeouts { startup: Some(Duration::from_millis(300)), call: None }));
+    assert_eq!(&*e.kind, "EngineTimeout");
+    assert!(e.message.starts_with("engine 'py' did not start within 0.3 s ("), "{}", e.message);
+    assert!(e.message.ends_with("); raise [engines.py] startup_timeout if it is only slow"), "{}", e.message);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn grace_kills_a_worker_that_ignores_bye() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let s = start(&mut it, "ignore_bye", no_timeouts()).expect("started");
+    let started = Instant::now();
+    it.shutdown_sessions();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(900) && took < Duration::from_secs(5), "{took:?}");
+    assert!(matches!(it.sessions[s].state, State::Closed));
+}
+
+#[cfg(windows)]
+#[test]
+fn status_9009_before_hello_is_engine_not_found() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let e = err_of(start(&mut it, "placeholder", no_timeouts()));
+    assert_eq!(&*e.kind, "EngineNotFound");
+    assert!(e.message.ends_with("is the Microsoft Store placeholder (exit code 9009)"), "{}", e.message);
+}
+
+#[test]
+fn a_spawn_failure_is_engine_not_found_every_time() {
+    let (mut it, _) = interp();
+    let missing = std::env::temp_dir().join("v2-no-such-dir").join("python.exe");
+    let argv = [missing.into_os_string()];
+    let e = err_of(it.start_session(py(), &argv, &[], no_timeouts(), at()));
+    assert_eq!(&*e.kind, "EngineNotFound");
+    assert!(e.message.starts_with("could not start '"), "{}", e.message);
+    let s = it.sessions.len() - 1;
+    let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!(again.message, e.message);
+}

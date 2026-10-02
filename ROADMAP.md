@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.2 The VEP/1 wire |
-| **Last update** | 2026-10-02: 1.1 engine registry, discovery and `v2 doctor` done (CI written, not yet run) |
+| **Next task** | 1.4 Python engine (after the owner's go-ahead: the foundation 1.0–1.3 is done) |
+| **Last update** | 2026-10-02: 1.2 VEP/1 wire and 1.3 sessions done (CI written, not yet run) |
 
 ## Rules
 
@@ -142,7 +142,7 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
 ### 0.9 Builtins and JSON
 - [x] `codec/json` on serde_json, plain mode: the 10.1 pre-scan (nesting limit 1,000, integers
       outside i64), number kinds, pretty printing, path-naming errors (§10.1, §10.2). The VEP
-      mode's `$v2` tags and base64 (§10.3) come with the protocol in 1.3
+      mode's `$v2` tags and base64 (§10.3) come with the wire in 1.2
 - [x] All builtins of DOCS 3.11 that don't need engines: `print` (`sep`, `end`), `input` (null
       at EOF), `len`, `type`, conversions, `range`, `json_parse`/`json_stringify`,
       `read_file`/`write_file`, `getenv`, `args`, `exit`, `error` (§5.10)
@@ -187,7 +187,9 @@ needs frames; handles come before imports because R04/R15 need only action block
 - [x] The watchdog moved here from `session`: timer stack with pause/resume, timers that kill
       a child's tree, every running child killed on the interrupt path (§1.3, §6.5, §8.5)
 - **Done when:** the `engines/process` unit tests (§22.3) pass on Windows and Linux and the
-  exit-path tests still pass — **passed 2026-10-02**
+  exit-path tests still pass — **passed 2026-10-02**; re-passed after its review's 12 fixes
+  (only the top timer runs and not while paused, the exit check, SIGCHLD reset, the interrupt
+  path waiting for trees before removing the run dir, the windowless console, signal names)
 
 ### 1.1 Engine registry and toolchain discovery
 - [x] `EngineSpec`, the py/js/ts table, aliases, runtime tag resolution with did-you-mean
@@ -207,25 +209,28 @@ needs frames; handles come before imports because R04/R15 need only action block
   Store placeholder
 
 ### 1.2 The VEP/1 wire
-- [ ] Framing: NDJSON, 64 MiB limit both ways, pre-`hello` noise, one `\r` dropped (§9.1)
-- [ ] Frame types and their checks, `ProtocolError` for every fatal case (§9.2–9.6, §9.11)
-- [ ] Codec VEP mode: numbers, `$v2` tags, base64, depth and cycle checks (§10.1–10.5)
-- [ ] Host `HandleRef`, release queue and the callable table (§11.2, §11.8)
+- [x] Framing: NDJSON, 64 MiB limit both ways, pre-`hello` noise, one `\r` dropped (§9.1)
+- [x] Frame types and their checks, `ProtocolError` for every fatal case (§9.2–9.6, §9.11)
+- [x] Codec VEP mode: numbers, `$v2` tags, base64, depth and cycle checks (§10.1–10.5)
+- [x] Host `HandleRef`, release queue and the callable table (§11.2, §11.8)
 
 ### 1.3 Sessions
-- [ ] Session state machine, lazy spawn, env (`PYTHONUTF8`, `NODE_PATH`), cwd (§8.1–8.3)
-- [ ] Handshake (§8.4); the re-entrant request loop with depth limit 64 (§9.7); when a worker may
+- [x] Session state machine, spawn, env (`PYTHONUTF8`, `NODE_PATH`), cwd (§8.1–8.3); starting a
+      session at first use comes with blocks (1.4)
+- [x] Handshake (§8.4); the re-entrant request loop with depth limit 64 (§9.7); when a worker may
       call V2, host side (§9.8); `release`/`bye` (§9.10)
-- [ ] Call and startup timers, paused during reverse calls (§8.5)
-- [ ] Crash detection → EngineCrashed; shutdown with `bye`, grace, kill (§8.6, §8.7)
-- [ ] Private run directory: create, owner-only permissions, remove on every exit path (§20.3)
+- [x] Call and startup timers, paused during reverse calls (§8.5)
+- [x] Crash detection → EngineCrashed; shutdown with `bye`, grace, kill (§8.6, §8.7)
+- [x] Private run directory: create, owner-only permissions, removed by main and by the
+      interrupt path (§20.3); 1.4 tests every exit path once adapters fill it
 - **Done when (1.2 + 1.3):** the `engines/vep` and `engines/session` protocol tests against the
-  scripted adapter, in process and as a real child (§22.3), pass on Windows and Linux
+  scripted adapter, in process and as a real child (§22.3), pass on Windows and Linux —
+  **passed 2026-10-02**
 
 ### 1.4 Python engine
 - [ ] `adapters/py.py`: launch, fd rewiring, `out` frames, dispatch loop (§14.1–14.3)
-- [ ] Reaching a block, the `load` frame, Python load: module per unit, line offsets,
-      last-expression value, block args (§12.1–12.3)
+- [ ] Reaching a block (its session starts at first use), the `load` frame, Python load:
+      module per unit, line offsets, last-expression value, block args (§12.1–12.3)
 - [ ] Action vs definition blocks: load once, failed loads re-raise (§12.1)
 - [ ] Python marshaling and the worker handle table (§10.6, §11.1); worker stdio rules (§9.9);
       `[python] paths` in `init`
@@ -379,3 +384,5 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-02 | 0.10: config layers with validation on the merged result, `v2 run`, host-only `v2 check`, exit paths (closed streams, late interrupts, ignored signals, panic → 101); three review rounds, 28 findings fixed with regression tests (each new test shown to fail without its fix); the Phase 0 exit audit (ch. 21 rows, R-tests, DOCS ch. 3 examples) closed 8 test gaps and found `range(end: n)` and float `-6.0 % 3` mismatches, both fixed. **Phase 0 complete.** Linux verified in WSL |
 | 2026-10-02 | 1.0: `engines/process` (child rules, Job Objects / sessions, tree kill, exit before reaping, captured runs) and the watchdog's timer stack; Phase 1 re-ordered (1.0 added, wire before sessions, handles before imports); Node 24.11.1 installed in WSL for Linux JS tests |
 | 2026-10-02 | 1.1: engine registry (py, js, ts), executable lookup (PATHEXT, WindowsApps placeholder, `py -3`, configured commands and venv), version probes with `toolchains.json`, `EngineNotFound` (exit 3), `engine_available`, the `requires:`/SKIP harness and the `v2 doctor` table |
+| 2026-10-02 | 1.0's review: 12 findings fixed with regression tests (timer stack, exit check, SIGCHLD, run-dir removal after an interrupt, console flags, signal names); timer tests serialized |
+| 2026-10-02 | 1.2 + 1.3: the VEP/1 wire (framing, frames, the `$v2` codec, handles and callables) and sessions (handshake, re-entrant request loop, depth limit, releases, timers paused during reverse calls, crash and timeout messages, `bye` with a shared grace, the private run dir), tested with scripted workers in process and as real children |

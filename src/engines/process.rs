@@ -57,10 +57,27 @@ fn die(w: &Watch) -> ! {
     for (_, kill) in &w.children {
         kill.kill_tree();
     }
+    // A killed process releases its files only once it has stopped (Windows), so wait a little
+    // for the trees before removing the run dir (20.3).
+    let deadline = Instant::now() + Duration::from_millis(500);
+    for (_, kill) in &w.children {
+        kill.wait_stopped(deadline);
+    }
     if let Some(dir) = &w.run_dir {
-        let _ = std::fs::remove_dir_all(dir);
+        remove_run_dir(dir);
     }
     hard_exit(EXIT_INTERRUPTED)
+}
+
+/// Remove the run dir; on Windows up to 3 more tries 50 ms apart while killed processes
+/// release their locks; errors are ignored (6.5, 20.3).
+pub fn remove_run_dir(dir: &std::path::Path) {
+    for attempt in 0..4 {
+        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() || !cfg!(windows) || attempt == 3 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// `_exit` on Unix (no atexit handlers, no C stdio flushing); on Windows Rust's exit is
@@ -78,16 +95,16 @@ fn hard_exit(code: i32) -> ! {
 // ---------------------------------------------------------------------------------------------
 // Timers (8.5)
 
-/// One deadline. Only the top of the stack runs: a request's timer pauses while V2 serves a
-/// call from that worker, and a timer pushed on top of a running one pauses it until popped.
+/// One deadline. Only the top of the stack runs, and not while it is paused: a request's timer
+/// pauses while V2 serves a call from that worker (8.5).
 #[derive(Debug)]
 struct Timer {
     id: u64,
     limit: Option<Duration>,
     used: Duration,
     running_since: Option<Instant>,
-    /// Paused because another timer was pushed on top; resumed when that one is popped.
-    auto_paused: bool,
+    /// Paused by `pause` until `resume`, wherever it is in the stack.
+    paused: bool,
     fired: bool,
 }
 
@@ -103,42 +120,44 @@ struct TimerStack {
 }
 
 impl TimerStack {
-    fn push(&mut self, id: u64, limit: Option<Duration>, now: Instant) {
-        if let Some(top) = self.stack.last_mut() {
-            if top.running_since.is_some() {
-                top.used = top.used_at(now);
-                top.running_since = None;
-                top.auto_paused = true;
+    /// Start or stop each clock from the stack: only the top runs, and not while paused.
+    fn sync(&mut self, now: Instant) {
+        let top = self.stack.len().checked_sub(1);
+        for (i, t) in self.stack.iter_mut().enumerate() {
+            let run = Some(i) == top && !t.paused;
+            match (run, t.running_since) {
+                (true, None) => t.running_since = Some(now),
+                (false, Some(_)) => {
+                    t.used = t.used_at(now);
+                    t.running_since = None;
+                }
+                _ => {}
             }
         }
-        self.stack.push(Timer { id, limit, used: Duration::ZERO, running_since: Some(now), auto_paused: false, fired: false });
+    }
+
+    fn push(&mut self, id: u64, limit: Option<Duration>, now: Instant) {
+        self.stack.push(Timer { id, limit, used: Duration::ZERO, running_since: None, paused: false, fired: false });
+        self.sync(now);
     }
 
     fn pause(&mut self, id: u64, now: Instant) {
         if let Some(t) = self.stack.iter_mut().find(|t| t.id == id) {
-            t.used = t.used_at(now);
-            t.running_since = None;
-            t.auto_paused = false;
+            t.paused = true;
         }
+        self.sync(now);
     }
 
     fn resume(&mut self, id: u64, now: Instant) {
         if let Some(t) = self.stack.iter_mut().find(|t| t.id == id) {
-            if t.running_since.is_none() {
-                t.running_since = Some(now);
-            }
-            t.auto_paused = false;
+            t.paused = false;
         }
+        self.sync(now);
     }
 
     fn pop(&mut self, id: u64, now: Instant) {
         self.stack.retain(|t| t.id != id);
-        if let Some(top) = self.stack.last_mut() {
-            if top.auto_paused {
-                top.auto_paused = false;
-                top.running_since = Some(now);
-            }
-        }
+        self.sync(now);
     }
 
     fn top_id(&self) -> Option<u64> {
@@ -240,7 +259,10 @@ fn watch() {
                 }
             }
         }
-        let wait = w.timers.time_left(now).map_or(TICK, |left| left.min(TICK));
+        let mut wait = w.timers.time_left(now).map_or(TICK, |left| left.min(TICK));
+        if w.timers.top_id().is_some() {
+            wait = wait.min(EXIT_CHECK.saturating_sub(now.duration_since(last_exit_check)));
+        }
         w = match s.wake.wait_timeout(w, wait) {
             Ok((guard, _)) => guard,
             Err(poisoned) => poisoned.into_inner().0,
@@ -259,6 +281,7 @@ impl Watchdog {
     /// Start the thread and, if it runs, the interrupt handler: without a watchdog nothing
     /// would end the run, so the OS default stays (6.5).
     pub fn start() -> Watchdog {
+        default_sigchld();
         if ensure_thread() {
             install_interrupt_handler();
         }
@@ -328,12 +351,6 @@ pub fn set_run_dir(dir: PathBuf) {
     lock().run_dir = Some(dir);
 }
 
-fn register(kill: KillHandle) -> u64 {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    lock().children.push((id, kill));
-    id
-}
-
 fn unregister(id: u64) {
     lock().children.retain(|(c, _)| *c != id);
 }
@@ -383,7 +400,10 @@ impl ExitInfo {
     /// `exit code 3`, `exit code 3221225477 = 0xC0000005`, `killed by signal 11 (SIGSEGV)` (8.6).
     pub fn describe(&self) -> String {
         match (self.code, self.signal) {
-            (_, Some(sig)) => format!("killed by signal {sig} ({})", signal_name(sig)),
+            (_, Some(sig)) => match signal_name(sig) {
+                Some(name) => format!("killed by signal {sig} ({name})"),
+                None => format!("killed by signal {sig}"),
+            },
             (Some(code), None) if cfg!(windows) && code as u32 >= 0x8000_0000 => {
                 format!("exit code {} = 0x{:08X}", code as u32, code as u32)
             }
@@ -401,35 +421,80 @@ impl ExitInfo {
     }
 }
 
+/// The name of a signal, as `kill -l` spells it (8.6).
 #[cfg(unix)]
-fn signal_name(sig: i32) -> &'static str {
-    match sig {
-        libc::SIGHUP => "SIGHUP",
-        libc::SIGINT => "SIGINT",
-        libc::SIGQUIT => "SIGQUIT",
-        libc::SIGILL => "SIGILL",
-        libc::SIGTRAP => "SIGTRAP",
-        libc::SIGABRT => "SIGABRT",
-        libc::SIGBUS => "SIGBUS",
-        libc::SIGFPE => "SIGFPE",
-        libc::SIGKILL => "SIGKILL",
-        libc::SIGUSR1 => "SIGUSR1",
-        libc::SIGSEGV => "SIGSEGV",
-        libc::SIGUSR2 => "SIGUSR2",
-        libc::SIGPIPE => "SIGPIPE",
-        libc::SIGALRM => "SIGALRM",
-        libc::SIGTERM => "SIGTERM",
-        libc::SIGXCPU => "SIGXCPU",
-        libc::SIGXFSZ => "SIGXFSZ",
-        libc::SIGSYS => "SIGSYS",
-        _ => "an unknown signal",
+fn signal_name(sig: i32) -> Option<String> {
+    let known = [
+        (libc::SIGHUP, "SIGHUP"),
+        (libc::SIGINT, "SIGINT"),
+        (libc::SIGQUIT, "SIGQUIT"),
+        (libc::SIGILL, "SIGILL"),
+        (libc::SIGTRAP, "SIGTRAP"),
+        (libc::SIGABRT, "SIGABRT"),
+        (libc::SIGBUS, "SIGBUS"),
+        (libc::SIGFPE, "SIGFPE"),
+        (libc::SIGKILL, "SIGKILL"),
+        (libc::SIGUSR1, "SIGUSR1"),
+        (libc::SIGSEGV, "SIGSEGV"),
+        (libc::SIGUSR2, "SIGUSR2"),
+        (libc::SIGPIPE, "SIGPIPE"),
+        (libc::SIGALRM, "SIGALRM"),
+        (libc::SIGTERM, "SIGTERM"),
+        (libc::SIGCHLD, "SIGCHLD"),
+        (libc::SIGCONT, "SIGCONT"),
+        (libc::SIGSTOP, "SIGSTOP"),
+        (libc::SIGTSTP, "SIGTSTP"),
+        (libc::SIGTTIN, "SIGTTIN"),
+        (libc::SIGTTOU, "SIGTTOU"),
+        (libc::SIGURG, "SIGURG"),
+        (libc::SIGXCPU, "SIGXCPU"),
+        (libc::SIGXFSZ, "SIGXFSZ"),
+        (libc::SIGVTALRM, "SIGVTALRM"),
+        (libc::SIGPROF, "SIGPROF"),
+        (libc::SIGWINCH, "SIGWINCH"),
+        (libc::SIGIO, "SIGIO"),
+        (libc::SIGSYS, "SIGSYS"),
+        #[cfg(target_os = "linux")]
+        (libc::SIGSTKFLT, "SIGSTKFLT"),
+        #[cfg(target_os = "linux")]
+        (libc::SIGPWR, "SIGPWR"),
+    ];
+    if let Some((_, name)) = known.iter().find(|(n, _)| *n == sig) {
+        return Some(name.to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (min, max) = (libc::SIGRTMIN(), libc::SIGRTMAX());
+        if sig == min {
+            return Some("SIGRTMIN".into());
+        }
+        if sig > min && sig <= max {
+            return Some(format!("SIGRTMIN+{}", sig - min));
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn signal_name(_: i32) -> Option<String> {
+    None
+}
+
+/// V2 needs its children's exit statuses, so an inherited `SIGCHLD = SIG_IGN` (which makes the
+/// kernel reap them at once) is put back to the default (8.3, 8.6).
+#[cfg(unix)]
+fn default_sigchld() {
+    // SAFETY: a zeroed, filled struct for `sigaction`.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
     }
 }
 
 #[cfg(not(unix))]
-fn signal_name(_: i32) -> &'static str {
-    "an unknown signal"
-}
+fn default_sigchld() {}
 
 /// What kills a child's tree, shared by the child and the watchdog (8.3, 8.5). Windows: the
 /// child's Job Object and a duplicated process handle; Unix: the session leader's pid, which
@@ -484,6 +549,36 @@ impl KillHandle {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
+    }
+
+    /// Wait until every process of the tree has stopped, or `deadline`. Windows only: a
+    /// terminated job's processes take a moment to go and hold their files until then.
+    fn wait_stopped(&self, deadline: Instant) {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::JobObjects::{
+                JobObjectBasicAccountingInformation, QueryInformationJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            };
+            loop {
+                let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+                // SAFETY: the job handle is open; `info` is sized for this information class.
+                let ok = unsafe {
+                    QueryInformationJobObject(
+                        self.0.job,
+                        JobObjectBasicAccountingInformation,
+                        &mut info as *mut _ as *mut core::ffi::c_void,
+                        std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || info.ActiveProcesses == 0 || Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = deadline;
     }
 
     /// Whether the child itself has exited (not reaped; 8.3).
@@ -569,8 +664,13 @@ impl ChildProc {
         let mut cmd = Command::new(program);
         cmd.args(&s.argv[1..]).envs(s.env.iter().map(|(k, v)| (k, v)));
         cmd.stdin(s.stdin.stdio()).stdout(s.stdout.stdio()).stderr(s.stderr.stdio());
+        // Under the watchdog's lock: the interrupt path can't run between the spawn and the
+        // registration, so it never misses a child (6.5).
+        let mut w = lock();
         let (child, kill) = platform_spawn(&mut cmd).map_err(|e| spawn_error(program, &e))?;
-        let reg = register(kill.clone());
+        let reg = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        w.children.push((reg, kill.clone()));
+        drop(w);
         Ok(ChildProc { child, kill, reg, done: false })
     }
 
@@ -608,15 +708,15 @@ impl ChildProc {
         self.kill.kill_tree();
     }
 
-    /// Unregister, kill what is left of the tree, then reap (8.3).
+    /// Kill what is left of the tree, unregister, then reap (8.3).
     pub fn reap(mut self) -> ExitInfo {
         self.finish()
     }
 
     fn finish(&mut self) -> ExitInfo {
         self.done = true;
-        unregister(self.reg);
         self.kill.kill_tree();
+        unregister(self.reg);
         match self.child.wait() {
             Ok(status) => ExitInfo::from_status(status),
             Err(_) => ExitInfo { code: None, signal: None },
@@ -669,7 +769,7 @@ fn platform_spawn(cmd: &mut Command) -> std::io::Result<(std::process::Child, Ki
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
-    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::System::Console::GetConsoleCP;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -679,8 +779,9 @@ fn platform_spawn(cmd: &mut Command) -> std::io::Result<(std::process::Child, Ki
     };
 
     let mut flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
-    // SAFETY: a plain query.
-    if unsafe { GetConsoleWindow() }.is_null() {
+    // Only a host with no console at all: children share any console the host has, even one
+    // without a window (8.3). SAFETY: a plain query; 0 means there is no console.
+    if unsafe { GetConsoleCP() } == 0 {
         flags |= CREATE_NO_WINDOW;
     }
     cmd.creation_flags(flags);
@@ -881,8 +982,15 @@ fn install_interrupt_handler() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The watchdog is process-wide and only its top timer runs, as on the one interpreter
+    /// thread of a run; tests that push timers take turns so they don't bury each other's.
+    pub(crate) fn serial() -> MutexGuard<'static, ()> {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// argv and env that run this test binary as a helper child playing `role` (`helper_main`).
     fn helper(role: &str) -> (Vec<OsString>, Vec<(OsString, OsString)>) {
@@ -949,6 +1057,41 @@ mod tests {
                 let leader = unsafe { libc::getsid(0) == libc::getpid() };
                 writeln!(out, "session-leader {leader}").unwrap();
             }
+            // A host whose run dir is in use by a child when the interrupt comes (6.5, 20.3).
+            "interrupted" => {
+                let dir = PathBuf::from(arg);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::env::set_current_dir(&dir).unwrap();
+                set_run_dir(dir.clone());
+                let (argv, env) = helper("sleep:20000");
+                // The child's cwd is the run dir (as a compiler's would be); the host's is not.
+                let _child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null }).unwrap();
+                std::env::set_current_dir(std::env::temp_dir()).unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+                INTERRUPTED.store(true, Ordering::SeqCst);
+                exit_interrupted();
+            }
+            // A run started with SIGCHLD ignored still sees its children's statuses.
+            "child_status" => {
+                Watchdog::start();
+                let (argv, env) = helper("exit:3");
+                let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).unwrap();
+                writeln!(out, "status {:?}", c.status.code).unwrap();
+            }
+            // A host with a console but no window: its child must share that console (8.3).
+            #[cfg(windows)]
+            "console_host" => {
+                let (argv, env) = helper("console_list");
+                let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).unwrap();
+                out.write_all(&c.stdout).unwrap();
+            }
+            #[cfg(windows)]
+            "console_list" => {
+                let mut pids = [0u32; 16];
+                // SAFETY: a buffer of 16 pids.
+                let n = unsafe { windows_sys::Win32::System::Console::GetConsoleProcessList(pids.as_mut_ptr(), 16) };
+                writeln!(out, "console processes {n}").unwrap();
+            }
             other => panic!("unknown helper role {other}"),
         }
         out.flush().unwrap();
@@ -1001,10 +1144,100 @@ mod tests {
         s.push(2, Some(Duration::from_secs(5)), at(t0, 10));
         s.pop(2, at(t0, 20));
         assert_eq!(s.expired(at(t0, 1_000)), None);
+        // A buried timer resumed under another one runs only once it is on top again.
+        let mut s = TimerStack::default();
+        s.push(1, Some(Duration::from_millis(100)), t0);
+        s.pause(1, at(t0, 10));
+        s.push(2, Some(Duration::from_secs(10)), at(t0, 10));
+        s.resume(1, at(t0, 20));
+        s.pop(2, at(t0, 1_000));
+        assert_eq!(s.expired(at(t0, 1_089)), None, "10 ms before the pause, 89 ms on top since");
+        assert_eq!(s.expired(at(t0, 1_090)), Some(1));
+        // A buried timer paused and resumed still restarts when popped back to the top.
+        let mut s = TimerStack::default();
+        s.push(1, Some(Duration::from_millis(100)), t0);
+        s.push(2, Some(Duration::from_secs(10)), at(t0, 50));
+        s.pause(1, at(t0, 60));
+        s.resume(1, at(t0, 70));
+        s.pop(2, at(t0, 1_000));
+        assert_eq!(s.expired(at(t0, 1_049)), None);
+        assert_eq!(s.expired(at(t0, 1_050)), Some(1), "its deadline is still enforced");
+    }
+
+    #[test]
+    fn exit_check_ends_a_read_a_grandchild_holds_open() {
+        let _serial = crate::engines::process::tests::serial();
+        // A session reads its worker's stdout to EOF (8.5): when the worker exits but a
+        // grandchild still holds the pipe, the watchdog's exited check kills the tree.
+        let (argv, env) = helper("holder");
+        let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null })
+            .expect("spawn");
+        let timer = push_timer(None, child.kill_handle());
+        let start = Instant::now();
+        let mut out = child.take_stdout().unwrap();
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        drop(timer);
+        child.reap();
+    }
+
+    #[test]
+    fn the_interrupt_path_removes_the_run_dir() {
+        // 20.3: also when a killed child was using it (Windows releases its files late).
+        for round in 0..3 {
+            let dir = temp(&format!("rundir{round}")).join("run");
+            let (argv, env) = helper(&format!("interrupted:{}", dir.display()));
+            let status = Command::new(&argv[0]).args(&argv[1..]).envs(env).stdout(Stdio::null()).status().unwrap();
+            assert_eq!(status.code(), Some(EXIT_INTERRUPTED));
+            assert!(!dir.exists(), "round {round}: the run dir was left behind");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_sigchld_is_reset() {
+        use std::os::unix::process::CommandExt;
+        let (argv, env) = helper("child_status");
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]).envs(env);
+        // SAFETY: only an async-signal-safe call between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("status Some(3)"), "{}", String::from_utf8_lossy(&out.stdout));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn children_share_a_windowless_console() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let (argv, env) = helper("console_host");
+        let out = Command::new(&argv[0]).args(&argv[1..]).envs(env).creation_flags(CREATE_NO_WINDOW).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let n: u32 = text.split("console processes ").nth(1).and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse().ok()).expect(&text);
+        assert!(n >= 2, "the child got a console of its own: {text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_names() {
+        let describe = |sig| ExitInfo { code: None, signal: Some(sig) }.describe();
+        assert_eq!(describe(libc::SIGPROF), format!("killed by signal {} (SIGPROF)", libc::SIGPROF));
+        assert_eq!(describe(libc::SIGKILL), format!("killed by signal {} (SIGKILL)", libc::SIGKILL));
+        #[cfg(target_os = "linux")]
+        assert_eq!(describe(libc::SIGRTMIN() + 2), format!("killed by signal {} (SIGRTMIN+2)", libc::SIGRTMIN() + 2));
+        assert_eq!(describe(200), "killed by signal 200");
     }
 
     #[test]
     fn kill_tree_kills_grandchildren() {
+        let _serial = crate::engines::process::tests::serial();
         let marker = temp("tree").join("late.txt");
         let (argv, env) = helper(&format!("grandchild:{}", marker.display()));
         let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null })
@@ -1027,6 +1260,7 @@ mod tests {
 
     #[test]
     fn probe_limit_kills_tree_and_reports_timed_out() {
+        let _serial = crate::engines::process::tests::serial();
         let marker = temp("limit").join("late.txt");
         let (argv, env) = helper(&format!("grandchild:{}", marker.display()));
         let start = Instant::now();
@@ -1039,6 +1273,7 @@ mod tests {
 
     #[test]
     fn pipes_are_read_concurrently() {
+        let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("chatty");
         let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).expect("spawn");
         assert!(!c.timed_out && c.status.success(), "{:?}", c.status);
@@ -1047,6 +1282,7 @@ mod tests {
 
     #[test]
     fn grandchild_holding_stdout_does_not_block() {
+        let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("holder");
         let start = Instant::now();
         let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).expect("spawn");
@@ -1056,6 +1292,7 @@ mod tests {
 
     #[test]
     fn input_reaches_stdin() {
+        let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("cat");
         let c = run_captured(&argv, &env, Some(b"hello".to_vec()), Some(Duration::from_secs(30))).expect("spawn");
         assert!(String::from_utf8_lossy(&c.stdout).contains("<hello>"), "{}", String::from_utf8_lossy(&c.stdout));
@@ -1067,6 +1304,7 @@ mod tests {
 
     #[test]
     fn exit_status_text() {
+        let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("exit:3");
         let c = run_captured(&argv, &env, None, None).expect("spawn");
         assert_eq!((c.status.code, c.status.describe()), (Some(3), "exit code 3".to_string()));
@@ -1093,6 +1331,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn exit_is_observed_without_reaping() {
+        let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("exit:0");
         let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
             .expect("spawn");
@@ -1108,6 +1347,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn children_lead_their_own_session() {
+        let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("session");
         let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).expect("spawn");
         assert!(String::from_utf8_lossy(&c.stdout).contains("session-leader true"), "{}", String::from_utf8_lossy(&c.stdout));
@@ -1116,6 +1356,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn children_are_in_their_own_job() {
+        let _serial = crate::engines::process::tests::serial();
         // In this child's job, not just in some job (the test runner may be in one already).
         let (argv, env) = helper("sleep:5000");
         let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })

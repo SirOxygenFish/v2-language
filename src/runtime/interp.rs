@@ -21,6 +21,7 @@ use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
 use crate::engines::process::stop_if_interrupted;
 use crate::engines::registry::Registry;
+use crate::engines::session::Session;
 use crate::syntax::ast::*;
 use crate::syntax::span::{FileId, SourceMap, Span};
 
@@ -50,6 +51,10 @@ pub struct Interp {
     pub sm: SourceMap,
     /// The engines of this run (7.1).
     pub registry: Registry,
+    /// The worker sessions, by `SessionId` (8.1).
+    pub sessions: Vec<Session>,
+    /// Cross-language crossings in progress (9.7).
+    pub xdepth: u32,
     pub out: Out,
     pub chars: CharCache,
     calls: Vec<CallRecord>,
@@ -84,6 +89,8 @@ impl Interp {
         Interp {
             sm,
             registry,
+            sessions: Vec::new(),
+            xdepth: 0,
             out: Out::new(),
             chars: CharCache::default(),
             calls: Vec::new(),
@@ -316,6 +323,9 @@ impl Interp {
     }
 
     fn exec(&mut self, s: &Stmt, env: &Env) -> Exec<()> {
+        if !self.sessions.is_empty() {
+            self.flush_releases();
+        }
         match &s.kind {
             StmtKind::Let(name, value) => {
                 let v = match value {
