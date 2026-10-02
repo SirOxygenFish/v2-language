@@ -46,19 +46,26 @@ fn create() -> Result<PathBuf, String> {
     Err(fail(None))
 }
 
-/// POSIX: `mkdir` with mode 0700, then `lstat` must show a real directory of the effective user
-/// with exactly that mode (20.3).
+/// POSIX: `mkdir` with mode 0700, `chmod` 0700 (the umask may have cleared owner bits), then
+/// `lstat` must show a real directory of the effective user with exactly that mode (20.3). A
+/// folder that fails is removed again.
 #[cfg(unix)]
 fn make_private(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new().mode(0o700).create(dir)?;
-    let m = std::fs::symlink_metadata(dir)?;
-    // SAFETY: a plain query.
-    let euid = unsafe { libc::geteuid() };
-    if !m.is_dir() || m.uid() != euid || m.permissions().mode() & 0o777 != 0o700 {
-        return Err(Error::other("the folder is not private"));
-    }
-    Ok(())
+    let check = || -> std::io::Result<()> {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        let m = std::fs::symlink_metadata(dir)?;
+        // SAFETY: a plain query.
+        let euid = unsafe { libc::geteuid() };
+        if !m.is_dir() || m.uid() != euid || m.permissions().mode() & 0o777 != 0o700 {
+            return Err(Error::other("the folder is not private"));
+        }
+        Ok(())
+    };
+    check().inspect_err(|_| {
+        let _ = std::fs::remove_dir(dir);
+    })
 }
 
 #[cfg(unix)]
@@ -174,6 +181,29 @@ mod tests {
         std::fs::write(dir.join("file"), "x").unwrap();
         remove();
         assert!(!dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_umask_does_not_change_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        // The umask is process-wide, so the test binary re-runs itself to set one.
+        if std::env::var_os("V2_UMASK_CHILD").is_some() {
+            // SAFETY: a plain call; this process runs only this test.
+            unsafe { libc::umask(0o277) };
+            let dir = run_dir().expect("a private run dir despite the umask");
+            let mode = std::fs::symlink_metadata(dir).unwrap().permissions().mode() & 0o777;
+            remove();
+            println!("\nmode {mode:o}");
+            std::process::exit(0);
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::rundir::tests::a_umask_does_not_change_the_mode", "--nocapture", "--test-threads=1"])
+            .env("V2_UMASK_CHILD", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("mode 700"), "{text}{}", String::from_utf8_lossy(&out.stderr));
     }
 
     /// The directory's DACL in SDDL.

@@ -27,6 +27,9 @@ pub struct Lookup {
     pub windows_apps: Option<PathBuf>,
     /// The base of a name with a separator (18.1: already absolute when it came from config).
     pub cwd: PathBuf,
+    /// macOS: `xcrun` shims that open an install dialog when the Command Line Tools are
+    /// missing, so `xcode-select -p` is asked first (7.6).
+    pub xcrun_shims: Vec<PathBuf>,
 }
 
 impl Lookup {
@@ -41,6 +44,7 @@ impl Lookup {
             pathext: std::env::var_os("PATHEXT"),
             windows_apps,
             cwd: std::env::current_dir().unwrap_or_default(),
+            xcrun_shims: if cfg!(target_os = "macos") { vec![PathBuf::from("/usr/bin/python3")] } else { Vec::new() },
         }
     }
 
@@ -100,8 +104,10 @@ fn with_extension_appended(p: &Path, ext: &str) -> PathBuf {
 /// tried (never the cwd).
 pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
     let mut hits: Vec<PathBuf> = Vec::new();
-    let mut consider = |p: PathBuf| {
-        if is_regular_file(&p) && executable(&p) && !hits.contains(&p) {
+    // `X_OK` only on the PATH walk: a named file that can't run fails its probe with the OS
+    // message instead of looking missing (7.5).
+    let mut consider = |p: PathBuf, walk: bool| {
+        if is_regular_file(&p) && (!walk || executable(&p)) && !hits.contains(&p) {
             hits.push(p);
         }
     };
@@ -110,10 +116,10 @@ pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
         let p = l.cwd.join(as_path);
         if cfg!(windows) && !has_accepted_extension(as_path) {
             for ext in ACCEPTED {
-                consider(with_extension_appended(&p, ext));
+                consider(with_extension_appended(&p, ext), false);
             }
         } else {
-            consider(p);
+            consider(p, false);
         }
         return hits;
     }
@@ -124,13 +130,13 @@ pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
         }
         if cfg!(windows) {
             if has_accepted_extension(as_path) {
-                consider(dir.join(name));
+                consider(dir.join(name), true);
             }
             for ext in l.extensions() {
-                consider(with_extension_appended(&dir.join(name), &ext));
+                consider(with_extension_appended(&dir.join(name), &ext), true);
             }
         } else {
-            consider(dir.join(name));
+            consider(dir.join(name), true);
         }
     }
     hits
@@ -143,6 +149,8 @@ pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
 #[derive(Clone, Debug)]
 pub enum ProbeOutcome {
     Exited { code: Option<i32>, output: String },
+    /// Killed by this signal (Unix).
+    Killed(i32),
     TimedOut,
     SpawnFailed(String),
 }
@@ -160,11 +168,14 @@ impl Prober for RealProber {
         match process::run_captured(argv, env, None, Some(PROBE_LIMIT)) {
             Err(msg) => ProbeOutcome::SpawnFailed(msg),
             Ok(c) if c.timed_out => ProbeOutcome::TimedOut,
-            Ok(c) => {
-                let mut output = String::from_utf8_lossy(&c.stdout).into_owned();
-                output.push_str(&String::from_utf8_lossy(&c.stderr));
-                ProbeOutcome::Exited { code: c.status.code, output }
-            }
+            Ok(c) => match c.status.signal {
+                Some(sig) => ProbeOutcome::Killed(sig),
+                None => {
+                    let mut output = String::from_utf8_lossy(&c.stdout).into_owned();
+                    output.push_str(&String::from_utf8_lossy(&c.stderr));
+                    ProbeOutcome::Exited { code: c.status.code, output }
+                }
+            },
         }
     }
 }
@@ -190,6 +201,7 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome) -> Judged {
     match outcome {
         ProbeOutcome::SpawnFailed(msg) => Judged::Skipped(msg.clone()),
         ProbeOutcome::TimedOut => Judged::Skipped(format!("version probe timed out ({} s)", PROBE_LIMIT.as_secs())),
+        ProbeOutcome::Killed(sig) => Judged::Skipped(format!("version probe failed ({})", ExitInfo { code: None, signal: Some(*sig) }.describe())),
         ProbeOutcome::Exited { code, output } => {
             // The placeholder prints "Python was not found" and exits 9009 (7.6).
             if alias && (*code == Some(9009) || output.contains("Python was not found")) {
@@ -245,19 +257,19 @@ impl ProbeCache {
         ProbeCache::open(None, CacheMode::Off)
     }
 
+    /// A cached usable version. Runs probe skipped hits again: a version-manager shim (pyenv,
+    /// asdf, volta) runs another interpreter in another project, and a timeout may have been
+    /// passing; the stored skips are for `v2 check` (7.7). A stale usable entry is caught by
+    /// `hello`'s version check (8.4).
     fn get(&self, key: &str) -> Option<Judged> {
         if self.mode != CacheMode::ReadWrite {
             return None;
         }
         let e = self.entries.get(key)?;
-        let version = e.get("version").and_then(Json::as_str).and_then(Version::parse);
-        let reason = e.get("reason").and_then(Json::as_str).map(str::to_string);
-        Some(match (e.get("ok").and_then(Json::as_bool)?, version, reason) {
-            (true, Some(v), _) => Judged::Usable(v),
-            (false, Some(v), Some(r)) => Judged::TooOld(v, r),
-            (false, None, Some(r)) => Judged::Skipped(r),
-            _ => return None,
-        })
+        if e.get("ok").and_then(Json::as_bool) != Some(true) {
+            return None;
+        }
+        e.get("version").and_then(Json::as_str).and_then(Version::parse).map(Judged::Usable)
     }
 
     fn put(&mut self, key: String, path: &Path, j: &Judged, output: &str) {
@@ -561,6 +573,10 @@ impl Resolver<'_> {
         let mut newest_old: Option<Version> = None;
         for candidate in &spec.candidates {
             for hit in find_program(&candidate[0], self.lookup) {
+                if self.lookup.xcrun_shims.contains(&hit) && !self.command_line_tools() {
+                    skipped.push((hit, "Command Line Tools missing".into()));
+                    continue;
+                }
                 let mut argv = vec![hit.clone().into_os_string()];
                 argv.extend(candidate[1..].iter().map(|a| OsString::from(&**a)));
                 match self.probe(spec, &argv, &hit) {
@@ -579,6 +595,13 @@ impl Resolver<'_> {
         Err(NotFound { status, message: not_found_message(spec, &skipped), command: None, from: None, skipped })
     }
 
+    /// macOS: whether the Command Line Tools are installed, so the `xcrun` shims can run
+    /// without opening an install dialog (7.6).
+    fn command_line_tools(&self) -> bool {
+        let argv = [OsString::from("/usr/bin/xcode-select"), OsString::from("-p")];
+        matches!(self.prober.probe(&argv, &[]), ProbeOutcome::Exited { code: Some(0), .. })
+    }
+
     /// ts: the js engine plus a way to strip types (7.6).
     pub fn resolve_ts(&mut self, spec: &Rc<EngineSpec>, js: Result<&ResolvedEngine, &NotFound>) -> Result<ResolvedEngine, NotFound> {
         let js = js.map_err(|nf| {
@@ -591,7 +614,7 @@ impl Resolver<'_> {
                 message.push('\n');
                 message.push_str(line);
             }
-            NotFound { message, ..nf.clone() }
+            NotFound { message, skipped: Vec::new(), ..nf.clone() }
         })?;
         let transpiler = self.cfg.engines.get("ts").and_then(|e| e.transpiler.as_ref()).filter(|t| t.value != ["node"]);
         let (method, origin) = match transpiler {
@@ -704,6 +727,7 @@ mod tests {
             pathext: None,
             windows_apps: apps.map(Path::to_path_buf),
             cwd: std::env::temp_dir(),
+            xcrun_shims: Vec::new(),
         }
     }
 
@@ -765,7 +789,7 @@ mod tests {
         let abs = temp("relabs");
         let good = exe(&abs, "node");
         let path = std::env::join_paths([PathBuf::new(), PathBuf::from("."), rel.clone(), abs.clone()]).unwrap();
-        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap() };
+        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new() };
         assert_eq!(find_program("node", &l), [good]);
         let _ = std::fs::remove_dir_all(&rel);
     }
@@ -992,16 +1016,66 @@ mod tests {
         let mut again = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
         let e = resolve_with(&cfg, &l, &p, &mut again, "js").unwrap();
         assert_eq!((p.calls.get(), e.version), (1, Some(Version(24, 11, 1))), "served from the cache");
-        // A changed file is probed again; skips are cached too.
+        // A changed file is probed again. Skips are stored, but runs probe them again (a
+        // version-manager shim answers per project, 7.7).
         let p_old = fake(|_| says("v16.0.0"));
         std::fs::write(&node, b"changed").unwrap();
         let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
         assert!(resolve_with(&cfg, &l, &p_old, &mut c, "js").is_err());
         assert_eq!(p_old.calls.get(), 1);
         c.save();
+        let saved: Json = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!(saved["entries"].as_object().unwrap().values().any(|e| e["ok"] == json!(false) && e["version"] == json!("16.0.0")), "{saved}");
         let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
         let nf = resolve_with(&cfg, &l, &p_old, &mut c, "js").unwrap_err();
-        assert_eq!((p_old.calls.get(), nf.status), (1, Status::Old(Version(16, 0, 0))));
+        assert_eq!((p_old.calls.get(), nf.status), (2, Status::Old(Version(16, 0, 0))));
+    }
+
+    #[test]
+    fn xcrun_shims_wait_for_the_command_line_tools() {
+        // macOS: /usr/bin/python3 opens an install dialog without the Command Line Tools (7.6).
+        let d = temp("xcrun");
+        let shim = exe(&d, "python3");
+        let mut l = lookup(&[&d], None);
+        l.xcrun_shims = vec![shim.clone()];
+        for (clt, expect) in [(1, None), (0, Some(Version(3, 9, 6)))] {
+            let p = fake(move |prog| {
+                if prog.ends_with("xcode-select") {
+                    ProbeOutcome::Exited { code: Some(clt), output: String::new() }
+                } else {
+                    says("Python 3.9.6")
+                }
+            });
+            let r = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py");
+            match expect {
+                Some(v) => assert_eq!(r.unwrap().version, Some(v)),
+                None => {
+                    assert_eq!(r.unwrap_err().skipped, [(shim.clone(), "Command Line Tools missing".to_string())]);
+                    assert_eq!(p.argvs.borrow().len(), 1, "the shim itself never ran");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_probe_killed_by_a_signal_says_so() {
+        let j = judge(&spec("py"), false, &ProbeOutcome::Killed(9));
+        let text = ExitInfo { code: None, signal: Some(9) }.describe();
+        assert_eq!(j, Judged::Skipped(format!("version probe failed ({text})")));
+        assert!(text.starts_with("killed by signal 9"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_file_need_not_be_executable_to_be_found() {
+        // 7.5: X_OK is the PATH walk's test; a configured path that can't run fails its probe.
+        let d = temp("noexec");
+        let f = d.join("python3");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        let l = Lookup { cwd: d.clone(), ..lookup(&[&d], None) };
+        assert_eq!(find_program("./python3", &l), [d.join("./python3")]);
+        assert!(find_program("python3", &l).is_empty(), "not on the PATH walk");
     }
 
     #[test]
@@ -1031,5 +1105,134 @@ mod tests {
         resolve_with(&cfg, &l, &p, &mut c, "js").unwrap();
         c.save();
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn the_minimum_itself_is_usable() {
+        let d = temp("kminimum");
+        exe(&d, "python3");
+        exe(&d, "node");
+        let p = fake(|prog| says(if prog.to_string_lossy().contains("node") { "v18.0.0" } else { "Python 3.8.0" }));
+        let l = lookup(&[&d], None);
+        assert_eq!(resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap().version, Some(Version(3, 8, 0)));
+        assert_eq!(resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "js").unwrap().version, Some(Version(18, 0, 0)));
+    }
+
+    #[test]
+    fn old_shows_the_newest_even_when_found_last() {
+        let d = temp("koldorder");
+        exe(&d, "python3");
+        exe(&d, "python");
+        let p = fake(|prog| says(if prog.file_stem().is_some_and(|s| s == "python3") { "Python 3.6.8" } else { "Python 3.7.9" }));
+        let nf = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.status, Status::Old(Version(3, 7, 9)));
+    }
+
+    #[test]
+    fn a_same_size_replacement_is_probed_again() {
+        let home = temp("kcachemtime");
+        let d = temp("kcachemtimebin");
+        let node = exe(&d, "node");
+        std::fs::write(&node, b"v1").unwrap();
+        let l = lookup(&[&d], None);
+        let cfg = Config::default();
+        let p = fake(|_| says("v24.11.1"));
+        let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+        resolve_with(&cfg, &l, &p, &mut c, "js").unwrap();
+        c.save();
+        // Same size, another mtime: say a patch upgrade that kept the launcher's size (7.7).
+        std::fs::write(&node, b"v2").unwrap();
+        let f = std::fs::File::options().write(true).open(&node).unwrap();
+        f.set_modified(std::time::SystemTime::now() + Duration::from_secs(120)).unwrap();
+        drop(f);
+        let p2 = fake(|_| says("v16.0.0"));
+        let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+        let nf = resolve_with(&cfg, &l, &p2, &mut c, "js").unwrap_err();
+        assert_eq!((p2.calls.get(), nf.status), (1, Status::Old(Version(16, 0, 0))));
+    }
+
+    #[test]
+    fn ts_transpiler_node_means_stripping_and_origin_follows_js() {
+        let d = temp("kts");
+        let node = exe(&d, "node");
+        let l = lookup(&[&d], None);
+        let mut cache = ProbeCache::off();
+        let p = fake(|_| says("v24.11.1"));
+        // js set by --engine: ts (stripping) shows js's FROM (19.2).
+        let cfg = with_command("js", &[&node.to_string_lossy()], ConfigSource::Cli);
+        let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
+        let js = r.resolve(&spec("js")).unwrap();
+        let ts = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap();
+        assert_eq!((ts.ts.clone(), ts.origin.label()), (Some(TsMethod::Strip), "--engine".to_string()));
+        // transpiler = "node" is the default: stripping, not a transpiler program (7.6, D33).
+        let mut with_node = Config::default();
+        let transpiler = Some(Sourced { value: vec!["node".to_string()], from: project_source() });
+        with_node.engines.insert("ts".into(), EngineCfg { transpiler, ..EngineCfg::default() });
+        let mut r = Resolver { cfg: &with_node, lookup: &l, prober: &p, cache: &mut cache };
+        let js = r.resolve(&spec("js")).unwrap();
+        assert_eq!(r.resolve_ts(&spec("ts"), Ok(&js)).unwrap().ts, Some(TsMethod::Strip));
+    }
+
+    #[test]
+    fn ts_names_a_one_line_js_failure() {
+        let cfg = with_command("js", &["missing/node.exe"], ConfigSource::Cli);
+        let p = fake(|_| says("v24.11.1"));
+        let l = lookup(&[], None);
+        let mut cache = ProbeCache::off();
+        let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
+        let js = r.resolve(&spec("js")).unwrap_err();
+        let nf = r.resolve_ts(&spec("ts"), Err(&js)).unwrap_err();
+        assert_eq!(nf.message, format!("engine 'ts' (TypeScript) not found — @ts blocks run on the js engine\njs: {}", js.message));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_configured_path_without_extension_gets_one() {
+        let d = temp("knoext");
+        let python = exe(&d, "python");
+        let bare = d.join("python");
+        assert_eq!(find_program(&bare.to_string_lossy(), &lookup(&[], None)), [python]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_apps_is_matched_case_insensitively() {
+        let root = temp("kalias");
+        let apps = root.join("WindowsApps");
+        std::fs::create_dir_all(&apps).unwrap();
+        exe(&apps, "python3");
+        let p = fake(|_| ProbeOutcome::Exited { code: Some(9009), output: String::new() });
+        let upper = root.join("WINDOWSAPPS");
+        let nf = resolve_with(&Config::default(), &lookup(&[&upper], Some(&apps)), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.skipped[0].1, "Microsoft Store placeholder");
+    }
+
+    #[test]
+    fn a_folder_listed_twice_is_one_hit() {
+        let d = temp("ktwice");
+        let node = exe(&d, "node");
+        assert_eq!(find_program("node", &lookup(&[&d, &d], None)), [node]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unset_pathext_accepts_cmd() {
+        let d = temp("kpathext");
+        std::fs::write(d.join("tsx.cmd"), b"").unwrap();
+        assert_eq!(find_program("tsx", &lookup(&[&d], None)), [d.join("tsx.cmd")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn venv_prefers_bin_python() {
+        let d = temp("kvenv");
+        let bin = d.join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let python = exe(&bin, "python");
+        exe(&bin, "python3");
+        let cfg = Config { python_venv: Some(Sourced { value: d.join(".venv"), from: project_source() }), ..Config::default() };
+        let p = fake(|_| says("Python 3.12.1"));
+        let e = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!(e.argv, [python.into_os_string()]);
     }
 }

@@ -128,7 +128,7 @@ mod tests {
 
     fn registry(path: Option<OsString>) -> (Registry, Rc<Cell<usize>>) {
         let calls = Rc::new(Cell::new(0));
-        let lookup = Lookup { path, pathext: None, windows_apps: None, cwd: std::env::temp_dir() };
+        let lookup = Lookup { path, pathext: None, windows_apps: None, cwd: std::env::temp_dir(), xcrun_shims: Vec::new() };
         let reg = Registry::new(Rc::new(Config::default()), Box::new(Counting(calls.clone())), lookup, ProbeCache::off());
         (reg, calls)
     }
@@ -177,5 +177,22 @@ mod tests {
         for tag in ["py", "js", "ts", "lua", "", "@py", "PY"] {
             assert!(!reg.engine_available(tag), "{tag}");
         }
+    }
+
+    #[test]
+    fn successes_are_memoized_too() {
+        let d = std::env::temp_dir().join(format!("v2reg-{}-memo", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let node = d.join(if cfg!(windows) { "node.exe" } else { "node" });
+        std::fs::write(&node, b"").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&node, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let (reg, calls) = registry(Some(d.into_os_string()));
+        for tag in ["js", "javascript", "ts", "js"] {
+            assert!(reg.engine_available(tag), "{tag}");
+        }
+        assert!(reg.resolve_tag("js").is_ok());
+        assert_eq!(calls.get(), 1, "resolution is memoized per id, successes too (7.1)");
     }
 }
