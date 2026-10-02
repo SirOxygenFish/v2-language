@@ -1,0 +1,26 @@
+{"name": "Ada", "n": 1, "f": 1.0, "big": -9223372036854775808, "list": [true, null, "é"], "$v2": "plain"}
+int float plain
+{"name":"Ada","n":1,"f":1.0,"big":-9223372036854775808,"list":[true,null,"é"],"$v2":"plain"}
+[1,2.0,-0.0,"a\"b\n",{},[]]
+{
+  "a": [
+    1,
+    {
+      "b": null
+    }
+  ],
+  "c": []
+}
+"é😀" null 1e+21
+[1, 2] s -0.0
+ValueError: invalid JSON at line 1 column 9: trailing comma
+ValueError: invalid JSON at line 1 column 5: EOF while parsing a list
+ValueError: invalid JSON at line 1 column 3: trailing characters
+ValueError: invalid JSON at line 2 column 3: integer does not fit in 64 bits
+ValueError: invalid JSON at line 1 column 1001: nested deeper than 1000 levels
+TypeError: cannot convert bytes to JSON at [1]
+TypeError: cannot convert func to JSON at ["k"]
+TypeError: cannot convert the float nan to JSON
+ValueError: cannot convert a cyclic list to JSON
+ValueError: json_stringify() argument 'indent' must be >= 0, got -1
+TypeError: json_parse() argument 'text' must be a str, got int

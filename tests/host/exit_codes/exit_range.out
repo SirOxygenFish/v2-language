@@ -1,0 +1,3 @@
+ValueError: exit code 1099511627776 is out of range
+TypeError: exit() argument 'code' must be an int, got str
+bye

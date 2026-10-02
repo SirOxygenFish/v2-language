@@ -1,0 +1,14 @@
+// R48: an exit code outside i32 is a ValueError; exit() alone is exit(0).
+try {
+    exit(2 ** 40)
+} catch (e) {
+    print(e.type + ": " + e.message)
+}
+try {
+    exit("1")
+} catch (e) {
+    print(e.type + ": " + e.message)
+}
+print("bye")
+exit()
+print("never reached")

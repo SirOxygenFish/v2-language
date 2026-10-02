@@ -97,7 +97,7 @@ impl SourceMap {
             return Ok(id);
         }
         let bytes = std::fs::read(&canonical)
-            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", path.display(), os_message(&e))))?;
+            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", display_path(&canonical), os_message(&e))))?;
         let display = display_path(&canonical);
         let text = match String::from_utf8(bytes) {
             Ok(t) => t,
@@ -187,6 +187,23 @@ pub fn normalize(text: &str) -> String {
     out
 }
 
+/// `path` made absolute with `.` dropped and `..` applied to the text, as Windows does; POSIX
+/// `std::path::absolute` keeps `..`, so walking up `/a/../b` would visit `/a` (2.1, 18.1).
+pub fn absolute_clean(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut clean = PathBuf::new();
+    for c in absolute.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    clean
+}
+
 pub fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
@@ -215,10 +232,12 @@ pub fn display_path(canonical: &Path) -> Rc<str> {
 /// The OS error text without Rust's ` (os error N)` suffix.
 pub fn os_message(e: &std::io::Error) -> String {
     let s = e.to_string();
-    match s.find(" (os error ") {
-        Some(i) => s[..i].to_string(),
-        None => s,
-    }
+    let s = match s.find(" (os error ") {
+        Some(i) => &s[..i],
+        None => &s[..],
+    };
+    // Windows ends its messages with a period; V2's messages don't (2.5).
+    s.trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]

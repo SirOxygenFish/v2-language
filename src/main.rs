@@ -1,5 +1,36 @@
 //! The `v2` binary: argument parsing, threads and exit codes (INTERNALS 1.2, 1.3, 6.5).
 
+/// `print!`/`println!`/`eprint!`/`eprintln!` that never panic: a closed or broken stdout or
+/// stderr must not turn an exit path into a panic (101) or an abort (6.5). Write errors are
+/// ignored; the exit code says what happened. After an interrupt nothing more is printed to
+/// stderr: the thread stops there and the run ends with 130 (6.5).
+macro_rules! stdout {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout().lock(), $($t)*);
+    }};
+}
+macro_rules! stdoutln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock(), $($t)*);
+    }};
+}
+macro_rules! stderr {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        $crate::engines::session::stop_if_interrupted();
+        let _ = write!(std::io::stderr().lock(), $($t)*);
+    }};
+}
+macro_rules! stderrln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        $crate::engines::session::stop_if_interrupted();
+        let _ = writeln!(std::io::stderr().lock(), $($t)*);
+    }};
+}
+
 mod adapters;
 mod build;
 mod cli;
@@ -30,31 +61,32 @@ fn main() {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
 
+    // A panic anywhere is a V2 bug: one line on stderr, exit 101 (6.5). The write can't fail
+    // into a second panic.
+    std::panic::set_hook(Box::new(|info| {
+        let _ = writeln!(std::io::stderr().lock(), "v2: internal error: {}", panic_message(info));
+    }));
+
     let invocation = match cli::parse(&args) {
         Ok(inv) => inv,
         Err(cli::UsageError(msg)) => {
-            eprintln!("v2: {msg}");
-            eprintln!("run `v2 --help` for usage");
+            stderrln!("v2: {msg}");
+            stderrln!("run `v2 --help` for usage");
             exit(EXIT_USAGE);
         }
     };
 
     match invocation.command {
         Command::Help => {
-            print!("{}", cli::HELP);
+            stdout!("{}", cli::HELP);
             exit(0);
         }
         Command::Version => {
-            println!("{}", cli::version_line());
+            stdoutln!("{}", cli::version_line());
             exit(0);
         }
         _ => {}
     }
-
-    // A panic anywhere is a V2 bug: one line on stderr, exit 101 (6.5).
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("v2: internal error: {}", panic_message(info));
-    }));
 
     let watchdog = engines::session::Watchdog::start();
     let interpreter = std::thread::Builder::new()
@@ -64,26 +96,78 @@ fn main() {
     let code = match interpreter {
         Ok(handle) => handle.join().unwrap_or(EXIT_PANIC),
         Err(e) => {
-            eprintln!("v2: internal error: cannot start the interpreter thread: {e}");
+            stderrln!("v2: internal error: cannot start the interpreter thread: {e}");
             EXIT_PANIC
         }
     };
     watchdog.stop();
+    // An interrupt that came while the run was ending still ends it with 130 (6.5).
+    if engines::session::interrupted() {
+        engines::session::exit_interrupted();
+    }
     exit(code);
 }
 
 /// Runs on the interpreter thread and returns the process exit code.
 fn run(invocation: Invocation) -> i32 {
+    // Debug builds only: a deliberate panic for the exit-101 test (INTERNALS 22.2).
+    #[cfg(debug_assertions)]
+    if std::env::var_os("V2_TEST_PANIC").is_some() {
+        panic!("V2_TEST_PANIC is set");
+    }
+    let flags = &invocation.flags;
     let what = match invocation.command {
-        Command::Script { file, args } => return runtime::run_script(&file, args),
-        Command::RunProject { .. } => "`v2 run`",
-        Command::Check { .. } => "`v2 check`",
+        Command::Script { file, args } => {
+            // Config is loaded before the script is parsed (ch. 18); errors exit 2.
+            if let Err(code) = load_config(&folder_of(&file), flags) {
+                return code;
+            }
+            return runtime::run_script(&file, args);
+        }
+        Command::RunProject { args } => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let Some(root) = config::find_root(&cwd) else {
+                stderrln!("v2: no v2.toml found in {} or its parents", cwd.display());
+                return EXIT_USAGE;
+            };
+            let cfg = match load_config(&cwd, flags) {
+                Ok(c) => c,
+                Err(code) => return code,
+            };
+            let Some(entry) = cfg.entry else {
+                stderrln!("v2: {} has no [project] entry", root.join("v2.toml").display());
+                return EXIT_USAGE;
+            };
+            return runtime::run_script(&entry.value.to_string_lossy(), args);
+        }
+        Command::Check { file } => {
+            return match load_config(&folder_of(&file), flags) {
+                Ok(cfg) => doctor::check(&file, &cfg),
+                Err(code) => code,
+            };
+        }
         Command::Doctor { .. } => "`v2 doctor`",
         Command::CacheClean => "`v2 cache clean`",
         Command::Help | Command::Version => unreachable!("handled in main"),
     };
-    eprintln!("v2: {what} is not implemented yet in this build");
+    stderrln!("v2: {what} is not implemented yet in this build");
     EXIT_USAGE
+}
+
+/// The folder a script lives in (its config's start folder, 18.1).
+fn folder_of(file: &str) -> std::path::PathBuf {
+    match std::path::Path::new(file).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    }
+}
+
+/// Load the configuration, or print the error and give exit code 2 (18.5).
+fn load_config(start: &std::path::Path, flags: &cli::Flags) -> Result<config::Config, i32> {
+    config::load(start, flags).map_err(|e| {
+        stderrln!("{}", e.0);
+        EXIT_USAGE
+    })
 }
 
 fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {

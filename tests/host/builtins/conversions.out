@@ -1,0 +1,23 @@
+5 2 3 1 0
+null bool int float str bytes list dict func func error
+3.5 [1, "a"] null! plain
+3 -3 42 7 0 1 9223372036854775807
+3.0 2.5 1000.0 inf -inf nan 0.0
+false false false true false true
+[0, 1, 2, 3] [2, 3, 4] [10, 7, 4, 1] [0, 4, 8] [] []
+[0, 1, 2] [1, 2] [2, 5]
+ValueError: invalid int: 'abc'
+ValueError: invalid int: '1_000'
+ValueError: int out of range: '99999999999999999999'
+ValueError: cannot convert 1e300 to int
+ValueError: cannot convert nan to int
+TypeError: int() can't convert list
+ValueError: invalid float: 'x1'
+TypeError: float() can't convert null
+TypeError: len() needs a str, bytes, list or dict, got int
+ValueError: range() step must not be zero
+TypeError: range() argument 'end' must be an int, got float
+ArityError: range() missing required argument 'end'
+TypeError: range() argument 'start' must be an int, got str
+ValueError: range too large
+ArityError: type() missing required argument 'x'

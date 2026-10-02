@@ -1,0 +1,4 @@
+// exit: 2
+// stderr: v2.toml: config error: [engines.py] call_timeout: expected a non-negative number, got string "5 seconds"
+// R48: an invalid v2.toml exits 2 before anything runs (INTERNALS 18.5).
+print("never printed")

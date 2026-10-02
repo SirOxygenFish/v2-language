@@ -24,3 +24,10 @@ print(first == second)
 show(lambda() {
     import "./errors.v2" as me
 })
+// A failed module never runs again: importing a cycle member re-raises its stored error.
+show(lambda() {
+    import "./fixtures/cyc_a.v2" as a
+})
+show(lambda() {
+    import "./fixtures/cyc_b.v2" as b
+})

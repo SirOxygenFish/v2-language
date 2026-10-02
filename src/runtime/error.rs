@@ -55,6 +55,8 @@ pub enum Flow {
     Return(Value),
     Break,
     Continue,
+    /// `exit(code)`: caught by nothing, and no `finally` runs (5.8).
+    Exit(i32),
 }
 
 pub type Exec<T> = Result<T, Flow>;
