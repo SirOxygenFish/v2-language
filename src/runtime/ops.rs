@@ -73,6 +73,8 @@ fn eq_at(a: &Value, b: &Value, depth: usize) -> Exec<bool> {
             _ => Func::ptr_eq(x, y),
         },
         (Value::Error(x), Value::Error(y)) => Rc::ptr_eq(x, y),
+        // The same foreign object: same session and id (11.6).
+        (Value::Handle(x), Value::Handle(y)) => x.same(y),
         _ => false,
     })
 }
@@ -146,10 +148,19 @@ fn overflow<T>(op: &str) -> Exec<T> {
 
 fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
     let mut msg = format!("unsupported operand types for {op}: '{}' and '{}'", a.type_name(), b.type_name());
-    if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
+    if is_handle(a) || is_handle(b) {
+        msg.push_str(HANDLE_HINT);
+    } else if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
         msg.push_str(" — use f\"...${x}\" or str(x)");
     }
     type_error(msg)
+}
+
+/// What a TypeError about a handle operand adds (11.7, D28).
+pub const HANDLE_HINT: &str = " — do it inside a block, or convert it with value(h) first";
+
+pub fn is_handle(v: &Value) -> bool {
+    matches!(v, Value::Handle(_))
 }
 
 /// `count` copies of a sequence of `len` items: the size is checked and the buffer reserved

@@ -10,10 +10,10 @@ use indexmap::IndexMap;
 use super::builtins::BuiltinDef;
 use super::env::Env;
 use super::error::ErrorValue;
+use crate::engines::handles::HandleRef;
 use crate::syntax::ast::FuncDecl;
 
 /// A V2 value. Cloning is O(1): lists and dicts are shared, everything else is immutable (5.1).
-/// Handles arrive with Phase 1.
 #[derive(Clone)]
 pub enum Value {
     Null,
@@ -25,6 +25,8 @@ pub enum Value {
     List(List),
     Dict(Dict),
     Func(Func),
+    /// An object that lives in a worker (ch. 11).
+    Handle(Rc<HandleRef>),
     Error(Rc<ErrorValue>),
 }
 
@@ -191,6 +193,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Dict(_) => "dict",
             Value::Func(_) => "func",
+            Value::Handle(_) => "handle",
             Value::Error(_) => "error",
         }
     }
@@ -206,7 +209,7 @@ impl Value {
             Value::Bytes(b) => !b.is_empty(),
             Value::List(l) => !l.borrow().is_empty(),
             Value::Dict(d) => !d.borrow().is_empty(),
-            Value::Func(_) | Value::Error(_) => true,
+            Value::Func(_) | Value::Handle(_) | Value::Error(_) => true,
         }
     }
 }
@@ -276,6 +279,7 @@ impl fmt::Debug for Value {
             Value::List(l) => write!(f, "<list of {}>", l.try_borrow().map_or(0, |l| l.len())),
             Value::Dict(d) => write!(f, "<dict of {}>", d.try_borrow().map_or(0, |d| d.len())),
             Value::Func(c) => write!(f, "<func {}>", c.name()),
+            Value::Handle(h) => write!(f, "<{} {}>", h.tag, h.type_name),
             Value::Error(e) => write!(f, "<error {}: {}>", e.kind, e.message),
         }
     }

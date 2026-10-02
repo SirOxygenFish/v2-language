@@ -149,6 +149,26 @@ impl SourceMap {
         (line_idx as u32 + 1, col)
     }
 
+    /// The file loaded from a canonical path, if any.
+    pub fn id_of(&self, path: &Path) -> Option<FileId> {
+        self.by_path.get(path).copied()
+    }
+
+    /// A one-character span at a 1-based line and column (in chars), if the file has them:
+    /// where a foreign frame points (10.3, 12.6).
+    pub fn span_at(&self, id: FileId, line: u32, col: u32) -> Option<Span> {
+        let f = self.file(id);
+        let start = *f.line_starts.get((line as usize).checked_sub(1)?)? as usize;
+        let text = self.line_text(id, line);
+        let (offset, c) = text.char_indices().nth((col as usize).checked_sub(1)?).unwrap_or((text.len(), ' '));
+        if offset == text.len() && col as usize != text.chars().count() + 1 {
+            return None;
+        }
+        let lo = (start + offset) as u32;
+        let hi = if offset < text.len() { lo + c.len_utf8() as u32 } else { lo };
+        Some(Span { file: id, lo, hi, line, col })
+    }
+
     /// The text of a 1-based line, without its line break.
     pub fn line_text(&self, id: FileId, line: u32) -> &str {
         let f = self.file(id);
