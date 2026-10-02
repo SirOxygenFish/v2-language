@@ -10,9 +10,10 @@ use serde_json::{json, Map, Value as Json};
 /// The largest frame either side may send: 64 MiB (9.1, D72).
 pub const MAX_FRAME: usize = 64 << 20;
 
-/// Bracket nesting a frame may have before it is parsed: 256 value levels plus the envelope
-/// (10.5). Deeper input is refused before serde_json, whose recursion this bounds.
-const MAX_FRAME_NESTING: usize = 256 + 8;
+/// Bracket nesting a frame may have before it is parsed (10.1). It only bounds serde_json's
+/// recursion; the codec enforces the 256 value levels of 10.5, which `dict` and `error` tags
+/// spread over more brackets.
+const MAX_FRAME_NESTING: usize = 1000;
 
 #[derive(Debug)]
 pub enum ReadErr {
@@ -178,7 +179,7 @@ fn nesting(line: &[u8], limit: usize) -> usize {
 /// A line as a JSON object, or what is wrong with it.
 fn object(line: &[u8]) -> Result<Map<String, Json>, String> {
     if nesting(line, MAX_FRAME_NESTING) > MAX_FRAME_NESTING {
-        return Err("value nested deeper than 256 levels".into());
+        return Err(format!("JSON nested deeper than {MAX_FRAME_NESTING} levels"));
     }
     let mut de = serde_json::Deserializer::from_slice(line);
     de.disable_recursion_limit();
@@ -425,8 +426,13 @@ mod tests {
         assert_eq!(parse_frame(b"[1]", c), Err("a line that is not a JSON object".into()));
         assert!(parse_frame(b"{\"t\":\"out\",\"stream\":\"stdout\",\"text\":\"\xff\"}", c).unwrap_err().starts_with("not valid JSON"));
         assert!(parse_frame(br#"{"t":"out","stream":"stdout","text":"\ud800"}"#, c).unwrap_err().starts_with("not valid JSON"));
-        let deep = format!("{{\"t\":\"ret\",\"id\":1,\"value\":{}{}}}", "[".repeat(300), "]".repeat(300));
-        assert_eq!(parse_frame(deep.as_bytes(), c), Err("value nested deeper than 256 levels".into()));
+        // The byte scan only bounds the parser (10.1); the codec enforces 256 value levels.
+        let deep = format!("{{\"t\":\"ret\",\"id\":1,\"value\":{}{}}}", "[".repeat(1000), "]".repeat(1000));
+        assert_eq!(parse_frame(deep.as_bytes(), c), Err("JSON nested deeper than 1000 levels".into()));
+        let scanned = format!("{{\"t\":\"ret\",\"id\":1,\"value\":{}{}}}", "[".repeat(998), "]".repeat(998));
+        // Frames are parsed on the interpreter thread and its 256 MiB stack (1.3).
+        let parsed = std::thread::Builder::new().stack_size(64 << 20).spawn(move || parse_frame(scanned.as_bytes(), c).is_ok());
+        assert!(parsed.unwrap().join().unwrap());
         let ok = format!("{{\"t\":\"ret\",\"id\":1,\"value\":{}{}}}", "[".repeat(256), "]".repeat(256));
         assert!(parse_frame(ok.as_bytes(), c).is_ok());
         assert_eq!(
@@ -444,5 +450,32 @@ mod tests {
         );
         let long = protocol_error("js", "w", &[b'a'; 200]);
         assert!(long.ends_with(&format!("(got: {}…)", "a".repeat(80))), "{long}");
+    }
+
+    #[test]
+    fn brackets_inside_strings_do_not_count() {
+        let c = Caps::default();
+        for raw in [format!("\\\"{}", "[".repeat(300)), format!("{}\\\\", "{".repeat(300))] {
+            let line = format!("{{\"t\":\"out\",\"stream\":\"stdout\",\"text\":\"{raw}\"}}");
+            let text: String = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
+            assert_eq!(parse_frame(line.as_bytes(), c), Ok(Frame::Out { stream: Stream::Stdout, text }), "{raw}");
+        }
+    }
+
+    #[test]
+    fn trailing_characters_are_fatal() {
+        assert_eq!(
+            parse_frame(br#"{"t":"out","stream":"stdout","text":"a"} {"t":"bye"}"#, Caps::default()),
+            Err("not valid JSON (trailing characters)".into())
+        );
+    }
+
+    #[test]
+    fn exactly_64_mib_goes_out() {
+        let overhead = serde_json::to_vec(&json!({"t": "ret", "id": 1, "value": ""})).unwrap().len();
+        let mut sink = Vec::new();
+        write_frame(&mut sink, &json!({"t": "ret", "id": 1, "value": "z".repeat(MAX_FRAME - overhead)})).expect("exactly the limit is sent");
+        assert_eq!(sink.len(), MAX_FRAME + 1);
+        assert_eq!(too_big_message("py", MAX_FRAME + 1), "value too large to send to engine 'py' (65 MiB, limit 64 MiB)");
     }
 }

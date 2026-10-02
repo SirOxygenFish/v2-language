@@ -216,4 +216,14 @@ mod tests {
             assert_eq!(ts_strips(v), want, "{v}");
         }
     }
+
+    #[test]
+    fn install_hints_are_7_8s_table() {
+        let (py, node) = match std::env::consts::OS {
+            "windows" => ("winget install -e --id Python.Python.3.12", "winget install -e --id OpenJS.NodeJS.LTS"),
+            "macos" => ("brew install python", "brew install node"),
+            _ => ("sudo apt install python3 / sudo dnf install python3", "https://nodejs.org (distro packages may be older than 18, or than 22.13 for ts)"),
+        };
+        assert_eq!((install_hint("py"), install_hint("js"), install_hint("ts")), (py, node, node));
+    }
 }

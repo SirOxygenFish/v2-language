@@ -161,7 +161,7 @@ fn handshake_failures() {
         (
             |w| w.send(json!({"t":"hello","vep":2,"engine":"py","impl":"x","version":"1","pid":1,"caps":[]})),
             "ProtocolError",
-            "engine 'py' broke the protocol: speaks VEP/2; this V2 speaks VEP/1",
+            "engine 'py' speaks VEP/2; this V2 speaks VEP/1",
         ),
         (|w| w.hello("3.6.8"), "EngineNotFound", "Python 3.6.8 at python is too old (needs 3.8+)"),
         (
@@ -477,6 +477,27 @@ fn worker_main() {
             w.recv_t("bye");
             std::thread::sleep(Duration::from_secs(20));
         }
+        "idle_exit" => {
+            w.start();
+            std::process::exit(5);
+        }
+        // Exit output larger than a pipe buffer (8.7).
+        "bye_flood" => {
+            w.start();
+            w.recv_t("bye");
+            let text = "x".repeat(16 << 10);
+            for _ in 0..64 {
+                w.send(json!({"t":"out","stream":"stdout","text":text}));
+            }
+            std::process::exit(0);
+        }
+        "hang_after_reverse" => {
+            w.start();
+            let f = w.recv_t("call");
+            w.send(json!({"t":"call","id":1,"target":{"fn":f["args"][0]["id"]},"args":[],"kwargs":{}}));
+            w.recv_t("ret");
+            std::thread::sleep(Duration::from_secs(20));
+        }
         "placeholder" => std::process::exit(9009),
         other => panic!("unknown worker script {other}"),
     }
@@ -592,4 +613,395 @@ fn a_spawn_failure_is_engine_not_found_every_time() {
     let s = it.sessions.len() - 1;
     let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
     assert_eq!(again.message, e.message);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mutation kills
+
+fn interp_cfg(cfg: Config) -> (Interp, Rc<RefCell<Vec<u8>>>) {
+    let reg = Registry::new(Rc::new(cfg), Box::new(NoProbe), Lookup::default(), ProbeCache::off());
+    let mut it = Interp::new(SourceMap::new(), HashMap::new(), 2 << 20, reg);
+    it.sm.add(PathBuf::from("C:/proj/main.v2"), "main.v2".into(), "x\n");
+    let (out, buf) = Out::capture();
+    it.out = out;
+    (it, buf)
+}
+
+fn js() -> Rc<ResolvedEngine> {
+    let spec = builtins().into_iter().nth(1).map(Rc::new).unwrap();
+    Rc::new(ResolvedEngine { spec, origin: Origin::Path, argv: vec!["node".into()], version: Some(Version(24, 11, 1)), skipped: Vec::new(), ts: None })
+}
+
+fn scripted_engine(it: &mut Interp, engine: Rc<ResolvedEngine>, script: impl FnOnce(PipeWorker) + Send + 'static) -> (SessionId, JoinHandle<()>) {
+    let (host_r, worker_w) = std::io::pipe().unwrap();
+    let (worker_r, host_w) = std::io::pipe().unwrap();
+    let t = std::thread::spawn(move || script(Worker { r: FrameReader::new(worker_r), w: worker_w }));
+    let s = it.attach_session(engine, Box::new(host_r), Box::new(host_w), None, no_timeouts());
+    (s, t)
+}
+
+#[test]
+fn init_paths_deduplicated_for_py_empty_for_js() {
+    let mut cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
+    let paths = vec![PathBuf::from("C:/proj"), PathBuf::from("C:/proj/lib"), PathBuf::from("C:/proj/lib")];
+    cfg.python_paths = Some(Sourced { value: paths, from: crate::config::ConfigSource::Default });
+    let (mut it, _) = interp_cfg(cfg);
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.hello("3.8.0"); // the minimum itself is fine (8.4)
+        let init = w.recv_t("init");
+        assert_eq!(init["paths"], json!(["C:/proj", "C:/proj/lib"]), "ordered, de-duplicated (9.3)");
+        w.ret(&init, Json::Null);
+        w.recv_t("bye");
+    });
+    let (j, tj) = scripted_engine(&mut it, js(), |mut w| {
+        w.send(json!({"t":"hello","vep":1,"engine":"js","impl":"node","version":"24.11.1","pid":7,"caps":["modules","handles","reverse"]}));
+        let init = w.recv_t("init");
+        assert_eq!(init["paths"], json!([]), "js: [] (9.3)");
+        w.ret(&init, Json::Null);
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).expect("py ready");
+    it.handshake(j, at()).expect("js ready");
+    it.shutdown_sessions();
+    t.join().unwrap();
+    tj.join().unwrap();
+}
+
+/// The host's end of a pipe that also logs, per session, each `bye` written to it.
+struct LogBye {
+    name: &'static str,
+    log: Rc<RefCell<Vec<&'static str>>>,
+    w: std::io::PipeWriter,
+}
+
+impl Write for LogBye {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if b.windows(9).any(|x| x == br#""t":"bye""#) {
+            self.log.borrow_mut().push(self.name);
+        }
+        self.w.write(b)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.w.flush()
+    }
+}
+
+#[test]
+fn shutdown_is_newest_first() {
+    let (mut it, stdout) = interp();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut threads = Vec::new();
+    for (name, text) in [("older", "a\n"), ("newer", "b\n")] {
+        let (host_r, worker_w) = std::io::pipe().unwrap();
+        let (worker_r, host_w) = std::io::pipe().unwrap();
+        threads.push(std::thread::spawn(move || {
+            let mut w = Worker { r: FrameReader::new(worker_r), w: worker_w };
+            w.start();
+            w.recv_t("bye");
+            w.send(json!({"t":"out","stream":"stdout","text":text}));
+        }));
+        let writer = LogBye { name, log: log.clone(), w: host_w };
+        let s = it.attach_session(py(), Box::new(host_r), Box::new(writer), None, no_timeouts());
+        it.handshake(s, at()).unwrap();
+    }
+    it.shutdown_sessions();
+    assert_eq!(*log.borrow(), ["newer", "older"], "bye goes newest first (8.7)");
+    let out = String::from_utf8_lossy(&stdout.borrow()).into_owned();
+    assert!(out.len() == 4 && out.contains("a\n") && out.contains("b\n"), "both drained: {out:?}");
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
+#[test]
+fn exit_output_is_kept_next_to_a_worker_that_ignores_bye() {
+    let _serial = crate::engines::process::tests::serial();
+    // The drain reads every worker at once: one that ignores `bye` cannot block another's
+    // exit output behind a full pipe (8.7).
+    let (mut it, stdout) = interp();
+    start(&mut it, "bye_flood", no_timeouts()).expect("started");
+    start(&mut it, "ignore_bye", no_timeouts()).expect("started");
+    it.shutdown_sessions();
+    assert_eq!(stdout.borrow().len(), 64 * (16 << 10));
+}
+
+static REENTER: BuiltinDef = BuiltinDef { name: "reenter", params: &[], f: reenter };
+static SWALLOW: BuiltinDef = BuiltinDef { name: "swallow", params: &[], f: swallow };
+
+/// A V2 callback that calls the worker that called it, and lets its error through.
+fn reenter(it: &mut Interp, _: Vec<Value>, at: Span) -> Exec<Value> {
+    it.request(0, call("inner"), "a call to 'inner'", at).map(|r| r.value)
+}
+
+/// The same, but it catches the error.
+fn swallow(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
+    let _ = reenter(it, args, at);
+    Ok(Value::Null)
+}
+
+#[test]
+fn a_failure_inside_a_callback_reaches_the_outer_call() {
+    // The nested request to the same worker breaks the protocol and kills the session; the
+    // outer call gets that error, or 8.2's "not running" when V2 code caught it (8.6).
+    for (f, kind, message) in [
+        (&REENTER, "ProtocolError", "engine 'py' broke the protocol: not valid JSON"),
+        (&SWALLOW, "EngineCrashed", "engine 'py' is not running (stopped earlier: broke the protocol); engines are not restarted"),
+    ] {
+        let (mut it, _) = interp();
+        let (s, t) = scripted(&mut it, |mut w| {
+            w.start();
+            let c = w.recv_t("call");
+            w.send(json!({"t":"call","id":1,"target":{"fn":c["args"][0]["id"]},"args":[],"kwargs":{}}));
+            w.recv_t("call");
+            w.raw(b"garbage\n");
+            let _ = w.r.read_line();
+        });
+        it.handshake(s, at()).unwrap();
+        let frame = call_with(&mut it, s, &func(f));
+        let e = err_of(it.request(s, frame, "a call to 'apply'", at()));
+        assert_eq!((&*e.kind, e.message.split(" (expected").next().unwrap()), (kind, message));
+        t.join().unwrap();
+    }
+}
+
+static BIG_FN: BuiltinDef = BuiltinDef { name: "big_fn", params: &[], f: big_fn };
+
+fn big_fn(_: &mut Interp, _: Vec<Value>, _: Span) -> Exec<Value> {
+    Ok(Value::list(vec![func(&ADD), Value::str(&"z".repeat(vep::MAX_FRAME))]))
+}
+
+#[test]
+fn a_reply_too_big_to_send_gives_its_callables_back() {
+    // The `fn` tag in a reply that was never sent holds no count (10.1, 11.8).
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        w.send(json!({"t":"call","id":1,"target":{"fn":c["args"][0]["id"]},"args":[],"kwargs":{}}));
+        assert_eq!(w.recv_t("err")["error"]["type"], "MarshalError");
+        w.ret(&c, Json::Null);
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let frame = call_with(&mut it, s, &func(&BIG_FN));
+    it.request(s, frame, "a call to 'apply'", at()).unwrap();
+    let table = &it.sessions[s].callables;
+    assert_eq!((table.count(1), table.count(2)), (1, 0), "big_fn was sent, add never was");
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn foreign_errors_keep_their_type_as_foreign_type() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        w.send(json!({"t":"err","id":c["id"],"error":{"type":"ZeroDivisionError","message":"division by zero","foreign_type":"ZeroDivisionError","trace":[]}}));
+        let c = w.recv_t("call");
+        w.send(json!({"t":"err","id":c["id"],"error":{"type":"KeyError","message":"'k'","foreign_type":"KeyError","trace":[]}}));
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let e = err_of(it.request(s, call("ratio"), "a call to 'ratio'", at()));
+    assert_eq!((&*e.kind, &*e.message, e.foreign_type.as_deref(), e.lang.as_deref()), ("ForeignError", "division by zero", Some("ZeroDivisionError"), Some("py")));
+    let e = err_of(it.request(s, call("get"), "a call to 'get'", at()));
+    assert_eq!((&*e.kind, e.foreign_type.as_deref(), e.lang.as_deref()), ("KeyError", Some("KeyError"), Some("py")));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn a_line_over_64_mib_after_hello() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        w.recv_t("call");
+        let mut big = vec![b'x'; vep::MAX_FRAME + 1];
+        big.push(b'\n');
+        let _ = w.w.write_all(&big); // the host stops reading once the line passes the limit
+    });
+    it.handshake(s, at()).unwrap();
+    let e = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!((&*e.kind, &*e.message), ("ProtocolError", "frame from engine 'py' exceeds 64 MiB"));
+    let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: broke the protocol); engines are not restarted");
+    t.join().unwrap();
+}
+
+static BIG: BuiltinDef = BuiltinDef { name: "big", params: &[], f: big };
+
+fn big(_: &mut Interp, _: Vec<Value>, _: Span) -> Exec<Value> {
+    Ok(Value::str(&"z".repeat(vep::MAX_FRAME)))
+}
+
+#[test]
+fn a_callback_result_too_big_is_an_err_to_the_worker() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        w.send(json!({"t":"call","id":1,"target":{"fn":c["args"][0]["id"]},"args":[],"kwargs":{}}));
+        let r = w.recv_t("err");
+        assert_eq!(r["error"]["type"], "MarshalError");
+        assert_eq!(r["error"]["message"], "value too large to send to engine 'py' (65 MiB, limit 64 MiB)");
+        w.ret(&c, json!("still usable"));
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let frame = call_with(&mut it, s, &func(&BIG));
+    let r = it.request(s, frame, "a call to 'apply'", at()).expect("the session survives");
+    assert!(matches!(r.value, Value::Str(v) if &*v == "still usable"));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+static NEST: BuiltinDef = BuiltinDef { name: "nest", params: &[], f: nest };
+
+/// A V2 callback that calls back into the worker that called it.
+fn nest(it: &mut Interp, _: Vec<Value>, at: Span) -> Exec<Value> {
+    match it.request(0, call("inner"), "a call to 'inner'", at) {
+        Err(Flow::Error(e)) => Ok(Value::str(&e.kind)),
+        Ok(_) => Ok(Value::str("no limit")),
+        Err(f) => Err(f),
+    }
+}
+
+#[test]
+fn a_served_call_counts_as_a_crossing() {
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        // Crossing 63 is the host's call, 64 this callback: its own call out would be the 65th.
+        w.send(json!({"t":"call","id":1,"target":{"fn":c["args"][0]["id"]},"args":[],"kwargs":{}}));
+        let r = w.recv_t("ret");
+        assert_eq!(r["value"], "RecursionError");
+        w.ret(&c, Json::Null);
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let frame = call_with(&mut it, s, &func(&NEST));
+    it.xdepth = MAX_XDEPTH - 2;
+    it.request(s, frame, "a call to 'apply'", at()).unwrap();
+    it.xdepth = 0;
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn an_init_err_of_any_type_kills_the_worker() {
+    // 8.4: `init` answered with `err` -> kill, EngineCrashed "failed to start", whatever its type.
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.hello("3.12.1");
+        let init = w.recv_t("init");
+        w.send(json!({"t":"err","id":init["id"],"error":{"type":"ProtocolError","message":"no init here","trace":[]}}));
+        let _ = w.r.read_line();
+    });
+    let e = err_of(it.handshake(s, at()));
+    let state = format!("{:?}", it.sessions[s].state);
+    assert_eq!((&*e.kind, &*e.message, state.starts_with("Dead")), ("EngineCrashed", "engine 'py' failed to start: no init here", true), "{state}");
+    t.join().unwrap();
+}
+
+#[test]
+fn a_death_while_idle_is_noticed_at_the_next_use() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let s = start(&mut it, "idle_exit", no_timeouts()).expect("started");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while it.sessions[s].child.as_ref().and_then(ChildProc::exited).is_none() {
+        assert!(Instant::now() < deadline, "the worker did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let e = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!((&*e.kind, &*e.message), ("EngineCrashed", "engine 'py' exited while idle (exit code 5)"));
+    let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: exited with code 5 at main.v2:1); engines are not restarted");
+}
+
+#[test]
+fn the_timer_runs_again_after_a_reverse_call() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let timeouts = Timeouts { startup: Some(Duration::from_secs(30)), call: Some(Duration::from_millis(300)) };
+    let s = start(&mut it, "hang_after_reverse", timeouts).expect("started");
+    let frame = call_with(&mut it, s, &func(&SLEEPY));
+    let started = Instant::now();
+    let e = err_of(it.request(s, frame, "a call to 'reverse'", at()));
+    assert_eq!((&*e.kind, &*e.message), ("EngineTimeout", "a call to 'reverse' in engine 'py' exceeded call_timeout (0.3 s); the engine was stopped"));
+    assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
+}
+
+#[test]
+fn the_grace_is_shared() {
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    start(&mut it, "ignore_bye", no_timeouts()).expect("started");
+    start(&mut it, "ignore_bye", no_timeouts()).expect("started");
+    let started = Instant::now();
+    it.shutdown_sessions();
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(1700), "one shared 1 s grace (8.7): {took:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_phrase() {
+    assert_eq!(exit_phrase(Some(&ExitInfo { code: None, signal: Some(9) })), "was killed by signal 9 (SIGKILL)");
+}
+
+#[test]
+fn node_modules_setting_comes_first() {
+    let mut cfg = Config { root: PathBuf::from("/proj"), ..Config::default() };
+    cfg.node_modules = Some(Sourced { value: PathBuf::from("/deps/node_modules"), from: crate::config::ConfigSource::Default });
+    let (_, env) = worker_command(&js(), &cfg, Path::new("/a.js"));
+    let node_path = env.iter().find(|(k, _)| k == "NODE_PATH").map(|(_, v)| v.clone()).unwrap();
+    assert_eq!(std::env::split_paths(&node_path).next(), Some(PathBuf::from("/deps/node_modules")));
+}
+
+/// A host process for `noise_before_hello_reaches_stderr`: does nothing unless `V2_HOST`.
+#[test]
+fn host_main() {
+    if std::env::var_os("V2_HOST").is_none() {
+        return;
+    }
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.raw(b"preload noise 7b1e\n");
+        w.start();
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn noise_before_hello_reaches_stderr() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args(["--exact", "engines::session::tests::host_main", "--nocapture", "--test-threads=1"])
+        .env("V2_HOST", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("preload noise 7b1e\n"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn a_handshake_at_depth_64_leaves_no_ready_session() {
+    // The init request is the 65th crossing: RecursionError, but the worker never got init.
+    let (mut it, _) = interp();
+    let (s, _t) = scripted(&mut it, |mut w| {
+        w.hello("3.12.1");
+        let _ = w.r.read_line();
+    });
+    it.xdepth = MAX_XDEPTH;
+    let e = err_of(it.handshake(s, at()));
+    it.xdepth = 0;
+    let state = format!("{:?}", it.sessions[s].state);
+    assert_eq!((&*e.kind, state.starts_with("Dead")), ("RecursionError", true), "{state}");
 }

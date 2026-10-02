@@ -77,7 +77,7 @@ pub struct Session {
     pub engine: Rc<ResolvedEngine>,
     pub state: State,
     child: Option<ChildProc>,
-    reader: Option<FrameReader<Box<dyn Read>>>,
+    reader: Option<FrameReader<Box<dyn Read + Send>>>,
     writer: Option<Box<dyn Write>>,
     pub hello: Option<Hello>,
     caps: Caps,
@@ -157,6 +157,10 @@ fn error(kind: &str, message: String) -> Flow {
     }
 }
 
+fn depth_error() -> Flow {
+    error("RecursionError", format!("cross-language call depth limit ({MAX_XDEPTH}) exceeded"))
+}
+
 impl Interp {
     /// Start a worker with `argv`/`env` and shake hands with it (8.3, 8.4).
     pub fn start_session(
@@ -167,6 +171,9 @@ impl Interp {
         timeouts: Timeouts,
         at: Span,
     ) -> Exec<SessionId> {
+        if self.xdepth >= MAX_XDEPTH {
+            return Err(self.raise(depth_error(), at));
+        }
         let key = engine.spec.session_of.clone().unwrap_or_else(|| engine.spec.id.clone());
         let spawned = ChildProc::spawn(&Spawn { argv, env, stdin: Pipe::Piped, stdout: Pipe::Piped, stderr: Pipe::Inherit });
         let mut child = match spawned {
@@ -178,7 +185,7 @@ impl Interp {
                 return Err(self.raise(Flow::Error(e), at));
             }
         };
-        let reader: Box<dyn Read> = Box::new(child.take_stdout().expect("piped stdout"));
+        let reader: Box<dyn Read + Send> = Box::new(child.take_stdout().expect("piped stdout"));
         let writer: Box<dyn Write> = Box::new(child.take_stdin().expect("piped stdin"));
         let s = self.new_session(key, engine, Some(reader), Some(writer), Some(child), timeouts);
         self.handshake(s, at)?;
@@ -189,7 +196,7 @@ impl Interp {
     pub fn attach_session(
         &mut self,
         engine: Rc<ResolvedEngine>,
-        reader: Box<dyn Read>,
+        reader: Box<dyn Read + Send>,
         writer: Box<dyn Write>,
         child: Option<ChildProc>,
         timeouts: Timeouts,
@@ -202,7 +209,7 @@ impl Interp {
         &mut self,
         key: Rc<str>,
         engine: Rc<ResolvedEngine>,
-        reader: Option<Box<dyn Read>>,
+        reader: Option<Box<dyn Read + Send>>,
         writer: Option<Box<dyn Write>>,
         child: Option<ChildProc>,
         timeouts: Timeouts,
@@ -300,8 +307,8 @@ impl Interp {
             let line = match self.sessions[s].reader.as_mut().map(FrameReader::read_line) {
                 Some(Ok(Some(line))) => line,
                 Some(Err(ReadErr::TooLong)) => {
-                    let flow = self.protocol_violation(s, "a line over 64 MiB", b"");
-                    return Err(self.raise(flow, at));
+                    self.kill_session(s, DeadReason::Protocol);
+                    return Err(self.raise(error("ProtocolError", format!("frame from engine '{tag}' exceeds 64 MiB")), at));
                 }
                 _ => {
                     let flow = self.worker_gone(s, &startup, at);
@@ -321,6 +328,11 @@ impl Interp {
                         Some(t) if t != "hello" => {
                             self.kill_session(s, DeadReason::Protocol);
                             error("ProtocolError", format!("engine '{tag}' sent '{t}' before hello"))
+                        }
+                        // 9.3: `engine 'py' speaks VEP/2; this V2 speaks VEP/1`.
+                        _ if what.starts_with("speaks VEP/") => {
+                            self.kill_session(s, DeadReason::Protocol);
+                            error("ProtocolError", format!("engine '{tag}' {what}"))
                         }
                         _ => self.protocol_violation(s, &what, &line),
                     };
@@ -343,7 +355,6 @@ impl Interp {
         }
         self.sessions[s].caps = hello.caps;
         self.sessions[s].hello = Some(hello);
-        self.sessions[s].state = State::Ready;
         let root = self.registry.config().root.to_string_lossy().into_owned();
         let mut paths: Vec<String> = Vec::new();
         if &*spec.id == "py" {
@@ -355,27 +366,39 @@ impl Interp {
                 }
             }
         }
+        // The init request would be one crossing too many: the worker never gets going.
+        if self.xdepth >= MAX_XDEPTH {
+            drop(startup);
+            self.kill_session(s, DeadReason::Exited { exit: None, during: None, at: Some(at) });
+            return Err(self.raise(depth_error(), at));
+        }
         let init = vep::init(0, &root, &paths);
         match self.exchange(s, init, startup, at) {
-            Ok(_) => Ok(()),
-            Err(Flow::Error(e)) if !matches!(&*e.kind, "EngineTimeout" | "EngineCrashed" | "ProtocolError" | "RecursionError") => {
+            Ok(_) => {
+                self.sessions[s].state = State::Ready;
+                Ok(())
+            }
+            // The host already stopped it (timeout, crash, protocol): its error stands.
+            Err(f) if matches!(self.sessions[s].state, State::Dead(_)) => Err(f),
+            // `init` answered with `err`, whatever its type (8.4).
+            Err(Flow::Error(e)) => {
                 self.kill_session(s, DeadReason::Exited { exit: None, during: None, at: Some(at) });
                 let flow = error("EngineCrashed", format!("engine '{tag}' failed to start: {}", e.message));
                 Err(self.raise(flow, at))
             }
-            Err(f) => Err(f),
+            Err(f) => {
+                self.kill_session(s, DeadReason::Exited { exit: None, during: None, at: Some(at) });
+                Err(f)
+            }
         }
     }
 
-    /// The use of a session that is not running (8.2, 8.6).
-    fn check_alive(&mut self, s: SessionId, at: Span) -> Exec<()> {
+    /// 8.2's error for a session that has stopped; `None` while it runs.
+    fn not_running(&self, s: SessionId) -> Option<Flow> {
         let tag = self.tag(s);
         let why = match &self.sessions[s].state {
-            State::Ready | State::Busy(_) => None,
-            State::Dead(DeadReason::SpawnFailed(e)) => {
-                let e = Rc::new(ErrorValue::new(&e.kind, e.message.clone()));
-                return Err(self.raise(Flow::Error(e), at));
-            }
+            State::Ready | State::Busy(_) => return None,
+            State::Dead(DeadReason::SpawnFailed(e)) => return Some(Flow::Error(Rc::new(ErrorValue::new(&e.kind, e.message.clone())))),
             State::Dead(DeadReason::Exited { exit, during, at: place }) => {
                 let mut w = exit_phrase(exit.as_ref());
                 if let Some(d) = during {
@@ -391,9 +414,14 @@ impl Interp {
             State::Dead(DeadReason::Protocol) => Some("broke the protocol".into()),
             State::Handshaking | State::Closing | State::Closed => Some("shut down".into()),
         };
-        if let Some(why) = why {
-            let msg = format!("engine '{tag}' is not running (stopped earlier: {why}); engines are not restarted");
-            return Err(self.raise(error("EngineCrashed", msg), at));
+        why.map(|why| error("EngineCrashed", format!("engine '{tag}' is not running (stopped earlier: {why}); engines are not restarted")))
+    }
+
+    /// The use of a session that is not running (8.2, 8.6).
+    fn check_alive(&mut self, s: SessionId, at: Span) -> Exec<()> {
+        let tag = self.tag(s);
+        if let Some(flow) = self.not_running(s) {
+            return Err(self.raise(flow, at));
         }
         // A death while idle is noticed at the next use (8.6).
         let idle_exit = if self.sessions[s].pending.is_empty() { self.sessions[s].child.as_ref().and_then(ChildProc::exited) } else { None };
@@ -418,7 +446,12 @@ impl Interp {
                 vep::write_frame(w.as_mut(), &vep::release(&ids))?;
             }
         }
-        vep::write_frame(w.as_mut(), frame)
+        let sent = vep::write_frame(w.as_mut(), frame);
+        if let Err(WriteErr::TooBig(_)) = sent {
+            // Nothing went out, so the `fn` tags it carried were never sent (10.1, 11.8).
+            session.callables.release(&crate::codec::vep::fn_ids(frame));
+        }
+        sent
     }
 
     /// A request to the worker (`load`, `module`, `call`, `op`) and its reply, serving the
@@ -432,8 +465,7 @@ impl Interp {
 
     fn exchange(&mut self, s: SessionId, mut frame: Json, mut pending: Pending, at: Span) -> Exec<Reply> {
         if self.xdepth >= MAX_XDEPTH {
-            let flow = error("RecursionError", format!("cross-language call depth limit ({MAX_XDEPTH}) exceeded"));
-            return Err(self.raise(flow, at));
+            return Err(self.raise(depth_error(), at));
         }
         let session = &mut self.sessions[s];
         session.next_id += 1;
@@ -582,7 +614,7 @@ impl Interp {
             t.pause();
         }
         let result = match target {
-            _ if self.xdepth >= MAX_XDEPTH => fail("RecursionError", format!("cross-language call depth limit ({MAX_XDEPTH}) exceeded")),
+            _ if self.xdepth >= MAX_XDEPTH => Err(depth_error()),
             Target::Fn(n) => match self.sessions[s].callables.get(n) {
                 Some(f) => {
                     self.xdepth += 1;
@@ -595,8 +627,17 @@ impl Interp {
             // Routes of inner `@import`s arrive in roadmap 1.7; until then no worker has one.
             Target::Route(n) => fail("ProtocolError", format!("unknown callable id {n}")),
         };
+        if let Err(Flow::Exit(code)) = result {
+            return Err(Flow::Exit(code));
+        }
+        // The session died inside the callback (a nested request to it failed): the callback's
+        // error, or 8.2's "not running", goes on up (8.6).
+        if matches!(self.sessions[s].state, State::Dead(_)) {
+            result?;
+            let flow = self.not_running(s).expect("a dead session");
+            return Err(self.raise(flow, at));
+        }
         let reply = match result {
-            Err(Flow::Exit(code)) => return Err(Flow::Exit(code)),
             Ok(v) => match self.wire(s).encode(&v, "the result") {
                 Ok(j) => vep::ret(c, j),
                 Err(Flow::Error(e)) => vep::err(c, self.error_payload(s, &e)),
@@ -605,9 +646,6 @@ impl Interp {
             Err(Flow::Error(e)) => vep::err(c, self.error_payload(s, &e)),
             Err(other) => return Err(other),
         };
-        if !matches!(self.sessions[s].state, State::Ready | State::Busy(_)) {
-            return Ok(()); // the session died inside the callback; the read reports it
-        }
         if let Err(e) = self.send(s, &reply) {
             let flow = match e {
                 WriteErr::TooBig(n) => {
@@ -639,7 +677,7 @@ impl Interp {
     fn gone_now(&mut self, s: SessionId, at: Span) -> Flow {
         match self.sessions[s].pending.pop() {
             Some(pending) => self.worker_gone(s, &pending, at),
-            None => error("EngineCrashed", format!("engine '{}' exited", self.tag(s))),
+            None => self.not_running(s).unwrap_or_else(|| error("EngineCrashed", format!("engine '{}' exited", self.tag(s)))),
         }
     }
 
@@ -703,11 +741,13 @@ impl Interp {
     }
 
     /// The orderly end (8.7): `bye` to every running session, newest first, then one shared
-    /// 1 s drain that forwards `out` frames, then the tree kill and reaping. After an interrupt
-    /// the watchdog kills the workers instead (6.5).
+    /// 1 s drain that forwards `out` frames from all of them as they come, then the tree kill
+    /// and reaping. After an interrupt the watchdog kills the workers instead (6.5).
     pub fn shutdown_sessions(&mut self) {
         process::stop_if_interrupted();
+        let (lines, rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
         let mut closing = Vec::new();
+        let mut open = 0;
         for s in (0..self.sessions.len()).rev() {
             if !matches!(self.sessions[s].state, State::Ready | State::Busy(_)) {
                 continue;
@@ -720,17 +760,37 @@ impl Interp {
             session.pending.clear();
             session.state = State::Closing;
             closing.push(s);
-        }
-        let deadline = Instant::now() + GRACE;
-        for s in closing {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let timer = self.timer(s, Some(left));
-            while let Some(Ok(Some(line))) = self.sessions[s].reader.as_mut().map(FrameReader::read_line) {
-                if let Ok(Frame::Out { stream, text }) = vep::parse_frame(&line, Caps::default()) {
-                    self.forward(stream, &text);
+            // Each worker's stdout is read on its own thread, so one that ignores `bye` cannot
+            // hold up another's exit output.
+            if let Some(mut reader) = session.reader.take() {
+                let lines = lines.clone();
+                let drain = move || {
+                    while let Ok(Some(line)) = reader.read_line() {
+                        if lines.send(Some(line)).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = lines.send(None);
+                };
+                if std::thread::Builder::new().name("v2-drain".into()).spawn(drain).is_ok() {
+                    open += 1;
                 }
             }
-            drop(timer);
+        }
+        let deadline = Instant::now() + GRACE;
+        while open > 0 {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
+            match rx.recv_timeout(left) {
+                Ok(Some(line)) => {
+                    if let Ok(Frame::Out { stream, text }) = vep::parse_frame(&line, Caps::default()) {
+                        self.forward(stream, &text);
+                    }
+                }
+                Ok(None) => open -= 1,
+                Err(_) => break,
+            }
+        }
+        for s in closing {
             self.sessions[s].stop();
             self.sessions[s].state = State::Closed;
         }
