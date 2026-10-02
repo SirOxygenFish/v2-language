@@ -3,6 +3,7 @@
 
 pub mod handles;
 pub mod imports;
+pub mod process;
 pub mod registry;
 pub mod resolve;
 pub mod runonly;

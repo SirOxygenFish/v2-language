@@ -19,14 +19,14 @@ macro_rules! stdoutln {
 macro_rules! stderr {
     ($($t:tt)*) => {{
         use std::io::Write as _;
-        $crate::engines::session::stop_if_interrupted();
+        $crate::engines::process::stop_if_interrupted();
         let _ = write!(std::io::stderr().lock(), $($t)*);
     }};
 }
 macro_rules! stderrln {
     ($($t:tt)*) => {{
         use std::io::Write as _;
-        $crate::engines::session::stop_if_interrupted();
+        $crate::engines::process::stop_if_interrupted();
         let _ = writeln!(std::io::stderr().lock(), $($t)*);
     }};
 }
@@ -88,7 +88,7 @@ fn main() {
         _ => {}
     }
 
-    let watchdog = engines::session::Watchdog::start();
+    let watchdog = engines::process::Watchdog::start();
     let interpreter = std::thread::Builder::new()
         .name("v2-interp".into())
         .stack_size(INTERP_STACK_BYTES)
@@ -102,8 +102,8 @@ fn main() {
     };
     watchdog.stop();
     // An interrupt that came while the run was ending still ends it with 130 (6.5).
-    if engines::session::interrupted() {
-        engines::session::exit_interrupted();
+    if engines::process::interrupted() {
+        engines::process::exit_interrupted();
     }
     exit(code);
 }

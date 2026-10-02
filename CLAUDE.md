@@ -66,6 +66,16 @@ it is loaded automatically into every session and every subagent.
   (`_exit(130)` on Unix). Handler only installed if the watchdog spawned; inherited SIG_IGN kept.
 - `ffi/cdecl` is done (parser needs it); rest of `ffi/`, `build/`, `engines/*` mostly empty.
 
+## Where I stopped (2026-10-02, usage limit)
+- Plan: `C:\Users\SirOxygen\.claude\plans\wild-wobbling-creek.md` (Phase 1 foundation = 1.0–1.3,
+  then report to the owner). 1.0 (`engines/process.rs`) is committed; its adversarial review
+  was stopped before finishing — re-run it, fix findings, then do 1.1.
+- 1.1 drafts (not yet in the repo): `%TEMP%\claude\C--Users-SirOxygen-Desktop-v2-language\
+  01e93e21-6252-4f4b-b948-9df871d7b845\scratchpad\draft11\` — spec.rs, resolve.rs (+
+  resolve_tests.rs to append), registry.rs, doctor_fn.rs, edit_harness.py (requires:/SKIP).
+  Still to write: interp/builtins/main/run_script wiring, exit 3, .v2 + run.rs tests, docs.
+- Node 24.11.1 is installed in WSL (`~/.local/node`, on PATH via `~/.local/bin`).
+
 ## Reminders for later phases
 - Interrupt path (6.5): once `INTERRUPTED` is set the interpreter prints nothing, runs no
   catch/finally, spawns nothing, and must NOT send `bye` (the watchdog kill_trees). When
