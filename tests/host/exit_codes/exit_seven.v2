@@ -1,0 +1,18 @@
+// exit: 7
+// R48: exit(7) ends the run with code 7; no catch or enclosing finally runs (INTERNALS 5.8, 6.5).
+func stop() {
+    try {
+        print("stopping")
+        exit(7)
+    } catch (e) {
+        print("never caught")
+    } finally {
+        print("never runs")
+    }
+}
+try {
+    stop()
+} finally {
+    print("never runs either")
+}
+print("never reached")

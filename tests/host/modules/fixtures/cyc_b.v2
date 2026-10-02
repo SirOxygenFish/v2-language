@@ -1,1 +1,2 @@
+print("cyc_b runs")
 import "./cyc_a.v2" as a

@@ -1,0 +1,16 @@
+// A RecursionError unwinds to the nearest catch, not the outermost (INTERNALS 5.9, ch. 21).
+func down(n) {
+    if n == 3000 {
+        try {
+            return down(n + 1)
+        } catch (e) {
+            return f"caught at ${n}: ${e.type}"
+        }
+    }
+    return down(n + 1)
+}
+try {
+    print(down(0))
+} catch (e) {
+    print("outer catch ran")
+}

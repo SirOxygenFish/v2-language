@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::syntax::ast::*;
-use crate::syntax::span::{display_path, FileId, LoadError, SourceMap};
+use crate::syntax::span::{absolute_clean, display_path, FileId, LoadError, SourceMap, Span};
 use crate::syntax::{check, lexer, parser, Diag};
 
 /// A static diagnostic of a module file, kept until an `import` of it runs (6.1 step 2).
@@ -59,6 +59,17 @@ pub fn resolve(sm: &SourceMap, importer: FileId, spec: &str) -> PathBuf {
     base.join(spec)
 }
 
+/// The file `import "spec"` in `importer` loads, canonical, or the `ImportError` message (6.4).
+/// A drive-relative Windows path (`C:m.v2`) is neither relative to the file nor absolute.
+pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
+    let p = Path::new(spec);
+    if matches!(p.components().next(), Some(std::path::Component::Prefix(_))) && !p.has_root() {
+        return Err(format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"));
+    }
+    let target = resolve(sm, importer, spec);
+    canonical(&target).ok_or_else(|| format!("cannot find module '{spec}' (looked for {})", shown(&target)))
+}
+
 /// `fs::canonicalize` without the `\\?\` prefix, or `None` when the file is missing.
 pub fn canonical(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok().map(|p| crate::syntax::span::strip_verbatim(&p))
@@ -67,41 +78,52 @@ pub fn canonical(path: &Path) -> Option<PathBuf> {
 /// 6.1 step 2: every file the `import` literals of `program` name, depth-first in source order.
 /// Missing files are skipped (their `import` fails when it runs).
 pub fn parse_graph(sm: &mut SourceMap, file: FileId, program: &[Stmt], parsed: &mut HashMap<PathBuf, Parsed>) {
-    let mut specs = Vec::new();
-    collect_imports(program, &mut specs);
-    for spec in specs {
-        let target = resolve(sm, file, &spec);
-        let Some(path) = canonical(&target) else { continue };
-        if parsed.contains_key(&path) || sm.file(file).path == path {
+    // Depth-first with an explicit stack: an import chain can be longer than the host stack.
+    let entry = sm.file(file).path.clone();
+    let mut stack = vec![(file, import_sites(program).into_iter())];
+    while let Some((importer, sites)) = stack.last_mut() {
+        let importer = *importer;
+        let Some((spec, _)) = sites.next() else {
+            stack.pop();
+            continue;
+        };
+        let Ok(path) = locate(sm, importer, &spec) else { continue };
+        if parsed.contains_key(&path) || path == entry {
             continue;
         }
         let Ok(result) = parse_file(sm, &path) else { continue };
         let next = match &result {
-            Parsed::Ok { file, program } => Some((*file, program.clone())),
+            Parsed::Ok { file, program } => Some((*file, import_sites(program).into_iter())),
             Parsed::Failed(_) => None,
         };
         parsed.insert(path, result);
-        if let Some((f, p)) = next {
-            parse_graph(sm, f, &p, parsed);
+        if let Some(frame) = next {
+            stack.push(frame);
         }
     }
 }
 
-/// Every `import "…"` path in a program, in source order, at any depth (6.4: imports may
-/// appear in any body, including function and lambda bodies).
-fn collect_imports(stmts: &[Stmt], out: &mut Vec<Rc<str>>) {
+/// Every `import "…"` in a program with its statement's span, in source order, at any depth
+/// (6.4: imports may appear in any body, including function and lambda bodies).
+pub fn import_sites(program: &[Stmt]) -> Vec<(Rc<str>, Span)> {
+    let mut out = Vec::new();
+    collect_imports(program, &mut out);
+    out
+}
+
+fn collect_imports(stmts: &[Stmt], out: &mut Vec<(Rc<str>, Span)>) {
     for s in stmts {
         stmt_imports(s, out);
     }
 }
 
-fn body_imports(b: &Body, out: &mut Vec<Rc<str>>) {
+fn body_imports(b: &Body, out: &mut Vec<(Rc<str>, Span)>) {
     collect_imports(&b.stmts, out);
 }
 
-fn stmt_imports(s: &Stmt, out: &mut Vec<Rc<str>>) {
+fn stmt_imports(s: &Stmt, out: &mut Vec<(Rc<str>, Span)>) {
     match &s.kind {
-        StmtKind::Import { path, .. } => out.push(path.clone()),
+        StmtKind::Import { path, .. } => out.push((path.clone(), s.span)),
         StmtKind::Let(_, e) => e.iter().for_each(|e| expr_imports(e, out)),
         StmtKind::Const(_, e) | StmtKind::Expr(e) | StmtKind::Throw(e) => expr_imports(e, out),
         StmtKind::Return(e) => e.iter().for_each(|e| expr_imports(e, out)),
@@ -148,7 +170,7 @@ fn stmt_imports(s: &Stmt, out: &mut Vec<Rc<str>>) {
     }
 }
 
-fn func_imports(f: &FuncDecl, out: &mut Vec<Rc<str>>) {
+fn func_imports(f: &FuncDecl, out: &mut Vec<(Rc<str>, Span)>) {
     for (_, d) in &f.params {
         d.iter().for_each(|d| expr_imports(d, out));
     }
@@ -158,7 +180,7 @@ fn func_imports(f: &FuncDecl, out: &mut Vec<Rc<str>>) {
     }
 }
 
-fn expr_imports(e: &Expr, out: &mut Vec<Rc<str>>) {
+fn expr_imports(e: &Expr, out: &mut Vec<(Rc<str>, Span)>) {
     match &e.kind {
         ExprKind::Lambda(f) => func_imports(f, out),
         ExprKind::FStr(parts) => {
@@ -217,8 +239,24 @@ fn expr_imports(e: &Expr, out: &mut Vec<Rc<str>>) {
     }
 }
 
-/// How a path that may not exist prints in messages (2.1): `.` segments dropped.
+/// How a path that may not exist prints in messages (2.1): `.` and `..` resolved, and the
+/// longest existing part canonicalized, so case and short names match the real folder.
 pub fn shown(path: &Path) -> Rc<str> {
-    let clean: PathBuf = path.components().collect();
-    display_path(&clean)
+    let clean = absolute_clean(path);
+    let mut existing = clean.clone();
+    let mut rest = Vec::new();
+    while canonical(&existing).is_none() {
+        match existing.file_name() {
+            Some(name) => {
+                rest.push(name.to_os_string());
+                existing.pop();
+            }
+            None => return display_path(&clean),
+        }
+    }
+    let mut full = canonical(&existing).unwrap_or(existing);
+    for name in rest.iter().rev() {
+        full.push(name);
+    }
+    display_path(&full)
 }

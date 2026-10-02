@@ -19,6 +19,7 @@ use super::module::{self, Parsed};
 use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
+use crate::engines::session::stop_if_interrupted;
 use crate::syntax::ast::*;
 use crate::syntax::span::{FileId, SourceMap, Span};
 
@@ -50,6 +51,8 @@ pub struct Interp {
     pub chars: CharCache,
     calls: Vec<CallRecord>,
     builtins: Env,
+    /// The script's arguments, for `args()` (5.10).
+    pub args: Vec<String>,
     /// Files parsed at startup and not imported yet (6.1 step 2).
     parsed: HashMap<PathBuf, Parsed>,
     modules: HashMap<PathBuf, ModuleState>,
@@ -81,6 +84,7 @@ impl Interp {
             chars: CharCache::default(),
             calls: Vec::new(),
             builtins,
+            args: Vec::new(),
             parsed,
             modules: HashMap::new(),
             import_stack: Vec::new(),
@@ -110,10 +114,9 @@ impl Interp {
 
     /// `import "spec" as name` (6.4): the module's namespace dict.
     fn import(&mut self, spec: &str, at: Span) -> Exec<Value> {
-        let target = module::resolve(&self.sm, at.file, spec);
-        let Some(path) = module::canonical(&target) else {
-            let msg = format!("cannot find module '{spec}' (looked for {})", module::shown(&target));
-            return self.fail_at("ImportError", msg, at);
+        let path = match module::locate(&self.sm, at.file, spec) {
+            Ok(p) => p,
+            Err(msg) => return self.fail_at("ImportError", msg, at),
         };
         match self.modules.get(&path) {
             Some(ModuleState::Done(ns)) => return Ok(ns.clone()),
@@ -167,6 +170,10 @@ impl Interp {
                 return Err(flow);
             }
         };
+        if self.calls.len() >= MAX_CALLS {
+            return self.fail_at("RecursionError", format!("maximum call depth ({MAX_CALLS}) exceeded"), at);
+        }
+        self.guard(at)?;
         self.modules.insert(path.clone(), ModuleState::Running);
         self.import_stack.push(path.clone());
         self.calls.push(CallRecord { name: None, call_site: at });
@@ -282,6 +289,7 @@ impl Interp {
 
     /// A body in a new frame whose parent is `parent`.
     fn exec_body(&mut self, body: &Body, parent: &Env) -> Exec<()> {
+        self.guard(body.span)?;
         let frame = new_frame(Some(parent));
         let r = self.exec_in(body, &frame);
         env::leave(frame);
@@ -529,6 +537,8 @@ impl Interp {
     /// outcome and replaces it only if it does not complete normally.
     fn exec_try(&mut self, body: &Body, catch: Option<&(Option<Name>, Body)>, finally: Option<&Body>, env: &Env) -> Exec<()> {
         let mut outcome = self.exec_body(body, env);
+        // After an interrupt no `catch` or `finally` runs (6.5).
+        stop_if_interrupted();
         if let (Err(Flow::Error(e)), Some((name, cbody))) = (&outcome, catch) {
             let e = e.clone();
             let frame = new_frame(Some(env));
@@ -538,8 +548,11 @@ impl Interp {
             outcome = self.exec_in(cbody, &frame);
             env::leave(frame);
         }
+        stop_if_interrupted();
         if let Some(f) = finally {
-            self.exec_body(f, env)?;
+            if !matches!(outcome, Err(Flow::Exit(_))) {
+                self.exec_body(f, env)?;
+            }
         }
         outcome
     }

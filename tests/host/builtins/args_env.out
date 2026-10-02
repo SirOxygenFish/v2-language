@@ -1,0 +1,6 @@
+["one", "\"two", "words\"", "3"] 4
+4
+null fallback
+str
+ValueError: invalid environment variable name: 'A=B'
+ValueError: invalid environment variable name: ''

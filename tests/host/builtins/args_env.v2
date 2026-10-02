@@ -1,0 +1,10 @@
+// args: one "two words" 3
+// args() and getenv() (DOCS 3.11, INTERNALS 5.10).
+print(args(), args().len())
+let a = args()
+a.push("changed")
+print(args().len())
+print(getenv("V2_SURELY_NOT_SET_42"), getenv("V2_SURELY_NOT_SET_42", "fallback"))
+print(type(getenv("HOME") ?? getenv("USERPROFILE")))
+try { getenv("A=B") } catch (e) { print(e.type + ": " + e.message) }
+try { getenv("") } catch (e) { print(e.type + ": " + e.message) }

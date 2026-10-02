@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Phase 0: Host core |
-| **Next task** | 0.9 Builtins and JSON |
-| **Last update** | 2026-10-01: 0.8 modules done (CI written, not yet run) |
+| **Current phase** | Phase 1: Python, JavaScript, TypeScript |
+| **Next task** | 1.1 Engine registry and toolchain discovery |
+| **Last update** | 2026-10-02: Phase 0 complete (0.9 + 0.10 done; CI written, not yet run) |
 
 ## Rules
 
@@ -140,19 +140,31 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
   reviewed together with 0.9)
 
 ### 0.9 Builtins and JSON
-- [ ] `codec/json` on serde_json with `$v2` tags (§10.1–10.3)
-- [ ] All builtins of DOCS 3.11 that don't need engines: `print` (`sep`, `end`), `input` (null
+- [x] `codec/json` on serde_json, plain mode: the 10.1 pre-scan (nesting limit 1,000, integers
+      outside i64), number kinds, pretty printing, path-naming errors (§10.1, §10.2). The VEP
+      mode's `$v2` tags and base64 (§10.3) come with the protocol in 1.3
+- [x] All builtins of DOCS 3.11 that don't need engines: `print` (`sep`, `end`), `input` (null
       at EOF), `len`, `type`, conversions, `range`, `json_parse`/`json_stringify`,
       `read_file`/`write_file`, `getenv`, `args`, `exit`, `error` (§5.10)
-- **Done when:** the builtin tests and the `codec/json` unit tests (§22.3) pass
+- **Done when:** the builtin tests and the `codec/json` unit tests (§22.3) pass — **passed
+  2026-10-02** (`tests/host/builtins`, `tests/host/exit_codes`, codec unit tests; reviewed
+  together with 0.8)
 
 ### 0.10 Config, CLI and exit paths
-- [ ] Config layers and precedence: defaults → `~/.v2/config.toml` → `v2.toml` → env → CLI;
-      config errors exit 2 (§18.1–18.5)
-- [ ] `v2 run`, host-only `v2 check FILE` (§19.1, §19.3)
-- [ ] Shutdown paths (§6.5): normal end, uncaught error, `exit()` (no `finally`), interrupt
-      → 130, internal panic → 101
-- **Done when:** the host parts of R39 and R48 pass
+- [x] Config layers and precedence: defaults → `~/.v2/config.toml` → `v2.toml` → env → CLI;
+      validation on the merged result; config errors exit 2 (§18.1–18.5)
+- [x] `v2 run`, host-only `v2 check FILE` (§19.1, §19.3)
+- [x] Shutdown paths (§6.5): normal end, uncaught error, `exit()` (no `finally`), interrupt
+      → 130 (also when the run ends before the watchdog wakes), internal panic → 101; a closed
+      stdout or stderr never turns an exit path into a panic or an abort
+- **Done when:** the host parts of R39 and R48 pass — **passed 2026-10-02** (also on Linux
+  in WSL; three review rounds, 28 findings fixed with regression tests)
+
+**Phase 0 complete when:** all of `tests/host`, the unit tests, R07, R09, R28, R39 (host part),
+R45, R48 (host part), R49 and the ch. 21 Syntax and Host rows pass (INTERNALS 23) — **done
+2026-10-02**: every listed test and ch. 21 row has a test (audited row by row), every DOCS
+chapter 3 example was run against the binary, and the suite passes on Windows and Linux
+(macOS untested until CI runs).
 
 **Phase 0 complete when:** all of `tests/host`, the unit tests, R07, R09, R28, R39 (host part),
 R45, R48 (host part), R49 and the ch. 21 Syntax and Host rows pass (INTERNALS 23).
@@ -342,3 +354,5 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-01 | 0.5: full parser and AST, static checks (all violations, in source order), `ffi/cdecl` with the 16.3 messages and the C++ dialect for `@cpp` prototype strings, expression-height limit; reviewed, fixes re-reviewed (25 findings fixed with regression tests) |
 | 2026-10-01 | 0.6 + 0.7: the interpreter core: values, operators, string/list/dict/bytes methods, frames and closures, the call binder, control flow, try/catch/finally, error values with traces, the stack guard, iterative freeing of deep values; 0.5's third review round fixed (C++ prototype references, K&R, nested f-string cost); reviewed (6 findings fixed) |
 | 2026-10-01 | 0.8: `import` with the startup parse of the import graph, run-once modules, namespace snapshots, circular-import chains, ImportError for syntax errors in modules (R49) |
+| 2026-10-02 | 0.9: the JSON codec (plain mode) and every engine-free builtin; reviewed together with 0.8 (about 9 findings fixed) |
+| 2026-10-02 | 0.10: config layers with validation on the merged result, `v2 run`, host-only `v2 check`, exit paths (closed streams, late interrupts, ignored signals, panic → 101); three review rounds, 28 findings fixed with regression tests (each new test shown to fail without its fix); the Phase 0 exit audit (ch. 21 rows, R-tests, DOCS ch. 3 examples) closed 8 test gaps and found `range(end: n)` and float `-6.0 % 3` mismatches, both fixed. **Phase 0 complete.** Linux verified in WSL |

@@ -175,8 +175,9 @@ fn v2_command(home: &Path) -> Command {
     cmd
 }
 
-/// Wait for `child` with a deadline. Stdin is fed and stdout/stderr are drained on helper threads,
-/// so neither a child that never reads its input nor a chatty child can block the harness.
+/// Wait for `child` with a deadline. Stdin is fed and stdout/stderr (those that are piped) are
+/// drained on helper threads, so neither a child that never reads its input nor a chatty child
+/// can block the harness; on the deadline the child is killed.
 fn wait_with_timeout(mut child: Child, input: Vec<u8>, timeout: Duration) -> Result<Output, String> {
     let start = Instant::now();
     if let Some(mut stdin) = child.stdin.take() {
@@ -184,18 +185,17 @@ fn wait_with_timeout(mut child: Child, input: Vec<u8>, timeout: Duration) -> Res
             let _ = stdin.write_all(&input);
         }); // the pipe closes when the writer finishes
     }
-    let mut out = child.stdout.take().expect("piped stdout");
-    let mut err = child.stderr.take().expect("piped stderr");
-    let out_t = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = out.read_to_end(&mut v);
-        v
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = err.read_to_end(&mut v);
-        v
-    });
+    fn drain(stream: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            if let Some(mut s) = stream {
+                let _ = s.read_to_end(&mut v);
+            }
+            v
+        })
+    }
+    let out_t = drain(child.stdout.take());
+    let err_t = drain(child.stderr.take());
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -428,6 +428,581 @@ fn run_generated(name: &str, src: &str) -> (Option<i32>, String, String) {
     (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// Write `files` (path, text) under a fresh temp home and run `v2 ARGS` in `cwd` (relative
+/// to the home); returns (exit code, stdout, stderr).
+fn run_in_project(files: &[(&str, &str)], cwd: &str, args: &[&str]) -> (Option<i32>, String, String) {
+    let home = TempHome::new();
+    for (path, text) in files {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let dir = home.0.join(cwd);
+    std::fs::create_dir_all(&dir).unwrap();
+    let child = v2_command(&home.0)
+        .args(args)
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(60)).unwrap();
+    (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn check_reports_every_file_and_exits_1_on_errors() {
+    // INTERNALS 19.3: the entry and every file it imports; diagnostics on stderr in file and
+    // source order, import problems with their run-time text, the summary on stdout.
+    let files = [
+        ("v2.toml", "[engines.py]\ncomand = \"x\"\n"),
+        ("app/main.v2", "import \"./lib/util.v2\" as util\nimport \"./lib/missing.v2\" as m\nlet a = 1\nlet a = 2\n"),
+        ("app/lib/util.v2", "import \"../main.v2\" as main\nbreak\n"),
+    ];
+    let (code, stdout, stderr) = run_in_project(&files, ".", &["check", "app/main.v2"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert_eq!(stdout, "check app/main.v2: 2 files, 4 errors, 1 warning\n");
+    let order = [
+        "app/main.v2:2:1: ImportError: cannot find module './lib/missing.v2' (looked for app/lib/missing.v2)",
+        "app/main.v2:4:5: SyntaxError: 'a' is already declared in this block",
+        "app/lib/util.v2:1:1: ImportError: circular import: app/main.v2 -> app/lib/util.v2 -> app/main.v2",
+        "app/lib/util.v2:2:1: SyntaxError: break outside a loop",
+        "unknown key [engines.py] comand (did you mean 'command'?)",
+    ];
+    let mut at = 0;
+    for needle in order {
+        let i = stderr[at..].find(needle).unwrap_or_else(|| panic!("{needle:?} not in order in:\n{stderr}"));
+        at += i + needle.len();
+    }
+    // A clean file: exit 0; check runs nothing.
+    let clean = [("main.v2", "print(\"must not print\")\nimport \"./util.v2\" as u\n"), ("util.v2", "func f() { }\n")];
+    let (code, stdout, stderr) = run_in_project(&clean, ".", &["check", "main.v2"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "check main.v2: 2 files, 0 errors, 0 warnings\n", ""));
+}
+
+#[test]
+fn run_starts_the_project_entry() {
+    // INTERNALS 19.1, 18.1: the root is the nearest folder with v2.toml, found from the cwd.
+    let files = [("v2.toml", "[project]\nentry = \"app/main.v2\"\n"), ("app/main.v2", "print(args())\n")];
+    let (code, stdout, stderr) = run_in_project(&files, "app/deeper", &["run", "a", "b c"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "[\"a\", \"b c\"]\n"), "{stderr}");
+    let (code, _, stderr) = run_in_project(&[("v2.toml", "[project]\nname = \"x\"\n")], ".", &["run"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("has no [project] entry"), "{stderr}");
+    let (code, _, stderr) = run_in_project(&[], ".", &["run"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("no v2.toml found in ") && stderr.contains(" or its parents"), "{stderr}");
+}
+
+#[test]
+fn a_script_outside_the_project_uses_its_own_folders_config() {
+    // INTERNALS 18.1: the root search starts at the script's folder, made absolute with `..`
+    // applied, so `v2 ../other/main.v2` run inside a project never reads that project's v2.toml.
+    let files = [
+        ("proj/v2.toml", "[engines.py]\nstartup_timeout = \"x\"\n"),
+        ("proj/sub/keep.txt", ""),
+        ("other/main.v2", "print(\"ran\")\n"),
+    ];
+    for (cwd, args) in [
+        ("proj", &["../other/main.v2"][..]),
+        ("proj/sub", &["../../other/main.v2"][..]),
+        ("proj", &["check", "../other/main.v2"][..]),
+    ] {
+        let (code, stdout, stderr) = run_in_project(&files, cwd, args);
+        assert_eq!(code, Some(0), "{cwd} {args:?}: {stderr}");
+        assert!(stdout == "ran\n" || stdout.starts_with("check "), "{cwd} {args:?}: {stdout}");
+    }
+}
+
+#[test]
+fn a_config_error_exits_2_before_anything_runs() {
+    // INTERNALS 18.5 and R48: syntax and type errors name the file; nothing of the script runs.
+    for (toml, needle) in [
+        ("[engines.py\n", "v2.toml:1:"),
+        ("[engines.py]\nstartup_timeout = \"30s\"\n", "config error: [engines.py] startup_timeout: expected a non-negative number, got string \"30s\""),
+    ] {
+        let files = [("v2.toml", toml), ("main.v2", "print(\"ran\")\n")];
+        let (code, stdout, stderr) = run_in_project(&files, ".", &["main.v2"]);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stdout.is_empty(), "nothing runs: {stdout}");
+        assert!(stderr.contains(needle) && stderr.contains("config error"), "{stderr}");
+    }
+    let (code, _, stderr) = run_in_project(&[("main.v2", "print(1)\n")], ".", &["--engine", "ts=x", "main.v2"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("ts has no executable of its own"), "{stderr}");
+}
+
+#[test]
+fn a_long_import_chain_is_a_recursion_error_not_a_crash() {
+    // An import is a call for the depth limit and the stack guard (INTERNALS 5.8, 5.9); the
+    // startup parse and `v2 check` walk the chain without recursing on the host stack.
+    let mut files: Vec<(String, String)> = (0..12_000).map(|i| (format!("m{i}.v2"), format!("import \"./m{}.v2\" as n\n", i + 1))).collect();
+    files.push(("m12000.v2".into(), "let done = 1\n".into()));
+    files.push(("main.v2".into(), "try { import \"./m0.v2\" as m } catch (e) { print(e.type, e.message) }\n".into()));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let (code, stdout, stderr) = run_in_project(&refs, ".", &["main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "RecursionError maximum call depth (10000) exceeded\n"), "{stderr}");
+    let (code, stdout, stderr) = run_in_project(&refs, ".", &["check", "main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "check main.v2: 12002 files, 0 errors, 0 warnings\n"), "{stderr}");
+}
+
+#[test]
+fn import_messages_show_paths_per_2_1() {
+    let main = "func show(f) { try { f() } catch (e) { print(e.message) } }\n\
+                show(lambda() { import \"./lib/../lib/nope.v2\" as a })\n\
+                show(lambda() { import \"./dir\" as b })\n";
+    let (code, stdout, stderr) = run_in_project(&[("main.v2", main), ("lib/x.v2", ""), ("dir/keep.v2", "")], ".", &["main.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "cannot find module './lib/../lib/nope.v2' (looked for lib/nope.v2)");
+    assert!(lines[1].starts_with("cannot import './dir': cannot read 'dir': "), "{}", lines[1]);
+    assert!(!lines[1].ends_with('.'), "no final period: {}", lines[1]);
+    // A missing file outside the cwd shows its absolute path.
+    let (_, stdout, _) = run_in_project(&[("app/main.v2", "try { import \"../../gone.v2\" as g } catch (e) { print(e.message) }\n")], "app", &["main.v2"]);
+    let shown = stdout.trim_end().rsplit("(looked for ").next().unwrap().trim_end_matches(')');
+    assert!(std::path::Path::new(shown).is_absolute() && !shown.contains(".."), "{stdout}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_drive_relative_import_is_an_import_error() {
+    let src = "try { import \"C:m.v2\" as m } catch (e) { print(e.message) }\n";
+    let (code, stdout, stderr) = run_in_project(&[("main.v2", src), ("m.v2", "let x = 1\n")], ".", &["main.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, "cannot find module 'C:m.v2' (a drive-relative path: write it relative to the file, or absolute)\n");
+}
+
+#[test]
+fn writing_to_a_closed_stdout_is_an_io_error() {
+    // INTERNALS 21 (Host) and 5.10: a failed write (closed pipe; Rust ignores SIGPIPE) raises
+    // IOError at the print.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("spam.v2"), "while true { print(\"x\" * 1000) }\n").unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("spam.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    drop(child.stdout.take()); // close the read end
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("IOError: cannot write to stdout"), "{err}");
+    assert!(err.contains("spam.v2:1:14"), "the caret is at the print: {err}");
+}
+
+/// Windows: put the child in its own process group, so Ctrl+Break can be sent to it alone. The
+/// event travels through a console this process shares with the child; a CI runner may start
+/// the tests without one, so allocate one then, keeping this process's own std handles.
+fn interruptible(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Console::{AllocConsole, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+        static CONSOLE: std::sync::Once = std::sync::Once::new();
+        // SAFETY: plain Win32 calls; AllocConsole fails harmlessly when a console is attached.
+        CONSOLE.call_once(|| unsafe {
+            let kinds = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+            let saved = kinds.map(|k| GetStdHandle(k));
+            if AllocConsole() != 0 {
+                for (k, h) in kinds.into_iter().zip(saved) {
+                    SetStdHandle(k, h);
+                }
+            }
+        });
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(unix)]
+    let _ = cmd;
+}
+
+/// Interrupt `child` the way a terminal does: SIGINT, or Ctrl+Break to its process group.
+fn interrupt(child: &Child) {
+    #[cfg(unix)]
+    // SAFETY: sending a signal to our own child.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    }
+    #[cfg(windows)]
+    {
+        // SAFETY: a plain Win32 call with the child's process group id.
+        let sent = unsafe { windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(1, child.id()) };
+        assert_ne!(sent, 0, "Ctrl+Break could not be sent: {}", std::io::Error::last_os_error());
+    }
+}
+
+#[test]
+fn an_interrupt_exits_130_without_running_finally() {
+    // INTERNALS 6.5: the handler only sets INTERRUPTED; the watchdog ends the run with 130,
+    // no catch or finally runs.
+    let home = TempHome::new();
+    std::fs::write(
+        home.0.join("busy.v2"),
+        "let n = 0\ntry {\n    while true { n += 1 }\n} catch (e) {\n    print(\"catch ran\")\n} finally {\n    print(\"finally ran\")\n}\n",
+    )
+    .unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("busy.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    interruptible(&mut cmd);
+    let child = cmd.spawn().expect("start v2");
+    std::thread::sleep(Duration::from_millis(500));
+    interrupt(&child);
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended after the interrupt");
+    assert_eq!(out.status.code(), Some(130));
+    assert!(out.stdout.is_empty(), "catch and finally must not run");
+    assert!(out.stderr.is_empty(), "no diagnostic after an interrupt");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interrupt_as_the_run_ends_still_exits_130() {
+    // INTERNALS 6.5: once INTERRUPTED is set the interpreter runs no catch or finally and prints
+    // no diagnostic, and a run that ends before the watchdog's next wake (up to 100 ms on Unix)
+    // still exits 130. The watchdog wakes on a 100 ms grid from startup, so the signal goes
+    // half a tick after v2 shows its prompt, and end of input follows 10 ms later: the run
+    // ends long before the watchdog's next wake.
+    let home = TempHome::new();
+    let scripts = [
+        // reaches catch and finally (exec_try)
+        ("late_try.v2", "try {\n    let x = input(\"> \")\n    print(x.trim())\n} catch (e) {\n    print(\"catch ran\")\n} finally {\n    print(\"finally ran\")\n}\n"),
+        // ends normally (main's check after the interpreter thread returns)
+        ("late_end.v2", "let x = input(\"> \")\n"),
+        // ends with an uncaught error (no diagnostic)
+        ("late_diag.v2", "print(input(\"> \").trim())\n"),
+    ];
+    for (name, src) in scripts {
+        std::fs::write(home.0.join(name), src).unwrap();
+        for _ in 0..5 {
+            let mut child = v2_command(&home.0)
+                .arg(name)
+                .current_dir(&home.0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start v2");
+            let stdin = child.stdin.take();
+            let mut out = child.stdout.take().unwrap();
+            let mut prompt = [0u8; 2];
+            out.read_exact(&mut prompt).expect("the prompt");
+            child.stdout = Some(out);
+            std::thread::sleep(Duration::from_millis(50));
+            interrupt(&child);
+            std::thread::sleep(Duration::from_millis(10));
+            drop(stdin); // end of input: input() returns null and the run ends at once
+            let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended");
+            let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert_eq!(out.status.code(), Some(130), "{name}: stdout {stdout:?} stderr {stderr:?}");
+            assert!(stdout.is_empty() && stderr.is_empty(), "{name}: stdout {stdout:?} stderr {stderr:?}");
+        }
+    }
+}
+
+/// `v2 ARGS` in `dir` with stdout (or stderr) on a pipe whose reader is already gone; returns
+/// the exit code and the other stream.
+fn run_with_a_closed_stream(home: &Path, args: &[&str], close_stdout: bool) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let mut cmd = v2_command(home);
+    cmd.args(args).current_dir(home).stdin(Stdio::null());
+    if close_stdout {
+        cmd.stdout(writer).stderr(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::piped()).stderr(writer);
+    }
+    let child = cmd.spawn().expect("start v2");
+    drop(cmd);
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let other = if close_stdout { out.stderr } else { out.stdout };
+    (out.status.code(), String::from_utf8_lossy(&other).into_owned())
+}
+
+#[test]
+fn a_closed_stdout_or_stderr_never_panics() {
+    // INTERNALS 6.5 and 19.1: 101 is a V2 bug and an abort is a crash. A diagnostic or summary
+    // that can't be written is dropped; the exit code is the one the run would have had.
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::write(d.join("quiet.v2"), "let x = 1\n").unwrap();
+    std::fs::write(d.join("bad.v2"), "break\n").unwrap();
+    std::fs::write(d.join("throw.v2"), "throw \"boom\"\n").unwrap();
+    std::fs::write(d.join("rec.v2"), "func f(n) { return f(n + 1) }\nf(0)\n").unwrap();
+    std::fs::write(d.join("small.v2"), "print(\"hello\")\n").unwrap();
+    std::fs::write(d.join("exit3.v2"), "print(\"hello\")\nexit(3)\n").unwrap();
+    std::fs::create_dir_all(d.join("cfg")).unwrap();
+    std::fs::write(d.join("cfg/v2.toml"), "[engines.py\n").unwrap();
+    std::fs::write(d.join("cfg/main.v2"), "let x = 1\n").unwrap();
+    for (args, code) in [
+        (&["check", "quiet.v2"][..], 0),
+        (&["check", "bad.v2"][..], 1),
+        (&["--version"][..], 0),
+        (&["--help"][..], 0),
+    ] {
+        let (got, stderr) = run_with_a_closed_stream(d, args, true);
+        assert_eq!(got, Some(code), "stdout closed, args {args:?}: {stderr}");
+        assert!(!stderr.contains("internal error") && !stderr.contains("panicked"), "args {args:?}: {stderr}");
+    }
+    // Program output that can't be written at the end of the run: reported, and exit 0 becomes
+    // 1; another code is kept (6.5).
+    let (got, stderr) = run_with_a_closed_stream(d, &["small.v2"], true);
+    assert_eq!(got, Some(1), "{stderr}");
+    assert!(stderr.starts_with("v2: cannot write to stdout: "), "{stderr}");
+    let (got, stderr) = run_with_a_closed_stream(d, &["exit3.v2"], true);
+    assert_eq!(got, Some(3), "{stderr}");
+    for (args, code) in [
+        (&["throw.v2"][..], 1),
+        (&["bad.v2"][..], 1),
+        (&["rec.v2"][..], 1),
+        (&["missing.v2"][..], 2),
+        (&["cfg/main.v2"][..], 2),
+        (&["check", "bad.v2"][..], 1),
+        (&["--bogus"][..], 2),
+        (&[][..], 2),
+    ] {
+        let (got, _) = run_with_a_closed_stream(d, args, false);
+        assert_eq!(got, Some(code), "stderr closed, args {args:?}");
+    }
+}
+
+#[test]
+fn check_keeps_file_order_and_warnings_for_files_that_are_not_utf8() {
+    // INTERNALS 19.3 and 18.5: a file that isn't UTF-8 reports at the place it was met, and
+    // config warnings are printed whenever the summary counts them.
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::write(d.join("v2.toml"), "[engines.py]\ncomand = \"x\"\n").unwrap();
+    std::fs::write(d.join("main.v2"), "import \"./bad.v2\" as b\nimport \"./good.v2\" as g\nlet x = 1\n").unwrap();
+    std::fs::write(d.join("bad.v2"), b"let a = \"\xff\"\n").unwrap();
+    std::fs::write(d.join("good.v2"), "let y = 1\nlet y = 2\n").unwrap();
+    let check = |file: &str| {
+        let child = v2_command(d)
+            .args(["check", file])
+            .current_dir(d)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start v2");
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let (code, stdout, stderr) = check("main.v2");
+    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 3 files, 2 errors, 1 warning\n"), "{stderr}");
+    let bad = stderr.find("bad.v2:1:1: SyntaxError: file is not valid UTF-8").expect(&stderr);
+    let good = stderr.find("good.v2:2:5: SyntaxError: 'y' is already declared").expect(&stderr);
+    let warning = stderr.find("unknown key [engines.py] comand").expect(&stderr);
+    assert!(bad < good && good < warning, "{stderr}");
+    let (code, stdout, stderr) = check("bad.v2");
+    assert_eq!((code, stdout.as_str()), (Some(1), "check bad.v2: 1 file, 1 error, 1 warning\n"), "{stderr}");
+    assert!(stderr.starts_with("bad.v2:1:1: SyntaxError: file is not valid UTF-8\nwarning: "), "{stderr}");
+    assert!(stderr.contains("unknown key [engines.py] comand"), "{stderr}");
+}
+
+#[test]
+fn check_warns_when_there_is_no_home_folder() {
+    // INTERNALS 18.1: the user layer is skipped and check warns; a run says nothing.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("main.v2"), "print(\"ran\")\n").unwrap();
+    let run = |args: &[&str]| {
+        let child = v2_command(&home.0)
+            .env_remove(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .args(args)
+            .current_dir(&home.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start v2");
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let (code, stdout, stderr) = run(&["check", "main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "check main.v2: 1 file, 0 errors, 1 warning\n"), "{stderr}");
+    assert!(stderr.starts_with("warning: no home folder ("), "{stderr}");
+    assert_eq!(run(&["main.v2"]), (Some(0), "ran\n".to_string(), String::new()));
+}
+
+#[test]
+fn block_head_and_close_errors() {
+    // INTERNALS 3.7, 4.5 and the ch. 21 Syntax rows: each case is a SyntaxError (exit 1)
+    // with these parts of the diagnostic, in order.
+    let fence = "hint: if the block's code has braces V2 can't match, use the fence form";
+    let no_args = "SyntaxError: compiled blocks take no args — @export a function and call it with arguments";
+    let cases: &[(&str, &[&str])] = &[
+        ("@py\n```\nx = 1\n```\n", &["b.v2:1:4: SyntaxError: expected { or a ``` fence after @py"]),
+        (
+            "@py(a,\n  b)\n{ x }\n",
+            &[
+                "b.v2:3:1: SyntaxError: the { that opens a block must be on the same line as @py",
+                "note: the block starts here (b.v2:1:1)",
+                "hint: move { to the end of line 2",
+            ],
+        ),
+        (
+            "@py {\n    x = 1 }\n",
+            &["b.v2:1:1: SyntaxError: @py block closes at a } that does not start its line", "note: the } that closes it (b.v2:2:11)", fence],
+        ),
+        (
+            "let y = @py { 1 } + 2\n",
+            &["b.v2:1:17: SyntaxError: unexpected text after the } that closes the @py block", fence, "(@py { 1 }) + 2"],
+        ),
+        ("@cpp(x: 1) {\n}\n", &["b.v2:1:5: ", no_args]),
+        ("@cxx(x: 1) {\n}\n", &["b.v2:1:5: ", no_args]),
+        ("@rust(x: 1) {\n}\n", &["b.v2:1:6: ", no_args]),
+        ("@rs(x: 1) {\n}\n", &["b.v2:1:4: ", no_args]),
+    ];
+    for (src, parts) in cases {
+        let (code, stdout, stderr) = run_generated("b.v2", src);
+        assert_eq!((code, stdout.as_str()), (Some(1), ""), "{src:?}: {stderr}");
+        let mut at = 0;
+        for part in *parts {
+            let i = stderr[at..].find(part).unwrap_or_else(|| panic!("{src:?}: {part:?} not in order in:\n{stderr}"));
+            at += i + part.len();
+        }
+    }
+    // A closing } may be followed by ) ] } , ; or a comment (C2).
+    let ok = "func f() {\n    let a = [@py {\n        1\n    }]\n    let b = {k: @py {\n        1\n    }}\n    print(@py {\n        1\n    }, 2); // c\n    let c = @py {\n        1\n    } /* c */\n}\nprint(\"ok\")\n";
+    assert_eq!(run_generated("ok.v2", ok), (Some(0), "ok\n".to_string(), String::new()));
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the V2_TEST_PANIC trigger exists in debug builds only")]
+fn a_host_panic_exits_101() {
+    // INTERNALS 6.5 and ch. 21 (Host panic): one line on stderr, exit 101, also when stderr is
+    // closed. The trigger exists in debug builds only (22.2).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("ok.v2"), "print(\"must not print\")\n").unwrap();
+    let child = v2_command(&home.0)
+        .env("V2_TEST_PANIC", "1")
+        .arg("ok.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let stderr = normalize(&String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(101), "{stderr}");
+    assert!(out.stdout.is_empty());
+    assert!(stderr.starts_with("v2: internal error: V2_TEST_PANIC is set (") && stderr.lines().count() == 1, "{stderr:?}");
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let child = v2_command(&home.0)
+        .env("V2_TEST_PANIC", "1")
+        .arg("ok.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(writer)
+        .spawn()
+        .expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!(out.status.code(), Some(101));
+}
+
+#[cfg(unix)]
+#[test]
+fn every_interrupt_signal_exits_130_and_ignored_ones_stay_ignored() {
+    // INTERNALS 6.5: SIGINT, SIGTERM and SIGHUP all end the run with 130, with no catch,
+    // finally or diagnostic; a signal ignored at startup (nohup) stays ignored.
+    use std::os::unix::process::CommandExt;
+    let home = TempHome::new();
+    let src = "try {\n    while true { }\n} catch (e) {\n    print(\"catch ran\")\n} finally {\n    print(\"finally ran\")\n}\n";
+    std::fs::write(home.0.join("busy.v2"), src).unwrap();
+    let start = |ignore_hup: bool| {
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("busy.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if ignore_hup {
+            // SAFETY: only an async-signal-safe call between fork and exec.
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                    Ok(())
+                });
+            }
+        }
+        let child = cmd.spawn().expect("start v2");
+        std::thread::sleep(Duration::from_millis(300));
+        child
+    };
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let child = start(false);
+        // SAFETY: sending a signal to our own child.
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, sig);
+        }
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended");
+        assert_eq!(out.status.code(), Some(130), "signal {sig}");
+        assert!(out.stdout.is_empty() && out.stderr.is_empty(), "signal {sig}: {out:?}");
+    }
+    let mut child = start(true);
+    // SAFETY: sending signals to our own child.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGHUP);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(child.try_wait().unwrap().is_none(), "an ignored SIGHUP must not end the run");
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended");
+    assert_eq!(out.status.code(), Some(130));
+}
+
+#[test]
+fn without_a_watchdog_an_interrupt_still_ends_the_run() {
+    // INTERNALS 6.5: if the watchdog thread can't start, no handler is installed, so the OS
+    // default ends the process instead of the interrupt being swallowed. A huge RUST_MIN_STACK
+    // makes the watchdog's spawn fail (the interpreter thread sets its own stack size).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("busy.v2"), "while true { }\n").unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.env("RUST_MIN_STACK", (1u64 << 50).to_string())
+        .arg("busy.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    interruptible(&mut cmd);
+    let child = cmd.spawn().expect("start v2");
+    std::thread::sleep(Duration::from_millis(500));
+    interrupt(&child);
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("the interrupt ended v2");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(out.status.signal(), Some(libc::SIGINT), "{:?}", out.status);
+    }
+    #[cfg(windows)]
+    assert_eq!(out.status.code(), Some(0xC000_013Au32 as i32), "STATUS_CONTROL_C_EXIT: {:?}", out.status);
+}
+
+#[test]
+fn a_module_written_during_the_run_is_parsed_when_imported() {
+    // late.v2 doesn't exist at startup, so the startup parse skips it; the import parses it
+    // (INTERNALS 6.4 step 1). write_file is relative to the working directory, which
+    // run_generated sets to the script's folder.
+    // A missing module is not remembered: a later import retries (ch. 21 Host rows).
+    let src = "write_file(\"late.v2\", \"let answer = 42\\n\")\n\
+               import \"./late.v2\" as late\n\
+               print(late.answer)\n\
+               write_file(\"broken.v2\", \"let = 1\\n\")\n\
+               try { import \"./broken.v2\" as b } catch (e) { print(e.message) }\n\
+               try { import \"./later.v2\" as l } catch (e) { print(e.type) }\n\
+               write_file(\"later.v2\", \"let n = 5\\n\")\n\
+               import \"./later.v2\" as later\n\
+               print(later.n)\n";
+    let (code, stdout, stderr) = run_generated("main.v2", src);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, "42\ncannot import './broken.v2': broken.v2:1:5: SyntaxError: expected a name after `let`, found `=`\nImportError\n5\n");
+}
+
 #[test]
 fn deep_recursion_then_a_long_chain_is_a_recursion_error() {
     // The stack guard covers every expression node, so a 9,990-term chain evaluated near the
@@ -437,11 +1012,12 @@ fn deep_recursion_then_a_long_chain_is_a_recursion_error() {
         let src = format!(
             "func plain(m) {{ if m == 0 {{ return deep(100) }}; return plain(m - 1) }}\n\
              func deep(n) {{\n    if n == 0 {{ return 0 }}\n    return deep(n - 1){chain}\n}}\n\
-             try {{ print(plain({depth})) }} catch (e) {{ print(e.type) }}\n"
+             try {{ print(plain({depth})) }} catch (e) {{ print(e.type + \": \" + e.message) }}\n"
         );
         let (code, stdout, stderr) = run_generated("chain.v2", &src);
         assert_eq!(code, Some(0), "depth {depth}: {stderr}");
-        assert!(stdout == "RecursionError\n" || stdout.trim().parse::<i64>().is_ok(), "depth {depth}: {stdout:?}");
+        let recursion = "RecursionError: maximum call depth (10000) exceeded\n";
+        assert!(stdout == recursion || stdout.trim().parse::<i64>().is_ok(), "depth {depth}: {stdout:?}");
     }
 }
 

@@ -1,0 +1,30 @@
+// json_parse and json_stringify (DOCS 3.11, INTERNALS 5.10, 10.1, 10.2).
+let text = "{\"name\": \"Ada\", \"n\": 1, \"f\": 1.0, \"big\": -9223372036854775808, \"list\": [true, null, \"é\"], \"$v2\": \"plain\"}"
+let d = json_parse(text)
+print(d)
+print(type(d.n), type(d.f), d["$v2"])
+print(json_stringify(d))
+print(json_stringify([1, 2.0, -0.0, "a\"b\n", {}, []]))
+print(json_stringify({a: [1, {b: null}], c: []}, indent: 2))
+print(json_stringify("é😀"), json_stringify(null), json_stringify(1e21))
+print(json_parse("[1, 2] "), json_parse("  \"s\"  "), json_parse("-0"))
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+show(lambda() => json_parse("{\"a\": 1,}"))
+show(lambda() => json_parse("[1, 2"))
+show(lambda() => json_parse("1 2"))
+show(lambda() => json_parse("[\n  99999999999999999999]"))
+show(lambda() => json_parse("[" * 1001))
+show(lambda() => json_stringify([1, b"x"]))
+show(lambda() => json_stringify({k: print}))
+show(lambda() => json_stringify(float("nan")))
+let cyc = [1]
+cyc.push(cyc)
+show(lambda() => json_stringify(cyc))
+show(lambda() => json_stringify(1, indent: -1))
+show(lambda() => json_parse(5))
