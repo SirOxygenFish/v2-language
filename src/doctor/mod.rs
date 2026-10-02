@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::config::Config;
-use crate::engines::session::stop_if_interrupted;
+use crate::engines::process::stop_if_interrupted;
 use crate::runtime::error::{render_diag, render_error, ErrorValue};
 use crate::runtime::module;
 use crate::syntax::span::{FileId, LoadError, SourceMap, Span};

@@ -19,7 +19,7 @@ use super::module::{self, Parsed};
 use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
-use crate::engines::session::stop_if_interrupted;
+use crate::engines::process::stop_if_interrupted;
 use crate::syntax::ast::*;
 use crate::syntax::span::{FileId, SourceMap, Span};
 
