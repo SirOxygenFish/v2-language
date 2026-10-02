@@ -79,6 +79,8 @@ pub struct EngineSpec {
     pub session_of: Option<Rc<str>>,
     /// argv prefixes tried in order; `[0]` is found on PATH (7.5).
     pub candidates: Vec<Vec<Rc<str>>>,
+    /// Appended to a worker's argv; `{adapter}` is the adapter's path (8.3, 14.1).
+    pub fixed_args: Vec<Rc<str>>,
     /// Added to the host's environment for probes and workers (7.7, 8.3).
     pub env: Vec<(Rc<str>, Rc<str>)>,
     pub min_version: Option<Version>,
@@ -103,6 +105,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             aliases: strs(&["python"]),
             session_of: None,
             candidates: py_candidates,
+            fixed_args: strs(&["-B", "-u", "{adapter}"]),
             env: vec![("PYTHONUTF8".into(), "1".into()), ("PYTHONIOENCODING".into(), "utf-8".into())],
             min_version: Some(Version(3, 8, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Python)),
@@ -113,6 +116,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             aliases: strs(&["javascript"]),
             session_of: None,
             candidates: vec![strs(&["node"])],
+            fixed_args: strs(&["{adapter}"]),
             env: Vec::new(),
             min_version: Some(Version(18, 0, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Node)),
@@ -123,6 +127,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             aliases: strs(&["typescript"]),
             session_of: Some("js".into()),
             candidates: Vec::new(),
+            fixed_args: Vec::new(),
             env: Vec::new(),
             min_version: None,
             probe: None,
