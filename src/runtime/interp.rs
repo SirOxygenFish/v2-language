@@ -1044,6 +1044,8 @@ fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
         Value::Float(x) => out.push_str(&float_str(*x)),
         Value::Str(s) => quoted(s, out),
         Value::Bytes(b) => out.push_str(&bytes_repr(b)),
+        // `<py datetime.date>`, built from the type name (11.6); `op str` arrives in roadmap 1.6.
+        Value::Handle(h) => out.push_str(&format!("<{} {}>", h.tag, h.type_name)),
         Value::List(l) => {
             let id = l.addr();
             if path.contains(&id) {

@@ -208,6 +208,10 @@ enum Step {
 }
 
 fn not_json<T>(what: &str, path: &[Step]) -> Exec<T> {
+    not_json_hint(what, path, "")
+}
+
+fn not_json_hint<T>(what: &str, path: &[Step], hint: &str) -> Exec<T> {
     let mut at = String::new();
     for p in path {
         match p {
@@ -220,7 +224,7 @@ fn not_json<T>(what: &str, path: &[Step]) -> Exec<T> {
         }
     }
     let at = if at.is_empty() { at } else { format!(" at {at}") };
-    type_error(format!("cannot convert {what} to JSON{at}"))
+    type_error(format!("cannot convert {what} to JSON{at}{hint}"))
 }
 
 /// A container about to be encoded: a cycle or nesting past 1,000 levels is a ValueError.
@@ -272,6 +276,7 @@ fn to_json(v: &Value, path: &mut Vec<Step>, open: &mut Vec<usize>) -> Exec<serde
             serde_json::Value::Object(out)
         }
         Value::Bytes(_) | Value::Func(_) | Value::Error(_) => return not_json(v.type_name(), path),
+        Value::Handle(_) => return not_json_hint("handle", path, " (use value(h) first)"),
     })
 }
 
