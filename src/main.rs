@@ -119,10 +119,10 @@ fn run(invocation: Invocation) -> i32 {
     let what = match invocation.command {
         Command::Script { file, args } => {
             // Config is loaded before the script is parsed (ch. 18); errors exit 2.
-            if let Err(code) = load_config(&folder_of(&file), flags) {
-                return code;
-            }
-            return runtime::run_script(&file, args);
+            return match load_config(&folder_of(&file), flags) {
+                Ok(cfg) => runtime::run_script(&file, args, std::rc::Rc::new(cfg)),
+                Err(code) => code,
+            };
         }
         Command::RunProject { args } => {
             let cwd = std::env::current_dir().unwrap_or_default();
@@ -134,11 +134,11 @@ fn run(invocation: Invocation) -> i32 {
                 Ok(c) => c,
                 Err(code) => return code,
             };
-            let Some(entry) = cfg.entry else {
+            let Some(entry) = cfg.entry.clone() else {
                 stderrln!("v2: {} has no [project] entry", root.join("v2.toml").display());
                 return EXIT_USAGE;
             };
-            return runtime::run_script(&entry.value.to_string_lossy(), args);
+            return runtime::run_script(&entry.value.to_string_lossy(), args, std::rc::Rc::new(cfg));
         }
         Command::Check { file } => {
             return match load_config(&folder_of(&file), flags) {
@@ -146,7 +146,15 @@ fn run(invocation: Invocation) -> i32 {
                 Err(code) => code,
             };
         }
-        Command::Doctor { .. } => "`v2 doctor`",
+        // `v2 doctor TAG` arrives in roadmap 1.9.
+        Command::Doctor { tag: None } => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            return match load_config(&cwd, flags) {
+                Ok(cfg) => doctor::doctor(std::rc::Rc::new(cfg)),
+                Err(code) => code,
+            };
+        }
+        Command::Doctor { tag: Some(_) } => "`v2 doctor TAG`",
         Command::CacheClean => "`v2 cache clean`",
         Command::Help | Command::Version => unreachable!("handled in main"),
     };

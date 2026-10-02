@@ -2,14 +2,17 @@
 //!
 //! Check is host-only for now: every file the entry imports is parsed and checked, and import
 //! problems are reported with their run-time text. The ENGINES, PACKAGES, LIBRARIES and COMPILED
-//! sections join it with the engines (roadmap Phases 1 and 2). Doctor arrives with the engine
-//! registry (roadmap 1.1).
+//! sections join it with the engines (roadmap 1.9 and Phase 2). Doctor prints the engine table;
+//! `v2 doctor TAG` arrives in roadmap 1.9.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::config::Config;
+use crate::engines::registry::Registry;
+use crate::engines::resolve::{CacheMode, Status};
+use crate::engines::spec::install_hint;
 use crate::engines::process::stop_if_interrupted;
 use crate::runtime::error::{render_diag, render_error, ErrorValue};
 use crate::runtime::module;
@@ -189,4 +192,71 @@ pub fn check(file: &str, cfg: &Config) -> i32 {
     } else {
         0
     }
+}
+
+/// `v2 doctor` (19.2): every engine resolved with fresh probes, as a table on stdout, then
+/// notes, the config files read and the config warnings. Missing engines are information, not
+/// failure: exit 0.
+pub fn doctor(cfg: Rc<Config>) -> i32 {
+    let reg = Registry::real(cfg.clone(), CacheMode::Refresh);
+    let mut rows: Vec<[String; 5]> = vec![["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].map(String::from)];
+    let mut notes: Vec<String> = Vec::new();
+    for spec in reg.specs() {
+        let id = spec.id.to_string();
+        let skipped = |list: &[(std::path::PathBuf, String)], notes: &mut Vec<String>| {
+            notes.extend(list.iter().map(|(p, why)| format!("{id}: skipped {} ({why})", p.display())));
+        };
+        match reg.resolve(spec) {
+            Ok(e) => {
+                let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
+                rows.push([id.clone(), "ok".into(), e.shown(), version, e.origin.label()]);
+                skipped(&e.skipped, &mut notes);
+            }
+            Err(nf) => {
+                let (status, version) = match nf.status {
+                    Status::Missing => ("missing", "-".to_string()),
+                    Status::Old(v) => ("old", v.to_string()),
+                    Status::Broken => ("broken", "-".to_string()),
+                };
+                let dash = || "-".to_string();
+                rows.push([id.clone(), status.into(), nf.command.clone().unwrap_or_else(dash), version, nf.from.clone().unwrap_or_else(dash)]);
+                skipped(&nf.skipped, &mut notes);
+                if nf.status == Status::Missing {
+                    notes.push(format!("{id}: not found; install: {}", install_hint(&id)));
+                } else {
+                    notes.push(format!("{id}: {}", nf.message.lines().next().unwrap_or_default()));
+                }
+            }
+        }
+    }
+    let widths: Vec<usize> = (0..5).map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0) + 2).collect();
+    for row in &rows {
+        let mut line = String::new();
+        for (c, cell) in row.iter().enumerate() {
+            if c + 1 < row.len() {
+                line.push_str(&format!("{cell:<width$}", width = widths[c]));
+            } else {
+                line.push_str(cell);
+            }
+        }
+        stdoutln!("{}", line.trim_end());
+    }
+    if !notes.is_empty() {
+        stdoutln!("notes:");
+        for n in &notes {
+            stdoutln!("  {n}");
+        }
+    }
+    if cfg.files.is_empty() {
+        stdoutln!("config files: none");
+    } else {
+        stdoutln!("config files:");
+        for f in &cfg.files {
+            stdoutln!("  {}", f.display());
+        }
+    }
+    for w in &cfg.warnings {
+        stdoutln!("{w}");
+    }
+    0
 }
