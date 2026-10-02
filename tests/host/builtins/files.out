@@ -1,0 +1,9 @@
+null
+16 ["line 1", "line 2é"]
+17 108
+efbbbf626f6dff
+IOError: '~/v2_files_test.txt' is not valid UTF-8 (use binary: true)
+IOError cannot read '~/missing_v2_file.txt
+TypeError: write_file() argument 'data' must be a str or bytes, got int
+TypeError: read_file() argument 'binary' must be a bool, got str
+3 efbbbf6f6b

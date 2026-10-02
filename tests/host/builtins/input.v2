@@ -1,0 +1,8 @@
+// input() reads one line at a time without the line break, and null at end of input (INTERNALS 5.10).
+let first = input("name? ")
+print()
+print(first)
+print(input())
+let crlf = input()
+print(crlf.len(), crlf)
+print(input(), input())

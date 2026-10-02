@@ -456,8 +456,7 @@ impl<'a> P<'a> {
         let mut spelled: Vec<&str> = Vec::new();
         let mut span: Option<(usize, usize)> = None;
         let mut reference = false;
-        loop {
-            let Some(kind) = self.peek() else { break };
+        while let Some(kind) = self.peek() {
             let t = self.toks[self.pos];
             if self.cpp {
                 match kind {

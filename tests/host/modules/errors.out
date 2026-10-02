@@ -1,4 +1,6 @@
 ImportError: cannot find module './fixtures/nope.v2' (looked for fixtures/nope.v2)
+cyc_a runs
+cyc_b runs
 ImportError: circular import: fixtures/cyc_a.v2 -> fixtures/cyc_b.v2 -> fixtures/cyc_a.v2
 boom runs once
 ValueError: boom
@@ -6,3 +8,5 @@ ValueError: boom
 ValueError: boom
 true
 ImportError: circular import: errors.v2 -> errors.v2
+ImportError: circular import: fixtures/cyc_a.v2 -> fixtures/cyc_b.v2 -> fixtures/cyc_a.v2
+ImportError: circular import: fixtures/cyc_a.v2 -> fixtures/cyc_b.v2 -> fixtures/cyc_a.v2

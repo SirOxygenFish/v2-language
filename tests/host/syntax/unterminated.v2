@@ -1,6 +1,8 @@
 // exit: 1
-// stderr: unterminated.v2:5:1: SyntaxError: @py block is never closed
+// stderr: unterminated.v2:7:1: SyntaxError: @py block is never closed
 // stderr: @py {
+// stderr: ^
+// stderr: hint: if the block's code has braces V2 can't match, use the fence form
 print("not printed: a file with a syntax error never runs")
 @py {
     x = 1

@@ -204,9 +204,12 @@ fn floor_rem_int(a: i64, b: i64) -> i64 {
     }
 }
 
+/// The same on floats, where a zero result takes the divisor's sign too (`-6.0 % 3` is `0.0`).
 fn floor_rem_float(a: f64, b: f64) -> f64 {
     let r = a % b;
-    if r != 0.0 && (r < 0.0) != (b < 0.0) {
+    if r == 0.0 {
+        0.0f64.copysign(b)
+    } else if (r < 0.0) != (b < 0.0) {
         r + b
     } else {
         r

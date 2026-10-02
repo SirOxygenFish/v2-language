@@ -1,0 +1,24 @@
+// read_file and write_file (DOCS 3.11, INTERNALS 5.10), in the harness's temporary home.
+let home = getenv("HOME") ?? getenv("USERPROFILE")
+let path = home + "/v2_files_test.txt"
+print(write_file(path, "line 1\r\nline 2é\n"))
+let text = read_file(path)
+print(text.len(), text.lines())
+print(len(read_file(path, binary: true)), read_file(path, true)[0])
+write_file(path, b"\xef\xbb\xbfbom\xff")
+let raw = read_file(path, binary: true)
+print(raw.hex())
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message.replace(home, "~"))
+    }
+}
+show(lambda() => read_file(path))
+// The OS's own text follows the path; it differs between systems.
+try { read_file(home + "/missing_v2_file.txt") } catch (e) { print(e.type, e.message.replace(home, "~").split("': ")[0]) }
+show(lambda() => write_file(path, 5))
+show(lambda() => read_file(path, binary: "yes"))
+write_file(path, b"\xef\xbb\xbfok")
+print(read_file(path).len(), read_file(path).encode().hex())
