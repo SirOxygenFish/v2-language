@@ -156,7 +156,7 @@ fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
     type_error(msg)
 }
 
-/// What a TypeError about a handle operand adds (11.7, D28).
+/// What a TypeError about a handle operand adds (11.7).
 pub const HANDLE_HINT: &str = " — do it inside a block, or convert it with value(h) first";
 
 pub fn is_handle(v: &Value) -> bool {

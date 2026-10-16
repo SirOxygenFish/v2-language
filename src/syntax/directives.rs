@@ -7,6 +7,8 @@
 use std::rc::Rc;
 
 use super::ast::{Directives, EngineImport, ExportItem, Exports, ImportItem, ImportItems, Name, Selector};
+use super::lexer::LABEL_HINT;
+use super::scan::canonical_tag;
 use super::span::{FileId, SourceMap, Span, UnitLoc};
 use super::token::{Delim, Kw, RawBody};
 use super::Diag;
@@ -18,7 +20,7 @@ pub struct Processed {
     pub directives: Directives,
 }
 
-/// Tags whose quoted `@export` items are C prototypes (4.4, 15.2).
+/// Tags whose `@export` items are function names only (4.4, 15.2).
 const COMPILED_TAGS: &[&str] = &["c", "cpp", "cxx", "rust", "rs"];
 
 struct Line {
@@ -94,7 +96,7 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         let lead = lines[i].text.len() - t.len();
         if is_directive(t, "@export") || is_directive(t, "@import") {
             let mut p = DirParser::new(sm, file, &lines, i, lead);
-            let last = p.directive(&mut directives, compiled)?;
+            let last = p.directive(&mut directives, tag, compiled)?;
             for line in &mut lines[i..=last] {
                 line.text.clear();
             }
@@ -327,8 +329,8 @@ impl<'a> DirParser<'a> {
         &self.toks[i]
     }
 
-    /// Parse one directive; returns the index of its last body line.
-    fn directive(&mut self, out: &mut Directives, compiled: bool) -> Result<usize, Diag> {
+    /// Parse one directive of a `tag` block; returns the index of its last body line.
+    fn directive(&mut self, out: &mut Directives, tag: &str, compiled: bool) -> Result<usize, Diag> {
         if let Some(d) = self.lex_error.take() {
             return Err(d);
         }
@@ -342,7 +344,7 @@ impl<'a> DirParser<'a> {
             }
             _ => {
                 self.bump();
-                let import = self.import(start)?;
+                let import = self.import(start, tag)?;
                 out.imports.push(import);
             }
         }
@@ -371,10 +373,12 @@ impl<'a> DirParser<'a> {
                 }
                 // Keywords are accepted bare here: they name foreign functions (4.4).
                 DK::Name(n) | DK::Kw(n) => push_export(exports, n, false, span)?,
-                DK::Str(s) => {
-                    let _ = compiled; // a quoted item is a C prototype in compiled blocks (15.2)
-                    push_export(exports, s, true, span)?
+                // Compiled blocks export functions by name (15.2).
+                DK::Str(_) if compiled => {
+                    return Err(Diag::new("compiled blocks export functions by name", span)
+                        .hint("export a wrapper function with a plain signature"))
                 }
+                DK::Str(s) => push_export(exports, s, true, span)?,
                 DK::End => return Err(Diag::new("unterminated @export list", open)),
                 other => return Err(Diag::new(format!("expected a name in the @export list, found {}", describe(&other)), span)),
             }
@@ -396,7 +400,7 @@ impl<'a> DirParser<'a> {
         }
     }
 
-    fn import(&mut self, start: Span) -> Result<EngineImport, Diag> {
+    fn import(&mut self, start: Span, tag: &str) -> Result<EngineImport, Diag> {
         if *self.peek() == DK::LBrace {
             let open = self.bump().span;
             let items = if *self.peek() == DK::Star {
@@ -449,20 +453,39 @@ impl<'a> DirParser<'a> {
             let selector = self.selector()?;
             Ok(EngineImport { items, selector, span: start.to(self.toks[self.pos.saturating_sub(1)].span) })
         } else {
-            let selector = self.selector()?;
-            if !matches!(selector, Selector::Module { .. }) {
-                return Err(Diag::new("only a package selector (py.name, js.name) can be imported as a whole module", self.toks[self.pos.saturating_sub(1)].span));
-            }
-            if !matches!(self.peek(), DK::Kw(w) if &**w == "as") {
-                return Err(Diag::new("expected `as NAME` after the package selector", self.span()));
-            }
-            self.bump();
-            let alias = self.name("a name after `as`")?;
-            Ok(EngineImport { items: ImportItems::Module(alias), selector, span: start.to(self.toks[self.pos.saturating_sub(1)].span) })
+            // Inside a block a whole module comes from the language's own import (13.7).
+            let hint = self.whole_module_hint(tag);
+            Err(Diag::new("the whole-module form of @import is only valid in V2 code", start).hint(hint))
         }
     }
 
-    /// `@tag`, `@tag.label`, `label`, `"label"`, `lang.seg.seg`, `v2` (4.1).
+    /// For `@import SEL as NAME` in a block: the block language's own import of that module,
+    /// else the names form.
+    fn whole_module_hint(&mut self, tag: &str) -> String {
+        let names = "import names instead: @import { … } from …".to_string();
+        let Ok(Selector::Module { lang, path }) = self.selector() else { return names };
+        if !matches!(self.peek(), DK::Kw(w) if &**w == "as") {
+            return names;
+        }
+        self.bump();
+        let Ok(alias) = self.name("") else { return names };
+        let module = path.iter().map(|n| &*n.text).collect::<Vec<_>>().join(".");
+        // ts runs in the js session, and `ts.pkg` is `js.pkg` (13.5).
+        fn family(t: &str) -> &str {
+            match canonical_tag(t) {
+                "ts" => "js",
+                other => other,
+            }
+        }
+        let block = canonical_tag(tag);
+        match (family(tag), family(&lang.text)) {
+            ("py", "py") => format!("use import {module} as {} inside @py blocks", alias.text),
+            ("js", "js") => format!("use const {} = require({module:?}) inside @{block} blocks", alias.text),
+            _ => names,
+        }
+    }
+
+    /// `@tag`, `@tag.label`, `label`, `lang.seg.seg`, `v2` (4.1).
     fn selector(&mut self) -> Result<Selector, Diag> {
         let t = self.bump();
         let span = t.span;
@@ -471,6 +494,9 @@ impl<'a> DirParser<'a> {
                 let tag = Name { text: tag, span };
                 if *self.peek() == DK::Dot {
                     self.bump();
+                    if let DK::Str(_) = self.peek() {
+                        return Err(Diag::new("a block label can't be a string", self.span()).hint(LABEL_HINT));
+                    }
                     let label = self.segment()?;
                     Ok(Selector::Exact { tag, label })
                 } else {
@@ -492,7 +518,7 @@ impl<'a> DirParser<'a> {
                     Ok(Selector::Label { label: Name { text: n, span } })
                 }
             }
-            DK::Str(s) => Ok(Selector::Label { label: Name { text: s, span } }),
+            DK::Str(_) => Err(Diag::new("a block label can't be a string", span).hint(LABEL_HINT)),
             other => Err(Diag::new(format!("expected a selector (@py, a block label, or py.module), found {}", describe(&other)), span)),
         }
     }
@@ -690,7 +716,7 @@ mod tests {
 
     #[test]
     fn imports_inside_blocks() {
-        let src = "@js {\n  @import { square, \"odd-name\" as odd } from @py.calc\n  @import { * } from py.statistics\n  @import { log } from v2\n  @import js.\"date-fns\" as dfns\n}";
+        let src = "@js {\n  @import { square, \"odd-name\" as odd } from @py.calc\n  @import { * } from py.statistics\n  @import { log } from v2\n  @import { format } from js.\"date-fns\"\n}";
         let (p, _) = run(src).unwrap();
         let imps = &p.directives.imports;
         assert_eq!(imps.len(), 4);
@@ -699,7 +725,7 @@ mod tests {
         assert!(matches!(&imps[1].items, ImportItems::All(_)));
         assert!(matches!(&imps[1].selector, Selector::Module { lang, path } if &*lang.text == "py" && path.len() == 1));
         assert!(matches!(&imps[2].selector, Selector::V2 { .. }));
-        assert!(matches!(&imps[3].items, ImportItems::Module(n) if &*n.text == "dfns"));
+        assert!(matches!(&imps[3].selector, Selector::Module { path, .. } if &*path[0].text == "date-fns"), "quoted package segments stay");
         // Every line was a directive, so no line has text: the body is "" (4.4).
         assert_eq!(&*p.body, "");
         assert_eq!(p.loc.line_count, 4);
@@ -714,7 +740,7 @@ mod tests {
         assert_eq!(err("@py {\n @export { f\n}"), "@py block is never closed");
         assert_eq!(err("@py ```\n @export { f\n```\n"), "unterminated @export list");
         assert_eq!(err("@py {\n @export { f } g\n}"), "unexpected text after the directive");
-        assert_eq!(err("@py {\n @import calc as c\n}"), "only a package selector (py.name, js.name) can be imported as a whole module");
+        assert_eq!(err("@py {\n @import calc as c\n}"), "the whole-module form of @import is only valid in V2 code");
         assert_eq!(err("@py {\n @import { a }\n}"), "expected `from` after the @import list");
     }
 
@@ -746,6 +772,75 @@ mod tests {
         let (p, sm) = run("@py {\n    def f(): pass\n    @export { f }\n}").unwrap();
         let at = p.directives.exports.unwrap().at.unwrap();
         assert_eq!(sm.line_col(at.file, at.lo), (3, 5));
+    }
+
+    /// The diagnostic for the first block in `src`.
+    fn diag(src: &str) -> Diag {
+        let mut sm = SourceMap::new();
+        let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+        let toks = lex(&sm, id).unwrap();
+        let (tag, raw) = toks
+            .iter()
+            .find_map(|t| match &t.tok {
+                Tok::BlockHead { tag, .. } => Some(tag.clone()),
+                _ => None,
+            })
+            .zip(toks.iter().find_map(|t| match &t.tok {
+                Tok::BlockBody(b) => Some(b.clone()),
+                _ => None,
+            }))
+            .expect("a block");
+        match process(&sm, &raw, &tag) {
+            Ok(_) => panic!("expected an error for {src:?}"),
+            Err(d) => d,
+        }
+    }
+
+    #[test]
+    fn a_whole_module_is_imported_by_the_blocks_own_language() {
+        // 4.4, 4.5, 13.7: inside a block only `@import { names } from SEL`; the hint names the language's
+        // own import when the module is the block's language.
+        for (src, hint) in [
+            ("@py {\n  @import py.numpy as np\n}", "use import numpy as np inside @py blocks"),
+            ("@python {\n  @import py.os.path as p\n}", "use import os.path as p inside @py blocks"),
+            ("@js {\n  @import js.\"date-fns\" as dfns\n}", "use const dfns = require(\"date-fns\") inside @js blocks"),
+            ("@ts {\n  @import ts.lodash as _\n}", "use const _ = require(\"lodash\") inside @ts blocks"),
+            ("@js {\n  @import py.numpy as np\n}", "import names instead: @import { … } from …"),
+            ("@c {\n  @import py.numpy as np\n}", "import names instead: @import { … } from …"),
+            ("@py {\n  @import calc as c\n}", "import names instead: @import { … } from …"),
+            ("@py {\n  @import py.numpy\n}", "import names instead: @import { … } from …"),
+        ] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("the whole-module form of @import is only valid in V2 code", Some(hint)), "{src}");
+            assert_eq!((d.span.line, d.span.col), (2, 3), "at the @import: {src}");
+        }
+    }
+
+    #[test]
+    fn labels_in_selectors_are_names() {
+        // 3.7, 4.1: a string where a block label would be is an error; quoted package segments stay.
+        for src in ["@js {\n  @import { f } from \"odd name\"\n}", "@js {\n  @import { f } from @py.\"odd name\"\n}"] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("a block label can't be a string", Some(LABEL_HINT)), "{src}");
+        }
+        assert!(run("@js {\n  @import { f } from py.\"my_mod\"\n}").is_ok());
+        assert!(run("@js {\n  @import { f } from @py.calc\n}").is_ok());
+    }
+
+    #[test]
+    fn compiled_exports_are_names() {
+        // 4.4, 4.5: a quoted item in a compiled block is an error; in py/js/ts blocks it is a name.
+        for tag in ["c", "cpp", "cxx", "rust", "rs"] {
+            let d = diag(&format!("@{tag} {{\n    @export {{ f, \"int g(int a)\" }}\n}}"));
+            assert_eq!(d.message, "compiled blocks export functions by name", "{tag}");
+            assert_eq!(d.hint.as_deref(), Some("export a wrapper function with a plain signature"));
+            assert_eq!((d.span.line, d.span.col), (2, 18), "at the string");
+        }
+        assert_eq!(exported("@c {\n    @export { f, g }\n}"), vec!["f", "g"]);
+        assert_eq!(err("@c {\n    @export { f, f }\n}"), "'f' is exported twice");
+        for tag in ["py", "js", "ts"] {
+            assert_eq!(exported(&format!("@{tag} {{\n    @export {{ \"odd-name\" }}\n}}")), vec!["odd-name"], "{tag}");
+        }
     }
 
     #[test]

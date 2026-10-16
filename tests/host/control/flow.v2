@@ -11,7 +11,7 @@ if score < 0 { print("never") }
 elif score < 50 { print("never") }
 else { print("else on its own line") }
 let queue = [1, 2, 3]
-while queue.len() > 0 {
+while len(queue) > 0 {
     print(queue.pop())
 }
 for name in ["ada", "grace"] { print(name) }

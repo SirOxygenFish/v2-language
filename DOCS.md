@@ -1,9 +1,7 @@
 # V2 — one script, every language
 
-> **Status: design specification.** This document describes the rebooted V2 language.
-> **None of it is implemented yet** — it is the blueprint we build from. The previous V2
-> (interpreter, old docs, registry) is archived in [`old/`](old/). How everything works under the
-> hood is specified in [`INTERNALS.md`](INTERNALS.md).
+> **Status:** being built; [ROADMAP.md](ROADMAP.md) "Where we are" says which parts work. How it
+> works under the hood is specified in [INTERNALS.md](INTERNALS.md).
 
 ---
 
@@ -78,17 +76,9 @@ print(top)   // [9, 8]
 
 ### Not in V2
 
-V2 used to promise everything. The reboot keeps only what glue code needs. These are **gone**:
-classes, structs, enums, traits, `match`, destructuring, generators, async/await, macros,
-decorators, type annotations, tuples, sets, comprehensions, pipes, bitwise operators, `defer`,
-labels/goto, WASM, inline assembly, actors, borrowing, the bytecode VM, and the 80-module
-standard library. If you need one of those, write that part in a language that has it — that is
-exactly what V2 is for.
-
-### How to read this document
-
-Chapters 2–3 teach the small host language. Chapters 4–12 are the polyglot system — the heart of
-V2. Chapters 13–16 cover configuration, tooling and safety. Chapter 17 has complete recipes.
+V2 has no classes, structs, enums, traits, `match`, destructuring, generators, async/await,
+macros, decorators, type annotations, tuples, sets, comprehensions, pipes, bitwise operators or
+`defer`: write that part in a language that has it — that is exactly what V2 is for.
 
 ---
 
@@ -97,13 +87,14 @@ V2. Chapters 13–16 cover configuration, tooling and safety. Chapter 17 has com
 ### Install
 
 ```bash
-cargo install --path .       # from the repo root once the new implementation exists
+cargo install --path .       # from the repo root
 ```
 
 This puts `v2` in `~/.cargo/bin`, which rustup already added to your `PATH`. The binary is called
 `v2`. Building it from source needs Rust and a C compiler (V2 bundles libffi, which is written in
 C); the built binary has no other dependencies. Each language you embed
-needs its own toolchain (`python`, `node`, `gcc`, `rustc`, …). `v2 doctor` shows what V2 can find.
+needs its own toolchain (`python`, `node`, `rustc`, and a C/C++ compiler: MSVC `cl` on Windows,
+`gcc` or `clang` elsewhere; see [chapter 5](#5-engines)). `v2 doctor` shows what V2 can find.
 
 ### Hello, world
 
@@ -138,6 +129,7 @@ ts      ok      (js engine, built-in type stripping)      22.14.0   PATH
 c       ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
 cpp     ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
 rust    ok      C:\Users\me\.cargo\bin\rustc.exe          1.91.1    PATH
+config file: none
 ```
 
 ### A project
@@ -146,16 +138,12 @@ A folder with a `v2.toml` is a V2 project (see [chapter 14](#14-project-file-v2t
 are optional — a single `.v2` file works on its own.
 
 ```toml
-[project]
-name  = "report-tool"
-entry = "main.v2"
-
 [python]
 venv = ".venv"      # use this virtual environment's python and packages
 ```
 
 ```bash
-v2 run          # runs [project].entry
+v2 main.v2      # V2 finds the v2.toml in the script's folder or a parent folder
 ```
 
 ---
@@ -181,9 +169,9 @@ let names = [
     "ada",                  // open brackets continue across lines
     "grace",
 ]
-let n = names
+let loud = names
     .filter(lambda(s) => s.starts_with("a"))   // a line starting with `.` continues
-    .len()
+    .map(lambda(s) => s.upper())
 ```
 
 A statement ends at the end of a line **unless** a `(`, `[` or dict `{` is still open, the line
@@ -306,13 +294,12 @@ Escapes: `\n` `\t` `\r` `\\` `\"` `\'` `\0` `\$` `\xNN` `\u{1F600}`. Any other e
 error (so a typo like `"\d"` is caught instead of silently kept).
 
 Strings are indexed by character: `"héllo"[1]` is `"é"`, `"hello"[-1]` is `"o"`,
-`"hello"[1:3]` is `"el"`.
+`"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`.
 
 String methods:
 
 | Method                       | Result                                           |
 | ---------------------------- | ------------------------------------------------ |
-| `s.len()` / `len(s)`         | number of characters                             |
 | `s.upper()`, `s.lower()`     | changed case                                     |
 | `s.trim()`                   | without leading/trailing whitespace              |
 | `s.split(sep)`               | list of parts                                    |
@@ -344,7 +331,7 @@ print(user.get("phone", "none"))   // none
 
 Dict keys are always strings. In a literal, a bare word (`name:`) is a string key; write
 `[expr]: value` to compute a key. Reading a missing key with `d[k]` or `d.k` is a `KeyError`; use
-`d.get(k, default)` when a key may be missing.
+`d.get(k, default)` when a key may be missing. `len(x)` is the number of items in a list or dict.
 
 | List method              | Effect                                        |
 | ------------------------ | --------------------------------------------- |
@@ -356,14 +343,14 @@ Dict keys are always strings. In a literal, a bare word (`name:`) is a string ke
 | `join(sep)`              | string made of the items                      |
 | `index_of(x)`            | index or `-1`                                 |
 | `get(i, default = null)` | item at index, or `default` if out of range   |
-| `len()` / `copy()`       |                                               |
+| `copy()`                 | shallow copy                                  |
 
 | Dict method              | Effect                                        |
 | ------------------------ | --------------------------------------------- |
 | `keys()` / `values()`    | lists                                         |
 | `get(k, default = null)` | value or default                              |
 | `remove(k)`              | remove and return the value                   |
-| `len()` / `copy()`       |                                               |
+| `copy()`                 | shallow copy                                  |
 
 If a dict holds a function under a key, `d.name(args)` calls that function — even when a dict
 method has the same name. Otherwise `d.name(args)` calls the dict method.
@@ -379,7 +366,7 @@ if score >= 90 {
     print("keep going")
 }
 
-while queue.len() > 0 {
+while len(queue) > 0 {
     handle(queue.pop())
 }
 
@@ -535,7 +522,6 @@ beyond read/write — comes from the languages you embed.
 | `error(type, message, data = null)`     | make an error value                                         |
 | `value(h)`                              | convert a foreign handle to plain V2 data                   |
 | `engine_available(tag)`                 | `true` if that engine's toolchain was found (`false` for unknown tags); never starts the engine |
-| `register_engine(tag, spec)`            | add a custom engine at runtime (chapter 13)                 |
 
 Relative paths in `read_file` and `write_file` are relative to the folder you run `v2` from (the
 working directory), like in Python and Node. `import` paths and `extern` library paths are relative
@@ -684,7 +670,7 @@ In a `py` block, if the last statement is not an expression, the block's value i
 Definition blocks are statements only; using one as an expression is a syntax error.
 
 A block value used as an operand, or followed by `.method()`, must be in parentheses:
-`(@py { 1 }) + 2`, `(@py { [1, 2] }).len()`.
+`(@py { 1 }) + 2`, `(@py { "ada" }).upper()`.
 
 ### 4.6 Output and input
 
@@ -702,9 +688,8 @@ prompt, Python `getpass`) waits for keyboard input — don't prompt from blocks.
 
 ### 4.7 Labels
 
-Labels are identifiers (or quoted strings, for unusual names) and must be unique within a file
-across all languages. Aliases of a tag mean the same thing: `@python stats` and `@py stats` are
-the same block kind.
+Labels are identifiers and must be unique within a file across all languages. Aliases of a tag
+mean the same thing: `@python stats` and `@py stats` are the same block kind.
 
 ### Errors
 
@@ -716,7 +701,7 @@ the same block kind.
 | two blocks with the same label                    | `SyntaxError`                           |
 | unknown tag, e.g. `@pyhton`                       | `EngineUnknown` (did you mean `py`?)    |
 | engine not installed or too old                   | `EngineNotFound` with an install hint   |
-| foreign syntax error in a py/js/ts block          | `ForeignError` pointing at the `.v2` line (with a configured TypeScript transpiler: at the block's opening line, carrying the transpiler's output) |
+| foreign syntax error in a py/js/ts block          | `ForeignError` pointing at the `.v2` line |
 | compile error in a c/cpp/rust block               | `BuildError` pointing at the `.v2` line |
 | reaching a definition block that failed to load   | the same error again                    |
 
@@ -730,9 +715,9 @@ An **engine** is what runs one language. V2 ships six built-in engines.
 | ---------------------- | ---------- | -------------------------------------- | ----------- |
 | `py` (`python`)        | Python     | Python 3.8+                            | interpreted |
 | `js` (`javascript`)    | JavaScript | Node.js 18+                            | interpreted |
-| `ts` (`typescript`)    | TypeScript | Node.js 22.13+ (or a configured transpiler) | interpreted |
-| `c`                    | C          | gcc, clang or MSVC `cl`                | compiled    |
-| `cpp` (`cxx`)          | C++        | g++, clang++ or MSVC `cl`              | compiled    |
+| `ts` (`typescript`)    | TypeScript | Node.js 22.13+ or 23.2+                | interpreted |
+| `c`                    | C          | MSVC `cl` on Windows; gcc or clang     | compiled    |
+| `cpp` (`cxx`)          | C++        | MSVC `cl` on Windows; g++ or clang++   | compiled    |
 | `rust` (`rs`)          | Rust       | rustc (stable)                         | compiled    |
 
 Interpreted engines run in a **worker process** that starts the first time you use that language
@@ -749,16 +734,15 @@ engines after the six above work. Until then, any of them can be added in a few 
 
 - Found as `python3`, `python`, or the `py -3` launcher on Windows (the Microsoft Store
   placeholder `python.exe` is skipped). Override with `[engines.py] command`.
-- If `[python] venv` is set, that virtual environment's Python and packages are used, unless
-  `[engines.py] command` is set in the same or a higher layer ([14](#14-project-file-v2toml)), in
-  which case the command wins.
-- Python modules are found in: the `.v2` file's folder, the project root, `[python] paths`, then
-  the normal Python path.
+- If `[python] venv` is set, that virtual environment's Python and packages are used
+  ([14](#14-project-file-v2toml)).
+- Where Python modules are found: [chapter 7](#7-importing-foreign-packages).
 - Named arguments become Python keyword arguments: `plot(xs, color: "red")`.
 - If a Python function returns a coroutine, V2 waits for it (see [8.4](#84-rules) for the one
   exception).
 - Output is UTF-8 on every platform.
-- The value of a block is its last expression, like in a Jupyter cell.
+- The value of a block is its last expression, like in a Jupyter cell
+  ([4.5](#45-getting-values-out-blocks-as-expressions)).
 - `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"`) instead
   of ending your program. In blocks, `__name__` is not `"__main__"`.
 
@@ -768,8 +752,7 @@ engines after the six above work. Until then, any of them can be added in a few 
 - Blocks run as scripts with `require` available; `import` *statements* are not allowed inside
   blocks — use `require(...)`, `await import(...)` in an exported async function, or
   `@import { x } from js.package` ([chapter 7](#7-importing-foreign-packages)).
-- `require` finds packages the way Node does, starting from the `.v2` file's folder (so a
-  `node_modules` folder in your project is found), plus `[node] modules` and `[node] paths`.
+- `require` finds packages the way Node does ([chapter 7](#7-importing-foreign-packages)).
 - If a function returns a Promise, V2 waits for it.
 - JavaScript has no keyword arguments: calling a JS function with named arguments is an
   `ArityError`.
@@ -780,21 +763,20 @@ engines after the six above work. Until then, any of them can be added in a few 
 
 ### TypeScript — `@ts`
 
-- Runs on the same Node worker as `@js`, with the types stripped first — by Node's built-in type
-  stripping (Node 22.13+ or 23.2+), or by the transpiler set in `[engines.ts] transpiler`.
+- Runs on the same Node worker as `@js`, with the types stripped first by Node's built-in type
+  stripping (Node 22.13+ or 23.2+). Settings go in `[engines.js]`; `ts` has none of its own.
 - Types are **not checked** — run `tsc` yourself if you want checking.
-- Built-in stripping only removes type syntax. `enum`, `namespace` and constructor parameter
-  properties raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`); set
-  `[engines.ts] transpiler` to use them. With a transpiler, error line numbers are only right if it
-  keeps the lines in place.
+- Stripping only removes type syntax. `enum`, `namespace` and constructor parameter properties
+  raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`): write TypeScript without them, or
+  use `@js`.
 - `@js` and `@ts` blocks can import from each other directly.
 
 ### C — `@c`, C++ — `@cpp`, Rust — `@rust`
 
-- Found as `cc`/`gcc`/`clang` (C), `c++`/`g++`/`clang++` (C++), `rustc` (Rust). On Windows, V2
-  prefers MSVC `cl` (found even outside a Developer Prompt, through the Visual Studio installer),
-  then `gcc`, then `clang`. Override with `[engines.c] command`, add flags with
-  `[engines.c] flags`.
+- On Linux and macOS, found as `cc`/`gcc`/`clang` (C) and `c++`/`g++`/`clang++` (C++). On
+  Windows, C and C++ use MSVC `cl` only (found even outside a Developer Prompt, through the Visual
+  Studio installer). Rust is `rustc`; on Windows it needs the same Visual Studio Build Tools.
+  Override with `[engines.c] command`, add flags with `[engines.c] flags`.
 - Standards: C11, C++17, Rust edition 2021.
 - See [chapter 11](#11-compiled-blocks-c-c-rust) for how compiled blocks work.
 
@@ -829,15 +811,18 @@ Inside a block, on its own line:
 ```
 
 - The list may span several lines.
-- `@export { * }` exports every function (and, in Python/JS, class) the block **defines** — not
-  names it imported. In compiled blocks it exports every non-`static`, non-`inline` function except
-  `main` whose signature V2 can convert; the others are left out and `v2 check` lists them.
+- `@export { * }` exports every function (and, in Python, class) the block **defines**; in
+  Python that leaves out names it imported. In `js` and `ts` blocks it exports the top-level
+  `function` declarations and every top-level `var` holding a function, including one set from
+  `require(...)` (names from the block's `@import` lines are not included); list `const`, `let`
+  and `class` names explicitly. In compiled blocks it exports every non-`static`, non-`inline`
+  function except `main` whose signature V2 can convert; the others are left out.
 - In `py`, `js` and `ts` blocks you may also export a constant, e.g. `@export { VERSION }`; V2
   copies its value when the block loads. Compiled blocks export functions only.
 - Exporting a class (Python) or constructor (JS) gives you a function that returns handles.
 - Every exported name is checked when the block loads; a missing name is an `ImportError`.
 - A name that isn't a valid V2 name (JavaScript's `$x`) can be written in quotes: `@export { "$x" }`.
-  In compiled blocks a quoted item is a C prototype instead (11.2).
+  Compiled blocks export functions by plain name; a quoted item there is a `SyntaxError`.
 - If your foreign code has a line that really starts with `@export` or `@import` (for example a
   Python decorator with that name), write `@@export` / `@@import` and V2 passes it through with a
   single `@`.
@@ -863,7 +848,8 @@ The **selector** says where to look:
 
 Aliases of a tag work in selectors: `@python.stats` is `@py.stats`, `python.os` is `py.os`. The
 whole-module form `@import MODULE_SELECTOR as alias` only works with package selectors like
-`py.numpy`.
+`py.numpy`, and only in V2 code. Inside a block it is a `SyntaxError`: use the language's own
+import there (`import numpy as np` in a `@py` block).
 
 An imported name is an ordinary V2 function in the scope where the `@import` appears. Call it,
 pass it around, store it, or re-export it from a V2 module.
@@ -943,10 +929,11 @@ npm install lodash                    # creates node_modules/ in the project roo
 venv = ".venv"
 ```
 
-Python looks in the `.v2` file's folder, the project root, `[python] paths`, and the venv. Node
-looks the way Node always does, starting from the `.v2` file's folder (so your project's
-`node_modules` is found), plus `[node] modules` and `[node] paths`; packages that only ship as ES
-modules work too. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
+Python looks in the `.v2` file's folder, the project root, then its normal module path (your
+`PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). Node
+looks the way Node always does: in the `node_modules` folders from the `.v2` file's folder upwards
+(so your project's is found), then in your own `NODE_PATH` if you set one; packages that only ship
+as ES modules work too. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
 
 One Python engine serves every `.v2` file in a run, so two local modules with the same name in
 different folders collide — the first one imported wins.
@@ -1088,7 +1075,7 @@ your V2 list. Return the new value instead.
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
 a whole-number JS `number` arrives in V2 as an `int`. Integers are range-checked when they go into
-compiled code (`FFIValueError` if 300 is passed as a `uint8_t`).
+compiled code (`MarshalError` if 300 is passed as a `uint8_t`).
 
 ### 9.2 Handles: everything else
 
@@ -1179,19 +1166,16 @@ its original type.
 
 | Error              | When                                                                  |
 | ------------------ | --------------------------------------------------------------------- |
-| `EngineUnknown`    | a block uses a tag no engine is registered for                        |
-| `EngineNotFound`   | the engine's toolchain isn't installed, is too old, or can't start — including a configured command, venv or transpiler that doesn't exist (message includes how to fix it) |
-| `EngineNameConflict` | `register_engine` tried to define a tag or alias that is built in, declared in a config file, or already registered with a different spec ([13.3](#133-at-runtime)) |
+| `EngineUnknown`    | a block or selector uses a tag that is neither built in nor declared in `v2.toml` |
+| `EngineNotFound`   | the engine's toolchain isn't installed, is too old, or can't start — including a configured command or venv that doesn't exist (message includes how to fix it) |
 | `EngineCrashed`    | the engine process died; every later use of that engine fails too     |
 | `EngineTimeout`    | a call ran longer than `call_timeout`                                 |
 | `EngineExitError`  | a compiled program or custom `run` engine exited with a non-zero status |
-| `MarshalError`     | a value couldn't cross (e.g. a handle sent to another engine)         |
+| `MarshalError`     | a value couldn't cross (e.g. a handle sent to another engine), or doesn't fit a C type (range, NUL inside a string, `null` for a `std::string`/`&str`, …), or a native result doesn't fit V2 (an unsigned value above the `int` range, a returned string that isn't valid UTF-8) |
 | `BuildError`       | a compiled block failed to compile (compiler output, `.v2` line numbers) |
 | `ForeignError`     | the foreign code threw an exception                                   |
 | `ProtocolError`    | an engine adapter broke the protocol (custom engines)                 |
-| `FFILoadError`     | a native library couldn't be loaded                                   |
-| `FFISymbolError`   | a declared function isn't in the library                              |
-| `FFIValueError`    | a value doesn't fit a C type (range, NUL inside a string, `null` for a `std::string`/`&str`, …), or a native result doesn't fit V2 (an unsigned value above the `int` range, a returned string that isn't valid UTF-8) |
+| `FFILoadError`     | a native library couldn't be loaded, or a declared function isn't in it |
 
 ### Skip if missing
 
@@ -1267,19 +1251,15 @@ V2 reads each exported function's signature from the source. Supported types:
 | nothing   | `void`                                                    | `()` / no return type     | `null`   |
 
 For anything else, pass JSON text as a string and parse it on the other side, or export a
-function with a simpler signature. If V2 can't read a signature (heavy macros, templates), give
-the C prototype explicitly in the export list:
-
-```text
-@export { add, "int mul(int a, int b)" }
-```
+function with a simpler signature. If V2 can't read a signature (heavy macros, templates,
+overloads), export a small wrapper function with a plain signature that calls it.
 
 **Who frees returned strings:** a returned `const char*` must point to memory that stays valid
 (a literal or a static buffer); V2 copies it. A returned `char*` must come from `malloc`; V2
 copies it and frees it. A Rust `String` or C++ `std::string` is handled for you.
 
 **`null` and named arguments:** a `const char*` parameter accepts `null` (passed as `NULL`);
-`std::string`, `&str` and `String` parameters don't (`FFIValueError`). Native functions take
+`std::string`, `&str` and `String` parameters don't (`MarshalError`). Native functions take
 positional arguments only — named arguments are an `ArityError`.
 
 ### 11.3 State
@@ -1289,9 +1269,8 @@ their values between calls.
 
 ### 11.4 Compiled action blocks: run a program
 
-A compiled block **without** `@export` is built as a small program and run. Used as a statement,
-its output is printed in order; used as an expression, its standard output (minus one trailing
-newline) is the block's value.
+A compiled block **without** `@export` is built as a small program and run, as a statement or as
+an expression ([4.5](#45-getting-values-out-blocks-as-expressions)).
 
 ```v2
 @rust {
@@ -1317,9 +1296,9 @@ last part of the error output is in `e.data.stderr`.
 
 The first run of a compiled block compiles it (Rust takes a second or two); later runs load the
 cached library instantly. The cache key covers the source, the compiler and its version, and the
-flags, so changing any of them rebuilds. The cache lives in your user folder
-(`~/.v2/cache/build`), never inside the project. `v2 cache clean` empties it (and the toolchain
-probe cache).
+flags, so changing any of them rebuilds. A cached library that is damaged is rebuilt
+automatically. The cache lives in your user folder (`~/.v2/cache/build`), never inside the
+project. `v2 cache clean` empties it (and the toolchain probe cache).
 
 Compiler errors are reported as a `BuildError` with line numbers pointing into your `.v2` file.
 
@@ -1333,19 +1312,19 @@ arguments as a **JSON array** and returns the result as **JSON text**:
 | C / C++  | `const char* mean(const char* args_json)` — returns `NULL` on error; `v2_last_error()` gives the message; the result stays valid until the next V2 call |
 | Rust     | `fn mean(args_json: &str) -> Result<String, String>`                   |
 
-A general `v2_call(name, args_json)` (C) / `v2::call(name, args_json)` (Rust) calls any name that
-the block imported. See the example in [8.3](#83-compiled-code-calling-other-languages).
+See the example in [8.3](#83-compiled-code-calling-other-languages).
 
-Inside compiled blocks only the `@import { names } from SELECTOR` form works (no `*`, no whole
-module handles), and only in blocks that `@export` something — a program-style block runs as a
-separate process and can't call back into V2 (`BuildError`).
+Inside compiled blocks only the `@import { names } from SELECTOR` form works (no `*`), and only in
+blocks that `@export` something — a program-style block runs as a separate process and can't call
+back into V2 (`BuildError`).
 
 ### 11.7 Limits
 
 - A crash in C or C++ code (a bad pointer, a segfault) takes down the whole V2 process — native
   code is not sandboxed. So does native code calling `exit()` or `abort()`.
-- Exported functions run inside the V2 process, so `call_timeout` can't interrupt them, and they
-  share standard input with V2's `input()` — don't read stdin from them.
+- Exported functions run inside the V2 process, so `call_timeout` doesn't apply to them
+  ([14](#14-project-file-v2toml)), and they share standard input with V2's `input()` — don't read
+  stdin from them.
 - Lists, dicts and callbacks as direct parameters of compiled functions are not supported; use
   JSON text.
 - Cargo crates in `@rust` blocks are not supported; only the standard library.
@@ -1379,16 +1358,15 @@ win.MessageBoxA(null, "Hello from V2", "V2", 0)
   - A bare name is searched per platform: `user32` → `user32.dll`; `sqlite3` → `sqlite3.dll` /
     `libsqlite3.so` / `libsqlite3.dylib`.
   - A path (`"./native/libfoo.so"`) is used as given (relative to the `.v2` file).
-  - Search order: `[ffi] search_paths`, the `.v2` file's folder, the project root, then the
-    system's normal search. On Windows that includes `PATH` but never the current folder, so a
-    downloaded folder can't slip in a fake DLL.
+  - Search order: the `.v2` file's folder, then the system's normal search. On Windows that
+    includes `PATH` but never the current folder, so a downloaded folder can't slip in a fake DLL.
 - **Types:** the same scalar types as compiled blocks (11.2), plus pointers:
   - `const char*` parameters take a V2 `str` (converted to a NUL-terminated copy for the
     duration of the call) or `null`; a returned `const char*` is copied into a `str`.
   - Any other pointer (`void*`, `FILE*`, `sqlite3*`, and also non-const `char*`) is an **opaque
     handle**: you get it from one function and pass it to another. `null` is the NULL pointer.
-- Positional arguments only; like compiled code, `extern` functions run inside the V2 process and
-  ignore `call_timeout`.
+- Positional arguments only. Like compiled code, `extern` functions run inside the V2 process, so
+  `call_timeout` doesn't apply to them ([14](#14-project-file-v2toml)).
 
 ```v2
 extern "sqlite3" as sq {
@@ -1405,21 +1383,26 @@ reading C headers directly with `#include`. Wrap those in a small `@c` block ins
 
 ### Errors
 
-`FFILoadError` (library not found — the message lists every place V2 looked), `FFISymbolError`
-(function not in the library), `FFIValueError` (argument or result doesn't fit), and a
+`FFILoadError` (library not found — the message lists every place V2 looked — or a declared
+function not in the library), `MarshalError` (argument or result doesn't fit), and a
 `SyntaxError` for a declaration V2 can't read.
 
 ---
 
 ## 13. Custom engines
 
-Any language can be added as a custom engine. There are two kinds.
+Any language can be added as a custom engine, declared in an `[engines.<tag>]` table in
+`v2.toml` ([chapter 14](#14-project-file-v2toml)). Tags are lowercase letters, digits and `_`,
+starting with a letter; `v2`, `export` and `import` are reserved. Built-in tags and their aliases
+can't be redefined: a table named after one configures that built-in engine, except `ts`
+(and `typescript`), which runs on the js engine and is configured in `[engines.js]`
+([chapter 14](#14-project-file-v2toml)). There are two kinds.
 
 ### 13.1 `run` engines: execute a file
 
-A `run` engine writes the block to a temporary file and runs a command. Used as an expression,
-its standard output (minus one trailing newline) is the block's value; used as a statement, its
-output is printed in order.
+A `run` engine writes the block to a temporary file and runs a command; its output is printed, or
+is the block's value when the block is used as an expression
+([4.5](#45-getting-values-out-blocks-as-expressions)).
 
 ```toml
 # v2.toml
@@ -1464,79 +1447,53 @@ clear error.
 [engines.rb]
 kind    = "bridged"
 command = ["ruby", "adapters/v2_adapter.rb"]   # relative to this v2.toml's folder
-aliases = ["ruby"]
 ```
 
 Relative file paths in `command` are resolved against the folder of the `v2.toml` that declares
 them. Custom blocks are scanned by counting braces (4.2), so use the fence form when the code has
 unbalanced braces. The protocol is specified in [INTERNALS.md](INTERNALS.md), with a checklist of
-messages an adapter must handle. `v2 doctor rb` starts the adapter and verifies the handshake.
-
-### 13.3 At runtime
-
-```v2
-register_engine("lua", {kind: "run", command: ["lua", "{file}"], ext: "lua"})
-@lua { print(1 + 1) }
-```
-
-`register_engine` must run before the first block that uses the tag is reached. Tags are
-lowercase letters, digits and `_`, starting with a letter; `v2`, `export` and `import` are
-reserved. Built-in tags (`py`, `js`, `ts`, `c`, `cpp`, `rust` and their aliases), tags declared in
-a config file, and tags already registered with a different spec can't be redefined
-(`EngineNameConflict`); registering the identical spec again does nothing. You can still change a
-built-in engine's command and options in `v2.toml`.
+messages an adapter must handle. To test an adapter, run a two-line `.v2` file that uses it.
 
 ---
 
 ## 14. Project file: `v2.toml`
 
-V2 looks for `v2.toml` in the script's folder and its parents; the folder where it is found is
-the **project root**. Every key is optional, except that a custom engine needs `kind` and
+V2 looks for `v2.toml` in the script's folder and its parents (`v2 doctor` starts from the
+current folder); the folder where it is found is the **project root**. Without one, the script's
+folder is the project root. Every key is optional, except that a custom engine needs `kind` and
 `command` (a `run` command must contain `{file}`; `ext` defaults to the tag). Relative paths are
-relative to the file that declares them.
+relative to the folder of the `v2.toml`.
 
 ```toml
-[project]
-name  = "report-tool"
-entry = "main.v2"                 # what `v2 run` runs
-
 [engines.py]
-# command = ["C:/Python312/python.exe"]   # skips auto-detection; wins over [python] venv
+# command = ["C:/Python312/python.exe"]   # skips auto-detection
 startup_timeout = 30              # seconds to wait for the engine to start (default 30)
 call_timeout    = 0               # seconds per call; 0 = no limit (default). Applies to worker
                                   # engines, run engines and compiled programs — not to in-process
                                   # compiled functions or extern calls, which can't be interrupted
 
-[engines.ts]
-transpiler = "node"               # "node" = built-in type stripping; or a program path (string)
-                                  # or argv (array) that reads TypeScript on stdin, writes JS
-
 [engines.rust]
 flags = ["-C", "opt-level=3"]
 
 [python]
-venv  = ".venv"                   # use this virtual environment
-paths = ["lib/python"]            # extra module folders
-
-[node]
-modules = "node_modules"          # where packages are resolved from
-paths   = []
-
-[ffi]
-search_paths = ["native/bin"]     # extra folders for `extern` libraries
-
-[engines.lua]                     # a custom engine (chapter 13)
-kind    = "run"
-command = ["lua", "{file}"]
-ext     = "lua"
+venv = ".venv"                    # use this virtual environment
 ```
 
-If `[engines.py] command` and `[python] venv` are set in the same file, `command` is used and the
-venv is ignored.
+If `[engines.py] command` (or `V2_ENGINE_PY`) is set, it is used and `[python] venv` is ignored.
 
-Settings are applied in this order, later ones winning: built-in defaults →
-`~/.v2/config.toml` (your personal defaults) → the project's `v2.toml` → environment variables
-(`V2_ENGINE_PY=C:/Python312/python.exe`) → command-line flags (`--engine py=...`).
+`@ts` blocks run on the js engine, so they are configured in `[engines.js]`: an `[engines.ts]`
+table, or `V2_ENGINE_TS`, is a configuration error. So is an unknown section or key, or a key that
+doesn't apply to that engine (such as `flags` in `[engines.py]`). A configuration error stops V2
+before anything runs, with exit code 2:
+
+```text
+C:\proj\v2.toml: config error: unknown key [engines.py] comand (did you mean 'command'?)
+```
+
+Settings are applied in this order, later ones winning: built-in defaults → the project's
+`v2.toml` → `V2_ENGINE_<TAG>` environment variables, which set one engine's executable
+(`V2_ENGINE_PY=C:/Python312/python.exe`). A `V2_ENGINE_<TAG>` for a tag that is neither built in
+nor declared in `v2.toml` is ignored.
 
 V2 writes nothing into your project: temporary files go to a private folder in your system's
 temp directory, and caches live in `~/.v2/`.
@@ -1548,24 +1505,20 @@ temp directory, and caches live in `~/.v2/`.
 | Command                        | Does                                                                 |
 | ------------------------------ | -------------------------------------------------------------------- |
 | `v2 file.v2 [args...]`         | run a script                                                         |
-| `v2 run [args...]`             | run the project's `[project] entry`                                  |
-| `v2 check file.v2`             | parse and validate without running anything; lists the engines and libraries the script would use |
+| `v2 check file.v2`             | parse and check the script and every file it `import`s, without running or writing anything; prints the errors |
 | `v2 doctor`                    | show every engine: found or not, command, version, and where the setting came from |
-| `v2 doctor TAG`                | test one engine in depth (starts it, or compiles a tiny program)     |
 | `v2 cache clean`               | delete V2's caches (compiled blocks and toolchain probe results)     |
 | `v2 --version`, `v2 --help`    |                                                                      |
 
-| Flag                 | Does                                              |
-| -------------------- | ------------------------------------------------- |
-| `--engine TAG=PATH`  | use this executable for an engine                 |
-| `--no-cache`         | rebuild compiled blocks and re-probe toolchains instead of using the caches |
+There are no other flags. A first word that is exactly `check`, `doctor` or `cache` is a command;
+to run a script with such a name, write it as a path: `v2 ./doctor`.
 
 | Exit code | Meaning                                                                  |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | success                                                                  |
-| `1`       | uncaught error, or a `SyntaxError`                                       |
+| `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error            |
 | `2`       | usage or configuration error                                             |
-| `3`       | a required engine is missing (uncaught `EngineNotFound`, or `check`/`doctor TAG` found it missing) |
+| `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
 | `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 
@@ -1575,9 +1528,9 @@ temp directory, and caches live in `~/.v2/`.
 
 - **Running a `.v2` file runs all the code in it** — every block, in every language, with your
   user rights. V2 has no sandbox. Only run scripts you trust.
-- `v2 check file.v2` shows what a script would use (engines, packages, native libraries) **without
-  running anything**. `v2 doctor`, by contrast, runs toolchain commands — including ones a
-  project's `v2.toml` configures — so don't run it on a project you don't trust.
+- `v2 check file.v2` only parses and checks the code; it runs nothing. `v2 doctor`, by contrast,
+  runs toolchain commands — including ones a project's `v2.toml` configures — so don't run it on a
+  project you don't trust.
 - When V2 searches `PATH` for toolchains it skips relative entries like `.`, so a project folder
   can't slip in its own fake `python` or `gcc`.
 - Processes started by run-engine blocks and compiled programs (and everything they start) are
@@ -1718,22 +1671,6 @@ func progress(done, total) {
 process(["a", "b", "c"])
 ```
 
-### 17.6 A shell step with a custom engine
-
-```toml
-[engines.sh]
-kind    = "run"
-command = ["bash", "{file}"]     # Windows: "C:/Program Files/Git/bin/bash.exe"
-ext     = "sh"
-```
-
-```v2
-let files = @sh { ls *.csv }
-for name in files.lines() {
-    print("found", name)
-}
-```
-
 ---
 
 ## 18. Appendix
@@ -1741,33 +1678,37 @@ for name in files.lines() {
 ### Grammar summary
 
 ```text
-program     = { statement }
+program     = { statement }                   (a statement ends at a line end or ";", 3.1)
 statement   = let | const | assign | if | while | for | "break" | "continue"
             | return | throw | try | func | import | engine_import | extern
-            | block | expression
+            | block | expr
 let         = "let" NAME [ "=" expr ]
 const       = "const" NAME "=" expr
 assign      = target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr
+target      = NAME | expr "." NAME | expr "[" expr "]"     (never through "?.")
 if          = "if" expr body { "elif" expr body } [ "else" body ]
 while       = "while" expr body
-for         = "for" NAME [ "," NAME ] "in" ( expr | expr ".." expr ) body
+for         = "for" NAME [ "," NAME ] "in" expr [ ".." expr ] body
 func        = "func" NAME "(" params ")" body
-params      = [ param { "," param } ]      param = NAME [ "=" expr ] | "..." NAME
+params      = [ param { "," param } [ "," ] ]      param = NAME [ "=" expr ] | "..." NAME
 return      = "return" [ expr ]
 throw       = "throw" expr
 try         = "try" body [ "catch" [ "(" NAME ")" ] body ] [ "finally" body ]
 import      = "import" STRING "as" NAME
-engine_import = "@import" ( "{" items "}" "from" selector | package "as" NAME )
-items       = "*" | item { "," item }     item = ( NAME | STRING ) [ "as" NAME ]
-selector    = "@" TAG [ "." LABEL ] | LABEL | package | "v2"
+engine_import = "@import" ( "{" items "}" "from" selector | selector "as" NAME )
+              (the "as" form takes a package selector and is not allowed inside blocks)
+items       = "*" | item { "," item } [ "," ]     item = ( NAME | STRING ) [ "as" NAME ]
+selector    = "@" TAG [ "." NAME ] | NAME | package | "v2"
 package     = LANG "." segment { "." segment }     segment = NAME | STRING
 extern      = "extern" STRING [ "as" NAME ] "{" C-declarations "}"
-block       = "@" TAG [ LABEL ] [ "(" block_args ")" ] ( "{" raw "}" | fence raw fence )
-block_args  = block_arg { "," block_arg }  block_arg = NAME | NAME ":" expr
+block       = "@" TAG [ NAME ] [ "(" [ block_arg { "," block_arg } [ "," ] ] ")" ]
+              ( "{" raw "}" | fence raw fence )
+block_arg   = NAME [ ":" expr ]
 body        = "{" { statement } "}"           (the "{" on the same line as its header)
-expr        = see the operator table in 3.4; primaries are literals, NAME, "(" expr ")",
-              list, dict, f-string, lambda, and action blocks (in parentheses when an
-              operator or postfix follows)
+expr        = block | ternary                 (a block used as a value must be an action block)
+ternary     = the operator table in 3.4 over primaries: literals, NAME, "(" expr ")", list,
+              dict, f-string and lambda — so a block used as an operand, or followed by a
+              postfix, needs parentheses
 lambda      = "lambda" "(" params ")" ( "=>" expr | body )
 ```
 
@@ -1777,23 +1718,3 @@ lambda      = "lambda" "(" params ")" ( "=>" expr | body )
 `continue` `try` `catch` `finally` `throw` `import` `as` `from` `extern` `true` `false` `null`
 
 Keywords may still be used after a `.` (`h.from`, `result.in`) and, quoted, in import lists.
-
-### Coming from old V2
-
-| Old V2                                            | Now                                                        |
-| ------------------------------------------------- | ---------------------------------------------------------- |
-| classes, structs, enums, traits, `match`, generators, async, macros, decorators, type annotations, tuples, sets, comprehensions, pipes, bitwise ops, `defer`, goto | removed — write that part in an embedded language |
-| 80+ `std.*` modules and 62 registry packages      | removed — import from Python/npm instead                   |
-| bytecode VM, `-c`/`-r`, `--target wasm/exe`       | removed — one interpreter                                  |
-| `print` without a newline                         | `print` ends with a newline                                |
-| errors without line numbers                       | every error has `file:line:col` and a stack                |
-| `0b`/`0o` literals, `//` floor division           | removed (`//` is always a comment)                         |
-| lists/dicts copied on every assignment            | shared; use `.copy()`                                      |
-| `var`                                             | use `let`                                                  |
-| `enable { py, js }`                               | not needed — blocks just work                              |
-| `@c` / `@rust` blocks silently skipped            | compiled, cached and callable                              |
-| `@import` inside blocks ignored with a warning    | works — any language can call any other                    |
-| foreign objects failed ("not JSON serializable")  | come back as handles                                       |
-| `register_engine(path, name)`                     | `register_engine(tag, spec)` and `[engines.<tag>]`         |
-| `extern c int f(...)`, `cimport`, `cstruct`, `std.ffi` | `extern "lib" { C declarations }`                     |
-| `@asm`, `@mal`, `@java`, `@cs`, `@sql`, `@wasm`   | removed — add any of them back as a custom engine          |

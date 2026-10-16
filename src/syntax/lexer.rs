@@ -893,6 +893,9 @@ impl<'a> Lexer<'a> {
 
 const DECORATOR_HINT: &str = "V2 has no decorators: @tag starts an embedded block of another language";
 
+/// Where a string stands for a block label (3.7, 4.1).
+pub(crate) const LABEL_HINT: &str = "a label is a name, like stats or calc_2";
+
 const FENCE_HINT: &str = "if the block's code has braces V2 can't match, use the fence form: put ``` after the header and close it with ``` on its own line";
 
 /// Embedded blocks, selectors, directives and `extern` bodies (3.6, 3.7, 3.9).
@@ -942,24 +945,14 @@ impl<'a> Lexer<'a> {
                         .hint(DECORATOR_HINT));
                 }
                 if Kw::from_word(w).is_some() {
-                    return Err(Diag::new(format!("a block label can't be the keyword `{w}`"), self.span_from(lm))
-                        .hint(format!("quote it: @{shown_tag} \"{w}\" {{")));
+                    return Err(Diag::new(format!("a block label can't be the keyword `{w}`"), self.span_from(lm)));
                 }
                 label = Some((Rc::<str>::from(w), self.span_from(lm)));
             }
+            // Labels are names (3.7); the string is read only to point at all of it.
             Some(q @ ('"' | '\'')) => {
-                let parts = self.one_line_body(StrKind::Plain, q)?;
-                let text: String = parts
-                    .iter()
-                    .map(|p| match p {
-                        RawPart::Lit(raw) => decode(raw),
-                        RawPart::Interp { .. } => String::new(),
-                    })
-                    .collect();
-                if text.is_empty() {
-                    return Err(Diag::new("a block label can't be empty", self.span_from(lm)));
-                }
-                label = Some((Rc::<str>::from(text), self.span_from(lm)));
+                self.one_line_body(StrKind::Plain, q)?;
+                return Err(Diag::new("a block label can't be a string", self.span_from(lm)).hint(LABEL_HINT));
             }
             _ => {}
         }
@@ -1433,7 +1426,6 @@ let n = names
         );
         // Args may span lines; the `{` goes after their `)`.
         assert_eq!(kinds("@py(\n  a,\n  b\n) { x }"), r#"HEAD(py) ( a , b ) BODY(" x ") EOF"#);
-        assert_eq!(kinds("@py \"odd name\" { x }"), r#"HEAD(py,odd name) BODY(" x ") EOF"#);
         assert_eq!(kinds("@py stats{ x }"), r#"HEAD(py,stats) BODY(" x ") EOF"#);
         // Fence form: nothing inside is scanned for its end.
         assert_eq!(kinds("@py ```\nx = '{'\n```\nprint(1)"), r#"HEAD(py) BODY("x = '{'\n") NL print ( 1 ) EOF"#);
@@ -1466,7 +1458,18 @@ let n = names
         assert_eq!(err("@memo\nfunc f() {}"), "expected { or a ``` fence after @memo");
         assert_eq!(err("@ {"), "expected an engine tag after @");
         assert_eq!(err("@py for { }"), "a block label can't be the keyword `for`");
-        assert_eq!(err("@py \"\" { }"), "a block label can't be empty");
+        // Labels are names, never strings (3.7).
+        let diag = |src: &str| {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            lex(&sm, id).unwrap_err()
+        };
+        for src in ["@py \"\" { }", "@py \"odd name\" { }", "@py 'stats' { }", "let x = @js \"a\"(n: 1) { n }"] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("a block label can't be a string", Some(LABEL_HINT)), "{src}");
+        }
+        let d = diag("@py \"odd name\" { }");
+        assert_eq!((d.span.col, d.span.hi - d.span.lo), (5, 10), "the whole string");
         assert_eq!(err("@py {\n x }"), "@py block closes at a } that does not start its line");
         assert_eq!(err("@py { 1 } + 2"), "unexpected text after the } that closes the @py block");
         assert_eq!(err("@py ```python\n```"), "nothing may follow the opening ``` fence on its line");

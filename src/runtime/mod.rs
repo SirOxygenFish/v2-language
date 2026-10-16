@@ -55,8 +55,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     // import that reaches them (6.1 step 2).
     let mut parsed = HashMap::new();
     module::parse_graph(&mut sm, file, &program, &mut parsed);
-    let mode = if cfg.no_cache { CacheMode::Refresh } else { CacheMode::ReadWrite };
-    let mut interp = Interp::new(sm, parsed, crate::INTERP_STACK_BYTES, Registry::real(cfg, mode));
+    let mut interp = Interp::new(sm, parsed, crate::INTERP_STACK_BYTES, Registry::real(cfg, CacheMode::ReadWrite));
     interp.args = args;
     let result = interp.run(file, &program);
     // Program output comes before the error that ended it (5.10). Output that can't be written
