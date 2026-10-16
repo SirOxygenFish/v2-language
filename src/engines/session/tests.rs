@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 
 use super::*;
-use crate::config::{Config, Sourced};
+use crate::config::Config;
 use crate::engines::registry::Registry;
 use crate::engines::resolve::{Lookup, Origin, ProbeCache, ProbeOutcome, Prober};
 use crate::engines::spec::builtins;
@@ -53,7 +53,7 @@ impl<R: Read, W: Write> Worker<R, W> {
     }
 
     fn hello(&mut self, version: &str) {
-        self.send(json!({"t":"hello","vep":1,"engine":"py","impl":"Test","version":version,"pid":4242,"caps":ALL_CAPS}));
+        self.send(json!({"t":"hello","vep":1,"version":version,"pid":4242,"caps":ALL_CAPS}));
     }
 
     fn start(&mut self) {
@@ -83,14 +83,12 @@ fn py() -> Rc<ResolvedEngine> {
         argv: vec!["python".into()],
         version: Some(Version(3, 12, 1)),
         skipped: Vec::new(),
-        ts: None,
     })
 }
 
 /// An interpreter with one source file, an empty config and captured stdout.
 fn interp() -> (Interp, Rc<RefCell<Vec<u8>>>) {
-    let mut cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
-    cfg.python_paths = Some(Sourced { value: vec![PathBuf::from("C:/proj/lib")], from: crate::config::ConfigSource::Default });
+    let cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
     let reg = Registry::new(Rc::new(cfg), Box::new(NoProbe), Lookup::default(), ProbeCache::off());
     let mut it = Interp::new(SourceMap::new(), HashMap::new(), 2 << 20, reg);
     it.sm.add(PathBuf::from("C:/proj/main.v2"), "main.v2".into(), "x\n");
@@ -142,7 +140,7 @@ fn handshake_and_init() {
         w.hello("3.12.1");
         let init = w.recv_t("init");
         assert_eq!(init["project_root"], "C:/proj");
-        assert_eq!(init["paths"], json!(["C:/proj", "C:/proj/lib"]), "py: the root, then [python] paths");
+        assert_eq!(init["paths"], json!(["C:/proj"]), "py: the project root (9.3)");
         w.ret(&init, Json::Null);
         w.recv_t("bye");
         w.recv_end();
@@ -159,7 +157,7 @@ fn handshake_failures() {
     let cases: Vec<Case> = vec![
         (|w| w.send(json!({"t":"ret","id":1,"value":null})), "ProtocolError", "engine 'py' sent 'ret' before hello"),
         (
-            |w| w.send(json!({"t":"hello","vep":2,"engine":"py","impl":"x","version":"1","pid":1,"caps":[]})),
+            |w| w.send(json!({"t":"hello","vep":2,"version":"1","pid":1,"caps":[]})),
             "ProtocolError",
             "engine 'py' speaks VEP/2; this V2 speaks VEP/1",
         ),
@@ -396,20 +394,14 @@ fn releases_ride_the_next_frame_or_go_alone_at_256() {
 
 #[test]
 fn worker_command_and_env() {
-    let mut cfg = Config { root: PathBuf::from("/proj"), ..Config::default() };
     let adapter = PathBuf::from("/run/adapters/py.py");
-    let (argv, env) = worker_command(&py(), &cfg, &adapter);
+    let (argv, env) = worker_command(&py(), &adapter);
     assert_eq!(argv, [OsString::from("python"), "-B".into(), "-u".into(), adapter.clone().into_os_string()]);
     assert!(env.contains(&("PYTHONUTF8".into(), "1".into())) && env.contains(&("PYTHONIOENCODING".into(), "utf-8".into())));
-    assert!(!env.iter().any(|(k, _)| k == "NODE_PATH"));
-    let js_spec = builtins().into_iter().nth(1).map(Rc::new).unwrap();
-    let js = ResolvedEngine { spec: js_spec, origin: Origin::Path, argv: vec!["node".into()], version: None, skipped: Vec::new(), ts: None };
-    cfg.node_paths = Some(Sourced { value: vec![PathBuf::from("/extra")], from: crate::config::ConfigSource::Default });
-    let (argv, env) = worker_command(&js, &cfg, &adapter);
+    // js: Node finds packages itself; V2 sets no NODE_PATH (an inherited one stays as it is).
+    let (argv, env) = worker_command(&js(), &adapter);
     assert_eq!(argv, [OsString::from("node"), adapter.into_os_string()]);
-    let node_path = env.iter().find(|(k, _)| k == "NODE_PATH").map(|(_, v)| v.clone()).expect("NODE_PATH");
-    let dirs: Vec<PathBuf> = std::env::split_paths(&node_path).collect();
-    assert_eq!(&dirs[..2], [PathBuf::from("/proj").join("node_modules"), PathBuf::from("/extra")]);
+    assert!(!env.iter().any(|(k, _)| k == "NODE_PATH"), "{env:?}");
 }
 
 #[test]
@@ -516,7 +508,6 @@ fn clone_engine(e: &ResolvedEngine) -> ResolvedEngine {
         argv: e.argv.clone(),
         version: e.version,
         skipped: e.skipped.clone(),
-        ts: e.ts.clone(),
     }
 }
 
@@ -629,7 +620,7 @@ fn interp_cfg(cfg: Config) -> (Interp, Rc<RefCell<Vec<u8>>>) {
 
 fn js() -> Rc<ResolvedEngine> {
     let spec = builtins().into_iter().nth(1).map(Rc::new).unwrap();
-    Rc::new(ResolvedEngine { spec, origin: Origin::Path, argv: vec!["node".into()], version: Some(Version(24, 11, 1)), skipped: Vec::new(), ts: None })
+    Rc::new(ResolvedEngine { spec, origin: Origin::Path, argv: vec!["node".into()], version: Some(Version(24, 11, 1)), skipped: Vec::new() })
 }
 
 fn scripted_engine(it: &mut Interp, engine: Rc<ResolvedEngine>, script: impl FnOnce(PipeWorker) + Send + 'static) -> (SessionId, JoinHandle<()>) {
@@ -641,20 +632,18 @@ fn scripted_engine(it: &mut Interp, engine: Rc<ResolvedEngine>, script: impl FnO
 }
 
 #[test]
-fn init_paths_deduplicated_for_py_empty_for_js() {
-    let mut cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
-    let paths = vec![PathBuf::from("C:/proj"), PathBuf::from("C:/proj/lib"), PathBuf::from("C:/proj/lib")];
-    cfg.python_paths = Some(Sourced { value: paths, from: crate::config::ConfigSource::Default });
+fn init_paths_are_the_root_for_py_and_empty_for_js() {
+    let cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
     let (mut it, _) = interp_cfg(cfg);
     let (s, t) = scripted(&mut it, |mut w| {
         w.hello("3.8.0"); // the minimum itself is fine (8.4)
         let init = w.recv_t("init");
-        assert_eq!(init["paths"], json!(["C:/proj", "C:/proj/lib"]), "ordered, de-duplicated (9.3)");
+        assert_eq!(init["paths"], json!(["C:/proj"]), "py: the project root (9.3)");
         w.ret(&init, Json::Null);
         w.recv_t("bye");
     });
     let (j, tj) = scripted_engine(&mut it, js(), |mut w| {
-        w.send(json!({"t":"hello","vep":1,"engine":"js","impl":"node","version":"24.11.1","pid":7,"caps":["modules","handles","reverse"]}));
+        w.send(json!({"t":"hello","vep":1,"version":"24.11.1","pid":7,"caps":["modules","handles","reverse"]}));
         let init = w.recv_t("init");
         assert_eq!(init["paths"], json!([]), "js: [] (9.3)");
         w.ret(&init, Json::Null);
@@ -807,7 +796,50 @@ fn foreign_errors_keep_their_type_as_foreign_type() {
     let e = err_of(it.request(s, call("ratio"), "a call to 'ratio'", at()));
     assert_eq!((&*e.kind, &*e.message, e.foreign_type.as_deref(), e.lang.as_deref()), ("ForeignError", "division by zero", Some("ZeroDivisionError"), Some("py")));
     let e = err_of(it.request(s, call("get"), "a call to 'get'", at()));
-    assert_eq!((&*e.kind, e.foreign_type.as_deref(), e.lang.as_deref()), ("KeyError", Some("KeyError"), Some("py")));
+    assert_eq!((&*e.kind, e.foreign_type.as_deref(), e.lang.as_deref()), ("ForeignError", Some("KeyError"), Some("py")));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn a_worker_reports_only_9_6s_kinds() {
+    // 9.6: an adapter's own kinds keep their type; a host-only kind is a foreign exception's
+    // name, so a worker can't make V2 exit 3 or claim a build or FFI failure.
+    let kinds = [
+        ("ForeignError", "ForeignError"),
+        ("ImportError", "ImportError"),
+        ("NameError", "NameError"),
+        ("ArityError", "ArityError"),
+        ("ValueError", "ValueError"),
+        ("MarshalError", "MarshalError"),
+        ("ProtocolError", "ProtocolError"),
+        ("Error", "Error"),
+        ("EngineNotFound", "ForeignError"),
+        ("EngineCrashed", "ForeignError"),
+        ("EngineTimeout", "ForeignError"),
+        ("EngineUnknown", "ForeignError"),
+        ("EngineNameConflict", "ForeignError"),
+        ("BuildError", "ForeignError"),
+        ("FFILoadError", "ForeignError"),
+        ("FFISymbolError", "ForeignError"),
+        ("FFIValueError", "ForeignError"),
+        ("TypeError", "ForeignError"),
+    ];
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, move |mut w| {
+        w.start();
+        for (sent, _) in kinds {
+            let c = w.recv_t("call");
+            w.send(json!({"t":"err","id":c["id"],"error":{"type":sent,"message":"m","foreign_type":null,"trace":[]}}));
+        }
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    for (sent, kind) in kinds {
+        let e = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+        let foreign_type = (kind == "ForeignError" && sent != "ForeignError").then_some(sent);
+        assert_eq!((&*e.kind, e.foreign_type.as_deref()), (kind, foreign_type), "{sent}");
+    }
     it.shutdown_sessions();
     t.join().unwrap();
 }
@@ -951,15 +983,6 @@ fn the_grace_is_shared() {
 #[test]
 fn signal_phrase() {
     assert_eq!(exit_phrase(Some(&ExitInfo { code: None, signal: Some(9) })), "was killed by signal 9 (SIGKILL)");
-}
-
-#[test]
-fn node_modules_setting_comes_first() {
-    let mut cfg = Config { root: PathBuf::from("/proj"), ..Config::default() };
-    cfg.node_modules = Some(Sourced { value: PathBuf::from("/deps/node_modules"), from: crate::config::ConfigSource::Default });
-    let (_, env) = worker_command(&js(), &cfg, Path::new("/a.js"));
-    let node_path = env.iter().find(|(k, _)| k == "NODE_PATH").map(|(_, v)| v.clone()).unwrap();
-    assert_eq!(std::env::split_paths(&node_path).next(), Some(PathBuf::from("/deps/node_modules")));
 }
 
 /// A host process for `noise_before_hello_reaches_stderr`: does nothing unless `V2_HOST`.

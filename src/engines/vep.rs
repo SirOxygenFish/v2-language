@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 use serde_json::{json, Map, Value as Json};
 
-/// The largest frame either side may send: 64 MiB (9.1, D72).
+/// The largest frame either side may send: 64 MiB (9.1).
 pub const MAX_FRAME: usize = 64 << 20;
 
 /// Bracket nesting a frame may have before it is parsed (10.1). It only bounds serde_json's
@@ -21,7 +21,7 @@ pub enum ReadErr {
     Io(std::io::Error),
 }
 
-/// Reads frames: raw bytes split on `\n` only, one `\r` before it dropped (9.1, D74).
+/// Reads frames: raw bytes split on `\n` only, one `\r` before it dropped (9.1).
 pub struct FrameReader<R> {
     r: BufReader<R>,
 }
@@ -115,10 +115,9 @@ pub struct Caps {
     pub reverse: bool,
 }
 
+/// `hello` is `{t, vep, version, pid, caps}` (9.3); other members are ignored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hello {
-    pub engine: String,
-    pub implementation: String,
     pub version: String,
     pub pid: u32,
     pub caps: Caps,
@@ -199,7 +198,7 @@ fn object(line: &[u8]) -> Result<Map<String, Json>, String> {
     }
 }
 
-/// Before `hello`: a line that is not a JSON object is preload noise for stderr (9.3, D74).
+/// Before `hello`: a line that is not a JSON object is preload noise for stderr (9.3).
 pub fn is_noise(line: &[u8]) -> bool {
     object(line).is_err()
 }
@@ -239,13 +238,7 @@ pub fn parse_hello(line: &[u8]) -> Result<Hello, String> {
         }
     }
     let pid = u32::try_from(uint(&m, "hello", "pid")?).map_err(|_| "'hello' frame with a bad 'pid'")?;
-    Ok(Hello {
-        engine: text(&m, "hello", "engine")?.to_string(),
-        implementation: text(&m, "hello", "impl")?.to_string(),
-        version: text(&m, "hello", "version")?.to_string(),
-        pid,
-        caps,
-    })
+    Ok(Hello { version: text(&m, "hello", "version")?.to_string(), pid, caps })
 }
 
 /// A frame after `hello`, checked against 9.11's fatal cases.
@@ -391,9 +384,13 @@ mod tests {
         assert!(is_noise(b"site customization loaded"));
         assert!(is_noise(b"[1, 2]"));
         assert!(!is_noise(br#"{"t":"hello"}"#));
-        let h = parse_hello(br#"{"t":"hello","vep":1,"engine":"py","impl":"CPython","version":"3.12.4","pid":4242,"caps":["modules","handles","kwargs","reverse","future"],"extra":1}"#).unwrap();
-        assert_eq!((h.engine.as_str(), h.pid, h.caps), ("py", 4242, Caps { modules: true, handles: true, kwargs: true, reverse: true }));
-        assert_eq!(parse_hello(br#"{"t":"hello","vep":2,"engine":"py","impl":"x","version":"1","pid":1,"caps":[]}"#), Err("speaks VEP/2; this V2 speaks VEP/1".into()));
+        let h = parse_hello(br#"{"t":"hello","vep":1,"version":"3.12.4","pid":4242,"caps":["modules","handles","kwargs","reverse","future"],"extra":1}"#).unwrap();
+        assert_eq!((h.version.as_str(), h.pid, h.caps), ("3.12.4", 4242, Caps { modules: true, handles: true, kwargs: true, reverse: true }));
+        // `engine` and `impl` are not part of `hello` (9.3): neither is needed, both are ignored.
+        let h = parse_hello(br#"{"t":"hello","vep":1,"engine":"py","impl":"CPython","version":"3.12.4","pid":1,"caps":[]}"#).unwrap();
+        assert_eq!(h, Hello { version: "3.12.4".into(), pid: 1, caps: Caps::default() });
+        assert_eq!(parse_hello(br#"{"t":"hello","vep":2,"version":"1","pid":1,"caps":[]}"#), Err("speaks VEP/2; this V2 speaks VEP/1".into()));
+        assert_eq!(parse_hello(br#"{"t":"hello","vep":1,"pid":1,"caps":[]}"#), Err("'hello' frame without 'version'".into()));
         assert_eq!(parse_hello(br#"{"t":"ret","id":1,"value":null}"#), Err("the first frame is not 'hello'".into()));
         assert_eq!(parse_hello(br#"{"t":"hello","vep":1}"#), Err("'hello' frame without 'caps'".into()));
     }

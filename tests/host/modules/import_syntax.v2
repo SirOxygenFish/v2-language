@@ -6,6 +6,6 @@ try {
 } catch (e) {
     print(e.type)
     print(e.message)
-    print(e.line, e.data.len())
+    print(e.line, len(e.data))
     print(e.data[1])
 }

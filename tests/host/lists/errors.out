@@ -6,6 +6,8 @@ TypeError: dict.get() argument 'k' must be a str, got int
 TypeError: dict has no method 'frobnicate'
 TypeError: dict keys must be str, got int
 TypeError: list has no field 'len'
+TypeError: list has no method 'len'
+TypeError: dict has no method 'len'
 TypeError: list has no method 'append'
 IndexError: pop from empty list
 IndexError: list index 5 out of range (length 2)
@@ -15,7 +17,7 @@ IndexError: list index -3 out of range (length 2)
 TypeError: list.get() argument 'i' must be an int, got str
 TypeError: cannot sort a list mixing int and str
 TypeError: cannot sort a list containing list (only numbers or strings)
-ArityError: lambda@errors.v2:27() missing required argument 'b'
+ArityError: lambda@errors.v2:29() missing required argument 'b'
 TypeError: list.join() argument 'sep' must be a str, got int
 TypeError: cannot read 'x' of null (use ?.)
 TypeError: cannot read 'x' of null (use ?.)

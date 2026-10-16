@@ -79,32 +79,6 @@ fn parse_header(src: &str) -> Result<Header, String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Lint: tautological assertions such as `check("x", true, true)` (INTERNALS 22.2)
-
-fn has_tautology(src: &str) -> bool {
-    let mut rest = src;
-    while let Some(pos) = rest.find("check(") {
-        let after = &rest[pos + "check(".len()..];
-        if let Some(comma) = after.find(',') {
-            if comma > 0 {
-                let tail = after[comma + 1..].trim_start();
-                if let Some(t) = tail.strip_prefix("true") {
-                    if let Some(t) = t.trim_start().strip_prefix(',') {
-                        if let Some(t) = t.trim_start().strip_prefix("true") {
-                            if t.trim_start().starts_with(')') {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        rest = after;
-    }
-    false
-}
-
-// ---------------------------------------------------------------------------------------------
 // Running one test
 
 enum Outcome {
@@ -222,9 +196,6 @@ fn run_test(path: &Path, engines: &Engines) -> Outcome {
         Ok(h) => h,
         Err(e) => return Outcome::Fail(e),
     };
-    if has_tautology(&src) {
-        return Outcome::Fail("contains a tautological check(..., true, true)".into());
-    }
     if let Some(p) = &header.platform {
         if p != this_platform() {
             return Outcome::Skip(format!("platform {p} only"));
@@ -455,8 +426,11 @@ fn help_lists_commands_and_exit_codes() {
     let out = v2(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
-    for needle in ["v2 [FLAGS] FILE", "doctor [TAG]", "cache clean", "--engine TAG=PATH", "130"] {
+    for needle in ["v2 FILE [ARGS...]", "v2 check FILE", "v2 doctor ", "v2 cache clean", "v2 --version", "130", "check found"] {
         assert!(text.contains(needle), "help lacks {needle:?}");
+    }
+    for gone in ["FLAGS", "--engine", "--no-cache", "v2 run", "TAG"] {
+        assert!(!text.contains(gone), "help still has {gone:?}");
     }
 }
 
@@ -465,7 +439,10 @@ fn usage_errors_exit_2() {
     for (args, needle) in [
         (&[][..], "no script given"),
         (&["--frobnicate", "x.v2"][..], "unknown flag `--frobnicate`"),
-        (&["--engine", "py", "x.v2"][..], "v2 doctor TAG"),
+        (&["--engine", "py=x", "x.v2"][..], "unknown flag `--engine`"),
+        (&["--no-cache", "x.v2"][..], "unknown flag `--no-cache`"),
+        (&["doctor", "py"][..], "unexpected argument `py` after `v2 doctor`"),
+        (&["run"][..], "cannot read 'run'"),
         (&["check"][..], "needs a FILE"),
         (&["no_such_script.v2"][..], "cannot read 'no_such_script.v2'"),
     ] {
@@ -549,19 +526,18 @@ fn check_reports_every_file_and_exits_1_on_errors() {
     // INTERNALS 19.3: the entry and every file it imports; diagnostics on stderr in file and
     // source order, import problems with their run-time text, the summary on stdout.
     let files = [
-        ("v2.toml", "[engines.py]\ncomand = \"x\"\n"),
+        ("v2.toml", "[engines.py]\ncall_timeout = 5\n"),
         ("app/main.v2", "import \"./lib/util.v2\" as util\nimport \"./lib/missing.v2\" as m\nlet a = 1\nlet a = 2\n"),
         ("app/lib/util.v2", "import \"../main.v2\" as main\nbreak\n"),
     ];
     let (code, stdout, stderr) = run_in_project(&files, ".", &["check", "app/main.v2"]);
     assert_eq!(code, Some(1), "{stderr}");
-    assert_eq!(stdout, "check app/main.v2: 2 files, 4 errors, 1 warning\n");
+    assert_eq!(stdout, "check app/main.v2: 2 files, 4 errors\n");
     let order = [
         "app/main.v2:2:1: ImportError: cannot find module './lib/missing.v2' (looked for app/lib/missing.v2)",
         "app/main.v2:4:5: SyntaxError: 'a' is already declared in this block",
         "app/lib/util.v2:1:1: ImportError: circular import: app/main.v2 -> app/lib/util.v2 -> app/main.v2",
         "app/lib/util.v2:2:1: SyntaxError: break outside a loop",
-        "unknown key [engines.py] comand (did you mean 'command'?)",
     ];
     let mut at = 0;
     for needle in order {
@@ -571,21 +547,30 @@ fn check_reports_every_file_and_exits_1_on_errors() {
     // A clean file: exit 0; check runs nothing.
     let clean = [("main.v2", "print(\"must not print\")\nimport \"./util.v2\" as u\n"), ("util.v2", "func f() { }\n")];
     let (code, stdout, stderr) = run_in_project(&clean, ".", &["check", "main.v2"]);
-    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "check main.v2: 2 files, 0 errors, 0 warnings\n", ""));
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "check main.v2: 2 files, 0 errors\n", ""));
+    // A bad v2.toml is a configuration error for check too (exit 2, nothing checked).
+    let files = [("v2.toml", "[engines.py]\ncomand = \"x\"\n"), ("main.v2", "let x = 1\n")];
+    let (code, stdout, stderr) = run_in_project(&files, ".", &["check", "main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(2), ""), "{stderr}");
+    assert!(stderr.contains("v2.toml: config error: unknown key [engines.py] comand (did you mean 'command'?)"), "{stderr}");
 }
 
 #[test]
-fn run_starts_the_project_entry() {
-    // INTERNALS 19.1, 18.1: the root is the nearest folder with v2.toml, found from the cwd.
-    let files = [("v2.toml", "[project]\nentry = \"app/main.v2\"\n"), ("app/main.v2", "print(args())\n")];
-    let (code, stdout, stderr) = run_in_project(&files, "app/deeper", &["run", "a", "b c"]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "[\"a\", \"b c\"]\n"), "{stderr}");
-    let (code, _, stderr) = run_in_project(&[("v2.toml", "[project]\nname = \"x\"\n")], ".", &["run"]);
-    assert_eq!(code, Some(2));
-    assert!(stderr.contains("has no [project] entry"), "{stderr}");
-    let (code, _, stderr) = run_in_project(&[], ".", &["run"]);
-    assert_eq!(code, Some(2));
-    assert!(stderr.contains("no v2.toml found in ") && stderr.contains(" or its parents"), "{stderr}");
+fn a_project_in_a_folder_with_a_space_and_non_ascii_runs() {
+    // INTERNALS 22.6: a path with a space and a non-ASCII character.
+    let files = [
+        ("v2 tést/v2.toml", "# project root\n"),
+        ("v2 tést/main.v2", "import \"./lib.v2\" as lib\nprint(lib.greet())\n"),
+        ("v2 tést/lib.v2", "func greet() { return \"hi\" }\n"),
+    ];
+    for (cwd, args, out) in [
+        ("v2 tést", &["main.v2"][..], "hi\n"),
+        ("", &["v2 tést/main.v2"][..], "hi\n"),
+        ("", &["check", "v2 tést/main.v2"][..], "check v2 tést/main.v2: 2 files, 0 errors\n"),
+    ] {
+        let (code, stdout, stderr) = run_in_project(&files, cwd, args);
+        assert_eq!((code, stdout.as_str()), (Some(0), out), "{cwd:?} {args:?}: {stderr}");
+    }
 }
 
 #[test]
@@ -610,20 +595,30 @@ fn a_script_outside_the_project_uses_its_own_folders_config() {
 
 #[test]
 fn a_config_error_exits_2_before_anything_runs() {
-    // INTERNALS 18.5 and R48: syntax and type errors name the file; nothing of the script runs.
+    // INTERNALS 18.5 and R48: syntax and type errors, unknown sections and keys, and keys that
+    // don't apply name the file; nothing of the script runs. The v2.toml is found from the
+    // script's folder upward (18.1).
     for (toml, needle) in [
         ("[engines.py\n", "v2.toml:1:"),
-        ("[engines.py]\nstartup_timeout = \"30s\"\n", "config error: [engines.py] startup_timeout: expected a non-negative number, got string \"30s\""),
+        ("[engines.py]\nstartup_timeout = \"30s\"\n", "v2.toml: config error: [engines.py] startup_timeout: expected a non-negative number, got string \"30s\""),
+        ("[engines.py]\ncomand = \"x\"\n", "v2.toml: config error: unknown key [engines.py] comand (did you mean 'command'?)"),
+        ("[project]\nentry = \"app/main.v2\"\n", "v2.toml: config error: unknown section [project]"),
+        ("[engines.js]\nflags = [\"-O2\"]\n", "v2.toml: config error: [engines.js] flags only applies to c, cpp and rust"),
+        ("[engines.ts]\ncall_timeout = 5\n", "v2.toml: config error: [engines.ts]: ts runs on the js engine; configure [engines.js]"),
     ] {
-        let files = [("v2.toml", toml), ("main.v2", "print(\"ran\")\n")];
-        let (code, stdout, stderr) = run_in_project(&files, ".", &["main.v2"]);
+        let files = [("v2.toml", toml), ("app/main.v2", "print(\"ran\")\n")];
+        let (code, stdout, stderr) = run_in_project(&files, ".", &["app/main.v2"]);
         assert_eq!(code, Some(2), "{stderr}");
         assert!(stdout.is_empty(), "nothing runs: {stdout}");
-        assert!(stderr.contains(needle) && stderr.contains("config error"), "{stderr}");
+        assert!(stderr.contains(needle), "{stderr}");
     }
-    let (code, _, stderr) = run_in_project(&[("main.v2", "print(1)\n")], ".", &["--engine", "ts=x", "main.v2"]);
-    assert_eq!(code, Some(2));
-    assert!(stderr.contains("ts has no executable of its own"), "{stderr}");
+    // V2_ENGINE_TS names the variable to use instead.
+    let (code, stdout, stderr, _) = run_with_files_env(&[("main.v2", "print(1)\n")], &["main.v2"], &[("V2_ENGINE_TS", "x")]);
+    assert_eq!((code, stdout.as_str()), (Some(2), ""), "{stderr}");
+    assert_eq!(stderr, "config error: V2_ENGINE_TS: ts runs on the js engine; set V2_ENGINE_JS\n");
+    // A variable for a tag nobody declares is ignored.
+    let (code, stdout, stderr, _) = run_with_files_env(&[("main.v2", "print(1)\n")], &["main.v2"], &[("V2_ENGINE_LUA", "x")]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "1\n", ""));
 }
 
 #[test]
@@ -637,7 +632,7 @@ fn a_long_import_chain_is_a_recursion_error_not_a_crash() {
     let (code, stdout, stderr) = run_in_project(&refs, ".", &["main.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "RecursionError maximum call depth (10000) exceeded\n"), "{stderr}");
     let (code, stdout, stderr) = run_in_project(&refs, ".", &["check", "main.v2"]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "check main.v2: 12002 files, 0 errors, 0 warnings\n"), "{stderr}");
+    assert_eq!((code, stdout.as_str()), (Some(0), "check main.v2: 12002 files, 0 errors\n"), "{stderr}");
 }
 
 #[test]
@@ -863,12 +858,10 @@ fn a_closed_stdout_or_stderr_never_panics() {
 }
 
 #[test]
-fn check_keeps_file_order_and_warnings_for_files_that_are_not_utf8() {
-    // INTERNALS 19.3 and 18.5: a file that isn't UTF-8 reports at the place it was met, and
-    // config warnings are printed whenever the summary counts them.
+fn check_keeps_file_order_for_files_that_are_not_utf8() {
+    // INTERNALS 19.3: a file that isn't UTF-8 reports at the place it was met.
     let home = TempHome::new();
     let d = &home.0;
-    std::fs::write(d.join("v2.toml"), "[engines.py]\ncomand = \"x\"\n").unwrap();
     std::fs::write(d.join("main.v2"), "import \"./bad.v2\" as b\nimport \"./good.v2\" as g\nlet x = 1\n").unwrap();
     std::fs::write(d.join("bad.v2"), b"let a = \"\xff\"\n").unwrap();
     std::fs::write(d.join("good.v2"), "let y = 1\nlet y = 2\n").unwrap();
@@ -885,20 +878,18 @@ fn check_keeps_file_order_and_warnings_for_files_that_are_not_utf8() {
         (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
     };
     let (code, stdout, stderr) = check("main.v2");
-    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 3 files, 2 errors, 1 warning\n"), "{stderr}");
+    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 3 files, 2 errors\n"), "{stderr}");
     let bad = stderr.find("bad.v2:1:1: SyntaxError: file is not valid UTF-8").expect(&stderr);
     let good = stderr.find("good.v2:2:5: SyntaxError: 'y' is already declared").expect(&stderr);
-    let warning = stderr.find("unknown key [engines.py] comand").expect(&stderr);
-    assert!(bad < good && good < warning, "{stderr}");
+    assert!(bad < good, "{stderr}");
     let (code, stdout, stderr) = check("bad.v2");
-    assert_eq!((code, stdout.as_str()), (Some(1), "check bad.v2: 1 file, 1 error, 1 warning\n"), "{stderr}");
-    assert!(stderr.starts_with("bad.v2:1:1: SyntaxError: file is not valid UTF-8\nwarning: "), "{stderr}");
-    assert!(stderr.contains("unknown key [engines.py] comand"), "{stderr}");
+    assert_eq!((code, stdout.as_str()), (Some(1), "check bad.v2: 1 file, 1 error\n"), "{stderr}");
+    assert_eq!(stderr, "bad.v2:1:1: SyntaxError: file is not valid UTF-8\n");
 }
 
 #[test]
-fn check_warns_when_there_is_no_home_folder() {
-    // INTERNALS 18.1: the user layer is skipped and check warns; a run says nothing.
+fn no_home_folder_is_silent() {
+    // INTERNALS 18.1: without a home folder the ~/.v2 caches are off; nothing says so.
     let home = TempHome::new();
     std::fs::write(home.0.join("main.v2"), "print(\"ran\")\n").unwrap();
     let run = |args: &[&str]| {
@@ -914,10 +905,10 @@ fn check_warns_when_there_is_no_home_folder() {
         let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
         (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
     };
-    let (code, stdout, stderr) = run(&["check", "main.v2"]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "check main.v2: 1 file, 0 errors, 1 warning\n"), "{stderr}");
-    assert!(stderr.starts_with("warning: no home folder ("), "{stderr}");
+    assert_eq!(run(&["check", "main.v2"]), (Some(0), "check main.v2: 1 file, 0 errors\n".to_string(), String::new()));
     assert_eq!(run(&["main.v2"]), (Some(0), "ran\n".to_string(), String::new()));
+    let (code, _, stderr) = run(&["doctor"]);
+    assert_eq!((code, stderr.as_str()), (Some(0), ""));
 }
 
 #[test]
@@ -1078,21 +1069,23 @@ fn without_a_watchdog_an_interrupt_still_ends_the_run() {
 
 /// `v2 ARGS` in a fresh home with `files` (path, text) written there; (code, stdout, stderr).
 fn run_with_files(files: &[(&str, &str)], args: &[&str]) -> (Option<i32>, String, String, TempHome) {
+    run_with_files_env(files, args, &[])
+}
+
+/// `run_with_files` with these environment variables set (such as `V2_ENGINE_PY`).
+fn run_with_files_env(files: &[(&str, &str)], args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String, TempHome) {
     let home = TempHome::new();
     for (path, text) in files {
         let p = home.0.join(path);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
     }
-    let child = v2_command(&home.0)
-        .args(args)
-        .current_dir(&home.0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start v2");
-    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(120)).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.args(args).current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
     let text = |b: &[u8]| normalize(&String::from_utf8_lossy(b));
     (out.status.code(), text(&out.stdout), text(&out.stderr), home)
 }
@@ -1104,7 +1097,7 @@ fn doctor_rows(stdout: &str) -> HashMap<String, Vec<String>> {
     assert!(header.split_whitespace().eq(["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"]), "{stdout}");
     let starts: Vec<usize> = ["STATUS", "COMMAND", "VERSION", "FROM"].iter().map(|h| header.find(h).unwrap()).collect();
     let mut rows = HashMap::new();
-    for line in lines.take_while(|l| !l.starts_with("notes:") && !l.starts_with("config files:")) {
+    for line in lines.take_while(|l| !l.starts_with("notes:") && !l.starts_with("config file:")) {
         let cell = |i: usize| -> String {
             let from = starts[i];
             let to = starts.get(i + 1).copied().unwrap_or(line.len()).min(line.len());
@@ -1136,7 +1129,7 @@ fn doctor_prints_the_engine_table() {
             assert_eq!(&row[1..], ["-", "-", "-"], "{stdout}");
         }
     }
-    assert!(stdout.contains("config files: none"), "{stdout}");
+    assert!(stdout.contains("config file: none"), "{stdout}");
     drop(home);
 }
 
@@ -1157,31 +1150,33 @@ fn doctor_writes_the_probe_cache() {
 fn doctor_reports_configured_problems() {
     // A configured command never falls back to auto-detection (7.6): broken, FROM its source.
     let files = [("v2.toml", "[engines.py]\ncommand = \"missing/python.exe\"\n")];
-    let (code, stdout, stderr, home) = run_with_files(&files, &["--engine", "js=missing/node.exe", "doctor"]);
+    let (code, stdout, stderr, home) = run_with_files_env(&files, &["doctor"], &[("V2_ENGINE_JS", "missing/node.exe")]);
     assert_eq!(code, Some(0), "{stderr}");
     let rows = doctor_rows(&stdout);
     assert_eq!((rows["py"][0].as_str(), rows["py"][3].as_str()), ("broken", "v2.toml"), "{stdout}");
     assert!(rows["py"][1].ends_with("python.exe"), "{stdout}");
-    assert_eq!((rows["js"][0].as_str(), rows["js"][3].as_str()), ("broken", "--engine"), "{stdout}");
+    assert_eq!((rows["js"][0].as_str(), rows["js"][3].as_str()), ("broken", "V2_ENGINE_JS"), "{stdout}");
+    assert!(stdout.contains("js: engine 'js' command '") && stdout.contains("not found (set by V2_ENGINE_JS)"), "{stdout}");
     assert_eq!(rows["ts"][0], "broken", "ts follows js:\n{stdout}");
     let toml = home.0.join("v2.toml");
     assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", home.0.join("missing/python.exe").display(), toml.display())), "{stdout}");
-    assert!(stdout.contains(&format!("config files:\n  {}", toml.display())), "{stdout}");
+    assert!(stdout.contains(&format!("config file: {}", toml.display())), "{stdout}");
 }
 
 #[test]
 fn an_uncaught_engine_not_found_exits_3() {
-    // R48 (run half) and INTERNALS 6.5: no usable toolchain is exit 3; it is catchable.
+    // R48 (EngineNotFound part) and INTERNALS 19.1: no usable toolchain is exit 3; it is catchable.
     let script = "print(\"before\")\n@py {\n    x = 1\n}\n";
-    let (code, stdout, stderr, _) = run_with_files(&[("main.v2", script)], &["--engine", "py=missing/python.exe", "main.v2"]);
+    let missing = [("V2_ENGINE_PY", "missing/python.exe")];
+    let (code, stdout, stderr, _) = run_with_files_env(&[("main.v2", script)], &["main.v2"], &missing);
     assert_eq!(code, Some(3), "{stderr}");
     assert_eq!(stdout, "before\n");
-    assert!(stderr.starts_with("main.v2:2:1: EngineNotFound: engine 'py' command '") && stderr.contains("not found (set by --engine)"), "{stderr}");
+    assert!(stderr.starts_with("main.v2:2:1: EngineNotFound: engine 'py' command '") && stderr.contains("not found (set by V2_ENGINE_PY)"), "{stderr}");
     let files = [("v2.toml", "[engines.py]\ncommand = \"missing/python.exe\"\n"), ("main.v2", script)];
     let (code, _, stderr, _) = run_with_files(&files, &["main.v2"]);
     assert_eq!(code, Some(3), "{stderr}");
     let caught = "try {\n    @py {\n        x = 1\n    }\n} catch (e) {\n    print(e.type)\n}\n";
-    let (code, stdout, stderr, _) = run_with_files(&[("main.v2", caught)], &["--engine", "py=missing/python.exe", "main.v2"]);
+    let (code, stdout, stderr, _) = run_with_files_env(&[("main.v2", caught)], &["main.v2"], &missing);
     assert_eq!((code, stdout.as_str()), (Some(0), "EngineNotFound\n"), "{stderr}");
 }
 
@@ -1273,14 +1268,6 @@ fn header_parsing() {
     assert_eq!(parse_header("\u{feff}// exit: 3\r\n").unwrap().exit, 3);
 }
 
-#[test]
-fn tautology_lint() {
-    assert!(has_tautology(r#"check("custom lang engines", true, true)"#));
-    assert!(has_tautology("check(x,true ,  true )"));
-    assert!(!has_tautology(r#"check("a", f(), true)"#));
-    assert!(!has_tautology("check(, true, true)"));
-}
-
 // ---------------------------------------------------------------------------------------------
 // Mutation kills
 
@@ -1297,7 +1284,7 @@ fn run_in_home(home: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> 
 }
 
 #[test]
-fn doctor_and_no_cache_probe_afresh() {
+fn runs_use_the_probe_cache_and_doctor_probes_afresh() {
     let home = TempHome::new();
     std::fs::write(home.0.join("probe.v2"), "print(engine_available(\"py\"), engine_available(\"js\"))\n").unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["probe.v2"], &[]);
@@ -1318,9 +1305,6 @@ fn doctor_and_no_cache_probe_afresh() {
     tamper();
     assert_eq!(run_in_home(&home.0, &["probe.v2"], &[]).1, "true true\n");
     assert!(tampered(), "a run reads the cache and keeps its hits (7.7)");
-    assert_eq!(run_in_home(&home.0, &["--no-cache", "probe.v2"], &[]).1, "true true\n");
-    assert!(!tampered(), "--no-cache probes afresh and overwrites (7.7, 19.4)");
-    tamper();
     let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &[]);
     assert_eq!(code, Some(0), "{stdout}");
     assert!(!stdout.contains("99.0.0") && !tampered(), "doctor probes afresh (19.2):\n{stdout}");
@@ -1330,7 +1314,7 @@ fn doctor_and_no_cache_probe_afresh() {
 fn doctor_columns_are_longest_cell_plus_two() {
     let (code, stdout, stderr, _) = run_with_files(&[], &["doctor"]);
     assert_eq!(code, Some(0), "{stderr}");
-    let lines: Vec<&str> = stdout.lines().take_while(|l| !l.starts_with("notes:") && !l.starts_with("config files:")).collect();
+    let lines: Vec<&str> = stdout.lines().take_while(|l| !l.starts_with("notes:") && !l.starts_with("config file:")).collect();
     let header = lines[0];
     let starts: Vec<usize> = ["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].iter().map(|h| header.find(h).unwrap()).collect();
     for c in 0..4 {

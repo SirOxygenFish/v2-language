@@ -214,7 +214,7 @@ pub struct Exports {
 #[derive(Debug)]
 pub struct ExportItem {
     pub text: Rc<str>,
-    /// In c/cpp/rust blocks a quoted item is a C prototype (15.2); elsewhere a non-V2 name.
+    /// A quoted name, for a foreign name V2 cannot write bare (py, js and ts blocks, 4.4).
     pub quoted: bool,
     pub span: Span,
 }

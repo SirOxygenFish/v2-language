@@ -4,15 +4,16 @@ The owner allowed this file so I keep my bearings across sessions. Keep it short
 it is loaded automatically into every session and every subagent.
 
 ## What this is
-- V2: a small glue language (Rust, tree-walking interpreter) whose point is the polyglot system:
-  `@py`/`@js`/`@ts`/`@c`/`@cpp`/`@rust` blocks, `@export`/`@import`, VEP/1 workers, compiled
-  blocks via libffi, `extern`.
+- V2: a small glue language with a small standard library (Rust, tree-walking interpreter)
+  whose point is the polyglot system: `@py`/`@js`/`@ts`/`@c`/`@cpp`/`@rust` blocks,
+  `@export`/`@import`, VEP/1 workers, compiled blocks via libffi, `extern`, custom engines.
 - **DOCS.md** = what the language does (user spec). **INTERNALS.md** = how (implementation spec,
   `§n.m` = its sections). **ROADMAP.md** = order + what's done ("Where we are", progress log).
+- The docs were trimmed to the glue-language scope on 2026-10-16 (ROADMAP progress log lists
+  what went). Don't bring cut features back without the owner's OK.
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: Phase 0 complete; Phase 1 under way (see ROADMAP "Where we are"). The owner asked to
-  stop after the foundation (1.0–1.3) and report before 1.4.
+- Status: ROADMAP "Where we are". 1.4 (Python engine) waits for the owner's go-ahead.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -44,10 +45,11 @@ it is loaded automatically into every session and every subagent.
   output macros `stdout!`/`stdoutln!`/`stderr!`/`stderrln!` (ignore write errors; the stderr
   ones first call `stop_if_interrupted`). Never use `print!`/`eprint!` in src. Debug builds:
   `V2_TEST_PANIC` panics the interpreter thread (for the 101 test).
-- `cli/`: argv parser, HELP text. `config/`: files → raw values (`Raw`, keyed
-  `section.key`/`engines.tag.key`) → L3/L4 overrides → `validate()` of the winners only.
-  `load_from(start, flags, home, env)` is the test seam. Custom engine tables kept raw (17.1 =
-  Phase 3).
+- `cli/`: argv parser (`v2 FILE`, `check FILE`, `doctor`, `cache clean`, `--version`, `--help`;
+  no other flags), HELP text. `config/`: the project's `v2.toml` read in file order, then
+  `V2_ENGINE_<TAG>` overrides (a replaced `command` is not validated); unknown sections/keys
+  and keys that don't apply are config errors (no warnings). `load_from(start, env)` is the
+  test seam. Custom engine tables kept raw until Phase 3 (17.1).
 - `syntax/`: `span` (SourceMap, FileId, display_path), `lexer`, `scan` (block bodies, profiles,
   `canonical_tag`), `directives` (@export/@import, dedent), `parser` (MAX_DEPTH 256, expression
   height MAX_LINKS 10,000), `check` (static checks, 4.5), `ast`.
@@ -60,33 +62,37 @@ it is loaded automatically into every session and every subagent.
 - Deep values are freed iteratively (Drop impls feed a thread-local queue).
 - `codec/json`: plain mode (serde_json, pre-scan for i64 overflow + nesting 1,000).
   `codec/vep`: the `$v2` wire codec (`Wire` context: session, caps, release queue, callables).
-- `doctor/`: host-only `v2 check` (explicit-stack import walk) and `doctor::doctor` (the table).
+- `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
+  prints `check X: N files, M errors`) and `doctor::doctor` (the table).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
-  `KillHandle`, `run_captured`, the watchdog (only the top timer runs, not while paused; exit
-  check every 250 ms; SIGCHLD reset), `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted`
-  (kills trees, waits ≤ 500 ms, removes the run dir). Tests re-run the test binary as the
-  child (`V2_HELPER`); **tests that push timers must hold `engines::process::tests::serial()`**
-  (the watchdog is global).
+  `KillHandle`, `run_captured(argv, env, limit)` (stdin null), the watchdog (only the top timer
+  runs, not while paused; exit check every 250 ms; SIGCHLD reset),
+  `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
+  the run dir). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
+  timers must hold `engines::process::tests::serial()`** (the watchdog is global).
 - `engines/spec.rs` (py/js/ts table, `Version`), `engines/resolve.rs` (`Lookup`, `find_program`,
-  `Prober`/`RealProber`, `ProbeCache` + `CacheMode`, `Resolver`, `ResolvedEngine`, `NotFound`),
-  `engines/registry.rs` (`Registry::real`, `resolve_tag`, `engine_available`). A reached block
-  resolves its tag, then `not_yet` until 1.4. Uncaught EngineNotFound exits 3.
-- `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders), `engines/handles.rs`
-  (`HandleRef`: Drop only queues the release; `CallableTable`), `engines/session.rs`
-  (`Interp.sessions: Vec<Session>`, `start_session`/`attach_session`, handshake, `request`
-  re-entrant loop serving reverse calls with the timer paused, `shutdown_sessions`: one reader
-  thread per worker, so readers are `Box<dyn Read + Send>`). Session state stays Handshaking
-  until `init`'s `ret`. Reaping a child also drops its timers (`process::unregister`).
-  `session/tests.rs`: scripted workers over `std::io::pipe()` or as a real child (`V2_WORKER`;
-  `worker_main` writes a newline first because libtest's "test ... " line has none).
+  `Prober`/`RealProber`, `ProbeCache` (usable entries only) + `CacheMode`, `Resolver`,
+  `ResolvedEngine`, `NotFound`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
+  `engine_available`). A reached block resolves its tag, then `not_yet` until 1.4. Uncaught
+  EngineNotFound exits 3.
+- `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders; `hello` = vep, version, pid,
+  caps), `engines/handles.rs` (`HandleRef`: Drop only queues the release; `CallableTable`),
+  `engines/session.rs` (`Interp.sessions: Vec<Session>`, `start_session`/`attach_session`,
+  `worker_command(e, adapter)`, handshake, `request` re-entrant loop serving reverse calls with
+  the timer paused, `shutdown_sessions`: one reader thread per worker, so readers are
+  `Box<dyn Read + Send>`; a worker `err` may only use 9.6's kinds, others become ForeignError).
+  Session state stays Handshaking until `init`'s `ret`. Reaping a child also drops its timers
+  (`process::unregister`). `session/tests.rs`: scripted workers over `std::io::pipe()` or as a
+  real child (`V2_WORKER`; `worker_main` writes a newline first because libtest's "test ... "
+  line has none).
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
-  `V2_TEST_REQUIRE`. `run_with_files` / `doctor_rows` helpers for CLI tests.
-- `ffi/cdecl` is done (parser needs it); rest of `ffi/`, `build/`, `adapters/` empty.
+  `V2_TEST_REQUIRE`. `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
+  tests. `tests/v2.toml` is comment-only (it just stops the upward config search).
+- `ffi/`: `cdecl` (C declarations; `parse_definition_head` waits for 15.3 (roadmap 2.3)),
+  `types` (CType, Sig), `call` (libffi smoke test). `build/`, `adapters/` are empty.
 
 ## Reminders for later phases
 - Interrupt path (6.5): once `INTERRUPTED` is set the interpreter prints nothing, runs no
   catch/finally, spawns nothing and sends no `bye` (`shutdown_sessions` skips it).
-- Check's ENGINES/PACKAGES/LIBRARIES/COMPILED sections and the pending-override warning
-  (18.4) come with 1.1 / Phase 3.
 - CI (`.github/workflows/ci.yml`) has never run (nothing pushed); macOS is untested.
