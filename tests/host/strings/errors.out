@@ -5,6 +5,7 @@ TypeError: string index must be an int, got str
 TypeError: str has no method 'frobnicate'
 TypeError: str has no method 'uper' — did you mean 'upper'?
 TypeError: str has no field 'len'
+TypeError: str has no method 'len'
 ValueError: str.split() separator must not be empty
 ValueError: str.replace() argument 'old' must not be empty
 TypeError: str.split() argument 'sep' must be a str, got int

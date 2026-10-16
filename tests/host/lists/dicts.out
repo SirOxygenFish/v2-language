@@ -8,7 +8,7 @@ ada@example.com {"name": "Grace", "favorite number": 7}
 2 3
 {"dyn": 1, "dyn2": 2, "a": 3, "for": 4, "if": 5} 4 5
 ["dyn", "dyn2", "a", "for", "if", "z"]
-my keys 3 42 99
+my keys default 42 99 3
 a 1
 b 2
 x

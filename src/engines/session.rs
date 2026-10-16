@@ -19,7 +19,6 @@ use super::resolve::ResolvedEngine;
 use super::spec::Version;
 use super::vep::{self, Caps, Frame, FrameReader, Hello, ReadErr, Stream, Target, WriteErr};
 use crate::codec::vep::Wire;
-use crate::config::Config;
 use crate::runtime::error::{fail, ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
 use crate::runtime::value::Value;
@@ -109,24 +108,14 @@ pub struct Reply {
 }
 
 /// A worker's argv and environment (8.3, 14.1): the resolved argv, the spec's fixed arguments
-/// with `{adapter}` filled in, the spec's environment, and for js `NODE_PATH` = `[node] modules`,
-/// then `[node] paths`, then any inherited value (D54).
-pub fn worker_command(e: &ResolvedEngine, cfg: &Config, adapter: &Path) -> (Vec<OsString>, Vec<(OsString, OsString)>) {
+/// with `{adapter}` filled in, and the spec's environment on top of the host's (a `NODE_PATH`
+/// the user has is inherited untouched).
+pub fn worker_command(e: &ResolvedEngine, adapter: &Path) -> (Vec<OsString>, Vec<(OsString, OsString)>) {
     let mut argv = e.argv.clone();
     for a in &e.spec.fixed_args {
         argv.push(if &**a == "{adapter}" { adapter.as_os_str().to_os_string() } else { OsString::from(&**a) });
     }
-    let mut env: Vec<(OsString, OsString)> = e.spec.env.iter().map(|(k, v)| (OsString::from(&**k), OsString::from(&**v))).collect();
-    if &*e.spec.id == "js" {
-        let mut dirs = vec![cfg.node_modules.as_ref().map_or_else(|| cfg.root.join("node_modules"), |m| m.value.clone())];
-        dirs.extend(cfg.node_paths.iter().flat_map(|p| p.value.iter().cloned()));
-        if let Some(inherited) = std::env::var_os("NODE_PATH") {
-            dirs.extend(std::env::split_paths(&inherited));
-        }
-        if let Ok(joined) = std::env::join_paths(dirs) {
-            env.push(("NODE_PATH".into(), joined));
-        }
-    }
+    let env = e.spec.env.iter().map(|(k, v)| (OsString::from(&**k), OsString::from(&**v))).collect();
     (argv, env)
 }
 
@@ -355,17 +344,9 @@ impl Interp {
         }
         self.sessions[s].caps = hello.caps;
         self.sessions[s].hello = Some(hello);
+        // `init.paths`: the project root for py, nothing for js (9.3).
         let root = self.registry.config().root.to_string_lossy().into_owned();
-        let mut paths: Vec<String> = Vec::new();
-        if &*spec.id == "py" {
-            paths.push(root.clone());
-            for p in self.registry.config().python_paths.iter().flat_map(|p| p.value.iter()) {
-                let p = p.to_string_lossy().into_owned();
-                if !paths.contains(&p) {
-                    paths.push(p);
-                }
-            }
-        }
+        let paths = if &*spec.id == "py" { vec![root.clone()] } else { Vec::new() };
         // The init request would be one crossing too many: the worker never gets going.
         if self.xdepth >= MAX_XDEPTH {
             drop(startup);
@@ -704,12 +685,9 @@ impl Interp {
         }
         let kind = e.get("type").and_then(Json::as_str).ok_or("an 'err' without a string 'type'")?;
         let message = e.get("message").and_then(Json::as_str).ok_or("an 'err' without a string 'message'")?;
-        const KINDS: [&str; 23] = [
-            "Error", "TypeError", "ValueError", "KeyError", "IndexError", "NameError", "ArityError", "IOError",
-            "RecursionError", "ImportError", "EngineUnknown", "EngineNotFound", "EngineNameConflict", "EngineCrashed",
-            "EngineTimeout", "EngineExitError", "MarshalError", "BuildError", "ForeignError", "ProtocolError",
-            "FFILoadError", "FFISymbolError", "FFIValueError",
-        ];
+        // The kinds an adapter may report (9.6); any other `type` is a foreign exception's, so a
+        // worker can't raise a host-only kind such as EngineNotFound.
+        const KINDS: [&str; 8] = ["ForeignError", "ImportError", "NameError", "ArityError", "ValueError", "MarshalError", "ProtocolError", "Error"];
         let mut err = if KINDS.contains(&kind) {
             let mut err = ErrorValue::new(kind, message);
             err.foreign_type = e.get("foreign_type").and_then(Json::as_str).map(Rc::from);

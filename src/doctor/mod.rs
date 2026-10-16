@@ -1,9 +1,8 @@
 //! `v2 doctor` and `v2 check` (INTERNALS 19.2, 19.3).
 //!
-//! Check is host-only for now: every file the entry imports is parsed and checked, and import
-//! problems are reported with their run-time text. The ENGINES, PACKAGES, LIBRARIES and COMPILED
-//! sections join it with the engines (roadmap 1.9 and Phase 2). Doctor prints the engine table;
-//! `v2 doctor TAG` arrives in roadmap 1.9.
+//! Check parses and statically checks the entry and every file it imports, reporting import
+//! problems with their run-time text; it executes nothing and writes nothing. Doctor prints the
+//! engine table.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -156,7 +155,7 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 /// `v2 check FILE` (19.3): diagnostics to stderr, the summary to stdout; exit 1 on any error.
-pub fn check(file: &str, cfg: &Config) -> i32 {
+pub fn check(file: &str) -> i32 {
     let mut c = Checker::default();
     let display: Rc<str> = match c.sm.load(Path::new(file)) {
         Ok(entry) => {
@@ -178,15 +177,7 @@ pub fn check(file: &str, cfg: &Config) -> i32 {
     for p in &c.problems {
         stderr!("{}", p.text);
     }
-    for w in &cfg.warnings {
-        stderrln!("{w}");
-    }
-    stdoutln!(
-        "check {display}: {}, {}, {}",
-        plural(c.files, "file"),
-        plural(c.errors, "error"),
-        plural(cfg.warnings.len(), "warning")
-    );
+    stdoutln!("check {display}: {}, {}", plural(c.files, "file"), plural(c.errors, "error"));
     if c.errors > 0 {
         1
     } else {
@@ -195,8 +186,7 @@ pub fn check(file: &str, cfg: &Config) -> i32 {
 }
 
 /// `v2 doctor` (19.2): every engine resolved with fresh probes, as a table on stdout, then
-/// notes, the config files read and the config warnings. Missing engines are information, not
-/// failure: exit 0.
+/// notes and the config file read. Missing engines are information, not failure: exit 0.
 pub fn doctor(cfg: Rc<Config>) -> i32 {
     let reg = Registry::real(cfg.clone(), CacheMode::Refresh);
     let mut rows: Vec<[String; 5]> = vec![["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].map(String::from)];
@@ -247,16 +237,9 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
             stdoutln!("  {n}");
         }
     }
-    if cfg.files.is_empty() {
-        stdoutln!("config files: none");
-    } else {
-        stdoutln!("config files:");
-        for f in &cfg.files {
-            stdoutln!("  {}", f.display());
-        }
-    }
-    for w in &cfg.warnings {
-        stdoutln!("{w}");
+    match &cfg.file {
+        Some(f) => stdoutln!("config file: {}", f.display()),
+        None => stdoutln!("config file: none"),
     }
     0
 }

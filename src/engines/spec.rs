@@ -1,7 +1,7 @@
 //! EngineSpec and the built-in engine table (INTERNALS 7.1, 7.2).
 //!
 //! Phase 1 registers py, js and ts; c, cpp and rust join with their toolchains in Phase 2
-//! (INTERNALS 23). Scanning profiles are not here: the lexer takes them from the static table
+//! (ROADMAP rule 2). Scanning profiles are not here: the lexer takes them from the static table
 //! in `syntax::scan` (3.8), which a test keeps in step with this one.
 
 use std::fmt;
@@ -136,7 +136,7 @@ pub fn builtins() -> Vec<EngineSpec> {
 }
 
 /// Whether a Node version has `module.stripTypeScriptTypes`: 22.13+ on the 22 line, or 23.2+
-/// (7.6, D33).
+/// (7.6).
 pub fn ts_strips(node: Version) -> bool {
     match node.0 {
         22 => node >= Version(22, 13, 0),

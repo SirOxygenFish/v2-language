@@ -1,5 +1,5 @@
-//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without the ones that need
-//! engines (`value`, `engine_available`, `register_engine`, Phases 1 and 3).
+//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `value`, which needs
+//! handles (roadmap Phase 1).
 
 use std::io::{BufRead, BufWriter, IsTerminal, StdoutLock, Write};
 use std::rc::Rc;

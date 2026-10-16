@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,7 +18,7 @@ use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How long the watchdog sleeps between checks at most (INTERNALS 1.3).
+/// How long the watchdog sleeps between checks at most (INTERNALS 6.5, 8.5).
 const TICK: Duration = Duration::from_millis(100);
 
 /// How often the watchdog checks whether the top timer's child has exited (8.5).
@@ -895,7 +895,7 @@ fn resume_main_thread(pid: u32) -> std::io::Result<()> {
     }
 }
 
-/// A child's output after it ended: probes now, transpilers later (7.7, 12.5).
+/// A child's output after it ended: version probes (7.7).
 pub struct Captured {
     pub status: ExitInfo,
     pub stdout: Vec<u8>,
@@ -913,23 +913,11 @@ fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// Run `argv` to its end with stdout and stderr captured, `input` on stdin (else the null
-/// device) and at most `limit`. Every pipe is serviced on its own thread; this thread waits for
-/// the exit (or the timer's kill), kills the tree, joins the readers, then reaps (8.3).
-pub fn run_captured(
-    argv: &[OsString],
-    env: &[(OsString, OsString)],
-    input: Option<Vec<u8>>,
-    limit: Option<Duration>,
-) -> Result<Captured, String> {
-    let stdin = if input.is_some() { Pipe::Piped } else { Pipe::Null };
-    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped })?;
-    let writer = match (input, child.take_stdin()) {
-        (Some(bytes), Some(mut w)) => Some(std::thread::spawn(move || {
-            let _ = w.write_all(&bytes);
-        })),
-        _ => None,
-    };
+/// Run `argv` to its end with stdin the null device, stdout and stderr captured, and at most
+/// `limit`. Each output pipe is read on its own thread; this thread waits for the exit (or the
+/// timer's kill), kills the tree, joins the readers, then reaps (8.3).
+pub fn run_captured(argv: &[OsString], env: &[(OsString, OsString)], limit: Option<Duration>) -> Result<Captured, String> {
+    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Piped })?;
     let out = drain(child.take_stdout());
     let err = drain(child.take_stderr());
     let timer = limit.map(|l| push_timer(Some(l), child.kill_handle()));
@@ -939,9 +927,6 @@ pub fn run_captured(
     drop(timer);
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
-    if let Some(w) = writer {
-        let _ = w.join();
-    }
     let status = child.reap();
     Ok(Captured { status, stdout, stderr, timed_out })
 }
@@ -995,6 +980,7 @@ fn install_interrupt_handler() {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::io::Write;
 
     /// The watchdog is process-wide and only its top timer runs, as on the one interpreter
     /// thread of a run; tests that push timers take turns so they don't bury each other's.
@@ -1140,14 +1126,14 @@ pub(crate) mod tests {
             "child_status" => {
                 Watchdog::start();
                 let (argv, env) = helper("exit:3");
-                let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).unwrap();
+                let c = run_captured(&argv, &env, Some(Duration::from_secs(30))).unwrap();
                 writeln!(out, "status {:?}", c.status.code).unwrap();
             }
             // A host with a console but no window: its child must share that console (8.3).
             #[cfg(windows)]
             "console_host" => {
                 let (argv, env) = helper("console_list");
-                let c = run_captured(&argv, &env, None, Some(Duration::from_secs(30))).unwrap();
+                let c = run_captured(&argv, &env, Some(Duration::from_secs(30))).unwrap();
                 out.write_all(&c.stdout).unwrap();
             }
             #[cfg(windows)]
@@ -1370,13 +1356,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn input_never_holds_up_the_timer() {
+    fn the_limit_ends_a_captured_run() {
         let _serial = crate::engines::process::tests::serial();
-        // A child that never reads its input: the input is written from its own thread, so the
-        // limit still ends the run.
         let (argv, env) = helper("sleep:20000");
         let start = Instant::now();
-        let c = run_captured(&argv, &env, Some(vec![b'x'; 4 << 20]), Some(Duration::from_millis(500))).expect("spawn");
+        let c = run_captured(&argv, &env, Some(Duration::from_millis(500))).expect("spawn");
         assert!(c.timed_out, "{:?}", c.status);
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
     }

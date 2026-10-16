@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use super::ast::*;
 use super::directives;
+use super::lexer::LABEL_HINT;
 use super::span::{SourceMap, Span};
 use super::token::{BraceKind, FPartTok, Kw, Op, Tok, Token};
 use super::Diag;
@@ -20,7 +21,7 @@ const MAX_DEPTH: u32 = 256;
 /// is long, and later passes recurse over it.
 const MAX_LINKS: u32 = 10_000;
 
-/// The fixed compiled tags: no block args, quoted exports are C prototypes (4.5, 15.2).
+/// The fixed compiled tags: no block args, exports by name only (4.5, 15.2).
 pub const COMPILED_TAGS: &[&str] = &["c", "cpp", "cxx", "rust", "rs"];
 
 pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag> {
@@ -593,7 +594,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `@tag`, `@tag.label`, `label`, `"label"`, `lang.seg.seg`, `v2` (4.1).
+    /// `@tag`, `@tag.label`, `label`, `lang.seg.seg`, `v2` (4.1).
     fn selector(&mut self) -> Result<Selector, Diag> {
         let t = self.bump();
         match t.tok {
@@ -601,6 +602,9 @@ impl<'a> Parser<'a> {
                 let tag = Name { text: tag, span: t.span };
                 if self.at_op(Op::Dot) {
                     self.bump();
+                    if let Tok::Str(_) = self.peek() {
+                        return Err(Diag::new("a block label can't be a string", self.span()).hint(LABEL_HINT));
+                    }
                     let label = self.segment()?;
                     Ok(Selector::Exact { tag, label })
                 } else {
@@ -622,7 +626,7 @@ impl<'a> Parser<'a> {
                     Ok(Selector::Label { label: Name { text: n, span: t.span } })
                 }
             }
-            Tok::Str(s) => Ok(Selector::Label { label: Name { text: s, span: t.span } }),
+            Tok::Str(_) => Err(Diag::new("a block label can't be a string", t.span).hint(LABEL_HINT)),
             other => Err(Diag::new(format!("expected a selector (@py, a block label, or py.module), found {other}"), t.span)),
         }
     }
@@ -720,25 +724,6 @@ impl<'a> Parser<'a> {
             return Err(Diag::new(format!("expected a block body, found {}", body_tok.tok), body_tok.span));
         };
         let processed = directives::process(self.sm, &raw, &tag)?;
-        // Quoted exports of compiled blocks are C prototypes, read now (4.3). A function named
-        // twice, bare or through a prototype, is exported twice (15.2).
-        if COMPILED_TAGS.contains(&&*tag) {
-            if let Some(ex) = &processed.directives.exports {
-                let mut seen: Vec<(Rc<str>, Span)> = Vec::new();
-                for item in &ex.items {
-                    let name = if item.quoted {
-                        let dialect = if matches!(&*tag, "cpp" | "cxx") { cdecl::Dialect::Cpp } else { cdecl::Dialect::C };
-                        cdecl::parse_prototype(&item.text, dialect).map_err(|e| Diag::new(e.message, item.span))?.name
-                    } else {
-                        item.text.clone()
-                    };
-                    if let Some((_, first)) = seen.iter().find(|(n, _)| *n == name) {
-                        return Err(Diag::new(format!("'{name}' is exported twice"), item.span).note("first exported here", *first));
-                    }
-                    seen.push((name, item.span));
-                }
-            }
-        }
         // A block arg may not share a name with what an inner @import binds (12.1, 13.7).
         for imp in &processed.directives.imports {
             let bound: Vec<(Rc<str>, Span)> = match &imp.items {
@@ -1373,7 +1358,10 @@ extern "m" as m { double cos(double x); }
         assert_eq!(err("@import { from } from py.x"), "expected a name in the @import list, found keyword `from`");
         assert_eq!(err("@import stats as s"), "only a package selector (py.name, js.name) can be imported as a whole module");
         assert_eq!(err("extern \"c\" { int printf(const char* f, ...); }"), "variadic functions (like printf) are not supported — wrap the call in a @c block");
-        assert_eq!(err("@c fast {\n  @export { \"int f(...)\" }\n}"), "variadic functions (like printf) are not supported — wrap the call in a @c block");
+        assert_eq!(err("@c fast {\n  @export { \"int f(...)\" }\n}"), "compiled blocks export functions by name");
+        assert_eq!(err("@import { f } from \"odd name\""), "a block label can't be a string");
+        assert_eq!(err("@import { f } from @py.\"odd name\""), "a block label can't be a string");
+        assert_eq!(diag("@import { f } from \"odd name\"").hint.as_deref(), Some(LABEL_HINT));
         assert_eq!(err("let x = -9223372036854775808 ** 1"), "integer literal does not fit in 64 bits");
         assert_eq!(err("} else if x {"), "unmatched `}`");
         assert_eq!(err("if a {\n} else if b {\n}"), "V2 writes `else if` as `elif`");
@@ -1402,7 +1390,7 @@ extern "m" as m { double cos(double x); }
         assert_eq!(err("@c(x) { int y; }"), "compiled blocks take no args — @export a function and call it with arguments");
         assert_eq!(err("@py(a, a: 1) { a }"), "block arg 'a' is given twice");
         assert_eq!(err("@py(m) {\n  @import { mean as m } from py.statistics\n}"), "'m' is already declared in this block");
-        assert_eq!(err("@py(np) {\n  @import py.numpy as np\n}"), "'np' is already declared in this block");
+        assert_eq!(err("@py(np) {\n  @import py.numpy as np\n}"), "the whole-module form of @import is only valid in V2 code");
         assert_eq!(err("@py { 1 }\n.x"), "a block value must be in parentheses here: (@py { … }).m()");
     }
 
@@ -1456,13 +1444,11 @@ extern "m" as m { double cos(double x); }
         assert!(parse_str("print(lambda(x) {\n    return x\n})").is_ok());
         assert!(parse_str("if \"a\" == \"\"\"\n    a\n    \"\"\" { }").is_ok(), "a multi-line token ends on the brace's line");
 
-        // A compiled function exported twice, bare or through a prototype (15.2).
-        assert_eq!(err("@c fast {\n    int f(int a) { return a; }\n    @export { f, \"int f(int a)\" }\n}"), "'f' is exported twice");
-        assert_eq!(err("@c fast {\n    @export { \"int f(int)\", \"int f(int a)\" }\n}"), "'f' is exported twice");
-        assert!(parse_str("@c fast {\n    @export { f, \"int g(int a)\" }\n}").is_ok());
-        // An empty prototype is an error, not a panic.
-        for p in ["\"\"", "\"   \"", "\"/* x */\"", "\"// c\""] {
-            assert_eq!(err(&format!("@c fast {{\n    @export {{ {p} }}\n}}")), "expected a C prototype, like \"int add(int a, int b)\"", "{p}");
+        // A compiled function exported twice (15.2); compiled blocks export names only (4.4, 4.5).
+        assert_eq!(err("@c fast {\n    int f(int a) { return a; }\n    @export { f, f }\n}"), "'f' is exported twice");
+        assert!(parse_str("@c fast {\n    @export { f, g }\n}").is_ok());
+        for p in ["\"\"", "\"int g(int a)\"", "\"std::string greet(const std::string& name)\""] {
+            assert_eq!(err(&format!("@cpp fast {{\n    @export {{ {p} }}\n}}")), "compiled blocks export functions by name", "{p}");
         }
 
         // Duplicate extern functions point at the name, with a note at the first.
@@ -1495,9 +1481,10 @@ extern "m" as m { double cos(double x); }
         assert_eq!((d.message.as_str(), d.span.line, d.span.col), ("expected an expression, found `}`", 2, 21));
         assert_eq!(err("print(f\"x ${a ? 1} y\")"), "expected `:`, found `}`");
         assert!(parse_str("print(f\"${ {a: 1} }\", f\"${lambda() { }}\")").is_ok());
-        // @cpp prototype strings use the C++ dialect; @c ones don't.
-        assert!(parse_str("@cpp words {\n    @export { \"std::string greet(const std::string& name)\" }\n}").is_ok());
-        assert_eq!(err("@c words {\n    @export { \"std::string greet(void)\" }\n}"), "cannot read this declaration");
+        // Quoted export names stay in py, js and ts blocks (4.4).
+        assert!(parse_str("@js words {\n    @export { \"default\" }\n}").is_ok());
+        // The whole-module form stays at V2 level (4.1).
+        assert!(parse_str("@import py.numpy as np\n@import js.\"date-fns\" as dfns").is_ok());
     }
 
     #[test]

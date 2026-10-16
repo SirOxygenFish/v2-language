@@ -1,10 +1,10 @@
 //! The C declaration parser (INTERNALS 16.3).
 //!
-//! Reads `extern` bodies (a list of prototypes) and `@export` prototype strings (one prototype,
-//! `;` optional) at parse time. Errors carry byte offsets into the text; the caller turns them
-//! into `SyntaxError` spans. `@cpp` prototype strings use the C++ dialect: `std::string`,
-//! `const std::string&`, `[[…]]`, `noexcept` and `extern "C"` (15.2). Definition heads of
-//! compiled blocks arrive with roadmap 2.4.
+//! Reads `extern` bodies (a list of prototypes) at parse time, and single definition heads (`;`
+//! optional). Errors carry byte offsets into the text; the caller turns them into `SyntaxError`
+//! spans. The C++ dialect, for `@cpp` definition heads (15.3), adds `std::string`,
+//! `const std::string&`, `[[…]]`, `noexcept` and `extern "C"`. Definition heads of compiled
+//! blocks arrive with roadmap 2.3 (C) and 2.4 (C++).
 
 use std::rc::Rc;
 
@@ -60,8 +60,9 @@ pub fn parse_extern(text: &str) -> Result<Vec<(Sig, usize, usize)>, CdeclError> 
     Ok(sigs)
 }
 
-/// One prototype, as written in an `@export` list (`;` optional).
-pub fn parse_prototype(text: &str, dialect: Dialect) -> Result<Sig, CdeclError> {
+/// One definition head or prototype (`;` optional), for compiled C/C++ functions (15.3).
+#[allow(dead_code)] // read by compiled-block signature extraction (roadmap 2.3)
+pub fn parse_definition_head(text: &str, dialect: Dialect) -> Result<Sig, CdeclError> {
     let mut p = P::new(text, dialect)?;
     if p.at_end() {
         return Err(p.err_here("expected a C prototype, like \"int add(int a, int b)\""));
@@ -853,10 +854,10 @@ mod tests {
     }
 
     #[test]
-    fn prototype_strings() {
-        assert_eq!(parse_prototype("int mul(int a, int b)", Dialect::C).unwrap().params.len(), 2);
-        assert!(parse_prototype("int mul(int a, int b);", Dialect::C).is_ok());
-        assert_eq!(parse_prototype("int mul(int a) extra", Dialect::C).unwrap_err().message, "expected the end of the prototype");
+    fn single_heads() {
+        assert_eq!(parse_definition_head("int mul(int a, int b)", Dialect::C).unwrap().params.len(), 2);
+        assert!(parse_definition_head("int mul(int a, int b);", Dialect::C).is_ok());
+        assert_eq!(parse_definition_head("int mul(int a) extra", Dialect::C).unwrap_err().message, "expected the end of the prototype");
     }
 
     #[test]
@@ -901,11 +902,11 @@ mod tests {
         assert_eq!((&text[e.lo..e.hi], e.lo), ("cos", 29));
         assert_eq!(e.note, Some(("first declared here".into(), 7, 10)));
         assert_eq!(parse_extern("int a(void); double b(double);").unwrap().iter().map(|(_, lo, hi)| (*lo, *hi)).collect::<Vec<_>>(), vec![(4, 5), (20, 21)]);
-        // Empty prototype strings.
+        // Empty heads.
         for p in ["", "   ", "/* x */", "// c"] {
-            assert_eq!(parse_prototype(p, Dialect::C).unwrap_err().message, "expected a C prototype, like \"int add(int a, int b)\"", "{p:?}");
+            assert_eq!(parse_definition_head(p, Dialect::C).unwrap_err().message, "expected a C prototype, like \"int add(int a, int b)\"", "{p:?}");
         }
-        assert_eq!(parse_prototype("int f(int a) { return a; }", Dialect::C).unwrap_err().message, "structs are not supported in extern — wrap the function in a @c block");
+        assert_eq!(parse_definition_head("int f(int a) { return a; }", Dialect::C).unwrap_err().message, "structs are not supported in extern — wrap the function in a @c block");
     }
 
     #[test]
@@ -938,8 +939,8 @@ mod tests {
     }
 
     #[test]
-    fn cpp_dialect_prototype_strings() {
-        let cpp = |t: &str| parse_prototype(t, Dialect::Cpp);
+    fn cpp_dialect_heads() {
+        let cpp = |t: &str| parse_definition_head(t, Dialect::Cpp);
         let g = cpp("std::string greet(const std::string& name)").unwrap();
         assert_eq!((g.ret, &*g.ret_spelling), (CType::OwnedStr, "std::string"));
         assert_eq!((g.params[0].ty, &*g.params[0].spelling, g.params[0].non_null), (CType::Str, "const std::string&", true));
@@ -951,18 +952,18 @@ mod tests {
         assert_eq!(cpp("int f(int& x)").unwrap_err().message, "cannot read this declaration");
         assert_eq!(cpp("int A::f(void)").unwrap_err().message, "cannot read this declaration");
         // The C dialect has none of these.
-        assert_eq!(parse_prototype("std::string f(void)", Dialect::C).unwrap_err().message, "cannot read this declaration");
+        assert_eq!(parse_definition_head("std::string f(void)", Dialect::C).unwrap_err().message, "cannot read this declaration");
     }
 
     #[test]
     fn round2_0_5_regressions() {
-        let cpp = |t: &str| parse_prototype(t, Dialect::Cpp).unwrap_err();
+        let cpp = |t: &str| parse_definition_head(t, Dialect::Cpp).unwrap_err();
         let at_cpp = |t: &str| {
             let e = cpp(t);
             (e.message, t[e.lo..e.hi].to_string())
         };
-        // Prototype strings use the 16.3 comma row too.
-        assert_eq!(parse_prototype("int a(void), b(void)", Dialect::C).unwrap_err().message, "declare one function per declaration");
+        // Definition heads use the 16.3 comma row too.
+        assert_eq!(parse_definition_head("int a(void), b(void)", Dialect::C).unwrap_err().message, "declare one function per declaration");
         // A C++ trailer or an attribute after `)` is not a K&R declaration list.
         assert_eq!(cpp("int f(Foo) noexcept").message, "unknown type 'Foo' — remove macros from copied declarations");
         assert_eq!(err("int f(x) __attribute__((pure));"), "unknown type 'x' — remove macros from copied declarations");
@@ -972,7 +973,7 @@ mod tests {
         assert_eq!(at_cpp("void f(const std::string&& s)"), ("cannot read this declaration".into(), "&".into()));
         assert_eq!(at_cpp("int f(const Foo& x)"), ("cannot read this declaration".into(), "&".into()));
         assert_eq!(at_cpp("Foo& f(void)"), ("cannot read this declaration".into(), "&".into()));
-        assert!(parse_prototype("int f(std::string const& s)", Dialect::Cpp).is_ok());
+        assert!(parse_definition_head("int f(std::string const& s)", Dialect::Cpp).is_ok());
         // A type word after a complete type is never a name.
         assert_eq!(at("int double f(void);"), ("cannot read the type 'int double'".into(), "double".into()));
         assert_eq!(err("double float(void);"), "cannot read the type 'double float'");

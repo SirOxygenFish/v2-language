@@ -26,7 +26,6 @@ const fn m(name: &'static str, params: &'static [ParamSpec], f: MethodFn) -> Met
 const NONE: &[ParamSpec] = &[];
 
 pub static STR_METHODS: &[MethodDef] = &[
-    m("len", NONE, |it, r, _, _| Ok(Value::Int(it.chars.len(the_str(r)) as i64))),
     m("upper", NONE, |_, r, _, _| Ok(Value::Str(the_str(r).to_uppercase().into()))),
     m("lower", NONE, |_, r, _, _| Ok(Value::Str(the_str(r).to_lowercase().into()))),
     m("trim", NONE, |_, r, _, _| Ok(Value::str(the_str(r).trim()))),
@@ -137,7 +136,6 @@ pub static LIST_METHODS: &[MethodDef] = &[
         }
         Ok(Value::Int(-1))
     }),
-    m("len", NONE, |_, r, _, _| Ok(Value::Int(the_list(r).borrow().len() as i64))),
     m("copy", NONE, |_, r, _, _| Ok(Value::list(the_list(r).borrow().clone()))),
 ];
 
@@ -157,7 +155,6 @@ pub static DICT_METHODS: &[MethodDef] = &[
             None => key_error(&k, the_dict(r)),
         }
     }),
-    m("len", NONE, |_, r, _, _| Ok(Value::Int(the_dict(r).borrow().len() as i64))),
     m("copy", NONE, |_, r, _, _| Ok(Value::dict(the_dict(r).borrow().clone()))),
 ];
 

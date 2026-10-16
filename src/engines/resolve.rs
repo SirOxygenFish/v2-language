@@ -165,7 +165,7 @@ pub struct RealProber;
 
 impl Prober for RealProber {
     fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)]) -> ProbeOutcome {
-        match process::run_captured(argv, env, None, Some(PROBE_LIMIT)) {
+        match process::run_captured(argv, env, Some(PROBE_LIMIT)) {
             Err(msg) => ProbeOutcome::SpawnFailed(msg),
             Ok(c) if c.timed_out => ProbeOutcome::TimedOut,
             Ok(c) => match c.status.signal {
@@ -225,12 +225,12 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome) -> Judged {
 // ---------------------------------------------------------------------------------------------
 // The probe cache (7.7)
 
-/// How a run uses `~/.v2/cache/toolchains.json` (7.7, 19.4).
+/// How a run uses `~/.v2/cache/toolchains.json` (7.7; doctor 19.2; no home folder 18.1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CacheMode {
     /// Runs: read, and write misses.
     ReadWrite,
-    /// Doctor and `--no-cache`: probe afresh and overwrite.
+    /// Doctor: probe afresh and overwrite.
     Refresh,
     /// No home folder: no cache at all.
     Off,
@@ -257,10 +257,7 @@ impl ProbeCache {
         ProbeCache::open(None, CacheMode::Off)
     }
 
-    /// A cached usable version. Runs probe skipped hits again: a version-manager shim (pyenv,
-    /// asdf, volta) runs another interpreter in another project, and a timeout may have been
-    /// passing; the stored skips are for `v2 check` (7.7). A stale usable entry is caught by
-    /// `hello`'s version check (8.4).
+    /// A cached usable version. A stale one is caught by `hello`'s version check (8.4).
     fn get(&self, key: &str) -> Option<Judged> {
         if self.mode != CacheMode::ReadWrite {
             return None;
@@ -272,19 +269,21 @@ impl ProbeCache {
         e.get("version").and_then(Json::as_str).and_then(Version::parse).map(Judged::Usable)
     }
 
+    /// The cache holds usable entries only (7.7): a skipped hit is probed again by every run,
+    /// because a version-manager shim (pyenv, asdf, volta) runs another interpreter in another
+    /// project, and a timeout may have been passing. A skip drops an entry doctor re-probed.
     fn put(&mut self, key: String, path: &Path, j: &Judged, output: &str) {
         if self.mode == CacheMode::Off {
             return;
         }
-        let version = match j {
-            Judged::Usable(v) | Judged::TooOld(v, _) => Json::String(v.to_string()),
-            Judged::Skipped(_) => Json::Null,
+        let Judged::Usable(version) = j else {
+            self.dirty |= self.entries.shift_remove(&key).is_some();
+            return;
         };
         let entry = json!({
             "path": path.to_string_lossy(),
-            "ok": matches!(j, Judged::Usable(_)),
-            "reason": j.reason(),
-            "version": version,
+            "ok": true,
+            "version": version.to_string(),
             "output": output,
         });
         self.entries.insert(key, entry);
@@ -390,50 +389,39 @@ impl Origin {
     }
 }
 
-/// `v2.toml`, `config.toml`, `V2_ENGINE_PY`, `--engine` (19.2's FROM column).
+/// `v2.toml` or `V2_ENGINE_PY` (19.2's FROM column).
 pub fn source_label(from: &ConfigSource) -> String {
     match from {
-        ConfigSource::Default => "-".into(),
-        ConfigSource::User(_) => "config.toml".into(),
         ConfigSource::Project(_) => "v2.toml".into(),
         ConfigSource::Env(var) => var.clone(),
-        ConfigSource::Cli => "--engine".into(),
     }
 }
 
-/// What "(set by …)" names: the file's full path, the variable, or `--engine` (7.6).
+/// What "(set by …)" names: the file's full path, or the variable (7.6).
 fn set_by(from: &ConfigSource) -> String {
     match from {
-        ConfigSource::User(p) | ConfigSource::Project(p) => p.display().to_string(),
-        other => source_label(other),
+        ConfigSource::Project(p) => p.display().to_string(),
+        ConfigSource::Env(var) => var.clone(),
     }
-}
-
-/// How `@ts` code becomes JavaScript (7.6).
-#[derive(Clone, Debug, PartialEq)]
-pub enum TsMethod {
-    Strip,
-    Transpiler(Vec<OsString>),
 }
 
 #[derive(Debug)]
 pub struct ResolvedEngine {
     pub spec: Rc<EngineSpec>,
     pub origin: Origin,
-    /// `[C:\Windows\py.exe, -3]`: the program, absolute, then its prefix arguments.
+    /// `[C:\Windows\py.exe, -3]`: the program, absolute, then its prefix arguments. ts: js's.
     pub argv: Vec<OsString>,
     pub version: Option<Version>,
     pub skipped: Vec<(PathBuf, String)>,
-    pub ts: Option<TsMethod>,
 }
 
 impl ResolvedEngine {
     /// Doctor's COMMAND column: the argv, space-joined, unquoted (19.2).
     pub fn shown(&self) -> String {
-        match &self.ts {
-            Some(TsMethod::Strip) => "(js engine, built-in type stripping)".into(),
-            Some(TsMethod::Transpiler(t)) => format!("(js engine, transpiler: {})", join(t)),
-            None => join(&self.argv),
+        if self.spec.session_of.is_some() {
+            "(js engine, built-in type stripping)".into()
+        } else {
+            join(&self.argv)
         }
     }
 }
@@ -448,7 +436,7 @@ pub enum Status {
     Missing,
     /// Only versions below the minimum (the newest shown), or a Node without ts stripping.
     Old(Version),
-    /// A configured command, venv or transpiler missing, or a probe that failed.
+    /// A configured command or venv missing, or a probe that failed.
     Broken,
 }
 
@@ -504,13 +492,12 @@ impl Resolver<'_> {
         judged
     }
 
-    /// py or js: the configured command or `[python] venv` (the higher layer; on a tie,
-    /// `command`), never falling back to auto-detection; else the candidates (7.6).
+    /// py or js: the configured command, else `[python] venv`, never falling back to
+    /// auto-detection; else the candidates (7.6).
     pub fn resolve(&mut self, spec: &Rc<EngineSpec>) -> Result<ResolvedEngine, NotFound> {
         let command = self.cfg.engines.get(&*spec.id).and_then(|e| e.command.as_ref());
         let venv = if &*spec.id == "py" { self.cfg.python_venv.as_ref() } else { None };
         match (command, venv) {
-            (Some(c), Some(v)) if rank(&v.from) > rank(&c.from) => self.venv(spec, &v.value, &v.from),
             (Some(c), _) => self.configured(spec, &c.value, &c.from),
             (None, Some(v)) => self.venv(spec, &v.value, &v.from),
             (None, None) => self.search(spec),
@@ -520,7 +507,7 @@ impl Resolver<'_> {
     fn usable(&mut self, spec: &Rc<EngineSpec>, argv: Vec<OsString>, origin: Origin, what: &str, from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let path = PathBuf::from(&argv[0]);
         match self.probe(spec, &argv, &path) {
-            Judged::Usable(v) => Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: Some(v), skipped: Vec::new(), ts: None }),
+            Judged::Usable(v) => Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: Some(v), skipped: Vec::new() }),
             other => {
                 let reason = other.reason().unwrap_or_default();
                 let mut nf = NotFound::broken(
@@ -581,7 +568,7 @@ impl Resolver<'_> {
                 argv.extend(candidate[1..].iter().map(|a| OsString::from(&**a)));
                 match self.probe(spec, &argv, &hit) {
                     Judged::Usable(v) => {
-                        return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped, ts: None })
+                        return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped })
                     }
                     Judged::TooOld(v, reason) => {
                         newest_old = newest_old.max(Some(v));
@@ -602,7 +589,7 @@ impl Resolver<'_> {
         matches!(self.prober.probe(&argv, &[]), ProbeOutcome::Exited { code: Some(0), .. })
     }
 
-    /// ts: the js engine plus a way to strip types (7.6).
+    /// ts: the js engine, if its Node has built-in type stripping (7.6).
     pub fn resolve_ts(&mut self, spec: &Rc<EngineSpec>, js: Result<&ResolvedEngine, &NotFound>) -> Result<ResolvedEngine, NotFound> {
         let js = js.map_err(|nf| {
             let rest: Vec<&str> = nf.message.lines().skip(1).collect();
@@ -616,45 +603,17 @@ impl Resolver<'_> {
             }
             NotFound { message, skipped: Vec::new(), ..nf.clone() }
         })?;
-        let transpiler = self.cfg.engines.get("ts").and_then(|e| e.transpiler.as_ref()).filter(|t| t.value != ["node"]);
-        let (method, origin) = match transpiler {
-            Some(t) => {
-                let name = &t.value[0];
-                let Some(path) = find_program(name, self.lookup).into_iter().next() else {
-                    return Err(NotFound::broken(format!("[engines.ts] transpiler '{name}' not found"), t.value.join(" "), &t.from));
-                };
-                let mut argv = vec![path.into_os_string()];
-                argv.extend(t.value[1..].iter().map(OsString::from));
-                (TsMethod::Transpiler(argv), Origin::Config(t.from.clone()))
-            }
-            None => {
-                let node = js.version.unwrap_or(Version(0, 0, 0));
-                if !ts_strips(node) {
-                    return Err(NotFound {
-                        status: Status::Old(node),
-                        message: format!(
-                            "@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found {node}) — upgrade Node or set [engines.ts] transpiler"
-                        ),
-                        command: Some(join(&js.argv)),
-                        from: Some(js.origin.label()),
-                        skipped: Vec::new(),
-                    });
-                }
-                (TsMethod::Strip, js.origin.clone())
-            }
-        };
-        Ok(ResolvedEngine { spec: spec.clone(), origin, argv: js.argv.clone(), version: js.version, skipped: Vec::new(), ts: Some(method) })
-    }
-}
-
-/// Which config layer is higher (18.3).
-fn rank(from: &ConfigSource) -> u8 {
-    match from {
-        ConfigSource::Default => 0,
-        ConfigSource::User(_) => 1,
-        ConfigSource::Project(_) => 2,
-        ConfigSource::Env(_) => 3,
-        ConfigSource::Cli => 4,
+        let node = js.version.unwrap_or(Version(0, 0, 0));
+        if !ts_strips(node) {
+            return Err(NotFound {
+                status: Status::Old(node),
+                message: format!("@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found {node}) — upgrade Node"),
+                command: Some(join(&js.argv)),
+                from: Some(js.origin.label()),
+                skipped: Vec::new(),
+            });
+        }
+        Ok(ResolvedEngine { spec: spec.clone(), origin: js.origin.clone(), argv: js.argv.clone(), version: js.version, skipped: Vec::new() })
     }
 }
 
@@ -666,11 +625,7 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)]) -> String
         m.push_str(&format!("\nskipped: {} ({reason})", path.display()));
     }
     let id = &spec.id;
-    m.push_str(&format!(
-        "\ninstall: {}\nor set [engines.{id}] command in v2.toml, V2_ENGINE_{}, or --engine {id}=PATH",
-        install_hint(id),
-        id.to_uppercase()
-    ));
+    m.push_str(&format!("\ninstall: {}\nor set [engines.{id}] command in v2.toml, or V2_ENGINE_{}", install_hint(id), id.to_uppercase()));
     m
 }
 
@@ -782,7 +737,7 @@ mod tests {
 
     #[test]
     fn relative_and_empty_path_entries_skipped() {
-        // A relative entry is relative to the cwd, which is never searched (D43).
+        // A relative entry is relative to the cwd, which is never searched (7.5).
         let rel = PathBuf::from("target").join(format!("v2res-rel-{}", std::process::id()));
         std::fs::create_dir_all(&rel).unwrap();
         exe(&rel, "node");
@@ -890,13 +845,13 @@ mod tests {
     fn configured_probe_failure_is_error() {
         let d = temp("cfgfail");
         let node = exe(&d, "node");
-        let cfg = with_command("js", &[&node.to_string_lossy()], ConfigSource::Cli);
+        let cfg = with_command("js", &[&node.to_string_lossy()], ConfigSource::Env("V2_ENGINE_JS".into()));
         let p = fake(|_| ProbeOutcome::Exited { code: Some(1), output: String::new() });
         let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
         assert_eq!(nf.status, Status::Broken);
         assert_eq!(
             nf.message,
-            format!("engine 'js' command '{}' (set by --engine) is not usable: version probe failed (exit code 1)", node.display())
+            format!("engine 'js' command '{}' (set by V2_ENGINE_JS) is not usable: version probe failed (exit code 1)", node.display())
         );
         let p = fake(|_| says("v16.20.0"));
         let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
@@ -917,17 +872,13 @@ mod tests {
         let python = exe(&bin, "python");
         let e = resolve_with(&missing, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
         assert_eq!((e.argv, e.origin), (vec![python.into_os_string()], Origin::Venv));
-        // The higher layer wins; on a tie, command.
+        // A configured command wins over the venv, from v2.toml or V2_ENGINE_PY (7.6).
         let other = exe(&d, "python3");
-        for (venv_from, command_from, want_venv) in [
-            (project_source(), ConfigSource::User("u".into()), true),
-            (ConfigSource::User("u".into()), project_source(), false),
-            (project_source(), project_source(), false),
-        ] {
+        for command_from in [project_source(), ConfigSource::Env("V2_ENGINE_PY".into())] {
             let mut cfg = with_command("py", &[&other.to_string_lossy()], command_from);
-            cfg.python_venv = Some(Sourced { value: venv.clone(), from: venv_from });
+            cfg.python_venv = Some(Sourced { value: venv.clone(), from: project_source() });
             let e = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
-            assert_eq!(e.origin == Origin::Venv, want_venv);
+            assert_ne!(e.origin, Origin::Venv);
         }
     }
 
@@ -954,23 +905,13 @@ mod tests {
         let js = r.resolve(&spec("js")).unwrap();
         let nf = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap_err();
         assert_eq!(nf.status, Status::Old(Version(22, 6, 0)));
-        assert_eq!(nf.message, "@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found 22.6.0) — upgrade Node or set [engines.ts] transpiler");
+        assert_eq!(nf.message, "@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found 22.6.0) — upgrade Node");
         let p = fake(|_| says("v24.11.1"));
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
         let js = r.resolve(&spec("js")).unwrap();
         let ts = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap();
-        assert_eq!((ts.ts.clone(), ts.shown(), ts.version), (Some(TsMethod::Strip), "(js engine, built-in type stripping)".to_string(), js.version));
-        // A transpiler that isn't there; one that is.
-        let mut with_tsx = Config::default();
-        let transpiler = Some(Sourced { value: vec!["tsx".to_string()], from: project_source() });
-        with_tsx.engines.insert("ts".into(), EngineCfg { transpiler, ..EngineCfg::default() });
-        let mut r = Resolver { cfg: &with_tsx, lookup: &l, prober: &p, cache: &mut cache };
-        let nf = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap_err();
-        assert_eq!((nf.status, nf.message.as_str()), (Status::Broken, "[engines.ts] transpiler 'tsx' not found"));
-        let tsx = exe(&d, "tsx");
-        let ts = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap();
-        assert_eq!(ts.ts, Some(TsMethod::Transpiler(vec![tsx.into_os_string()])));
-        assert_eq!(ts.origin.label(), "v2.toml");
+        assert_eq!((ts.shown(), ts.version, &ts.argv), ("(js engine, built-in type stripping)".to_string(), js.version, &js.argv));
+        assert_eq!(js.shown(), join(&js.argv));
         // Without js there is no ts.
         let js_missing = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
@@ -988,7 +929,7 @@ mod tests {
         let nf = resolve_with(&Config::default(), &lookup(&[&apps], Some(&apps)), &p, &mut ProbeCache::off(), "py").unwrap_err();
         let tried = if cfg!(windows) { "python3, python, py -3" } else { "python3, python" };
         let want = format!(
-            "engine 'py' (Python) not found\ntried: {tried} on PATH\nskipped: {} (Microsoft Store placeholder)\ninstall: {}\nor set [engines.py] command in v2.toml, V2_ENGINE_PY, or --engine py=PATH",
+            "engine 'py' (Python) not found\ntried: {tried} on PATH\nskipped: {} (Microsoft Store placeholder)\ninstall: {}\nor set [engines.py] command in v2.toml, or V2_ENGINE_PY",
             alias.display(),
             install_hint("py")
         );
@@ -1016,7 +957,7 @@ mod tests {
         let mut again = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
         let e = resolve_with(&cfg, &l, &p, &mut again, "js").unwrap();
         assert_eq!((p.calls.get(), e.version), (1, Some(Version(24, 11, 1))), "served from the cache");
-        // A changed file is probed again. Skips are stored, but runs probe them again (a
+        // A changed file is probed again. Skips are not stored: every run probes them again (a
         // version-manager shim answers per project, 7.7).
         let p_old = fake(|_| says("v16.0.0"));
         std::fs::write(&node, b"changed").unwrap();
@@ -1025,7 +966,8 @@ mod tests {
         assert_eq!(p_old.calls.get(), 1);
         c.save();
         let saved: Json = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert!(saved["entries"].as_object().unwrap().values().any(|e| e["ok"] == json!(false) && e["version"] == json!("16.0.0")), "{saved}");
+        let entries = saved["entries"].as_object().unwrap();
+        assert!(entries.values().all(|e| e["ok"] == json!(true) && e["version"] == json!("24.11.1")), "usable entries only: {saved}");
         let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
         let nf = resolve_with(&cfg, &l, &p_old, &mut c, "js").unwrap_err();
         assert_eq!((p_old.calls.get(), nf.status), (2, Status::Old(Version(16, 0, 0))));
@@ -1099,6 +1041,14 @@ mod tests {
         let mut c = ProbeCache::open(Some(&home), CacheMode::Refresh);
         resolve_with(&cfg, &l, &p, &mut c, "js").unwrap();
         assert_eq!(p.calls.get(), 4);
+        // A Refresh probe that now skips drops the entry: the cache holds usable entries only.
+        c.save();
+        let skips = fake(|_| ProbeOutcome::Exited { code: Some(1), output: String::new() });
+        let mut c = ProbeCache::open(Some(&home), CacheMode::Refresh);
+        assert!(resolve_with(&cfg, &l, &skips, &mut c, "js").is_err());
+        c.save();
+        let saved: Json = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved["entries"], json!({}), "{saved}");
         // Off never writes.
         std::fs::remove_file(&file).unwrap();
         let mut c = ProbeCache::open(Some(&home), CacheMode::Off);
@@ -1152,30 +1102,23 @@ mod tests {
     }
 
     #[test]
-    fn ts_transpiler_node_means_stripping_and_origin_follows_js() {
+    fn ts_origin_follows_js() {
         let d = temp("kts");
         let node = exe(&d, "node");
         let l = lookup(&[&d], None);
         let mut cache = ProbeCache::off();
         let p = fake(|_| says("v24.11.1"));
-        // js set by --engine: ts (stripping) shows js's FROM (19.2).
-        let cfg = with_command("js", &[&node.to_string_lossy()], ConfigSource::Cli);
+        // js set by V2_ENGINE_JS: ts shows js's FROM (19.2).
+        let cfg = with_command("js", &[&node.to_string_lossy()], ConfigSource::Env("V2_ENGINE_JS".into()));
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
         let js = r.resolve(&spec("js")).unwrap();
         let ts = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap();
-        assert_eq!((ts.ts.clone(), ts.origin.label()), (Some(TsMethod::Strip), "--engine".to_string()));
-        // transpiler = "node" is the default: stripping, not a transpiler program (7.6, D33).
-        let mut with_node = Config::default();
-        let transpiler = Some(Sourced { value: vec!["node".to_string()], from: project_source() });
-        with_node.engines.insert("ts".into(), EngineCfg { transpiler, ..EngineCfg::default() });
-        let mut r = Resolver { cfg: &with_node, lookup: &l, prober: &p, cache: &mut cache };
-        let js = r.resolve(&spec("js")).unwrap();
-        assert_eq!(r.resolve_ts(&spec("ts"), Ok(&js)).unwrap().ts, Some(TsMethod::Strip));
+        assert_eq!(ts.origin.label(), "V2_ENGINE_JS");
     }
 
     #[test]
     fn ts_names_a_one_line_js_failure() {
-        let cfg = with_command("js", &["missing/node.exe"], ConfigSource::Cli);
+        let cfg = with_command("js", &["missing/node.exe"], ConfigSource::Env("V2_ENGINE_JS".into()));
         let p = fake(|_| says("v24.11.1"));
         let l = lookup(&[], None);
         let mut cache = ProbeCache::off();

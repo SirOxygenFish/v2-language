@@ -1,5 +1,4 @@
-//! Tag resolution (INTERNALS 7.1, 7.3). Custom engines and `register_engine` (7.4, 17.2) join
-//! in roadmap Phase 3.
+//! Tag resolution (INTERNALS 7.1, 7.3). Custom engines (7.4, 17.1) join in roadmap Phase 3.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
