@@ -121,7 +121,7 @@ fn load_from(start: &Path, env: impl Iterator<Item = (OsString, OsString)>) -> R
 }
 
 /// `V2_ENGINE_<TAG>` (18.4): one executable path each, never split; empty means unset. The prefix
-/// is case-insensitive on Windows; the tag is lower-cased and canonicalized.
+/// is case-insensitive on Windows; the tag must be canonical.
 fn engine_overrides(env: impl Iterator<Item = (OsString, OsString)>) -> Result<Overrides, ConfigError> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let prefix_len = "V2_ENGINE_".len();
@@ -139,12 +139,19 @@ fn engine_overrides(env: impl Iterator<Item = (OsString, OsString)>) -> Result<O
         if !has_prefix || v.is_empty() || !k.is_char_boundary(prefix_len) {
             continue;
         }
-        let tag = canonical_tag(&k[prefix_len..].to_lowercase()).to_string();
+        // Canonical tags only (`V2_ENGINE_PY`, not `V2_ENGINE_PYTHON`): an alias is ignored like
+        // any other unknown tag. Off Windows the tag is upper case, as the prefix is, so no two
+        // variables can name one engine (18.4).
+        let rest = &k[prefix_len..];
+        if !cfg!(windows) && rest.bytes().any(|b| b.is_ascii_lowercase()) {
+            continue;
+        }
+        let tag = rest.to_lowercase();
         if tag == "ts" {
             return Err(ConfigError(format!("config error: {k}: ts runs on the js engine; set V2_ENGINE_JS")));
         }
-        if let Some((_, other)) = found.get(&tag) {
-            return Err(ConfigError(format!("config error: {other} and {k} both set the {tag} engine")));
+        if canonical_tag(&tag) != tag {
+            continue;
         }
         found.insert(tag, (from_cwd(&cwd, Path::new(&v)), k));
     }
@@ -229,10 +236,16 @@ impl File {
         Ok(self.base.join(text))
     }
 
-    /// An array of strings; `single` also takes a string as one element, never split (18.2).
-    fn strings(&self, what: &str, v: &toml::Value, single: bool, non_empty: bool) -> Result<Vec<String>, ConfigError> {
-        let list = match v {
-            toml::Value::String(s) if single => vec![s.clone()],
+    /// An array of strings. For a `command`, a string gets the array to write instead (18.2):
+    /// `[engines.lua] command must be an array: write ["lua", "{file}"]`.
+    fn strings(&self, what: &str, v: &toml::Value, command: bool, non_empty: bool) -> Result<Vec<String>, ConfigError> {
+        let list: Vec<String> = match v {
+            toml::Value::String(s) if command && !s.trim().is_empty() => {
+                // A word with a backslash goes in TOML literal quotes, so the hint stays valid TOML.
+                let quote = |w: &str| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
+                let words: Vec<String> = s.split_whitespace().map(quote).collect();
+                return Err(self.error(format!("{what} must be an array: write [{}]", words.join(", "))));
+            }
             toml::Value::Array(items) => items.iter().map(|i| self.string_of(what, i)).collect::<Result<_, _>>()?,
             other => return self.expected(what, "an array of strings", other),
         };
@@ -255,17 +268,25 @@ impl File {
     }
 
     /// 18.1: `argv[0]` with a separator is joined to the file's folder (without one it is left
-    /// for the PATH walk); so are later elements that are relative, contain a separator, don't
-    /// start with `-` and contain no `{`.
+    /// for the PATH walk). A later element is joined only when it starts with `./` or `../`, or
+    /// when it names something that exists in that folder (`adapters/x.rb`), so switches, inline
+    /// scripts (`cd src/x && make`) and `{file}` patterns are left alone.
     fn argv(&self, what: &str, mut argv: Vec<String>) -> Result<Vec<String>, ConfigError> {
         for (i, a) in argv.iter_mut().enumerate() {
+            let p = Path::new(a.as_str());
             let path_like = a.contains(['/', '\\']);
-            let relative = !Path::new(a.as_str()).has_root();
-            if i == 0 || (path_like && relative && !a.starts_with('-') && !a.contains('{')) {
+            let candidate = !a.starts_with('-') && !a.contains('{') && !p.has_root();
+            if i == 0 || (path_like && candidate) {
                 self.not_drive_relative(what, a)?;
-                if path_like && Path::new(a.as_str()).is_relative() {
-                    *a = self.base.join(a.as_str()).to_string_lossy().into_owned();
-                }
+            }
+            let dotted = ["./", "../", ".\\", "..\\"].iter().any(|d| a.starts_with(d));
+            let join = if i == 0 {
+                path_like && p.is_relative()
+            } else {
+                candidate && p.is_relative() && (dotted || (!a.is_empty() && self.base.join(p).exists()))
+            };
+            if join {
+                *a = self.base.join(a.as_str()).to_string_lossy().into_owned();
             }
         }
         Ok(argv)
@@ -396,7 +417,7 @@ mod tests {
 
     #[test]
     fn finds_the_root_and_reads_values() {
-        let cfg = project("ok", "[python]\nvenv = \".venv\"\n[engines.python]\ncommand = \"py.exe\"\ncall_timeout = 5\n[engines.c]\nflags = [\"-O2\"]\n[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n").unwrap();
+        let cfg = project("ok", "[python]\nvenv = \".venv\"\n[engines.python]\ncommand = [\"py.exe\"]\ncall_timeout = 5\n[engines.c]\nflags = [\"-O2\"]\n[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n").unwrap();
         assert!(cfg.root.join("v2.toml").is_file());
         assert_eq!(cfg.file, Some(cfg.root.join("v2.toml")));
         assert_eq!(cfg.python_venv.as_ref().unwrap().value, cfg.root.join(".venv"));
@@ -440,10 +461,16 @@ mod tests {
     }
 
     #[test]
-    fn flags_take_only_an_array() {
-        // 18.2: only `command` takes a string as one element.
+    fn commands_and_flags_take_only_an_array() {
+        // 18.2: a string is never split; for a command the error shows the array to write.
         let e = project("flagstr", "[engines.c]\nflags = \"-O2 -Wall\"\n").unwrap_err().0;
         assert!(e.ends_with("[engines.c] flags: expected an array of strings, got string \"-O2 -Wall\""), "{e}");
+        let e = project("cmdstr", "[engines.py]\ncommand = \"py -3\"\n").unwrap_err().0;
+        assert!(e.ends_with("v2.toml: config error: [engines.py] command must be an array: write [\"py\", \"-3\"]"), "{e}");
+        let e = project("cmdpath", "[engines.py]\ncommand = 'C:\\Py\\python.exe -X utf8'\n").unwrap_err().0;
+        assert!(e.ends_with("[engines.py] command must be an array: write ['C:\\Py\\python.exe', \"-X\", \"utf8\"]"), "{e}");
+        let e = project("cmdempty", "[engines.py]\ncommand = \" \"\n").unwrap_err().0;
+        assert!(e.ends_with("[engines.py] command: expected an array of strings, got string \" \""), "{e}");
     }
 
     #[test]
@@ -498,12 +525,19 @@ mod tests {
 
     #[test]
     fn engine_commands_resolve_against_the_declaring_folder() {
-        // 18.1: argv[0] with a separator, and later path-like elements.
-        let cfg = project("argv", "[engines.py]\ncommand = [\"tools/python\", \"adapters/x.py\", \"-X\", \"-a/b\", \"{file}/x\", \"utf8\"]\n[engines.js]\ncommand = \"node\"\n").unwrap();
+        // 18.1: argv[0] with a separator; later elements starting with ./ or ../, or naming
+        // something that exists in the folder. Inline scripts and missing names stay as written.
+        let d = temp("argv");
+        std::fs::create_dir_all(d.join("adapters")).unwrap();
+        std::fs::write(d.join("adapters/x.py"), "").unwrap();
+        let toml_text = "[engines.py]\ncommand = [\"tools/python\", \"adapters/x.py\", \"./run.sh\", \"-X\", \"-a/b\", \"{file}/x\", \"utf8\", \"cd src/x && make\", \"lib/missing.py\"]\n[engines.js]\ncommand = [\"node\"]\n";
+        std::fs::write(d.join("v2.toml"), toml_text).unwrap();
+        let cfg = load_from(&d, vars(&[])).unwrap();
         let py = &cfg.engines["py"].command.as_ref().unwrap().value;
         assert_eq!(py[0], cfg.root.join("tools/python").to_string_lossy());
         assert_eq!(py[1], cfg.root.join("adapters/x.py").to_string_lossy());
-        assert_eq!(&py[2..], ["-X", "-a/b", "{file}/x", "utf8"]);
+        assert_eq!(py[2], cfg.root.join("./run.sh").to_string_lossy());
+        assert_eq!(&py[3..], ["-X", "-a/b", "{file}/x", "utf8", "cd src/x && make", "lib/missing.py"]);
         assert_eq!(cfg.engines["js"].command.as_ref().unwrap().value, vec!["node"]);
         // Later elements with a root (Windows switches such as /c) are not paths to rewrite.
         let switches = project("argvroot", "[engines.py]\ncommand = [\"cmd\", \"/c\", \"python\", \"/tools/x.py\"]\n").unwrap();
@@ -518,7 +552,7 @@ mod tests {
         assert!(e.ends_with("v2.toml: config error: [python] venv: 'C:venv' is a drive-relative path: write it relative to the file, or absolute"), "{e}");
         // Engine commands too: argv[0] with or without a separator, and later path-like elements.
         for (toml_text, what, bad) in [
-            ("[engines.py]\ncommand = \"C:python.exe\"\n", "[engines.py] command", "C:python.exe"),
+            ("[engines.py]\ncommand = [\"C:python.exe\"]\n", "[engines.py] command", "C:python.exe"),
             ("[engines.py]\ncommand = [\"C:tools/python\"]\n", "[engines.py] command", "C:tools/python"),
             ("[engines.py]\ncommand = [\"python\", \"C:adapters/x.py\"]\n", "[engines.py] command", "C:adapters/x.py"),
         ] {
@@ -533,14 +567,25 @@ mod tests {
     fn environment_overrides() {
         // 18.4: the prefix test compares bytes, so a multibyte char across byte 10 is skipped.
         let d = temp("env");
-        let env = vars(&[("我的环境变量", "x"), ("AБВГДЕЖЗИ", "x"), ("V2_ENGINEé", "x"), ("V2_ENGINE_PYTHON", "bin/py"), ("V2_ENGINE_JS", "")]);
+        let env = vars(&[("我的环境变量", "x"), ("AБВГДЕЖЗИ", "x"), ("V2_ENGINEé", "x"), ("V2_ENGINE_PY", "bin/py"), ("V2_ENGINE_JS", "")]);
         let cfg = load_from(&d, env).unwrap();
         let py = cfg.engines["py"].command.as_ref().unwrap();
         assert_eq!(py.value, vec![std::env::current_dir().unwrap().join("bin/py").to_string_lossy().into_owned()]);
-        assert_eq!(py.from, ConfigSource::Env("V2_ENGINE_PYTHON".into()));
+        assert_eq!(py.from, ConfigSource::Env("V2_ENGINE_PY".into()));
         assert!(!cfg.engines.contains_key("js"), "an empty variable is unset");
-        let e = load_from(&d, vars(&[("V2_ENGINE_PY", "a"), ("V2_ENGINE_PYTHON", "b")])).unwrap_err().0;
-        assert_eq!(e, "config error: V2_ENGINE_PY and V2_ENGINE_PYTHON both set the py engine");
+        // Only canonical tags count: an alias is ignored like an unknown tag.
+        let cfg = load_from(&d, vars(&[("V2_ENGINE_PYTHON", "b"), ("V2_ENGINE_JAVASCRIPT", "n")])).unwrap();
+        assert!(cfg.engines.is_empty(), "aliases are not tags here");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn engine_variables_name_tags_in_upper_case() {
+        // 18.4: off Windows the tag is upper case like the prefix, so no two variables name one
+        // engine.
+        let d = temp("envcase");
+        let cfg = load_from(&d, vars(&[("V2_ENGINE_Py", "a"), ("V2_ENGINE_py", "b")])).unwrap();
+        assert!(cfg.engines.is_empty(), "{:?}", cfg.engines.keys().collect::<Vec<_>>());
     }
 
     #[test]
@@ -557,10 +602,9 @@ mod tests {
     fn v2_engine_ts_names_v2_engine_js() {
         // ts has no executable of its own (18.4).
         let d = temp("envts");
-        for var in ["V2_ENGINE_TS", "V2_ENGINE_TYPESCRIPT"] {
-            let e = load_from(&d, vars(&[(var, "x")])).unwrap_err().0;
-            assert_eq!(e, format!("config error: {var}: ts runs on the js engine; set V2_ENGINE_JS"));
-        }
+        let e = load_from(&d, vars(&[("V2_ENGINE_TS", "x")])).unwrap_err().0;
+        assert_eq!(e, "config error: V2_ENGINE_TS: ts runs on the js engine; set V2_ENGINE_JS");
+        assert!(load_from(&d, vars(&[("V2_ENGINE_TYPESCRIPT", "x")])).is_ok(), "an alias is ignored");
         assert!(load_from(&d, vars(&[("V2_ENGINE_TS", "")])).is_ok(), "an empty variable is unset");
     }
 }

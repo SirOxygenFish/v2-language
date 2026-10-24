@@ -32,8 +32,8 @@ pub enum Value {
 
 /// Something callable (5.1). Proxies, native functions and handle methods arrive with Phases 1-2.
 pub enum Callable {
-    /// A `func` or lambda with the frame it closes over. `name` is the function's name, or
-    /// `lambda@main.v2:12` (5.7).
+    /// A `func` (named or anonymous) with the frame it closes over. `name` is the function's
+    /// name, or `func@main.v2:12` (5.7).
     Closure { decl: Rc<FuncDecl>, env: Env, name: Rc<str> },
     Builtin(&'static BuiltinDef),
 }

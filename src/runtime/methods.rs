@@ -38,7 +38,7 @@ pub static STR_METHODS: &[MethodDef] = &[
     m("ends_with", &[ParamSpec::req("p")], |_, r, a, _| {
         Ok(Value::Bool(the_str(r).ends_with(&*str_arg(&a[0], "str.ends_with", "p")?)))
     }),
-    m("find", &[ParamSpec::req("sub")], str_find),
+    m("index_of", &[ParamSpec::req("sub")], str_index_of),
     m("encode", NONE, |_, r, _, _| Ok(Value::Bytes(the_str(r).as_bytes().into()))),
 ];
 
@@ -64,9 +64,16 @@ pub static LIST_METHODS: &[MethodDef] = &[
         the_list(r).borrow_mut().push(a.remove(0));
         Ok(Value::Null)
     }),
-    m("pop", NONE, |_, r, _, _| match the_list(r).borrow_mut().pop() {
-        Some(v) => Ok(v),
-        None => fail("IndexError", "pop from empty list"),
+    m("pop", &[ParamSpec::opt("i", || Value::Int(-1))], |_, r, a, _| {
+        let i = int_arg(&a[0], "list.pop", "i")?;
+        let mut l = the_list(r).borrow_mut();
+        if l.is_empty() {
+            return fail("IndexError", "pop from empty list");
+        }
+        match normalize(i, l.len()) {
+            Some(k) => Ok(l.remove(k)),
+            None => index_error("list", i, l.len()),
+        }
     }),
     m("get", &[ParamSpec::req("i"), ParamSpec::opt("default", || Value::Null)], |_, r, mut a, _| {
         let i = int_arg(&a[0], "list.get", "i")?;
@@ -83,14 +90,6 @@ pub static LIST_METHODS: &[MethodDef] = &[
         let k = if i < 0 { i.saturating_add(len) } else { i }.clamp(0, len);
         l.insert(k as usize, a.remove(1));
         Ok(Value::Null)
-    }),
-    m("remove_at", &[ParamSpec::req("i")], |_, r, a, _| {
-        let i = int_arg(&a[0], "list.remove_at", "i")?;
-        let mut l = the_list(r).borrow_mut();
-        match normalize(i, l.len()) {
-            Some(k) => Ok(l.remove(k)),
-            None => index_error("list", i, l.len()),
-        }
     }),
     m("sort", NONE, list_sort),
     m("reverse", NONE, |_, r, _, _| {
@@ -239,8 +238,8 @@ fn str_replace(_: &mut Interp, r: &Value, a: Vec<Value>, _: Span) -> Exec<Value>
     Ok(Value::Str(the_str(r).replace(&*old, &new).into()))
 }
 
-fn str_find(it: &mut Interp, r: &Value, a: Vec<Value>, _: Span) -> Exec<Value> {
-    let sub = str_arg(&a[0], "str.find", "sub")?;
+fn str_index_of(it: &mut Interp, r: &Value, a: Vec<Value>, _: Span) -> Exec<Value> {
+    let sub = str_arg(&a[0], "str.index_of", "sub")?;
     let s = the_str(r);
     Ok(Value::Int(match s.find(&*sub) {
         Some(b) => it.chars.char_of(s, b) as i64,

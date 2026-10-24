@@ -13,7 +13,7 @@ func g() {
 }
 print(g())
 
-// The same in a for body and in a lambda.
+// The same in a for body and in an anonymous func.
 for i in 0..2 {
     let before = i * 10
     try {
@@ -22,7 +22,7 @@ for i in 0..2 {
     }
     print(before)
 }
-let h = lambda() {
+let h = func() {
     let kept = "kept"
     try { f() } catch (e) { }
     return kept

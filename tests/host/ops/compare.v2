@@ -10,8 +10,8 @@ let nan = inf - inf
 print(inf, -inf, nan, nan == nan, nan != nan, nan < 1, 1 < nan, nan >= nan)
 print(2 in [1, 2, 3], 2.0 in [1, 2], "x" in {x: 1}, "ell" in "hello", "" in "abc")
 print(0 in b"\x00", 300 in b"\x00", b"el" in b"hello", 4 not in [1, 2], "y" not in {y: 1})
-let f = lambda() => 1
+let f = func() => 1
 let g = f
-print(f == g, f == lambda() => 1, print == print)
+print(f == g, f == func() => 1, print == print)
 let e = error("E", "m")
 print(e == e, e == error("E", "m"))

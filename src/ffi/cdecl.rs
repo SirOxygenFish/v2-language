@@ -223,7 +223,7 @@ fn typedef(name: &str) -> Option<Base> {
 }
 
 const QUALS: &[&str] = &["const", "volatile", "restrict", "__restrict", "__restrict__"];
-const CALLCONV: &[&str] = &["__cdecl", "_cdecl", "__stdcall", "_stdcall", "WINAPI", "WINAPIV", "APIENTRY", "CALLBACK"];
+const CALLCONV: &[&str] = &["__cdecl", "_cdecl", "__stdcall", "_stdcall", "__fastcall", "_fastcall", "WINAPI", "WINAPIV", "APIENTRY", "CALLBACK"];
 const IGNORED: &[&str] = &["extern", "static", "inline", "__inline", "__extension__", "WINBASEAPI", "WINUSERAPI"];
 const INT_WORDS: &[&str] = &["signed", "unsigned", "char", "short", "int", "long"];
 /// C keywords that are not type words: never a function name.
@@ -828,6 +828,7 @@ mod tests {
         let m = one("int WINAPI MessageBoxA(HWND hWnd, LPCSTR text, LPCSTR caption, UINT type);");
         assert_eq!(m.params.iter().map(|p| p.ty).collect::<Vec<_>>(), vec![CType::Ptr, CType::Str, CType::Str, CType::Int { size: 4, signed: false }]);
         assert_eq!(one("__declspec(dllimport) int __cdecl f(void);").name.as_ref(), "f");
+        assert_eq!(one("int __fastcall g(int a);").name.as_ref(), "g");
         assert_eq!(one("extern int f(); // comment\n/* block */").params.len(), 0);
         assert_eq!(parse_extern("int a(void); double b(double);").unwrap().len(), 2);
         assert_eq!(parse_extern("  // nothing\n").unwrap().len(), 0);

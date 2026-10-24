@@ -126,7 +126,7 @@ impl Encoder<'_, '_> {
             Value::Handle(h) => {
                 if h.session != self.wire.session {
                     return self.fail(format!(
-                        "this handle belongs to engine '{}' and can't be passed to '{}' — convert it with value(h) first",
+                        "this handle belongs to engine '{}' and can't be passed to '{}' — convert it with to_v2(h) first",
                         h.tag, self.wire.tag
                     ));
                 }
@@ -489,7 +489,7 @@ mod tests {
         let args = Value::list(vec![Value::dict(m)]);
         assert_eq!(fx.wire(ALL).encode(&h, "args[0]").unwrap().to_string(), r#"{"$v2":"h","id":9}"#);
         let e = fx.wire(ALL).encode(&args, "args").err().map(err_text).unwrap();
-        assert_eq!(e, "MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — convert it with value(h) first (at args[0][\"when\"])");
+        assert_eq!(e, "MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — convert it with to_v2(h) first (at args[0][\"when\"])");
         // Decoding: one HandleRef per tag; without the handles cap a tag is fatal.
         let tag: Json = serde_json::from_str(r#"{"$v2":"h","id":4,"type":"datetime.date"}"#).unwrap();
         let v = fx.wire(ALL).decode(&tag).unwrap();

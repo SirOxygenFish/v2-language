@@ -1,7 +1,7 @@
 ValueError - port out of range: 99999
 at fields.v2:4:9
 ["parse_port (fields.v2:4)", "fields.v2:10"]
-null null null
+null null null null
 done
 KeyError k null null null [] {"extra": 1}
 KeyError: k

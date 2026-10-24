@@ -1,5 +1,5 @@
-//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `value`, which needs
-//! handles (roadmap Phase 1).
+//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `to_v2`, which needs
+//! handles (roadmap Phase 1), and without the roadmap 0.11 additions.
 
 use std::io::{BufRead, BufWriter, IsTerminal, StdoutLock, Write};
 use std::rc::Rc;
@@ -19,6 +19,9 @@ pub struct BuiltinDef {
     pub params: &'static [ParamSpec],
     pub f: BuiltinFn,
 }
+
+/// Builtins that take positional arguments only: `range(start: 5)` would read as an end (5.10).
+pub const POSITIONAL_ONLY: &[&str] = &["range"];
 
 pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef {
@@ -203,9 +206,8 @@ fn float(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     }))
 }
 
-/// `range(end)` / `range(start, end, step = 1)`: a list of ints, sized before it is built (5.10).
-/// `range(end)` or `range(start, end, step = 1)`: one argument, by position or as `end:`, is the
-/// end (5.10).
+/// `range(end)` / `range(start, end, step = 1)`: a list of ints, sized before it is built. One
+/// argument is the end; arguments are positional only (5.10).
 fn range(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let (start, end) = match (&args[0], &args[1]) {
         (Value::Null, Value::Null) => return fail("ArityError", "range() missing required argument 'end'"),

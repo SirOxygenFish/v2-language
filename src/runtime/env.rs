@@ -90,7 +90,7 @@ pub fn visible_names(env: &Env) -> Vec<Rc<str>> {
 }
 
 /// Called when `env` goes out of scope. A closure stored in the frame it captures (a local
-/// `func`, `let f = lambda …`) keeps the frame alive through an `Rc` cycle; if nothing else
+/// `func`, `let f = func …`) keeps the frame alive through an `Rc` cycle; if nothing else
 /// reaches the frame, clear its slots so the cycle is freed (5.6). Cycles through containers
 /// are not trimmed.
 pub fn leave(env: Env) {
@@ -124,9 +124,9 @@ mod tests {
 
     /// A closure over `frame`, stored in `frame` (the cycle of a local `func`).
     fn closure_in(frame: &Env) -> Value {
-        let prog = parse_str("let f = lambda() => 1").unwrap();
+        let prog = parse_str("let f = func() => 1").unwrap();
         let StmtKind::Let(_, Some(e)) = &prog[0].kind else { panic!("let") };
-        let ExprKind::Lambda(decl) = &e.kind else { panic!("lambda") };
+        let ExprKind::Func(decl) = &e.kind else { panic!("func") };
         frame.borrow_mut().closures += 1;
         let f = Value::func(Callable::Closure { decl: decl.clone(), env: frame.clone(), name: "f".into() });
         declare(frame, "f".into(), f.clone(), false);

@@ -29,9 +29,6 @@ pub type SessionId = usize;
 /// Cross-language crossings in progress at most, across all engines (9.7, DOCS 8.4).
 pub const MAX_XDEPTH: u32 = 64;
 
-/// Queued releases that make a standalone `release` at a statement boundary (9.10).
-const RELEASE_BATCH: usize = 256;
-
 /// The drain after `bye`, shared by every session (8.7).
 const GRACE: Duration = Duration::from_secs(1);
 
@@ -329,14 +326,16 @@ impl Interp {
                 }
             }
         };
-        // A launcher or alias may run another interpreter than the one probed (8.4).
+        // A launcher or alias may run another interpreter than the one probed (8.4). A session a ts
+        // block started is held to js's minimum.
         let spec = self.sessions[s].engine.spec.clone();
+        let spec = spec.session_of.as_deref().and_then(|o| self.registry.canonical(o).cloned()).unwrap_or(spec);
         if let (Some(min), Some(v)) = (spec.min_version, Version::parse(&hello.version)) {
-            if v < min {
+            if spec.too_old(v).is_some() {
                 let path = self.sessions[s].engine.argv[0].to_string_lossy().into_owned();
                 let e = Rc::new(ErrorValue::new(
                     "EngineNotFound",
-                    format!("{} {v} at {path} is too old (needs {}+)", spec.language, min.short()),
+                    format!("{} {v} at {path} is too old (needs {})", spec.language, spec.needs(min)),
                 ));
                 self.kill_session(s, DeadReason::SpawnFailed(e.clone()));
                 return Err(self.raise(Flow::Error(e), at));
@@ -344,16 +343,14 @@ impl Interp {
         }
         self.sessions[s].caps = hello.caps;
         self.sessions[s].hello = Some(hello);
-        // `init.paths`: the project root for py, nothing for js (9.3).
         let root = self.registry.config().root.to_string_lossy().into_owned();
-        let paths = if &*spec.id == "py" { vec![root.clone()] } else { Vec::new() };
         // The init request would be one crossing too many: the worker never gets going.
         if self.xdepth >= MAX_XDEPTH {
             drop(startup);
             self.kill_session(s, DeadReason::Exited { exit: None, during: None, at: Some(at) });
             return Err(self.raise(depth_error(), at));
         }
-        let init = vep::init(0, &root, &paths);
+        let init = vep::init(0, &root);
         match self.exchange(s, init, startup, at) {
             Ok(_) => {
                 self.sessions[s].state = State::Ready;
@@ -687,7 +684,7 @@ impl Interp {
         let message = e.get("message").and_then(Json::as_str).ok_or("an 'err' without a string 'message'")?;
         // The kinds an adapter may report (9.6); any other `type` is a foreign exception's, so a
         // worker can't raise a host-only kind such as EngineNotFound.
-        const KINDS: [&str; 8] = ["ForeignError", "ImportError", "NameError", "ArityError", "ValueError", "MarshalError", "ProtocolError", "Error"];
+        const KINDS: [&str; 7] = ["ForeignError", "ImportError", "NameError", "ValueError", "MarshalError", "ProtocolError", "Error"];
         let mut err = if KINDS.contains(&kind) {
             let mut err = ErrorValue::new(kind, message);
             err.foreign_type = e.get("foreign_type").and_then(Json::as_str).map(Rc::from);
@@ -699,23 +696,6 @@ impl Interp {
         };
         err.lang = Some(self.tag(s));
         Ok(err)
-    }
-
-    /// At a statement boundary: a standalone `release` to each session holding 256 or more
-    /// queued ids (9.10). A write error is left for the next use to report (8.6).
-    pub fn flush_releases(&mut self) {
-        for session in &mut self.sessions {
-            if !session.caps.handles || !matches!(session.state, State::Ready | State::Busy(_)) {
-                continue;
-            }
-            if session.releases.borrow().len() < RELEASE_BATCH {
-                continue;
-            }
-            let ids = std::mem::take(&mut *session.releases.borrow_mut());
-            if let Some(w) = session.writer.as_mut() {
-                let _ = vep::write_frame(w.as_mut(), &vep::release(&ids));
-            }
-        }
     }
 
     /// The orderly end (8.7): `bye` to every running session, newest first, then one shared

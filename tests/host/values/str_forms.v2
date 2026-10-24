@@ -2,7 +2,7 @@
 print(null, true, false, 42, -7, 2.0, 0.1, 1e20, 1e-7, 3.14, -0.0)
 print([1, "a", 'b"c', "line\nnext", null, [true]], {k: 1, "x y": "v"})
 print(b"\x00A\xff", [b"hi"], "tab\there", ["tab\there", "\u{1b}", "\\"])
-print(print, lambda(x) => x, [lambda() => 1])
+print(print, func(x) => x, [func() => 1])
 func greet() { }
 print(greet, [greet], {f: greet})
 print(error("ValueError", "bad"), [error("E", "m")])

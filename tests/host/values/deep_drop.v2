@@ -9,7 +9,7 @@ d = null
 let f = null
 for i in 0..300000 {
     let g = f
-    f = lambda() => g
+    f = func() => g
 }
 f = null
 // Errors hold their data the same way.

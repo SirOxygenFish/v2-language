@@ -294,9 +294,9 @@ pub fn parse_frame(line: &[u8], caps: Caps) -> Result<Frame, String> {
 // ---------------------------------------------------------------------------------------------
 // Host → worker frames (9.2)
 
-/// `init`: the project root and the module search folders (9.3).
-pub fn init(id: u64, project_root: &str, paths: &[String]) -> Json {
-    json!({"t": "init", "id": id, "project_root": project_root, "paths": paths})
+/// `init`: the project root (9.3).
+pub fn init(id: u64, project_root: &str) -> Json {
+    json!({"t": "init", "id": id, "project_root": project_root})
 }
 
 pub fn ret(id: u64, value: Json) -> Json {
