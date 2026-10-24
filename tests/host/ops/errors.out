@@ -15,6 +15,6 @@ TypeError: cannot compare str and int with '<'
 TypeError: bad operand type for unary -: 'str'
 TypeError: 'in' needs a list, dict, str or bytes on the right, got int
 TypeError: 'in' on a str needs a str, got int
-TypeError: 'in' on a dict needs a str key, got int
+false true
 ValueError: repetition result too large
 ValueError: integer overflow in '+' 9223372036854775807

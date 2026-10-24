@@ -15,10 +15,10 @@ func show(f) {
         print(e.type + ": " + e.message.replace(home, "~"))
     }
 }
-show(lambda() => read_file(path))
+show(func() => read_file(path))
 // The OS's own text follows the path; it differs between systems.
 try { read_file(home + "/missing_v2_file.txt") } catch (e) { print(e.type, e.message.replace(home, "~").split("': ")[0]) }
-show(lambda() => write_file(path, 5))
-show(lambda() => read_file(path, binary: "yes"))
+show(func() => write_file(path, 5))
+show(func() => read_file(path, binary: "yes"))
 write_file(path, b"\xef\xbb\xbfok")
 print(len(read_file(path)), read_file(path).encode().hex())

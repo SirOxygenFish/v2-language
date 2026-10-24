@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: no_lambda.v2:4:14: SyntaxError: V2 has no lambda keyword
+// stderr: hint: anonymous functions are written func(x) => …
+let double = lambda(x) => x * 2

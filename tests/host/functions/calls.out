@@ -14,4 +14,4 @@ null null
 inner is hoisted too
 true true
 6 15
-<func greet> <func lambda@calls.v2:14> <builtin print>
+<func greet> <func func@calls.v2:14> <builtin print>

@@ -104,7 +104,7 @@ pub fn parse_graph(sm: &mut SourceMap, file: FileId, program: &[Stmt], parsed: &
 }
 
 /// Every `import "…"` in a program with its statement's span, in source order, at any depth
-/// (6.4: imports may appear in any body, including function and lambda bodies).
+/// (6.4: imports may appear in any body, including function bodies).
 pub fn import_sites(program: &[Stmt]) -> Vec<(Rc<str>, Span)> {
     let mut out = Vec::new();
     collect_imports(program, &mut out);
@@ -182,7 +182,7 @@ fn func_imports(f: &FuncDecl, out: &mut Vec<(Rc<str>, Span)>) {
 
 fn expr_imports(e: &Expr, out: &mut Vec<(Rc<str>, Span)>) {
     match &e.kind {
-        ExprKind::Lambda(f) => func_imports(f, out),
+        ExprKind::Func(f) => func_imports(f, out),
         ExprKind::FStr(parts) => {
             for p in parts {
                 if let FPart::Expr { expr, .. } = p {

@@ -1,7 +1,7 @@
 //! Code-point positions in strings (INTERNALS 5.4).
 //!
 //! User-visible string positions are code-point indexes. An 8-slot round-robin cache of
-//! `CharIndex` keeps `s[i]`, `len(s)`, slices and `find` from being O(n) per call.
+//! `CharIndex` keeps `s[i]`, `len(s)`, slices and `index_of` from being O(n) per call.
 
 use std::rc::{Rc, Weak};
 

@@ -7,9 +7,9 @@ for i, ch in "ab" { print(i, ch) }
 print("Hello World".lower(), "straße".upper(), "  pad \t\n".trim() + "|")
 print("a,b,,c".split(","), "one\ntwo\r\nthree\n".lines(), "a::b".split("::"))
 print("aaa".replace("a", "b"), "hello".starts_with("he"), "hello".ends_with("lo"), "x".starts_with(""))
-print("héllo wörld".find("wö"), "abc".find("z"), "abc".find(""), "é".encode(), b"h\xc3\xa9".decode(), b"\x01\xab".hex())
+print("héllo wörld".index_of("wö"), "abc".index_of("z"), "abc".index_of(""), "é".encode(), b"h\xc3\xa9".decode(), b"\x01\xab".hex())
 let long = "é" * 100 + "x" + "a" * 100
-print(len(long), long[100], long.find("x"), long[99:102], long[-1])
+print(len(long), long[100], long.index_of("x"), long[99:102], long[-1])
 let price = 19.999
 print(f"${price:.2f}", f"${2:.3f}", f"${1 + 1}", f"${[1, "a"]}", f"${"plain"}")
 let b = b"hi!"

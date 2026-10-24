@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: equality_chain.v2:4:19: SyntaxError: comparisons cannot be chained; write a == b && b == c
+// `==` and `!=` take one operator, like `<` (INTERNALS 4.1).
+let same = 1 == 1 == true

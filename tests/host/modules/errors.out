@@ -4,7 +4,7 @@ cyc_b runs
 ImportError: circular import: fixtures/cyc_a.v2 -> fixtures/cyc_b.v2 -> fixtures/cyc_a.v2
 boom runs once
 ValueError: boom
-["fixtures/boom.v2:2", "lambda@errors.v2:16 (errors.v2:17)", "show (errors.v2:4)", "errors.v2:16"]
+["fixtures/boom.v2:2", "func@errors.v2:16 (errors.v2:17)", "show (errors.v2:4)", "errors.v2:16"]
 ValueError: boom
 true
 ImportError: circular import: errors.v2 -> errors.v2

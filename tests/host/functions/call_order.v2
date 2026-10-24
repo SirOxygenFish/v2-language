@@ -1,19 +1,19 @@
 // The callee is resolved before the arguments run, for methods too (INTERNALS 5.7).
-let d = {f: lambda(x) => "old f"}
+let d = {f: func(x) => "old f"}
 func swap() {
-    d.f = lambda(x) => "new f"
+    d.f = func(x) => "new f"
     return 0
 }
 print(d.f(swap()))
-let g = lambda(x) => "old g"
+let g = func(x) => "old g"
 func swap_g() {
-    g = lambda(x) => "new g"
+    g = func(x) => "new g"
     return 0
 }
 print(g(swap_g()))
 let e = {}
 func add() {
-    e.get = lambda(x) => "key func"
+    e.get = func(x) => "key func"
     return "missing"
 }
 print(e.get(add()))
@@ -28,7 +28,7 @@ try { [].frobnicate(noisy()) } catch (err) { print(err.message) }
 let xs = [1, 2]
 xs.push(x: 3)
 xs.insert(i: 0, x: 0)
-print(xs.get(i: 1), xs.get(i: 9, default: "none"), xs.index_of(x: 3), xs.remove_at(i: 0), xs)
+print(xs.get(i: 1), xs.get(i: 9, default: "none"), xs.index_of(x: 3), xs.pop(i: 0), xs)
 let m = {a: 1}
 print(m.get(k: "a"), m.get(k: "b", default: 0), m.remove(k: "a"), m)
 print("ab".starts_with(p: "a"), "ab".ends_with(p: "b"), "a,b".split(sep: ","), "aa".replace(old: "a", new: "b"))

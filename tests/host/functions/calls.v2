@@ -11,8 +11,8 @@ func total(...nums) {
     return sum
 }
 print(total(1, 2, 3), total(...[4, 5]), total(), total(1, ...[2, 3], 4))
-let double = lambda(x) => x * 2
-let shout = lambda(s) {
+let double = func(x) => x * 2
+let shout = func(s) {
     return s.upper() + "!"
 }
 print(double(21), shout("hey"))
@@ -28,7 +28,7 @@ func stamp(items = []) {
 print(stamp(), stamp())
 func counter() {
     let n = 0
-    return lambda() {
+    return func() {
         n += 1
         return n
     }
@@ -37,14 +37,14 @@ let c1 = counter()
 let c2 = counter()
 print(c1(), c1(), c2())
 let fs = []
-for i in 0..3 { fs.push(lambda() => i) }
-print(fs.map(lambda(f) => f()))
+for i in 0..3 { fs.push(func() => i) }
+print(fs.map(func(f) => f()))
 func fact(n) { return n <= 1 ? 1 : n * fact(n - 1) }
 print(fact(20))
 func apply(f, ...args) { return f(...args) }
-print(apply(lambda(a, b) => a - b, 10, 3))
-let ops = {add: lambda(a, b) => a + b}
-print(ops.add(2, 3), [lambda() => "in a list"][0]())
+print(apply(func(a, b) => a - b, 10, 3))
+let ops = {add: func(a, b) => a + b}
+print(ops.add(2, 3), [func() => "in a list"][0]())
 func outer() {
     return inner()
     func inner() { return "inner is hoisted too" }
@@ -56,7 +56,7 @@ print(even(10), odd(7))
 func make_adders() {
     let adders = {}
     for k in [1, 10] {
-        adders[str_of(k)] = lambda(x) => x + k
+        adders[str_of(k)] = func(x) => x + k
     }
     return adders
 }

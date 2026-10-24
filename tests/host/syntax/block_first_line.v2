@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: block_first_line.v2:4:7: SyntaxError: a multi-line block starts on the line after its {
+// stderr: hint: move this code to the next line, or write the whole block on one line
+@py { x = 1
+    y = 2
+}

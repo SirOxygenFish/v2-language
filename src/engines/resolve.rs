@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value as Json};
 use sha2::{Digest, Sha256};
 
 use super::process::{self, ExitInfo};
-use super::spec::{install_hint, ts_strips, EngineSpec, Version};
+use super::spec::{install_hint, EngineSpec, Version};
 use crate::config::{Config, ConfigSource};
 
 /// How long a version probe may run (7.7).
@@ -214,9 +214,9 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome) -> Judged {
             let Some(version) = pattern.find(output) else {
                 return Judged::Skipped(format!("no version in its {} output", args.join(" ")));
             };
-            match spec.min_version {
-                Some(min) if version < min => Judged::TooOld(version, format!("too old: {version} < {}", min.short())),
-                _ => Judged::Usable(version),
+            match spec.too_old(version) {
+                Some(why) => Judged::TooOld(version, why),
+                None => Judged::Usable(version),
             }
         }
     }
@@ -434,7 +434,7 @@ fn join(argv: &[OsString]) -> String {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
     Missing,
-    /// Only versions below the minimum (the newest shown), or a Node without ts stripping.
+    /// Only versions below the minimum (the newest shown).
     Old(Version),
     /// A configured command or venv missing, or a probe that failed.
     Broken,
@@ -603,16 +603,6 @@ impl Resolver<'_> {
             }
             NotFound { message, skipped: Vec::new(), ..nf.clone() }
         })?;
-        let node = js.version.unwrap_or(Version(0, 0, 0));
-        if !ts_strips(node) {
-            return Err(NotFound {
-                status: Status::Old(node),
-                message: format!("@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found {node}) — upgrade Node"),
-                command: Some(join(&js.argv)),
-                from: Some(js.origin.label()),
-                skipped: Vec::new(),
-            });
-        }
         Ok(ResolvedEngine { spec: spec.clone(), origin: js.origin.clone(), argv: js.argv.clone(), version: js.version, skipped: Vec::new() })
     }
 }
@@ -788,13 +778,13 @@ mod tests {
         let l = lookup(&[&a, &b], None);
         let e = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap();
         assert_eq!(e.argv, [new.into_os_string()]);
-        assert_eq!(e.skipped, [(old.clone(), "too old: 3.6.8 < 3.8".to_string())]);
+        assert_eq!(e.skipped, [(old.clone(), "too old: 3.6.8 < 3.10".to_string())]);
         // Only old ones: status Old with the newest version.
         exe(&a, "python");
         let p = fake(|prog| says(if prog.to_string_lossy().contains("python3") { "Python 3.7.9" } else { "Python 3.6.8" }));
         let nf = resolve_with(&Config::default(), &lookup(&[&a], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert_eq!(nf.status, Status::Old(Version(3, 7, 9)));
-        assert!(nf.message.contains("too old: 3.7.9 < 3.8") && nf.message.contains("too old: 3.6.8 < 3.8"), "{}", nf.message);
+        assert!(nf.message.contains("too old: 3.7.9 < 3.10") && nf.message.contains("too old: 3.6.8 < 3.10"), "{}", nf.message);
     }
 
     #[test]
@@ -900,12 +890,14 @@ mod tests {
         let l = lookup(&[&d], None);
         let mut cache = ProbeCache::off();
         let cfg = Config::default();
+        // A Node without type stripping is too old for js too, so ts never sees one (7.2).
         let p = fake(|_| says("v22.6.0"));
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
-        let js = r.resolve(&spec("js")).unwrap();
-        let nf = r.resolve_ts(&spec("ts"), Ok(&js)).unwrap_err();
-        assert_eq!(nf.status, Status::Old(Version(22, 6, 0)));
-        assert_eq!(nf.message, "@ts blocks need Node 22.13+ (or 23.2+) for built-in type stripping (found 22.6.0) — upgrade Node");
+        let js = r.resolve(&spec("js"));
+        assert_eq!(js.as_ref().unwrap_err().status, Status::Old(Version(22, 6, 0)));
+        let nf = r.resolve_ts(&spec("ts"), js.as_ref()).unwrap_err();
+        assert!(nf.message.starts_with("engine 'ts' (TypeScript) not found — @ts blocks run on the js engine\n"), "{}", nf.message);
+        assert!(nf.message.contains("too old: 22.6.0 < 22.13"), "{}", nf.message);
         let p = fake(|_| says("v24.11.1"));
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
         let js = r.resolve(&spec("js")).unwrap();
@@ -980,12 +972,13 @@ mod tests {
         let shim = exe(&d, "python3");
         let mut l = lookup(&[&d], None);
         l.xcrun_shims = vec![shim.clone()];
-        for (clt, expect) in [(1, None), (0, Some(Version(3, 9, 6)))] {
+        // (The Command Line Tools' own Python is 3.9, below the minimum; a newer one stands in.)
+        for (clt, expect) in [(1, None), (0, Some(Version(3, 12, 4)))] {
             let p = fake(move |prog| {
                 if prog.ends_with("xcode-select") {
                     ProbeOutcome::Exited { code: Some(clt), output: String::new() }
                 } else {
-                    says("Python 3.9.6")
+                    says("Python 3.12.4")
                 }
             });
             let r = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py");
@@ -1062,10 +1055,10 @@ mod tests {
         let d = temp("kminimum");
         exe(&d, "python3");
         exe(&d, "node");
-        let p = fake(|prog| says(if prog.to_string_lossy().contains("node") { "v18.0.0" } else { "Python 3.8.0" }));
+        let p = fake(|prog| says(if prog.to_string_lossy().contains("node") { "v22.13.0" } else { "Python 3.10.0" }));
         let l = lookup(&[&d], None);
-        assert_eq!(resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap().version, Some(Version(3, 8, 0)));
-        assert_eq!(resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "js").unwrap().version, Some(Version(18, 0, 0)));
+        assert_eq!(resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap().version, Some(Version(3, 10, 0)));
+        assert_eq!(resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "js").unwrap().version, Some(Version(22, 13, 0)));
     }
 
     #[test]

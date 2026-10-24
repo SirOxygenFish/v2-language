@@ -140,7 +140,7 @@ fn handshake_and_init() {
         w.hello("3.12.1");
         let init = w.recv_t("init");
         assert_eq!(init["project_root"], "C:/proj");
-        assert_eq!(init["paths"], json!(["C:/proj"]), "py: the project root (9.3)");
+        assert!(init.get("paths").is_none(), "init carries only the project root (9.3)");
         w.ret(&init, Json::Null);
         w.recv_t("bye");
         w.recv_end();
@@ -161,7 +161,7 @@ fn handshake_failures() {
             "ProtocolError",
             "engine 'py' speaks VEP/2; this V2 speaks VEP/1",
         ),
-        (|w| w.hello("3.6.8"), "EngineNotFound", "Python 3.6.8 at python is too old (needs 3.8+)"),
+        (|w| w.hello("3.6.8"), "EngineNotFound", "Python 3.6.8 at python is too old (needs 3.10+)"),
         (
             |w| {
                 w.hello("3.12.1");
@@ -365,7 +365,9 @@ fn cross_language_depth_limit_both_ways() {
 }
 
 #[test]
-fn releases_ride_the_next_frame_or_go_alone_at_256() {
+fn releases_ride_the_next_frame() {
+    // 9.10, 11.2: dropped handles queue their ids and the next frame to that worker carries
+    // them, however many; a statement boundary sends nothing on its own.
     let (mut it, _) = interp();
     let (s, t) = scripted(&mut it, |mut w| {
         w.start();
@@ -379,7 +381,9 @@ fn releases_ride_the_next_frame_or_go_alone_at_256() {
         let many: Vec<Json> = (10..266).map(|i| json!({"$v2":"h","id":i,"type":"Thing"})).collect();
         w.ret(&c, Json::Array(many));
         let r = w.recv_t("release");
-        assert_eq!(r["h"].as_array().map(Vec::len), Some(256), "a standalone release");
+        assert_eq!(r["h"].as_array().map(Vec::len), Some(256), "carried by the next request");
+        let c = w.recv_t("call");
+        w.ret(&c, Json::Null);
         w.recv_t("bye");
     });
     it.handshake(s, at()).unwrap();
@@ -387,7 +391,10 @@ fn releases_ride_the_next_frame_or_go_alone_at_256() {
     drop(r);
     let r = it.request(s, call("g"), "a call to 'g'", at()).unwrap();
     drop(r);
-    it.flush_releases();
+    let prog = crate::syntax::parser::parse_str("let y = 1").unwrap();
+    it.run(FileId(0), &prog).unwrap();
+    assert_eq!(it.sessions[s].releases.borrow().len(), 256, "nothing sent at the statement boundary");
+    it.request(s, call("h"), "a call to 'h'", at()).unwrap();
     it.shutdown_sessions();
     t.join().unwrap();
 }
@@ -623,6 +630,21 @@ fn js() -> Rc<ResolvedEngine> {
     Rc::new(ResolvedEngine { spec, origin: Origin::Path, argv: vec!["node".into()], version: Some(Version(24, 11, 1)), skipped: Vec::new() })
 }
 
+#[test]
+fn a_session_a_ts_block_starts_is_held_to_js_minimum() {
+    // 8.4: the ts spec has no minimum of its own, so hello is checked against js's.
+    let (mut it, _) = interp();
+    let ts = builtins().into_iter().nth(2).map(Rc::new).unwrap();
+    let engine = Rc::new(ResolvedEngine { spec: ts, origin: Origin::Path, argv: vec!["node".into()], version: Some(Version(24, 11, 1)), skipped: Vec::new() });
+    let (s, t) = scripted_engine(&mut it, engine, |mut w| {
+        w.send(json!({"t":"hello","vep":1,"version":"23.1.0","pid":7,"caps":[]}));
+    });
+    let e = err_of(it.handshake(s, at()));
+    assert_eq!((&*e.kind, &*e.message), ("EngineNotFound", "JavaScript 23.1.0 at node is too old (needs 22.13+, not 23.0 or 23.1)"));
+    assert!(format!("{:?}", it.sessions[s].state).starts_with("Dead"));
+    t.join().unwrap();
+}
+
 fn scripted_engine(it: &mut Interp, engine: Rc<ResolvedEngine>, script: impl FnOnce(PipeWorker) + Send + 'static) -> (SessionId, JoinHandle<()>) {
     let (host_r, worker_w) = std::io::pipe().unwrap();
     let (worker_r, host_w) = std::io::pipe().unwrap();
@@ -632,20 +654,22 @@ fn scripted_engine(it: &mut Interp, engine: Rc<ResolvedEngine>, script: impl FnO
 }
 
 #[test]
-fn init_paths_are_the_root_for_py_and_empty_for_js() {
+fn init_is_the_project_root_and_the_minimums_hold() {
     let cfg = Config { root: PathBuf::from("C:/proj"), ..Config::default() };
     let (mut it, _) = interp_cfg(cfg);
     let (s, t) = scripted(&mut it, |mut w| {
-        w.hello("3.8.0"); // the minimum itself is fine (8.4)
+        w.hello("3.10.0"); // the minimum itself is fine (8.4)
         let init = w.recv_t("init");
-        assert_eq!(init["paths"], json!(["C:/proj"]), "py: the project root (9.3)");
+        let mut keys: Vec<&String> = init.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["id", "project_root", "t"], "init carries only the project root (9.3)");
         w.ret(&init, Json::Null);
         w.recv_t("bye");
     });
     let (j, tj) = scripted_engine(&mut it, js(), |mut w| {
-        w.send(json!({"t":"hello","vep":1,"version":"24.11.1","pid":7,"caps":["modules","handles","reverse"]}));
+        w.send(json!({"t":"hello","vep":1,"version":"22.13.0","pid":7,"caps":["modules","handles","reverse"]}));
         let init = w.recv_t("init");
-        assert_eq!(init["paths"], json!([]), "js: [] (9.3)");
+        assert_eq!(init["project_root"], "C:/proj");
         w.ret(&init, Json::Null);
         w.recv_t("bye");
     });
@@ -809,7 +833,7 @@ fn a_worker_reports_only_9_6s_kinds() {
         ("ForeignError", "ForeignError"),
         ("ImportError", "ImportError"),
         ("NameError", "NameError"),
-        ("ArityError", "ArityError"),
+        ("ArityError", "ForeignError"),
         ("ValueError", "ValueError"),
         ("MarshalError", "MarshalError"),
         ("ProtocolError", "ProtocolError"),
@@ -1027,4 +1051,21 @@ fn a_handshake_at_depth_64_leaves_no_ready_session() {
     it.xdepth = 0;
     let state = format!("{:?}", it.sessions[s].state);
     assert_eq!((&*e.kind, state.starts_with("Dead")), ("RecursionError", true), "{state}");
+}
+
+#[test]
+fn a_dict_key_holding_a_handle_wins_over_the_dict_methods() {
+    // INTERNALS 5.5, DOCS 3.6 and 3.10: a module that re-exports a foreign function value
+    // (`let keys = pymod.keys`) is called through its key, even when a dict method has that name.
+    // Handles are not callable until roadmap 1.6, so reaching the handle is a TypeError; before
+    // the fix `d.keys()` silently ran the dict method.
+    let (mut it, _) = interp();
+    let env = crate::runtime::env::new_frame(None);
+    let h = Value::Handle(Rc::new(crate::engines::handles::HandleRef::new(0, "py".into(), 1, "function".into(), Default::default())));
+    let d = Value::dict([("keys".into(), h)].into_iter().collect());
+    crate::runtime::env::declare(&env, "d".into(), d, false);
+    let prog = crate::syntax::parser::parse_str("d.keys()").unwrap();
+    let crate::syntax::ast::StmtKind::Expr(e) = &prog[0].kind else { panic!("expression") };
+    let Err(Flow::Error(err)) = it.eval(e, &env) else { panic!("the dict method ran") };
+    assert_eq!(&*err.message, "'handle' is not callable");
 }
