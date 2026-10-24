@@ -1,4 +1,4 @@
-# Build and test V2 on every platform (INTERNALS 22.6). The engine columns of the matrix
+# Build and test V2 on every platform (INTERNALS 22.5). The engine columns of the matrix
 # (Python, Node, C/C++ compilers, V2_TEST_REQUIRE) are added as roadmap Phases 1 and 2 land.
 name: CI
 

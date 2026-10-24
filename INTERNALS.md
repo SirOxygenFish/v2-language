@@ -48,7 +48,7 @@
 ---
 
 ## 1. Architecture and crate layout
-`v2` is one binary crate (edition 2021, stable Rust). It targets 64-bit x86_64 and aarch64 on Windows (MSVC), Linux and macOS (ch. 16); 22.6 defines the CI matrix.
+`v2` is one binary crate (edition 2021, stable Rust). It targets 64-bit x86_64 and aarch64 on Windows (MSVC), Linux and macOS (ch. 16); 22.5 defines the CI matrix.
 ### 1.1 Processes and run pipeline
 ```text
  v2 host process
@@ -2248,7 +2248,7 @@ The registry (7.1) maps every tag to its spec; built-in aliases canonicalize eve
 - a built-in tag or alias: `define_engine: 'py' is a built-in engine — configure it in [engines.py] in v2.toml`;
 - a tag already declared by `v2.toml` or by an earlier call, from any file: `define_engine: engine 'r' is already declared (main.v2:3)`, or `(C:\proj\v2.toml)`. The registry is per run, so each tag is declared once.
 
-A `V2_ENGINE_<TAG>` kept from startup for that tag replaces `command[0]` now (18.4). The engine exists from the call on: a block reached before it raised EngineUnknown (7.3). The call returns `null`. `v2 doctor` and `v2 check` run no script, so they never see these engines (19.2, 19.3).
+A `V2_ENGINE_<TAG>` kept from startup for that tag replaces `command[0]` now (18.4). The engine exists from the call on: a block reached before it raised EngineUnknown (7.3). The call returns `null`. `v2 doctor` runs no script, so it never lists these engines (19.2).
 
 Nothing is resolved or started at registration. `engine_available(tag)` is `false` for an unknown tag and, for a custom tag, `true` when `command[0]` resolves to an executable file; it never spawns anything.
 
@@ -2543,7 +2543,7 @@ src/**                    #[cfg(test)] unit and protocol tests
 - **Headers.** Leading `//` comments: `// requires: py js`, `// exit: 1` (default 0), `// stderr: <text>` (repeatable; each must appear, in order), `// args: a b`, `// platform: windows|unix`, `// timeout: 60`.
 - **Expected output.** Stdout must equal `<name>.out` after CRLF-to-LF conversion. A test with neither a `.out` file nor a `stderr:` line is rejected.
 - **SKIP.** Once per harness run, a generated probe (run in an isolated home like the tests) prints `engine_available(t)` for every tag named in `requires:`; if it fails, every test that needs an engine fails with its error. A test that needs a missing tag reports `SKIP {file} (engine {tag} not available)` and never counts as a pass; when `V2_TEST_REQUIRE=py,js,…` is set (CI), a SKIP for a listed tag is a FAIL.
-- **Isolation.** `HOME` and `USERPROFILE` point at a fresh temporary home (18.1 reads `~` from exactly these), so the `~/.v2` caches start empty; `RUSTUP_HOME` and `CARGO_HOME` keep their original values so `rustc` still works, and `V2_TEST_RUST_TOOLCHAIN`, when set, becomes `RUSTUP_TOOLCHAIN` (22.6). Inherited `V2_ENGINE_*` variables are removed, and `V2_ENGINE_FAKE` is set to the built `fake_adapter` for `tests/custom`.
+- **Isolation.** `HOME` and `USERPROFILE` point at a fresh temporary home (18.1 reads `~` from exactly these), so the `~/.v2` caches start empty; `RUSTUP_HOME` and `CARGO_HOME` keep their original values so `rustc` still works, and `V2_TEST_RUST_TOOLCHAIN`, when set, becomes `RUSTUP_TOOLCHAIN` (22.5). Inherited `V2_ENGINE_*` variables are removed, and `V2_ENGINE_FAKE` is set to the built `fake_adapter` for `tests/custom`.
 - **Panic trigger.** Debug builds only (`cfg(debug_assertions)`, so never in a release binary): with `V2_TEST_PANIC` set, the interpreter thread panics at once, so a test can check 6.5's panic path (`v2: internal error: …`, exit 101).
 - **Summary.** `{p} passed, {f} failed, {s} skipped`, listing every skip with its reason; `cargo test` fails when f > 0.
 
@@ -2562,7 +2562,7 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | `engines/process` | the timer stack, tree kills, the interrupt path, concurrent pipes, reaping and the per-OS child rules (6.5, 8.3, 8.5). Not tested, because they matter only in races or with a console event: `CREATE_NEW_PROCESS_GROUP`, the `getppid` check, the `ESRCH` fallback |
 | `engines/vep`, `codec/vep` (pure) | framing and the size limit (9.1), noise before `hello`, every 9.11 fatal frame, call targets, the `$v2` tags both ways, callable ids and releases |
 | `engines/session` | handshake, `init` and startup failures; reply order and `out`; crashes, timeouts and Dead sessions; callbacks and the depth limit; releases; `bye` and the shared grace (ch. 8, 9) |
-| `examples/fake_adapter.rs` | a real child process for `tests/custom`. Its "language" is one JSON object per block, e.g. `{"answer": 42, "echo": "$0", "fail": "!boom", "say": "@out:hi"}`; its first argument picks the mode (default `ok`): `ok`, `garbage`, `vep2`, `nohello`, `noise` (startup lines before `hello`), `crash`, `slow`, `nocaps` or `idlecall`. Each mode's test folder has a `v2.toml` with `[engines.fake]` `kind = "bridged"`, `command = ["fake_adapter", "<mode>"]`; the harness's `V2_ENGINE_FAKE` replaces only `command[0]` (18.4) |
+| `examples/fake_adapter.rs` | a real child process for `tests/custom`. Its "language" is one JSON object per block, e.g. `{"answer": 42, "echo": "$0", "fail": "!boom", "say": "@out:hi"}`; its first argument picks the mode (default `ok`): `ok`, `garbage`, `vep2`, `nohello`, `noise` (startup lines before `hello`), `crash`, `slow` (each call sleeps 30 s) or `nocaps`. Each mode's test folder has a `v2.toml` with `[engines.fake]` `kind = "bridged"`, `command = ["fake_adapter", "<mode>"]`; the harness's `V2_ENGINE_FAKE` replaces only `command[0]` (18.4) |
 
 ### 22.4 Mandatory regression list
 
@@ -2599,14 +2599,14 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R29 | `engines/js/bigint.v2` | `echo(2**60) == 2**60` through JS; `@js(x: 2**60) { typeof x }` is `"bigint"`; `@js(x: 2**53 - 1) { typeof x }` is `"number"`; `@js { 1e20 }` follows chapter 10 without overflow |
 | R30 | `engines/js/proto_key.v2` | `@js(d: {"__proto__": {"x": 1}}) { d.x === undefined && Object.keys(d).length === 1 }` is `true`; `echo` returns an equal dict |
 | R31 | `engines/{py,js}/surrogates.v2` | a lone surrogate from `@py { "\ud800" }` or `@js { "\ud800" }` follows chapter 10, with no panic; the session keeps working |
-| R32 | `host/stdin_owner.v2` with `.in` = `a\nb\n` | `@py { import sys; sys.stdin.read() }` raises ForeignError (9.9's stdin error) and `@js { require("fs").readFileSync(0) }` throws; then `input()` returns `a`, then `b`, then `null` |
+| R32 | `cross/stdin_owner.v2` with `.in` = `a\nb\n` | `@py { import sys; sys.stdin.read() }` raises ForeignError (9.9's stdin error) and `@js { require("fs").readFileSync(0) }` throws; then `input()` returns `a`, then `b`, then `null` |
 | R33 | `engines/js/idle_timer.v2` | a `setImmediate` callback scheduled during a call, calling an imported V2 function, runs in the event-loop turn after that call's reply (14.4) and throws 9.8's idle-call Error in JS; the V2 function never runs; the stored callback still works during a later call |
-| R34 | `engines/py/subprocess.v2` | in a block, `subprocess.run([sys.executable, "-c", "print('child')"])` and `os.write(1, b"x\n")` put `child` and `x` on stderr, not stdout; the next call works (protocol intact) |
+| R34 | `engines/py/subprocess.v2` | in a block, `subprocess.run([sys.executable, "-c", "print('child')"])` and `os.write(1, b"x\n")` put `child` and `x` on stderr, not stdout; the next block runs (protocol intact) |
 | R35 | `custom/run/` (requires js) | with `[engines.nd]` set to `kind = "run"`, `command = ["node", "{file}"]`, `ext = "js"`: statement output is in order; `@nd(t: "x y", n: [1, 2]) { process.stdout.write(process.env.V2_ARG_t + process.env.V2_ARG_n + "\r\n") }` has value `x y[1,2]`; `console.error("bad"); process.exit(3)` raises EngineExitError with `e.data.status == 3` and `bad` in `e.data.stderr`; on Windows, `@nd(p: 1, P: 2) {}` raises ValueError; `@export` inside raises ImportError |
-| R37 | `custom/bridged/` | export, call, `out` and `err` work; the fake adapter's modes (22.3) `garbage`, `vep2`, `nohello`, `crash` and `nocaps` each produce their chapter 21 row; mode `noise` still starts, with the noise on stderr |
+| R37 | `custom/bridged/` | export, call, `out` and `err` work; the fake adapter's modes (22.3) `garbage`, `vep2`, `nohello`, `crash`, `slow` (with `call_timeout = 1`) and `nocaps` each produce their chapter 21 row; mode `noise` still starts, with the noise on stderr |
 | R38 | `cross/depth.v2` | V2↔py mutual recursion reaching depth 64 succeeds; depth 65 raises RecursionError, which V2 catches |
 | R39 | `host/bom_crlf.v2` | stored with a BOM and CRLF line endings (`.gitattributes`: `-text`); it runs, and a `@py` error in it reports the right line |
-| R40 | `engines/py/interrupt/` (run.rs, unix) | SIGINT, and separately SIGTERM, sent to the host during a sleeping py call exits 130 within 2 s; the worker pid is gone and the run dir is removed |
+| R40 | `engines/py/interrupt/` (run.rs, unix) | SIGINT, and separately SIGTERM, sent to the host during a sleeping `@py` block exits 130 within 2 s; the worker pid is gone and the run dir is removed |
 | R41 | `engines/resolve` unit test | a WindowsApps `python.exe` whose probe exits 9009 is skipped and the next candidate is used; one whose probe prints `Python 3.12.1` is kept |
 | R42 | `engines/ts/strip.v2` | a `@ts t` block exporting `function dbl(x: number): number` gives `dbl(21) == 42`, and a `@js` block imports `dbl` from `t` |
 | R43 | `engines/{py,js}/export_star.v2` | `@export { * }` exports a py block's `def`s and classes, but not a name brought in by `from math import sqrt`; in a js block it exports a top-level `function`, but not a `const f = () => …` unless it is listed |
@@ -2627,7 +2627,7 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R58 | `custom/builtin/{bash,pwsh,cmd}.v2` (each `requires:` its tag), `custom/builtin/cmd_unix.v2` (`// platform: unix`), run.rs (doctor) | with no `v2.toml`: `@sh { echo hi }` prints `hi` and `let b = @bash { printf ok }` gives `"ok"`, through Git Bash on Windows (never `System32\bash.exe`); `@pwsh { Write-Output 5 }` gives `"5"`; on Windows `@cmd(x: 1) { echo %V2_ARG_x% }` gives `"1"`; in `cmd_unix.v2`, `@cmd { }` raises EngineNotFound `cmd is Windows only`; `v2 doctor` has a row for each built-in run engine (run.rs `doctor_rows`; 7.2, 19.2) |
 | R59 | `custom/define_engine/` (requires js) | with no `v2.toml`, `define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")` then `@nd { console.log(1 + 2) }` prints `3`; a block `@nq` reached before its `define_engine` raises EngineUnknown ending `or with define_engine`; declaring `nd` again, or `py`, raises ValueError (17.2); `command: ["node"]` raises `ValueError: define_engine: command must contain {file}`; in `sub/lib.v2`, imported from `main.v2`, a command `["node", "./runner.js", "{file}"]` runs `sub/runner.js` (the caller's folder, 18.1) |
 
-### 22.6 CI matrix
+### 22.5 CI matrix
 
 | Job | Python | Node | C / C++ | `@rust` | `V2_TEST_REQUIRE` |
 | --- | --- | --- | --- | --- | --- |
