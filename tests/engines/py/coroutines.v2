@@ -1,0 +1,45 @@
+// requires: py
+// A block's value that is a coroutine is awaited on the session's event loop; inside a running
+// loop that is an error (DOCS 8.4, INTERNALS 9.8). Warnings are recorded to check that a
+// refused coroutine is closed, not left "never awaited".
+@py {
+    import sys, warnings
+    sys.v2_warnings = []
+    warnings.simplefilter("always")
+    warnings.showwarning = lambda message, *rest, **kw: sys.v2_warnings.append(str(message))
+}
+print(@py {
+    import asyncio
+    async def answer():
+        await asyncio.sleep(0.01)
+        return 42
+    answer()
+})
+// A coroutine in statement position is still awaited.
+@py {
+    import asyncio
+    async def say():
+        print("awaited in statement position")
+    say()
+}
+func inner() {
+    return @py {
+        async def one():
+            return 1
+        one()
+    }
+}
+try {
+    @py(inner) {
+        async def outer():
+            return inner()
+        outer()
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(@py {
+    import gc, sys
+    gc.collect()
+    sys.v2_warnings
+})

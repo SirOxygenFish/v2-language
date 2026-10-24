@@ -1,0 +1,76 @@
+// requires: py
+// V2 functions passed into Python as block args are callables that call back into V2 (DOCS 8.2,
+// INTERNALS 9.7, 9.8, 11.8, 14.2).
+func twice(x) {
+    return x * 2
+}
+func greet(name, greeting = "Hello") {
+    return f"${greeting}, ${name}"
+}
+let calls = []
+func log(msg) {
+    calls.push(msg)
+}
+print(@py(twice, greet, log) {
+    log("from python")
+    [twice(21), greet("Ada"), greet("Ada", greeting="Hi"), callable(twice), type(twice).__name__]
+})
+print(calls)
+// Python sorts with a V2 key function, calling it once per item (DOCS 8.2).
+let people = [{name: "Ada", age: 36}, {name: "Grace", age: 85}, {name: "Linus", age: 21}]
+let by_age = @py(people, key: func(p) => p.age) { sorted(people, key=key) }
+print(by_age.map(func(p) => p.name))
+// Closures keep their variables; builtins work too.
+let n = 10
+print(@py(add: func(x) => x + n, length: len) { [add(5), length("héllo")] })
+// One V2 function is one Python object, also across blocks.
+print(@py(a: twice, b: twice) { a is b })
+// Calls nest: V2 -> Python -> V2 -> Python.
+func outer(x) {
+    return @py(x) { x + 1 }
+}
+print(@py(f: outer) { f(1) + f(10) })
+// Arity and argument errors come back to Python as V2Error.
+print(@py(twice) {
+    try:
+        twice(1, 2)
+    except Exception as e:
+        r = [e.type, e.message]
+    r
+})
+print(@py(greet) {
+    try:
+        greet("x", colour="red")
+    except Exception as e:
+        r = [e.type, e.message]
+    r
+})
+// Only the thread V2 called may call V2; a stored callback works again during a later block,
+// but not from a thread while the worker is idle (DOCS 8.4, INTERNALS 9.8).
+@py(f: twice) {
+    import sys, threading
+    out = []
+    def run():
+        try:
+            out.append(f(1))
+        except Exception as e:
+            out.append([e.type, e.message])
+    t = threading.Thread(target=run)
+    t.start()
+    t.join()
+    print(out[0])
+    sys.v2_saved = f
+}
+print(@py { __import__("sys").v2_saved(4) })
+@py {
+    import sys, threading
+    sys.v2_res = []
+    def idle_call():
+        try:
+            sys.v2_res.append(sys.v2_saved(1))
+        except Exception as e:
+            sys.v2_res.append([e.type, e.message])
+    threading.Timer(0.1, idle_call).start()
+}
+sleep(0.6)
+print(@py { __import__("sys").v2_res })

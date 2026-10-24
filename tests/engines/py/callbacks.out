@@ -1,0 +1,11 @@
+[42, "Hello, Ada", "Hi, Ada", true, "V2Function"]
+["from python"]
+["Linus", "Ada", "Grace"]
+[15, 5]
+true
+13
+["ArityError", "twice() takes 1 positional argument but 2 were given"]
+["ArityError", "greet() got an unexpected argument 'colour'"]
+['Error', "V2 function 'twice' called from another thread"]
+8
+[["Error", "V2 function 'twice' called outside an active V2 call"]]

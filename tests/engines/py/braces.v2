@@ -1,0 +1,10 @@
+// requires: py
+// R06 (py): braces inside Python strings and comments don't close the block (INTERNALS 3.8).
+@py { print("}") }
+@py {
+    d = {"k": "{", "v": '}'}  # } in a comment
+    s = """}
+    {"""
+    print(d["k"] + d["v"], s.count("}"), f"{len(d)}}}")
+}
+print(@py { "}" + '{' })

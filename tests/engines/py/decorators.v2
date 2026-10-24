@@ -1,0 +1,24 @@
+// requires: py
+// R05: decorator lines reach Python untouched and the block stays an action block; @@ lines
+// inside a string print with one @ (INTERNALS 4.4, 22.4).
+for i in 0..2 {
+    @py(i) {
+        import functools
+        def exporter(f):
+            return f
+        def export_json(f):
+            @functools.wraps(f)
+            def wrapper(*a):
+                return "json:" + str(f(*a))
+            return wrapper
+        @exporter
+        @export_json
+        def answer(n):
+            return n * 21
+        doc = """
+        @@export { x }
+        @@import y
+        """
+        print(i, answer(2), [line.strip() for line in doc.strip().splitlines()])
+    }
+}

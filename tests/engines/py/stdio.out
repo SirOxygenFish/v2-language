@@ -1,0 +1,13 @@
+v2 1
+py 1
+no newline;bytes é
+v2 2
+from a thread during the block
+héllo 😀   tab	end
+true 10
+3000000 3000000
+b"\x00\xff!"
+é😀
+a�b
+written by a str subclass, then flushed
+v2 end

@@ -1,0 +1,118 @@
+// requires: py
+// Errors from Python blocks, and V2 errors through Python (DOCS 3.9, 10; INTERNALS 9.6, 14.2).
+func fields(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.lang, "|", e.line)
+        return e
+    }
+}
+fields(func() => @py { 1 / 0 })
+fields(func() => @py { raise KeyError("k") })
+// A foreign syntax error is a ForeignError with foreign_type SyntaxError, its message alone.
+fields(func() => @py { def broken( })
+// sys.exit() is an error, not the end of the worker.
+fields(func() => @py { import sys; sys.exit(3) })
+print(@py { "the worker is still running" })
+// str() of a foreign error names its class.
+let e = fields(func() => @py { raise ValueError("bad value") })
+print(str(e))
+// Chained causes (raise ... from ...) become e.cause.
+let c = fields(func() => @py {
+    try:
+        int("x")
+    except ValueError as inner:
+        raise RuntimeError("outer") from inner
+})
+print(c.cause.type, c.cause.foreign_type, c.cause.message, c.cause.cause)
+print(fields(func() => @py { raise RuntimeError("no cause") }).cause)
+// A V2 error thrown in a callback crosses Python and comes back with its own type and data.
+func boom(x) {
+    throw error("ValueError", "bad " + str(x), {n: x})
+}
+let back = fields(func() => @py(f: boom) { f(1) })
+print(back.data, back.foreign_type)
+// Inside Python it is a V2Error with the V2 fields.
+print(@py(f: boom) {
+    try:
+        f(2)
+    except Exception as e:
+        out = [type(e).__name__, e.type, e.message, e.data, e.lang, e.foreign_type, str(e)]
+    out
+})
+// A V2 error caught and raised again in Python keeps its type.
+fields(func() => @py(f: boom) {
+    try:
+        f(3)
+    except Exception as e:
+        raise e
+})
+// Blocks cannot read standard input (DOCS 4.6).
+fields(func() => @py { import sys; sys.stdin.read() })
+fields(func() => @py { input() })
+// A V2 error keeps its data through Python, functions and handles included, and its location.
+func cb() {
+    return 1
+}
+func thrower(x) {
+    throw error("ValueError", "data inside", {cb: cb, h: x})
+}
+let h = @py { {1, 2} }
+let d = fields(func() => @py(f: thrower, h) { f(h) })
+print(d.data.cb == cb, type(d.data.h), d.data.h == h)
+// Data that can't cross is left out, but the error keeps its type and location.
+let loop = [1]
+loop.push(loop)
+func cyclic() {
+    throw error("ValueError", "cyclic data", loop)
+}
+let c2 = fields(func() => @py(f: cyclic) { f() })
+print(c2.data)
+// An error value never raised in V2 is placed where it is raised: at the block.
+let never = fields(func() => @py(e: error("Custom", "never raised")) { raise e })
+print(len(never.trace) > 0)
+// A V2Error made in Python is reported like any exception: it can't claim a host-only kind.
+fields(func() => @py { raise __import__("sys").modules["__main__"].V2Error("EngineNotFound", "fake") })
+// A V2 call that fails with a foreign error: lang and foreign_type reach Python too.
+func risky() {
+    return @py { 1 / 0 }
+}
+print(@py(f: risky) {
+    try:
+        f()
+    except Exception as e:
+        r = [e.type, e.message, e.lang, e.foreign_type]
+    r
+})
+// At most 8 chained causes cross (9.6).
+let chain = fields(func() => @py {
+    def chain(n):
+        if n == 0:
+            raise ValueError("level 0")
+        try:
+            chain(n - 1)
+        except Exception as inner:
+            raise ValueError("level %d" % n) from inner
+    chain(10)
+})
+let n = 0
+let link = chain.cause
+while link != null {
+    n += 1
+    print(link.message)
+    link = link.cause
+}
+print("causes:", n)
+// A value that can't cross says where it failed.
+fields(func() => @py { [1, {"k": ["a\udc80"]}] })
+// A block's syntax error carries only its .v2 frame, not the adapter's or ast's.
+@py {
+    import sys
+    M = sys.modules["__main__"]
+    try:
+        M.do_load({"file": __file__, "line": 1, "source": "def broken(", "unit": "test:1", "args": {},
+                   "kind": "action", "want_value": False, "exports": [], "imports": []})
+    except SyntaxError as e:
+        print([f["file"] == __file__ for f in M.serialize(e)["trace"]])
+}

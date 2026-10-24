@@ -886,6 +886,220 @@ fn interrupt(child: &Child) {
     }
 }
 
+/// For a run.rs test that needs an engine: whether it is here. A missing engine skips the test,
+/// or fails it when `V2_TEST_REQUIRE` names it (22.2).
+fn needs(tag: &str, test: &str) -> bool {
+    let available = engine_availability(&[tag.to_string()]).unwrap_or_else(|e| panic!("{e}"));
+    if available[tag] {
+        return true;
+    }
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default();
+    assert!(!required.split(',').any(|t| t.trim() == tag), "engine {tag} not available, and V2_TEST_REQUIRE requires it");
+    // Straight to stderr: libtest would swallow eprintln! output of a test that passes.
+    let _ = writeln!(std::io::stderr(), "SKIP {test} (engine {tag} not available)");
+    false
+}
+
+/// A fresh temp folder for one run: what `temp_dir()` gives v2 and its children (20.3).
+fn with_temp(cmd: &mut Command, tmp: &Path) {
+    std::fs::create_dir_all(tmp).unwrap();
+    cmd.env("TMP", tmp).env("TEMP", tmp).env("TMPDIR", tmp);
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+}
+
+#[test]
+fn python_finds_modules_next_to_the_script_then_in_the_project() {
+    // DOCS 5 and 7, INTERNALS 9.3, 14.3: sys.path starts with the .v2 file's folder, then the
+    // project root, also when PYTHONPATH lists the root after another folder; the adapter's own
+    // folder is not on it; json.py and asyncio.py next to the script don't replace the adapter's
+    // modules (an inherited PYTHONPATH is the user's own, 20.2); a function in a .py file next to
+    // the script works with multiprocessing's spawn.
+    if !needs("py", "python_finds_modules_next_to_the_script_then_in_the_project") {
+        return;
+    }
+    let home = TempHome::new();
+    let main = r#"@py {
+    import os, sys, helper, rootmod
+    here = os.path.dirname(__file__)
+    root = os.path.dirname(here)
+    print(helper.where(), rootmod.where())
+    print(sys.path.index(here), sys.path.index(root), sys.path.index(os.environ["V2_OTHER"]) > 1)
+    print(any(os.path.basename(p.rstrip("/\\")) == "adapters" for p in sys.path))
+}
+print(@py {
+    async def f():
+        return "awaited with the stdlib asyncio"
+    f()
+})
+@py {
+    import multiprocessing, helper
+    with multiprocessing.get_context("spawn").Pool(2) as pool:
+        print(pool.map(helper.square, [1, 2, 3]))
+}
+"#;
+    let files = [
+        ("proj/v2.toml", "# the project root
+"),
+        ("proj/rootmod.py", "def where():
+    return 'root'
+"),
+        ("proj/sub/json.py", "raise ImportError('a project json.py replaced the adapter json')
+"),
+        ("proj/sub/asyncio.py", "raise ImportError('a project asyncio.py replaced the stdlib asyncio')
+"),
+        ("proj/sub/helper.py", "def where():
+    return 'sub'
+
+def square(x):
+    return x * x
+"),
+        ("proj/sub/main.v2", main),
+        ("other/placeholder.txt", ""),
+    ];
+    for (path, text) in files {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let canon = |p: PathBuf| {
+        let c = std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        c.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(c)
+    };
+    let (other, proj) = (canon(home.0.join("other")), canon(home.0.join("proj")));
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut cmd = v2_command(&home.0);
+    cmd.arg(home.0.join("proj/sub/main.v2")).current_dir(&home.0).env("PYTHONPATH", format!("{other}{sep}{proj}")).env("V2_OTHER", &other);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout, "sub root
+0 1 True
+False
+awaited with the stdlib asyncio
+[1, 4, 9]
+");
+}
+
+#[test]
+fn every_exit_path_removes_the_run_dir() {
+    // INTERNALS 20.3, ROADMAP 1.4: a run that started the py engine, whose adapter lives in the
+    // run dir, removes it at a normal end, an uncaught error, exit() (also inside a callback
+    // while Python waits), and after the worker crashed.
+    if !needs("py", "every_exit_path_removes_the_run_dir") {
+        return;
+    }
+    let home = TempHome::new();
+    let scripts = [
+        ("end.v2", "@py { print(1) }\n", 0),
+        ("throw.v2", "@py { print(1) }\nthrow \"boom\"\n", 1),
+        ("exit.v2", "@py { print(1) }\nexit(4)\n", 4),
+        ("foreign.v2", "@py { 1 / 0 }\n", 1),
+        ("crash.v2", "@py { import os; os._exit(3) }\n", 1),
+        ("callback_exit.v2", "@py(f: func() => exit(5)) { f() }\nprint(\"not reached\")\n", 5),
+    ];
+    for (name, src, code) in scripts {
+        std::fs::write(home.0.join(name), src).unwrap();
+        let tmp = home.0.join(format!("tmp-{name}"));
+        let mut cmd = v2_command(&home.0);
+        cmd.arg(name).current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        with_temp(&mut cmd, &tmp);
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+        assert_eq!(out.status.code(), Some(code), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("not reached"), "{name}");
+        assert_eq!(names_in(&tmp), Vec::<String>::new(), "{name} left its run dir");
+    }
+}
+
+/// Whether process `pid` still runs (not a zombie waiting for its new parent to reap it).
+fn running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return false;
+        }
+        // Where /proc exists, a zombie (state Z, after the parenthesized name) has ended.
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'),
+            Err(_) => true,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: plain Win32 calls on a handle this function owns.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            ok != 0 && code == 259 // STILL_ACTIVE
+        }
+    }
+}
+
+#[test]
+fn an_interrupt_during_a_py_block_exits_130_and_cleans_up() {
+    // R40 (INTERNALS 6.5, 8.3): SIGINT, and separately SIGTERM (Windows: Ctrl+Break), while a
+    // @py block sleeps: exit 130 within 2 s, the worker is gone and the run dir is removed.
+    if !needs("py", "an_interrupt_during_a_py_block_exits_130_and_cleans_up") {
+        return;
+    }
+    #[cfg(unix)]
+    let signals = [libc::SIGINT, libc::SIGTERM];
+    #[cfg(windows)]
+    let signals = [0];
+    for signal in signals {
+        let home = TempHome::new();
+        let src = "@py {\n    import os, time\n    open(\"worker.pid\", \"w\").write(str(os.getpid()))\n    time.sleep(30)\n}\nprint(\"not reached\")\n";
+        std::fs::write(home.0.join("sleepy.v2"), src).unwrap();
+        let tmp = home.0.join("tmp");
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("sleepy.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        with_temp(&mut cmd, &tmp);
+        interruptible(&mut cmd);
+        let child = cmd.spawn().expect("start v2");
+        let pid_file = home.0.join("worker.pid");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the block never started");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let start = Instant::now();
+        #[cfg(unix)]
+        // SAFETY: sending a signal to our own child.
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, signal);
+        }
+        #[cfg(windows)]
+        {
+            let _ = signal;
+            interrupt(&child);
+        }
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended after the interrupt");
+        assert_eq!(out.status.code(), Some(130), "signal {signal}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(start.elapsed() < Duration::from_secs(2), "signal {signal}: {:?}", start.elapsed());
+        assert!(out.stdout.is_empty() && out.stderr.is_empty(), "signal {signal}: no output after an interrupt");
+        let gone = Instant::now() + Duration::from_secs(2);
+        while running(pid) {
+            assert!(Instant::now() < gone, "signal {signal}: worker {pid} outlived the run");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(names_in(&tmp), Vec::<String>::new(), "signal {signal}: the run dir was left");
+    }
+}
+
 #[test]
 fn an_interrupt_exits_130_without_running_finally() {
     // INTERNALS 6.5: the handler only sets INTERRUPTED; the watchdog ends the run with 130,

@@ -1,10 +1,8 @@
 // requires: py
-// Aliases name the same engine (INTERNALS 7.3).
+// Aliases name the same engine, and blocks of either share one process (INTERNALS 7.3, 8.1).
 print(engine_available("py"), engine_available("python"))
-try {
-    @python {
-        x = 1
-    }
-} catch (e) {
-    print(e.message)
+@python {
+    import sys
+    sys.v2_marker = "set by @python"
 }
+print(@py { __import__("sys").v2_marker })

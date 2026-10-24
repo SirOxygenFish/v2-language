@@ -273,7 +273,7 @@ impl Wire<'_> {
                 let _ = e.span.set(span);
             }
         }
-        if let Some(frames) = m.get("trace").and_then(Json::as_array) {
+        if let Some(frames) = m.get("trace").and_then(Json::as_array).filter(|f| !f.is_empty()) {
             let frames: Vec<Rc<str>> = frames.iter().filter_map(Json::as_str).map(Rc::from).collect();
             let _ = e.trace.set(frames.into());
         }
