@@ -1,0 +1,10 @@
+ValueError | null | data inside | null | 16
+true handle true
+ValueError | null | cyclic data | null | 25
+null
+Custom | null | never raised | null | 29
+true
+["ForeignError", "js", "TypeError"]
+ForeignError | Error | level 10 | js | 45
+causes: 8
+Error bad type SelfError handle

@@ -1,0 +1,6 @@
+py: ForeignError OSError
+js: ForeignError
+a b null
+js utf8: ForeignError
+js readFile: ForeignError
+protocol intact

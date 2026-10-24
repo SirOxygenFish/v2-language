@@ -1,0 +1,38 @@
+// requires: js
+// stderr: unhandled rejection: Error: nobody waits for this
+// stderr: Error: timer boom
+// A block's value that is a Promise is awaited when V2 waits on JavaScript directly; inside a
+// nested cross-language call it can't be (DOCS 8.4, INTERNALS 9.8, 14.4).
+print(@js { new Promise((resolve) => setTimeout(() => resolve(42), 10)) })
+print(@js { (async () => "async value")() })
+try {
+    @js { Promise.reject(new TypeError("rejected")) }
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+// A Promise in statement position is still awaited.
+@js { (async () => { await null; console.log("awaited in statement position"); })() }
+func inner() {
+    return @js { Promise.resolve(1) }
+}
+try {
+    @js(inner) { inner() }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+// A rejection nobody handles is printed to stderr and the worker goes on.
+@js { Promise.reject(new Error("nobody waits for this")); null }
+print(@js { "still running" })
+// A Promise that can never settle (nothing left for it to wait on) is an error, not the end of
+// the worker, also when a timer that would have settled it throws.
+try {
+    @js { new Promise(() => {}) }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+try {
+    @js { new Promise((resolve) => setTimeout(() => { throw new Error("timer boom"); }, 5)) }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(@js { "still serving" })

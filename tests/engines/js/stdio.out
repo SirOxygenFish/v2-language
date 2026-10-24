@@ -1,0 +1,16 @@
+v2 1
+js 1
+no newline;bytes é
+through fs.writeSync
+v2 2
+through writeFileSync
+through appendFileSync
+through writevSync
+through writeFile
+v2 3
+child stdout captured: captured
+fork exited with 0
+promisified
+v2 4
+["HI!", "fixtures"]
+after a large output

@@ -1,0 +1,7 @@
+[42, "Hello, Ada", "Hi, Ada", "function", "twice"]
+["Linus", "Ada", "Grace"]
+true
+13
+["ArityError", "twice() takes 1 positional argument but 2 were given"]
+[["Error", "V2 function 'twice' called outside an active V2 call"]]
+8

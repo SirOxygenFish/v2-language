@@ -1,0 +1,46 @@
+// requires: js
+// V2 functions passed into JavaScript as block args are functions that call back into V2
+// (DOCS 8.2, 8.4; INTERNALS 9.8, 11.8, 14.2, 14.4).
+func twice(x) {
+    return x * 2
+}
+func greet(name, greeting = "Hello") {
+    return f"${greeting}, ${name}"
+}
+print(@js(twice, greet) { [twice(21), greet("Ada"), greet("Ada", "Hi"), typeof twice, twice.name] })
+// JavaScript sorts with a V2 comparator, calling it once per comparison.
+let people = [{name: "Ada", age: 36}, {name: "Grace", age: 85}, {name: "Linus", age: 21}]
+let by_age = @js(people, cmp: func(a, b) => a.age - b.age) { people.sort(cmp) }
+print(by_age.map(func(p) => p.name))
+// One V2 function is one JavaScript function.
+print(@js(a: twice, b: twice) { a === b })
+// Calls nest: V2 -> JavaScript -> V2 -> JavaScript.
+func outer(x) {
+    return @js(x) { x + 1 }
+}
+print(@js(f: outer) { f(1) + f(10) })
+// Errors in the call come back as V2Error.
+print(@js(twice) {
+    let r;
+    try {
+        twice(1, 2);
+    } catch (e) {
+        r = [e.type, e.message];
+    }
+    r
+})
+// A timer that calls V2 after the block returned fails inside JavaScript: the engine is idle
+// then. Timers run during the event-loop turn after each call (INTERNALS 14.4).
+@js(f: twice) {
+    process.v2Results = [];
+    setImmediate(() => {
+        try {
+            process.v2Results.push(f(1));
+        } catch (e) {
+            process.v2Results.push([e.type, e.message]);
+        }
+    });
+}
+print(@js { process.v2Results })
+// While V2 awaits a JavaScript Promise, timers may call V2.
+print(@js(f: twice) { new Promise((resolve) => setTimeout(() => resolve(f(4)), 10)) })

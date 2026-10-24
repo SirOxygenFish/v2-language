@@ -1,0 +1,43 @@
+// requires: js
+// A JavaScript definition block that fails to load stays failed; @export names, quoted ones
+// included, must be defined (DOCS 4.3, 6.1; INTERNALS 12.1, 12.2, 12.4).
+let errs = []
+for i in 0..2 {
+    try {
+        @js bad {
+            console.log("loading");
+            throw new RangeError("nope");
+            @export { f }
+        }
+    } catch (e) {
+        errs.push(e)
+    }
+}
+print(errs[0] == errs[1], errs[0].type, errs[0].foreign_type, errs[0].message)
+for name in ["plain", "quoted"] {
+    try {
+        if name == "plain" {
+            @js partial {
+                function a() {}
+                @export { a, b }
+            }
+        } else {
+            @js quoted {
+                globalThis["my-func"] = () => 1;
+                @export { "my-func", "other-func" }
+            }
+        }
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+// let, const and class need listing; @export { * } takes functions only.
+@js star {
+    function f() {}
+    var g = () => 1;
+    let h = () => 2;
+    var notAFunction = 3;
+    function _private() {}
+    @export { * }
+}
+print("star loaded")

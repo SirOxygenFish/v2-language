@@ -26,11 +26,9 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 1.5 (not started). A draft `js.js` sits in the session scratchpad (not in the repo); it
-  was driven by hand over VEP (loads, values, BigInt, Promises, causes, ts stripping,
-  callbacks). If the scratchpad is gone, write it again from 12.4, 12.5, 14.4 and py.py.
-- Lessons from 1.4: the same bugs py.py had will apply to js.js (pin encoded stubs, re-encode
-  error tags, roll back handle counts, never re-enter the send path, every request gets a reply).
+- Now: 1.6 (not started): handle ops (11.3-11.5), callable handles, named args (10.8). Both
+  adapters need `op` and `call {h}` handlers; py.py and js.js should stay parallel (same rules,
+  same bugs: see the 1.4/1.5 review lessons in the ROADMAP log).
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -119,8 +117,10 @@ it is loaded automatically into every session and every subagent.
 - `engines/units.rs`: `exec_block` (12.1: definition units Loading/Loaded/Failed in
   `Interp.units`; action blocks every reach), `block_name`, `session_for` (one session per key,
   adapter written by `adapters::materialize`), timeouts from config. `adapters/py.py` (embedded
-  via `adapters/mod.rs`): the whole Python worker; adapter internals are module globals of
-  `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units, HANDLERS).
+  via `adapters/mod.rs`, `for_session(key)`): the whole Python worker; its internals are module
+  globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
+  HANDLERS). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
+  JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`.
 - Empty stubs (a doc comment only): `engines/imports.rs`, `engines/runonly.rs`, `build/*`,
   `ffi/lib.rs`.
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.

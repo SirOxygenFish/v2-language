@@ -1068,7 +1068,7 @@ The host cannot enforce either rule: it reads a worker's frames only while a req
 
 **Awaiting (the async rule).** The result of a `call`, and the completion value of a `load` even with `want_value: false`, are awaited when awaitable (`inspect.isawaitable`; a thenable). `op` results never are.
 - **py:** `loop.run_until_complete(x)` on the session's event loop (one per session, created on first use), at any depth. If an event loop is already running in the thread, the reply is `err` type `Error`: `'fetch' returned a coroutine while another coroutine is being awaited; call it directly from V2` (for a block's value: `the block's value is a coroutine while another coroutine is being awaited in this thread`).
-- **js:** only a request served from the idle listener (stack depth 1) is awaited, and the event loop keeps running meanwhile (14.4). Inside a stub's synchronous wait the event loop cannot run, so the reply is `err` type `Error`: `'fetch_json' returned a Promise during a nested cross-language call; only an outermost call can be awaited` (DOCS 8.4).
+- **js:** only a request served from the idle listener (stack depth 1) is awaited, and the event loop keeps running meanwhile (14.4). Inside a stub's synchronous wait the event loop cannot run, so the reply is `err` type `Error`: `'fetch_json' returned a Promise during a nested cross-language call; only an outermost call can be awaited` (DOCS 8.4; for a block's value: `the block's value is a Promise during …`).
 - Before either error reply the adapter calls `coro.close()` or attaches a no-op rejection handler, so no "never awaited" or unhandled-rejection warning appears.
 
 ### 9.9 Output and worker stdio
@@ -1479,10 +1479,10 @@ function doLoad(m) {
   const src = m.lang === 'ts' ? stripTypes(m.source) : m.source;           // 12.5
   rememberSource(m.file, m.line, src);
   const ctx = newContext(m.file);
-  for (const [k, v] of Object.entries(m.args)) ctx[checkName(k)] = decode(v);  // adapter realm (10.7)
+  for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));  // adapter realm (10.7)
   bindImports(ctx, m.imports);                                              // 13.7
   const script = compileOrExplain(src, { filename: m.file, lineOffset: m.line - 1,
-    importModuleDynamically: dynImport(m.file) });
+    importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER });
   const before = new Set(Object.getOwnPropertyNames(ctx));                 // for @export { * }
   return settle(script.runInContext(ctx), v => {  // settle: now, or once a thenable settles (9.8)
     if (m.kind === 'action') return { value: m.want_value ? encode(v) : null, exports: [], missing: [] };
@@ -1497,8 +1497,12 @@ function doLoad(m) {
 - `require` is created for the `.v2` file: `./x` resolves from its folder, bare names walk up `node_modules` folders
   from there (so the project root's is found), then an inherited `NODE_PATH` (14.1). `module`/`exports` only let
   CommonJS-style code run. No `columnOffset`: V8 applies it to line 1 only; the host maps columns (12.6).
-- `dynImport(file)` = `spec => import(entryUrl(spec, file))` (14.4); without it `import()` fails with
-  `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`.
+- `import()` in a block goes to Node's own loader (`USE_MAIN_CONTEXT_DEFAULT_LOADER`), which resolves relative to
+  the script's filename, the `.v2` file; a callback there would need `--experimental-vm-modules`. The filter of 12.5
+  also drops this loader's one `ExperimentalWarning`.
+- Node globals that are accessors (`crypto`, `navigator`) are defined on the context with the main `globalThis` as
+  the getter's receiver, since some check it; args are data properties (`defineData`), whatever the context has
+  under that name.
 - Decoded values (10.7), and values from `require`d modules and Node built-ins (an `fs` error, a package's array),
   belong to the adapter's realm, not the unit's, so `instanceof Array`/`instanceof Error` is false for them: blocks test
   `Array.isArray(x)` and `e.name`/`e.message`.
@@ -1532,8 +1536,10 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
   not erasable and fail with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; such code is written in erasable TypeScript or in
   `@js`. The stripper parses the whole block, so it also throws on any syntax error, before V8 compiles anything. On
   any stripping failure the adapter sends `err` `ForeignError` (foreign_type `SyntaxError`) with one trace frame
-  `{file: m.file, line: m.line + L − 1, col: C}`, where L:C is the 1-based body position the stripper's message reports
-  (its `[line:col]` marker); with no readable position it sends no frame, so the error stays at the block's `@ts` (12.6). A `process.emitWarning` filter drops the one `ExperimentalWarning` it prints.
+  `{file: m.file, line: m.line + L − 1, col: C}`, where L:C is the 1-based body position the stripper reports (a
+  `[line:col]` marker in its message, or, on Node 24, its stack's first line `:L` and a caret under column C); with no
+  readable position it sends no frame, so the error stays at the block's `@ts` (12.6). The message ends with Node's
+  code: `TypeScript enum is not supported in strip-only mode (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX)`. A `process.emitWarning` filter drops the one `ExperimentalWarning` it prints.
 
 ### 12.6 Foreign positions to .v2 positions
 
@@ -1543,7 +1549,7 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 - **`col`** is 1-based code points relative to the body text line (kept by `remember_source`), sent only for frames in
   `.v2` files, else `null`. Python 3.11+: `FrameSummary.colno` (0-based UTF-8 bytes) converted; 3.10: `null`. JS:
   parsed from `err.stack` (`at fn (file:line:col)`, UTF-16 units) and converted. Syntax errors: Python `e.offset`; V8's
-  caret line; ts type stripping: the stripper's `[line:col]` marker, which gives the line too (12.5).
+  caret line; ts type stripping: the stripper's position, which gives the line too (12.5).
 - **Host:** a frame in a known `.v2` file whose line lies in a block body gets body line `line − loc.body_first_line + 1`
   and its column from `UnitLoc::col` (2.3; a `null` col becomes the line's first non-blank column), and prints as 2.5 says
   (`in @py risky`).
@@ -1799,8 +1805,11 @@ fd 0 (9.9).
 1. `require` the built-ins used: `fs vm v8 path module stream string_decoder url util child_process`; get `gc` once,
    through `v8.setFlagsFromString("--expose-gc")` and `vm.runInNewContext("gc")`.
 2. Stdio exactly as 9.9: the `process.stdout`, `stderr` and `stdin` getters are replaced (`console` binds lazily,
-   so it follows), `fs` calls on fds 0–2 are wrapped, `child_process` stdio is rewritten so children never inherit fd 0
-   or 1 (their output goes to stderr), then `module.syncBuiltinESMExports()`. Frames are written only through the
+   so it follows), `fs` calls on fds 0–2 are wrapped (also the ones Node routes past `readSync`/`writeSync`:
+   `readFile(Sync)`, `readv(Sync)`, `writeFile(Sync)`, `appendFile(Sync)`, `writev(Sync)`), `child_process` stdio is
+   rewritten at every index, `fork`'s default (`inherit` plus `ipc`) included, so children never inherit fd 0 or 1
+   (their output goes to stderr); the wrappers keep their originals' properties (`util.promisify.custom`). Then
+   `module.syncBuiltinESMExports()`. Frames are written only through the
    saved `fs.writeSync(1, …)`, the adapter's private channel, and fd 1 stays blocking. Native addons that write fd 1 are
    not covered; after `hello` their lines are a `ProtocolError` (9.11).
 3. `process.exit` is replaced by a function that throws an `Error`, so a block cannot end the worker; the original is
@@ -1809,7 +1818,9 @@ fd 0 (9.9).
    and the worker keeps running (0.1).
 
 The loop is 14.2's: an async top level that blocks in `fs.readSync` between requests, with nested `serve(id)` fully
-synchronous; event-loop turns and Promise awaiting follow 9.8. The event loop cannot turn while `fs.readSync` blocks,
+synchronous; event-loop turns and Promise awaiting follow 9.8. An awaited Promise that can never settle (the
+event loop runs dry, Node's `beforeExit`) is answered with `err` type `Error`: `the block's value is a Promise that
+can never settle: nothing is left for it to wait on`, and the worker keeps serving. The event loop cannot turn while `fs.readSync` blocks,
 so after the reply to every outermost (stack depth 1) request, before the next `fs.readSync`, the loop yields one
 event-loop turn (`await new Promise(r => setImmediate(r))`). If more than 1,000 `fn` stubs were created since the last
 turn, it first calls `gc()` synchronously, because V8 runs `FinalizationRegistry` callbacks only after a collection
@@ -1818,7 +1829,7 @@ turn, it first calls `gc()` synchronously, because V8 runs `FinalizationRegistry
 `Reflect.apply`/`Reflect.construct` as 11.3 decides; named arguments never arrive, since js declares no `kwargs` cap and
 the host raises `ArityError` before sending (10.8).
 
-- `entryUrl(spec, from)` (12.4, 13.5): a built-in (`node:` or in `Module.builtinModules`) stays as is; anything else →
+- `entryUrl(spec, from)` (13.5): a built-in (`node:` or in `Module.builtinModules`) stays as is; anything else →
   `pathToFileURL(createRequire(from).resolve(spec))`, the file `require` would load.
 - **Node 22.13** (not 23.0 or 23.1, 7.2) is the floor for js and ts alike: `isWellFormed`/`toWellFormed` (10.4),
   require(esm) (13.5) and `module.stripTypeScriptTypes` (12.5) need no fallback.

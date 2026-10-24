@@ -1,0 +1,57 @@
+// requires: js
+// Errors from JavaScript blocks, and V2 errors through JavaScript (DOCS 3.9, 10; INTERNALS 9.6,
+// 12.4, 14.2, 14.4).
+func fields(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.lang, "|", e.line)
+        return e
+    }
+}
+fields(func() => @js { null.x })
+fields(func() => @js { throw new RangeError("out of range") })
+// A thrown non-Error: foreign_type is its typeof.
+fields(func() => @js { throw "just a string" })
+fields(func() => @js { throw 42 })
+// Syntax errors, with clearer messages for module syntax.
+fields(func() => @js { function broken(a b) {} })
+fields(func() => @js { import fs from "fs" })
+fields(func() => @js { export const x = 1 })
+fields(func() => @js { await Promise.resolve(1) })
+// process.exit() throws instead of ending the worker.
+fields(func() => @js { process.exit(3) })
+print(@js { "the worker is still running" })
+// Error.cause becomes e.cause.
+let c = fields(func() => @js { throw new Error("outer", { cause: new TypeError("inner") }) })
+print(c.cause.type, c.cause.foreign_type, c.cause.message, c.cause.cause)
+// A V2 error thrown in a callback crosses JavaScript and comes back with its type and data.
+func boom(x) {
+    throw error("ValueError", "bad " + str(x), {n: x})
+}
+let back = fields(func() => @js(f: boom) { f(1) })
+print(back.data)
+// Inside JavaScript it is a V2Error with the V2 fields.
+print(@js(f: boom) {
+    let out;
+    try {
+        f(2);
+    } catch (e) {
+        out = [e.name, e instanceof Error, e.type, e.message, e.data, e.lang, e.foreign_type];
+    }
+    out
+})
+// A V2Error made in JavaScript can't claim a host-only kind.
+fields(func() => @js(f: boom) {
+    let made;
+    try {
+        f(3);
+    } catch (e) {
+        made = new e.constructor("EngineNotFound", "fake");
+    }
+    throw made;
+})
+// Blocks cannot read standard input (DOCS 4.6).
+fields(func() => @js { require("fs").readFileSync(0) })
+// A value that can't cross says where it failed.
+fields(func() => @js { [1, {k: ["a\udc80"]}] })

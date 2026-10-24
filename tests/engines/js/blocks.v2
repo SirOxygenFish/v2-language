@@ -1,0 +1,64 @@
+// requires: js ts
+// JavaScript action and definition blocks, args and values (DOCS 4.3-4.5, 9.1; INTERNALS 10.7,
+// 12.1, 12.2, 12.4).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+// An action block runs on every reach, each time in a fresh context.
+for i in 0..3 {
+    @js(i) {
+        globalThis.seen = (globalThis.seen ?? []).concat([i]);
+        console.log("action", i, JSON.stringify(seen));
+    }
+}
+// A definition block loads once; its args are evaluated once.
+func noisy(x) {
+    print("arg evaluated", x)
+    return x
+}
+for i in 0..3 {
+    @js counter(start: noisy(i)) {
+        console.log("loading with", start);
+        function bump() { return 1; }
+        @export { bump }
+    }
+}
+// Values: the completion value; undefined is null; a whole number arrives as an int.
+print(@js { 1 + 1 }, @js { 2.0 }, @js { 1.5 }, @js { "s" }, @js { undefined }, @js { null }, @js { true })
+print(type(@js { 2.0 }), type(@js { 1.5 }), @js { [1, , 3] }, @js { ({a: [1, {b: "x"}]}) })
+print(@js { 2 ** 60 }, type(@js { 2 ** 60 }), @js { 1e20 }, type(@js { 1e20 }), @js { 2n ** 62n })
+print(type(@js { 2n ** 70n }), type(@js { new Map() }), type(@js { new Set([1]) }), type(@js { () => 1 }))
+print((@js { NaN }) != (@js { NaN }), @js { -Infinity }, @js { Buffer.from([0, 255]) }, @js { new Uint8Array([1]) })
+print(@js { ({"$v2": 1, k: 2}) }, @js { Object.keys({b: 1, "2": 2}) })
+print(@js { let x = 1; if (x) { "completion of an if" } })
+// In statement position the value is computed but never sent, so it can be anything.
+@js { "\ud800" }
+show(func() => @js { "\ud800" })
+// Args are copied in: a dict is a plain object, a big int a BigInt, bytes a Buffer.
+let nums = [4, 8, 15]
+@js(nums, label: "lucky", d: {"__proto__": {"x": 1}}, big: 2 ** 60, small: 2 ** 53 - 1, raw: b"\xff", f: 1.0) {
+    nums.push(99);
+    console.log(label, nums.reduce((a, b) => a + b), d.x === undefined, Object.keys(d).length, typeof big, typeof small, Buffer.isBuffer(raw), f);
+}
+print(nums)
+// Each block has its own context; blocks share one process.
+@js {
+    const privateName = 1;
+    process.v2SharedByBlocks = "yes";
+}
+print(@js { typeof privateName }, @js { process.v2SharedByBlocks })
+// Bad arg names are refused by the adapter.
+show(func() => @js(undefined: 1) { 1 })
+show(func() => @js(class: 1) { 1 })
+// A V2 function goes in as a function and comes back as itself.
+print(@js(x: [print]) { x }, (@js(x: print) { x }) == print, @js(x: print) { typeof x })
+// Node's globals are there, read the way the main realm reads them; an arg may reuse a name.
+print(@js { [typeof crypto.randomUUID(), typeof URL, typeof fetch, typeof structuredClone, typeof setTimeout, typeof Buffer, typeof require] })
+print(@js(crypto: 5) { crypto })
+// import() loads built-ins and ES modules, relative to the .v2 file (12.4).
+print(@js { (async () => (await import("node:path")).basename("/a/b.txt"))() })
+print(@ts { (async (): Promise<unknown[]> => { const m = await import("./fixtures/esm.mjs"); return [m.answer, m.default()]; })() })

@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.5 JavaScript and TypeScript engine |
+| **Next task** | 1.6 Handles |
 | **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
 
 ## Rules
@@ -149,14 +149,14 @@ callbacks and errors that cross languages.
   **passed 2026-10-25** (Windows and Linux)
 
 ### 1.5 JavaScript and TypeScript engine
-- [ ] `adapters/js.js`: sync stdin reads, wrapped stdout/console/fs/child_process (§14.4)
-- [ ] JavaScript load with `vm`, completion value, no `import` statements (§12.4)
-- [ ] TypeScript via Node's built-in `module.stripTypeScriptTypes` (one Node rule for js and ts:
+- [x] `adapters/js.js`: sync stdin reads, wrapped stdout/console/fs/child_process (§14.4)
+- [x] JavaScript load with `vm`, completion value, no `import` statements (§12.4)
+- [x] TypeScript via Node's built-in `module.stripTypeScriptTypes` (one Node rule for js and ts:
       22.13+, not 23.0 or 23.1; §7.2, §12.5)
-- [ ] JS marshaling (§10.7); Promises awaited only for an outermost request (stack depth 1, §9.8)
-- [ ] V2 functions passed into JS as stubs and `V2Error`; `Error.cause` as `e.cause` (§9.6,
+- [x] JS marshaling (§10.7); Promises awaited only for an outermost request (stack depth 1, §9.8)
+- [x] V2 functions passed into JS as stubs and `V2Error`; `Error.cause` as `e.cause` (§9.6,
       §11.8, §14.2)
-- **Done when:** R06 (js) and R32 pass
+- **Done when:** R06 (js) and R32 pass — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.6 Handles
 - [ ] Operations (old-style JS constructors called with `new`), iteration (mapping handles like
@@ -342,3 +342,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-24 | ROADMAP checked against INTERNALS and DOCS: Phase 1 re-cut so each milestone can pass its own tests (V2 function stubs and `V2Error` into 1.4/1.5, named args into 1.6, cross-engine callable handles, leaks, idle callbacks and R54 into 1.7), Phase 2/3 items and citations completed, stale claims fixed; the owner gave the go-ahead for 0.11 and Phase 1 |
 | 2026-10-24 | 0.11: the small standard library (`exec`, `script_dir`, the file and folder functions, `sleep`, `time`, `min`/`max`/`sum`/`abs`/`round`/`div`, `assert`, `print(stderr:)`, `split()`, `push(...items)`, `sort(key, reverse)`); a review found 12 issues, each fixed with a test (drive-relative and `%` program paths, cwd-relative paths, pipes serviced at once, tree kill) |
 | 2026-10-25 | 1.4: the Python engine (`adapters/py.py`, blocks reached and loaded, values, V2 functions as stubs, `V2Error`, causes, coroutines, uncaught foreign errors printed with their class and causes); a review confirmed 34 findings, fixed with tests (error data with functions or handles through Python, a finalizer printing mid-send, replies that can't fail, handle counts given back, sys.path order, 8 causes, split UTF-8) |
+| 2026-10-25 | 1.5: the JavaScript and TypeScript engine (`adapters/js.js`, one vm context per unit, Promises awaited for outermost requests, ts through Node's type stripping); the 1.4 lessons applied up front; a review confirmed 24 findings, fixed with tests (Node's fs shortcuts and `fork` past the stdio wrappers, `import()` without a flag, chunks splitting surrogate pairs, a Promise that can never settle, accessor globals like `crypto`, quoted missing exports, ts error codes) |

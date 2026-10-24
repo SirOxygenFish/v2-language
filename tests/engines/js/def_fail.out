@@ -1,0 +1,5 @@
+loading
+true ForeignError RangeError nope
+ImportError | @export lists 'b' but block 'partial' does not define it
+ImportError | @export lists 'other-func' but block 'quoted' does not define it
+star loaded
