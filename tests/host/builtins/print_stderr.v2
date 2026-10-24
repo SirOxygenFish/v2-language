@@ -1,0 +1,8 @@
+// stderr: to stderr 1
+// stderr: a-b!
+// print(stderr: true) writes standard error, not standard output (DOCS 3.11, INTERNALS 5.10).
+print("to stdout")
+print("to stderr", 1, stderr: true)
+print("a", "b", sep: "-", end: "!\n", stderr: true)
+try { print("x", stderr: 1) } catch (e) { print(e.type + ": " + e.message) }
+try { print("x", stderr: null) } catch (e) { print(e.type + ": " + e.message) }

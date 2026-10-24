@@ -1,0 +1,33 @@
+1 3 2.5 zoo
+1 1.0 2 7 a
+int float
+ValueError: min() of an empty list
+ValueError: max() of an empty list
+TypeError: min() can't compare int and str
+TypeError: max() needs numbers or strings, got list
+TypeError: min() needs numbers or strings, got list
+TypeError: min() needs numbers or strings, got null
+6 3.5 0 int 0.30000000000000004
+0.6000000000000001 0.6 0.0
+TypeError: sum() needs a list of numbers, got str at [1]
+TypeError: sum() argument 'xs' must be a list, got int
+ValueError: integer overflow in '+'
+3 3 2.5 0 0.0
+ValueError: integer overflow in abs()
+TypeError: abs() needs an int or float, got str
+2 4 -2 0 2.67 1.0
+7 7 2 int 1.2 float
+0 123.5 1e20 0.1
+1.5 0.1
+ValueError: round() argument 'digits' must be >= 0, got -1
+ValueError: cannot convert 1e300 to int
+ValueError: cannot convert nan to int
+ValueError: cannot convert inf to int
+TypeError: round() argument 'x' must be an int or float, got str
+TypeError: round() argument 'digits' must be an int, got float
+inf nan
+3 -4 -4 3 2 -2 0
+ValueError: division by zero
+ValueError: integer overflow in div()
+TypeError: div() argument 'a' must be an int, got float
+TypeError: div() argument 'b' must be an int, got str

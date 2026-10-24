@@ -26,7 +26,7 @@ try { n.x(noisy()) } catch (err) { print(err.message) }
 try { [].frobnicate(noisy()) } catch (err) { print(err.message) }
 // Documented parameter names bind by name (DOCS 3.5, 3.6).
 let xs = [1, 2]
-xs.push(x: 3)
+xs.push(3)
 xs.insert(i: 0, x: 0)
 print(xs.get(i: 1), xs.get(i: 9, default: "none"), xs.index_of(x: 3), xs.pop(i: 0), xs)
 let m = {a: 1}

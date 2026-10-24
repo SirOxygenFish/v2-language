@@ -1,0 +1,30 @@
+// assert, sleep and time (DOCS 3.11, INTERNALS 5.9, 5.10).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+print(assert(true), assert(1, "never"), assert([0]))
+show(func() => assert(false))
+show(func() => assert(0, "zero is falsy"))
+show(func() => assert("", message: "empty"))
+show(func() => assert(true, 5))
+// An AssertionError is raised at the call, like any error.
+try {
+    assert(1 > 2, "math broke")
+} catch (e) {
+    print(e.type, e.message, e.line, e.col)
+}
+let t0 = time()
+print(type(t0), t0 > 1700000000.0)
+print(sleep(0.05), sleep(0))
+let waited = time() - t0
+print(waited >= 0.04, waited < 5.0)
+show(func() => sleep(-1))
+show(func() => sleep(-0.5))
+show(func() => sleep(float("nan")))
+show(func() => sleep(1e300))
+show(func() => sleep("1"))
+show(func() => time(1))

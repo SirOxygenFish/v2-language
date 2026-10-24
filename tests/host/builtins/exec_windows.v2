@@ -1,0 +1,10 @@
+// platform: windows
+// exec finds a program on PATH like an engine command (DOCS 3.11, INTERNALS 5.10, 7.5).
+let r = exec(["cmd", "/d", "/c", "echo", "hi"])
+print(r.code, json_stringify(r.stdout), json_stringify(r.stderr))
+// Exit codes are unsigned 32-bit numbers on Windows, as 8.6 prints them.
+print(exec(["cmd", "/d", "/c", "exit", "3"]).code, exec(["cmd", "/d", "/c", "exit", "-1"]).code)
+// Output that isn't UTF-8 is decoded leniently.
+let home = getenv("USERPROFILE")
+write_file(home + "/v2_exec_ff.bin", b"a\xffb")
+print(json_stringify(exec(["cmd", "/d", "/c", "type", home + r"\v2_exec_ff.bin"]).stdout))

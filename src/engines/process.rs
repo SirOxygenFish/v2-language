@@ -657,21 +657,36 @@ pub struct ChildProc {
     done: bool,
 }
 
-/// `could not start 'C:\...\python.exe': <OS message>` (8.3). Windows messages such as
-/// `%1 is not a valid Win32 application` come with their `%1` unfilled.
-fn spawn_error(program: &OsString, e: &std::io::Error) -> String {
-    let os = crate::syntax::span::os_message(e).replace("%1", "the program");
-    let mut msg = format!("could not start '{}': {os}", program.to_string_lossy());
+/// A child that could not start.
+#[derive(Debug)]
+pub struct SpawnError {
+    /// `could not start 'C:\...\python.exe': <reason>` (8.3).
+    pub message: String,
+    /// The OS message alone, which `exec` words its own way (5.10).
+    pub reason: String,
+}
+
+/// Windows messages such as `%1 is not a valid Win32 application` come with their `%1`
+/// unfilled.
+fn spawn_error(program: &OsString, e: &std::io::Error) -> SpawnError {
+    let mut reason = crate::syntax::span::os_message(e).replace("%1", "the program");
     if cfg!(windows) && e.raw_os_error() == Some(193) {
-        msg.push_str(" (not a valid program for this machine)");
+        reason.push_str(" (not a valid program for this machine)");
     }
-    msg
+    SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason }
 }
 
 impl ChildProc {
-    pub fn spawn(s: &Spawn) -> Result<ChildProc, String> {
+    pub fn spawn(s: &Spawn) -> Result<ChildProc, SpawnError> {
         stop_if_interrupted();
         let program = &s.argv[0];
+        // Windows runs a batch file through cmd.exe, which would expand `%NAME%` in its path
+        // (Rust escapes only the arguments) and run something else (7.5).
+        let ext = std::path::Path::new(program).extension().map(|e| e.to_ascii_lowercase());
+        if cfg!(windows) && (ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref())) && program.to_string_lossy().contains('%') {
+            let reason = "a batch file whose path contains '%' can't be started safely".to_string();
+            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
+        }
         let mut cmd = Command::new(program);
         cmd.args(&s.argv[1..]).envs(s.env.iter().map(|(k, v)| (k, v)));
         cmd.stdin(s.stdin.stdio()).stdout(s.stdout.stdio()).stderr(s.stderr.stdio());
@@ -895,7 +910,7 @@ fn resume_main_thread(pid: u32) -> std::io::Result<()> {
     }
 }
 
-/// A child's output after it ended: version probes (7.7).
+/// A child's output after it ended: version probes (7.7), `exec` (5.10).
 pub struct Captured {
     pub status: ExitInfo,
     pub stdout: Vec<u8>,
@@ -913,11 +928,24 @@ fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// Run `argv` to its end with stdin the null device, stdout and stderr captured, and at most
-/// `limit`. Each output pipe is read on its own thread; this thread waits for the exit (or the
-/// timer's kill), kills the tree, joins the readers, then reaps (8.3).
-pub fn run_captured(argv: &[OsString], env: &[(OsString, OsString)], limit: Option<Duration>) -> Result<Captured, String> {
-    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Piped })?;
+/// Run `argv` to its end with stdout and stderr captured, and at most `limit`. Stdin is the null
+/// device, or a pipe that a helper thread writes `input` into and then closes. Each output pipe
+/// is read on its own thread; this thread waits for the exit (or the timer's kill), kills the
+/// tree, joins the readers, then reaps (8.3).
+pub fn run_captured(
+    argv: &[OsString],
+    env: &[(OsString, OsString)],
+    limit: Option<Duration>,
+    input: Option<Vec<u8>>,
+) -> Result<Captured, SpawnError> {
+    let stdin = if input.is_some() { Pipe::Piped } else { Pipe::Null };
+    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped })?;
+    // A child that exits without reading gets a write error here, which is not the caller's.
+    let feed = input.zip(child.take_stdin()).map(|(bytes, mut pipe)| {
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut pipe, &bytes);
+        })
+    });
     let out = drain(child.take_stdout());
     let err = drain(child.take_stderr());
     let timer = limit.map(|l| push_timer(Some(l), child.kill_handle()));
@@ -927,6 +955,9 @@ pub fn run_captured(argv: &[OsString], env: &[(OsString, OsString)], limit: Opti
     drop(timer);
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
+    // Not joined: its writes fail now that the tree is dead, and a process that escaped the
+    // tree could keep it blocked (8.3).
+    drop(feed);
     let status = child.reap();
     Ok(Captured { status, stdout, stderr, timed_out })
 }
@@ -1058,6 +1089,24 @@ pub(crate) mod tests {
                 out.flush().unwrap();
                 std::thread::sleep(Duration::from_secs(30));
             }
+            // 1 MiB to stdout and to stderr before reading stdin: every pipe must be serviced
+            // at once (8.3).
+            "chatty_cat" => {
+                let chunk = vec![b'x'; 64 * 1024];
+                let mut err = std::io::stderr();
+                for _ in 0..16 {
+                    out.write_all(&chunk).unwrap();
+                    err.write_all(&chunk).unwrap();
+                }
+                let mut input = Vec::new();
+                std::io::stdin().read_to_end(&mut input).unwrap();
+                write!(out, "<read {}>", input.len()).unwrap();
+            }
+            // Start a grandchild that holds stdout and writes `arg` after 1.5 s, then exit.
+            "orphan" => {
+                plain_helper(&format!("late:{arg}")).stdin(Stdio::null()).spawn().unwrap();
+                wait_for(&started(arg));
+            }
             "cat" => {
                 let mut input = Vec::new();
                 std::io::stdin().read_to_end(&mut input).unwrap();
@@ -1126,14 +1175,14 @@ pub(crate) mod tests {
             "child_status" => {
                 Watchdog::start();
                 let (argv, env) = helper("exit:3");
-                let c = run_captured(&argv, &env, Some(Duration::from_secs(30))).unwrap();
+                let c = run_captured(&argv, &env, Some(Duration::from_secs(30)), None).unwrap();
                 writeln!(out, "status {:?}", c.status.code).unwrap();
             }
             // A host with a console but no window: its child must share that console (8.3).
             #[cfg(windows)]
             "console_host" => {
                 let (argv, env) = helper("console_list");
-                let c = run_captured(&argv, &env, Some(Duration::from_secs(30))).unwrap();
+                let c = run_captured(&argv, &env, Some(Duration::from_secs(30)), None).unwrap();
                 out.write_all(&c.stdout).unwrap();
             }
             #[cfg(windows)]
@@ -1360,9 +1409,57 @@ pub(crate) mod tests {
         let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("sleep:20000");
         let start = Instant::now();
-        let c = run_captured(&argv, &env, Some(Duration::from_millis(500))).expect("spawn");
+        let c = run_captured(&argv, &env, Some(Duration::from_millis(500)), None).expect("spawn");
         assert!(c.timed_out, "{:?}", c.status);
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_captured_run_gets_its_input_then_eof() {
+        // `exec(argv, input: …)` (5.10): the bytes, then end of input; without input, the null
+        // device. 1 MiB is more than a pipe buffer, so the writer must not block the reader.
+        let (argv, env) = helper("cat");
+        // libtest's own lines come before the helper's output.
+        let echoed = |input: Option<Vec<u8>>| {
+            let c = run_captured(&argv, &env, None, input).expect("spawn");
+            let at = c.stdout.iter().position(|&b| b == b'<').expect("the helper's output");
+            c.stdout[at..].to_vec()
+        };
+        let big = vec![b'x'; 1 << 20];
+        assert_eq!(echoed(Some(big.clone())).len(), big.len() + 2);
+        assert_eq!(echoed(Some(b"a\nb".to_vec())), b"<a\nb>");
+        assert_eq!(echoed(None), b"<>");
+    }
+
+    #[test]
+    fn a_captured_run_services_its_input_and_outputs_at_once() {
+        // 8.3: input is written while both outputs are read. A child that fills stdout and
+        // stderr before it reads stdin, and one that never reads its input, both finish.
+        let _serial = crate::engines::process::tests::serial();
+        let input = vec![b'y'; 1 << 20];
+        let (argv, env) = helper("chatty_cat");
+        let c = run_captured(&argv, &env, Some(Duration::from_secs(30)), Some(input.clone())).expect("spawn");
+        assert!(!c.timed_out);
+        assert!(c.stdout.ends_with(b"<read 1048576>"), "{}", String::from_utf8_lossy(&c.stdout[c.stdout.len().saturating_sub(40)..]));
+        assert!(c.stdout.len() > 1 << 20 && c.stderr.len() >= 1 << 20, "{} {}", c.stdout.len(), c.stderr.len());
+        let (argv, env) = helper("chatty");
+        let c = run_captured(&argv, &env, Some(Duration::from_secs(30)), Some(input)).expect("spawn");
+        assert!(!c.timed_out && c.status.success(), "{:?}", c.status);
+    }
+
+    #[test]
+    fn a_captured_run_stops_what_its_child_started() {
+        // 8.3, DOCS 3.11 (`exec`): a grandchild left behind holding stdout is killed with the
+        // tree when the child exits, so the run returns at once and the grandchild never writes.
+        let dir = temp("orphan");
+        let marker = dir.join("late");
+        let (argv, env) = helper(&format!("orphan:{}", marker.display()));
+        let start = Instant::now();
+        let c = run_captured(&argv, &env, None, None).expect("spawn");
+        assert!(c.status.success(), "{:?}", c.status);
+        assert!(start.elapsed() < Duration::from_millis(1400), "{:?}", start.elapsed());
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(!marker.exists(), "the grandchild outlived the run");
     }
 
     #[cfg(unix)]
@@ -1387,7 +1484,7 @@ pub(crate) mod tests {
         let e = ChildProc::spawn(&Spawn { argv: &argv, env: &[], stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
             .err()
             .expect("an error");
-        assert!(e.ends_with(" (not a valid program for this machine)") && !e.contains("%1"), "{e}");
+        assert!(e.message.ends_with(" (not a valid program for this machine)") && !e.message.contains("%1"), "{e:?}");
         let describe = |c: u32| ExitInfo { code: Some(c as i32), signal: None }.describe();
         assert_eq!(describe(0x8000_0000), "exit code 2147483648 = 0x80000000");
         assert_eq!(describe(0x7FFF_FFFF), "exit code 2147483647");

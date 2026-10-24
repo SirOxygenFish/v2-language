@@ -1,0 +1,5 @@
+// For script_dir.v2: script_dir() here is this file's folder, not the entry file's.
+func data() {
+    return read_file(script_dir() + "/data.txt").trim()
+}
+let here = script_dir()

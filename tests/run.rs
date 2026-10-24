@@ -662,6 +662,168 @@ fn a_drive_relative_import_is_an_import_error() {
 }
 
 #[test]
+fn exec_runs_a_program_without_a_shell() {
+    // DOCS 3.11, INTERNALS 5.10: the arguments arrive exactly as given; the code, stdout and
+    // stderr come back; `input` is piped and then closed; a non-zero code is not an error. The
+    // program is v2 itself, so the test is the same on every OS.
+    let child = "print(json_stringify(args()))\nprint(\"to err\", stderr: true)\nlet line = input()\nwhile line != null {\n    print(\"got \" + line)\n    line = input()\n}\nexit(len(args()))\n";
+    let main = r#"let v2 = args()[0]
+let r = exec([v2, "child.v2", "a b", "", "c\"d", "%PATH%", "$HOME"])
+print(r.code, json_stringify(r.stdout), json_stringify(r.stderr), r.keys())
+r = exec([v2, "child.v2"], input: "one\r\ntwo")
+print(r.code, json_stringify(r.stdout))
+print(exec([v2, "child.v2"], input: b"three\n").stdout.trim())
+print(exec([v2, "child.v2"], input: "").stdout.trim())
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message.split("': ")[0])
+    }
+}
+show(func() => exec([]))
+show(func() => exec(v2))
+show(func() => exec([v2, 1]))
+show(func() => exec([v2], input: 5))
+try { exec(["v2_no_such_program_here"]) } catch (e) { print(e.type + ": " + e.message) }
+show(func() => exec(["./no_such_dir/prog"]))
+// A name with a separator is started as a path, so the reason is the OS's (7.5).
+try { exec(["./no_such_dir/prog"]) } catch (e) { print(e.message.ends_with("not found on PATH"), len(e.message) > 45) }
+"#;
+    let (code, stdout, stderr, _home) = run_with_files(&[("child.v2", child), ("main.v2", main)], &["main.v2", BIN]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        stdout,
+        concat!(
+            r#"5 "[\"a b\",\"\",\"c\\\"d\",\"%PATH%\",\"$HOME\"]\n" "to err\n" ["code", "stdout", "stderr"]"#,
+            "\n",
+            r#"0 "[]\ngot one\ngot two\n""#,
+            "\n",
+            "[]\ngot three\n",
+            "[]\n",
+            "ValueError: exec() argument 'argv' must not be empty\n",
+            "TypeError: exec() argument 'argv' must be a list, got str\n",
+            "TypeError: exec() argument 'argv' must hold only str, got int at [1]\n",
+            "TypeError: exec() argument 'input' must be a str, bytes or null, got int\n",
+            "IOError: exec: cannot start 'v2_no_such_program_here': not found on PATH\n",
+            "IOError: exec: cannot start './no_such_dir/prog\n",
+            "false true\n",
+        )
+    );
+}
+
+#[test]
+fn file_functions_and_exec_use_the_working_directory() {
+    // DOCS 3.11, INTERNALS 5.10: relative paths in the file functions and exec's argv[0] are
+    // relative to the cwd, not to the script; the program runs in V2's cwd and environment, and
+    // with no `input` its stdin is empty even when V2's own stdin has data, which stays V2's.
+    let home = TempHome::new();
+    let main = r#"print(exists("data.txt"), read_file("data.txt").trim())
+print("data.txt" in list_dir("."), "main.v2" in list_dir("."))
+make_dir("made/deep")
+write_file("made/deep/f.txt", "a")
+write_file("made/deep/f.txt", "b", append: true)
+print(read_file("made/deep/f.txt"), exists(script_dir() + "/made"))
+remove_file("made/deep/f.txt")
+print(list_dir("made/deep"))
+let r = exec(["./prog", "child.v2"])
+print(r.code, r.stdout.trim())
+print(input())
+"#;
+    let files = [
+        ("proj/sub/main.v2", main),
+        ("proj/sub/data.txt", "script copy\n"),
+        ("work/data.txt", "cwd copy\n"),
+        ("work/child.v2", "print(read_file(\"data.txt\").trim(), getenv(\"V2_TEST_MARK\"), input())\n"),
+    ];
+    for (path, text) in files {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let work = home.0.join("work");
+    std::fs::copy(BIN, work.join(if cfg!(windows) { "prog.exe" } else { "prog" })).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg(home.0.join("proj/sub/main.v2")).current_dir(&work).env("V2_TEST_MARK", "mark");
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), b"secret\n".to_vec(), Duration::from_secs(60)).unwrap();
+    let (stdout, stderr) = (normalize(&String::from_utf8_lossy(&out.stdout)), String::from_utf8_lossy(&out.stderr).into_owned());
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(stdout, "true cwd copy\ntrue false\nab false\n[]\n0 cwd copy mark null\nsecret\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_refuses_paths_cmd_would_rewrite() {
+    // INTERNALS 7.5: `C:prog` is relative to drive C's own current folder, so it is never
+    // found, even in the cwd; a batch file whose path holds `%` would be expanded by cmd.exe.
+    let home = TempHome::new();
+    std::fs::copy(BIN, home.0.join("prog.exe")).unwrap();
+    std::fs::create_dir_all(home.0.join("p%OS%q")).unwrap();
+    std::fs::write(home.0.join("p%OS%q").join("x.cmd"), "@echo ran\r\n").unwrap();
+    let drive = home.0.to_string_lossy()[..2].to_string();
+    let main = format!(
+        "func show(f) {{\n    try {{\n        print(f())\n    }} catch (e) {{\n        print(e.type + \": \" + e.message)\n    }}\n}}\nshow(func() => exec([\"{drive}prog\", \"--version\"]))\nshow(func() => exec([r\".\\p%OS%q\\x.cmd\"]))\n"
+    );
+    std::fs::write(home.0.join("main.v2"), main).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("main.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        stdout,
+        format!(
+            "IOError: exec: cannot start '{drive}prog': a drive-relative path: write it relative to the working directory, or absolute\n\
+             IOError: exec: cannot start '.\\p%OS%q\\x.cmd': a batch file whose path contains '%' can't be started safely\n"
+        )
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn list_dir_refuses_names_that_are_not_utf8_and_exists_follows_symlinks() {
+    // INTERNALS 5.10: a name that is not UTF-8 is an IOError; `exists` follows symlinks.
+    use std::os::unix::ffi::OsStrExt;
+    let home = TempHome::new();
+    let d = home.0.join("names");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join(std::ffi::OsStr::from_bytes(b"bad\xff")), "").unwrap();
+    std::fs::write(d.join("data.txt"), "").unwrap();
+    std::os::unix::fs::symlink("data.txt", d.join("link")).unwrap();
+    std::os::unix::fs::symlink("missing", d.join("dangling")).unwrap();
+    let main = "try { list_dir(\"names\") } catch (e) { print(e.type + \": \" + e.message) }\nprint(exists(\"names/link\"), exists(\"names/dangling\"), exists(\"names/data.txt\"))\n";
+    std::fs::write(home.0.join("main.v2"), main).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("main.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "IOError: cannot list 'names': a name is not valid UTF-8\ntrue false true\n");
+}
+
+#[test]
+fn print_to_stderr_flushes_stdout_first() {
+    // INTERNALS 5.10: `print(stderr: true)` flushes `Out` and then writes stderr, so on one pipe
+    // the lines keep program order; a failed write to stderr is an IOError at the print (ch. 21
+    // Host).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("order.v2"), "print(\"a\")\nprint(\"b\", stderr: true)\nprint(\"c\")\nprint(\"d\", \"e\", sep: \"-\", end: \"!\\n\", stderr: true)\n").unwrap();
+    let (mut reader, writer) = std::io::pipe().expect("a pipe");
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("order.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(writer.try_clone().unwrap()).stderr(writer);
+    let child = cmd.spawn().expect("start v2");
+    drop(cmd);
+    let mut text = String::new();
+    reader.read_to_string(&mut text).unwrap();
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text, "a\nb\nc\nd-e!\n");
+    std::fs::write(home.0.join("closed.v2"), "try {\n    print(\"x\", stderr: true)\n} catch (e) {\n    print(e.type, e.message.split(\":\")[0], e.line)\n}\n").unwrap();
+    let (code, stdout) = run_with_a_closed_stream(&home.0, &["closed.v2"], false);
+    assert_eq!((code, stdout.as_str()), (Some(0), "IOError cannot write to stderr 2\n"));
+}
+
+#[test]
 fn writing_to_a_closed_stdout_is_an_io_error() {
     // INTERNALS 21 (Host) and 5.10: a failed write (closed pipe; Rust ignores SIGPIPE) raises
     // IOError at the print.

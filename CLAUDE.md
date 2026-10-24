@@ -26,7 +26,8 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 0.11 (not started).
+- Now: 1.4 (not started). Draft adapter: `scratchpad/py.py` of the session (move to
+  `src/adapters/py.py`).
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -74,7 +75,7 @@ it is loaded automatically into every session and every subagent.
   7/8 of the stack; MAX_CALLS 10,000; no FileScope/units/export registry yet; `call_value(f,
   pos, named, at)` calls any V2 value from Rust), `value` (`Callable` = Closure | Builtin),
   `env`, `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
-  `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table; `Out`, the only stdout
+  `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
   `fail(..)`; the caller places it at the call site.
@@ -87,7 +88,8 @@ it is loaded automatically into every session and every subagent.
 - `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
   prints `check X: N files, M errors`) and `doctor::doctor` (the table).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
-  `KillHandle`, `run_captured(argv, env, limit)` (stdin null), the watchdog (only the top timer
+  `KillHandle`, `run_captured(argv, env, limit, input)` (stdin null or fed by an unjoined thread;
+  `SpawnError { message, reason }`; batch paths with `%` refused), the watchdog (only the top timer
   runs, not while paused; exit check every 250 ms; SIGCHLD reset),
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
   the run dir). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push

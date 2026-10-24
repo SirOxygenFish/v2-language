@@ -1,0 +1,10 @@
+// script_dir(): the absolute folder of the file containing the call (DOCS 3.11, INTERNALS 5.10).
+import "./fixtures/where.v2" as where
+let dir = script_dir()
+print(dir.starts_with("/") || dir[1:3] == ":\\")
+print(exists(dir + "/script_dir.v2"), "script_dir.v2" in list_dir(dir))
+// The module's script_dir() is its own folder: data.txt exists only there.
+print(where.data(), exists(dir + "/data.txt"))
+print(where.here == dir + "/fixtures" || where.here == dir + "\\fixtures")
+let f = script_dir
+print(f() == dir)
