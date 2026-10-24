@@ -9,15 +9,17 @@ it is loaded automatically into every session and every subagent.
   `@export`/`@import`, VEP/1 workers, compiled blocks via libffi, `extern`, custom engines.
 - **DOCS.md** = what the language does (user spec). **INTERNALS.md** = how (implementation spec,
   `§n.m` = its sections). **ROADMAP.md** = order + what's done ("Where we are", progress log).
-- The docs were trimmed to the glue-language scope on 2026-10-16 (ROADMAP progress log lists
-  what went). Don't bring cut features back without the owner's OK.
+- The docs were trimmed to the glue-language scope on 2026-10-16, then reviewed on 2026-10-24
+  (43 owner-approved changes; ROADMAP progress log lists both). Don't bring cut features back
+  without the owner's OK.
 - **Never propose cutting how other languages get in**: built-in engines, custom engines (`run`
   and `bridged`), `extern`, compiled blocks, cross-language `@import`/`@export`, handles. That
   reach is the language (owner, 2026-10-24: "2 and 3 are the main base of the language").
   Bloat to trim is elsewhere: host-language extras, tooling, config, over-detailed spec text.
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: ROADMAP "Where we are". 1.4 (Python engine) waits for the owner's go-ahead.
+- Status: ROADMAP "Where we are". 1.4 (Python engine) and 0.11 (small standard library, so far
+  docs only) wait for the owner's go-ahead.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -37,7 +39,8 @@ it is loaded automatically into every session and every subagent.
   mangle backslashes** — for any edit containing `\` write a Python script with the Write tool
   and run it, or use the Edit tool.
 - Linux check: WSL Ubuntu has cargo (nightly 1.93):
-  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude old --exclude .git /mnt/c/Users/SirOxygen/Desktop/v2-language/ ~/v2/ && cd ~/v2 && cargo test"`
+  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude old --exclude .git '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
+  (the repo lives in `Desktop\My Stuff\v2-language`; quote the path, it has a space)
   (also `cargo clippy --all-targets` there: nightly has extra lints, and cfg(unix) code only
   compiles there).
 - For review workflows, copy `target/debug/v2.exe` to the scratchpad and let agents use that
@@ -51,16 +54,18 @@ it is loaded automatically into every session and every subagent.
   `V2_TEST_PANIC` panics the interpreter thread (for the 101 test).
 - `cli/`: argv parser (`v2 FILE`, `check FILE`, `doctor`, `cache clean`, `--version`, `--help`;
   no other flags), HELP text. `config/`: the project's `v2.toml` read in file order, then
-  `V2_ENGINE_<TAG>` overrides (a replaced `command` is not validated); unknown sections/keys
-  and keys that don't apply are config errors (no warnings). `load_from(start, env)` is the
-  test seam. Custom engine tables kept raw until Phase 3 (17.1).
+  `V2_ENGINE_<TAG>` overrides (canonical tags only; a replaced `command` is not validated);
+  `command` must be an array; unknown sections/keys and keys that don't apply are config
+  errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
+  raw until Phase 3 (17.1).
 - `syntax/`: `span` (SourceMap, FileId, display_path), `lexer`, `scan` (block bodies, profiles,
   `canonical_tag`), `directives` (@export/@import, dedent), `parser` (MAX_DEPTH 256, expression
-  height MAX_LINKS 10,000), `check` (static checks, 4.5), `ast`.
+  height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
+  (static checks, 4.5, incl. "this expression's value is not used"), `ast`.
 - `runtime/`: `interp` (exec/eval take `&Env`; only stack = `calls`; `guard()` at 7/8 of the
   stack; MAX_CALLS 10,000), `value`, `env`, `call` (binder), `ops`, `methods`, `strings`
-  (char cache), `builtins` (+ `Out`, the only stdout writer), `error` (ErrorValue, Flow,
-  rendering, did_you_mean), `module` (import graph, `locate`, `shown`).
+  (char cache), `builtins` (+ `Out`, the only stdout writer; `POSITIONAL_ONLY`), `error`
+  (ErrorValue, Flow, rendering, did_you_mean), `module` (import graph, `locate`, `shown`).
 - `Flow { Error, Return, Break, Continue, Exit }`, `Exec<T> = Result<T, Flow>`. Interrupts are
   never a Flow.
 - Deep values are freed iteratively (Drop impls feed a thread-local queue).
@@ -74,7 +79,8 @@ it is loaded automatically into every session and every subagent.
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
   the run dir). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
   timers must hold `engines::process::tests::serial()`** (the watchdog is global).
-- `engines/spec.rs` (py/js/ts table, `Version`), `engines/resolve.rs` (`Lookup`, `find_program`,
+- `engines/spec.rs` (py/js/ts table, `Version`, `too_old`: Python 3.10+, one Node rule for js
+  and ts: 22.13+, not 23.0/23.1), `engines/resolve.rs` (`Lookup`, `find_program`,
   `Prober`/`RealProber`, `ProbeCache` (usable entries only) + `CacheMode`, `Resolver`,
   `ResolvedEngine`, `NotFound`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
   `engine_available`). A reached block resolves its tag, then `not_yet` until 1.4. Uncaught

@@ -276,7 +276,7 @@ fn to_json(v: &Value, path: &mut Vec<Step>, open: &mut Vec<usize>) -> Exec<serde
             serde_json::Value::Object(out)
         }
         Value::Bytes(_) | Value::Func(_) | Value::Error(_) => return not_json(v.type_name(), path),
-        Value::Handle(_) => return not_json_hint("handle", path, " (use value(h) first)"),
+        Value::Handle(_) => return not_json_hint("handle", path, " (use to_v2(h) first)"),
     })
 }
 

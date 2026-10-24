@@ -19,7 +19,7 @@ d["a"] = 0
 d.z = 26
 print(d.keys())
 // A key holding a function wins over the dict method of that name; other keys don't.
-let ns = {keys: lambda() => "my keys", get: 99, double: lambda(x) => x * 2}
+let ns = {keys: func() => "my keys", get: 99, double: func(x) => x * 2}
 print(ns.keys(), ns.get("nope", "default"), ns.double(21), ns.get, len(ns))
 for key, value in {a: 1, b: 2} { print(key, value) }
 for key in {x: 1} { print(key) }

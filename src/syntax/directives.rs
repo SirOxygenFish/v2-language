@@ -108,6 +108,9 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         }
         i += 1;
     }
+    if compiled {
+        compiled_directives(&directives, tag)?;
+    }
 
     // Step 3: dedent the code lines.
     let code: Vec<usize> = (0..lines.len())
@@ -622,6 +625,81 @@ fn describe(k: &DK) -> String {
     }
 }
 
+/// Compiled blocks' directive rules (4.5, 15.2), checked statically so `v2 check` finds them: a
+/// block without `@export` runs as a program and can't import; imports name functions, never
+/// `*`; every local name must be an identifier of the block's language, because V2 generates a
+/// function with that name (15.4).
+fn compiled_directives(d: &Directives, tag: &str) -> Result<(), Diag> {
+    let lang = match tag {
+        "c" => "C",
+        "cpp" | "cxx" => "C++",
+        _ => "Rust",
+    };
+    for import in &d.imports {
+        if d.exports.is_none() {
+            return Err(Diag::new("a compiled block without @export runs as a program and can't @import", import.span)
+                .hint("export a function from this block, or call the other language from V2 code"));
+        }
+        match &import.items {
+            ImportItems::All(star) => {
+                return Err(Diag::new("compiled blocks import names, not *", *star).hint("list the names: @import { mean } from …"))
+            }
+            ImportItems::Names(items) => {
+                for item in items {
+                    let (local, span) = item.alias.as_ref().map_or((&item.name, item.span), |a| (&a.text, a.span));
+                    if !native_ident(lang, local) {
+                        return Err(Diag::new(format!("'{local}' is not a valid {lang} identifier — rename it with 'as'"), span));
+                    }
+                }
+            }
+            ImportItems::Module(_) => {}
+        }
+    }
+    if let Some(ex) = &d.exports {
+        for item in &ex.items {
+            if !native_ident(lang, &item.text) {
+                return Err(Diag::new(format!("'{}' is not a valid {lang} identifier", item.text), item.span)
+                    .hint("rename the function, or export a wrapper with a plain name"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An ASCII identifier that is not a keyword of `lang` (C11, C++17, Rust 2021 strict and
+/// reserved keywords).
+fn native_ident(lang: &str, name: &str) -> bool {
+    const C: &[&str] = &[
+        "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern",
+        "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed",
+        "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "_Alignas",
+        "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary", "_Noreturn", "_Static_assert",
+        "_Thread_local",
+    ];
+    const CPP: &[&str] = &[
+        "alignas", "alignof", "and", "and_eq", "asm", "bitand", "bitor", "bool", "catch", "char16_t", "char32_t",
+        "char8_t", "class", "compl", "concept", "consteval", "constexpr", "constinit", "const_cast", "co_await",
+        "co_return", "co_yield", "decltype", "delete", "dynamic_cast", "explicit", "export", "false", "friend",
+        "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private",
+        "protected", "public", "reinterpret_cast", "requires", "static_assert", "static_cast", "template", "this",
+        "thread_local", "throw", "true", "try", "typeid", "typename", "using", "virtual", "wchar_t", "xor", "xor_eq",
+    ];
+    const RUST: &[&str] = &[
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self",
+        "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become",
+        "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+    ];
+    let mut chars = name.chars();
+    let ident = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let keyword = match lang {
+        "C" => C.contains(&name),
+        "C++" => C.contains(&name) || CPP.contains(&name),
+        _ => RUST.contains(&name),
+    };
+    ident && !keyword && name != "_"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,9 +758,9 @@ mod tests {
         assert_eq!(&*p.body, "sum(data) / len(data)\n");
         assert_eq!((p.loc.body_first_line, p.loc.body_col), (1, 21));
         assert!(p.directives.exports.is_none());
-        let (p, _) = run("@py { x = 1\n    y = 2\n}").unwrap();
-        assert_eq!(&*p.body, "x = 1\ny = 2\n");
-        assert_eq!((p.loc.body_first_line, p.loc.body_col), (1, 7));
+        // A multi-line block's code starts on the line after its `{` (3.7); blanks may follow it.
+        assert_eq!(run("@py { x = 1\n    y = 2\n}").err().as_deref(), Some("a multi-line block starts on the line after its {"));
+        assert_eq!(&*run("@py {   \r\n    y = 2\n}").unwrap().0.body, "y = 2\n");
         let (p, _) = run("@py {}").unwrap();
         assert_eq!(&*p.body, "");
     }
@@ -825,6 +903,26 @@ mod tests {
         }
         assert!(run("@js {\n  @import { f } from py.\"my_mod\"\n}").is_ok());
         assert!(run("@js {\n  @import { f } from @py.calc\n}").is_ok());
+    }
+
+    #[test]
+    fn compiled_directive_rules_are_static() {
+        // 4.5, 15.2: v2 check finds these; they are no longer BuildErrors at load.
+        let err = |src: &str| run(src).err().unwrap_or_default();
+        assert_eq!(err("@c {\n    @import { mean } from py.statistics\n    int main(void) { return 0; }\n}"),
+            "a compiled block without @export runs as a program and can't @import");
+        assert_eq!(err("@rust {\n    @import { * } from stats\n    fn f() {}\n    @export { f }\n}"), "compiled blocks import names, not *");
+        assert_eq!(err("@cpp {\n    @import { delete } from stats\n    void f() {}\n    @export { f }\n}"),
+            "'delete' is not a valid C++ identifier — rename it with 'as'");
+        assert_eq!(err("@rust {\n    @import { mean as fn } from stats\n    fn f() {}\n    @export { f }\n}"),
+            "'fn' is not a valid Rust identifier — rename it with 'as'");
+        assert_eq!(err("@c {\n    @import { café } from stats\n    void f(void) {}\n    @export { f }\n}"),
+            "'café' is not a valid C identifier — rename it with 'as'");
+        assert_eq!(err("@c {\n    int größe(void) { return 1; }\n    @export { größe }\n}"), "'größe' is not a valid C identifier");
+        // Fine: an alias fixes the name; delete is no keyword in C; py blocks take any name.
+        assert!(run("@cpp {\n    @import { delete as remove } from stats\n    void f() {}\n    @export { f }\n}").is_ok());
+        assert!(run("@c {\n    @import { delete } from stats\n    void f(void) {}\n    @export { f }\n}").is_ok());
+        assert!(run("@py {\n    @import { * } from stats\n}").is_ok());
     }
 
     #[test]

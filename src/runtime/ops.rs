@@ -157,7 +157,7 @@ fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
 }
 
 /// What a TypeError about a handle operand adds (11.7).
-pub const HANDLE_HINT: &str = " — do it inside a block, or convert it with value(h) first";
+pub const HANDLE_HINT: &str = " — do it inside a block, or convert it with to_v2(h) first";
 
 pub fn is_handle(v: &Value) -> bool {
     matches!(v, Value::Handle(_))
@@ -345,10 +345,8 @@ pub fn contains(y: &Value, x: &Value) -> Exec<bool> {
             }
             Ok(false)
         }
-        Value::Dict(d) => match x {
-            Value::Str(k) => Ok(d.borrow().contains_key(k)),
-            other => type_error(format!("'in' on a dict needs a str key, got {}", other.type_name())),
-        },
+        // Keys are strings, so anything else is simply not a key (5.3).
+        Value::Dict(d) => Ok(matches!(x, Value::Str(k) if d.borrow().contains_key(k))),
         Value::Str(s) => match x {
             Value::Str(sub) => Ok(s.contains(&**sub)),
             other => type_error(format!("'in' on a str needs a str, got {}", other.type_name())),

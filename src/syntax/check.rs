@@ -1,7 +1,7 @@
 //! Static checks that need the whole tree (INTERNALS 4.5): block labels, the reserved `v2`
-//! name, `break`/`continue`/`return` placement and redeclarations. A file that parses gets
-//! every check, and all violations are reported in source order. (Checks that the grammar
-//! decides locally are parse errors, raised by the parser.)
+//! name, `break`/`continue`/`return` placement, redeclarations and unused expression values.
+//! A file that parses gets every check, and all violations are reported in source order.
+//! (Checks that the grammar decides locally are parse errors, raised by the parser.)
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -56,6 +56,25 @@ impl Checker {
         }
     }
 
+    /// A statement that is only an expression must be a call or an action block (4.5): any other
+    /// value is computed and dropped, which is almost always a mistake (`x == 1` meant as
+    /// `x = 1`, or a line starting with `-` meant to continue the line before).
+    fn unused_value(&mut self, e: &Expr) {
+        let last = match &e.kind {
+            ExprKind::OptChain(chain) => &chain.kind,
+            k => k,
+        };
+        if matches!(last, ExprKind::Call { .. } | ExprKind::Block(_)) {
+            return;
+        }
+        let hint = match &e.kind {
+            ExprKind::Unary(..) => "to continue the previous line, end that line with the operator",
+            ExprKind::Binary(BinOp::Eq, ..) => "did you mean '='?",
+            _ => "assign it with let, or remove it",
+        };
+        self.diags.push(Diag::new("this expression's value is not used", e.span).hint(hint));
+    }
+
     fn body_of(&mut self, body: &Body, ctx: Ctx, introduced: &[&Name]) {
         let stmts: Vec<&Stmt> = body.stmts.iter().collect();
         self.body(&stmts, ctx, introduced);
@@ -68,7 +87,11 @@ impl Checker {
                     self.expr(e, ctx);
                 }
             }
-            StmtKind::Const(_, e) | StmtKind::Expr(e) | StmtKind::Throw(e) => self.expr(e, ctx),
+            StmtKind::Const(_, e) | StmtKind::Throw(e) => self.expr(e, ctx),
+            StmtKind::Expr(e) => {
+                self.unused_value(e);
+                self.expr(e, ctx);
+            }
             StmtKind::Break if !ctx.in_loop => self.diags.push(Diag::new("break outside a loop", s.span)),
             StmtKind::Continue if !ctx.in_loop => self.diags.push(Diag::new("continue outside a loop", s.span)),
             StmtKind::Break | StmtKind::Continue => {}
@@ -243,7 +266,7 @@ impl Checker {
                 }
             }
             ExprKind::Member { obj, .. } => self.expr(obj, ctx),
-            ExprKind::Lambda(f) => self.func(f),
+            ExprKind::Func(f) => self.func(f),
             ExprKind::Block(b) => self.block(b, ctx),
         }
     }
@@ -300,7 +323,7 @@ mod tests {
         assert_eq!(diags("func f() { }\nconst f = 1"), vec!["'f' is already declared in this block"]);
         assert_eq!(diags("import \"./u.v2\" as u\n@import { mean as u } from py.statistics"), vec!["'u' is already declared in this block"]);
         assert_eq!(diags("extern \"m\" { double cos(double x); }\nlet cos = 1"), vec!["'cos' is already declared in this block"]);
-        assert_eq!(diags("let f = lambda(a) { let a = 1 }"), vec!["'a' is already declared in this block"]);
+        assert_eq!(diags("let f = func(a) { let a = 1 }"), vec!["'a' is already declared in this block"]);
         // The two loop variables are both declared in the loop body.
         assert_eq!(diags("for i, i in xs { }"), vec!["'i' is already declared in this block"]);
         let prog = parse_str("for i, i in xs { }").unwrap();

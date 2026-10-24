@@ -1070,6 +1070,14 @@ impl<'a> Lexer<'a> {
                     d.hint(FENCE_HINT)
                 });
             }
+            // A multi-line block's code starts on the line after its `{` (3.7), so its first line
+            // dedents like the others.
+            let first = text.split('\n').next().unwrap_or("");
+            let lead = first.len() - first.trim_start_matches([' ', '\t']).len();
+            if !is_extern && !first.trim_matches([' ', '\t', '\r']).is_empty() {
+                return Err(Diag::new("a multi-line block starts on the line after its {", self.span_at(body_start + lead, 1))
+                    .hint("move this code to the next line, or write the whole block on one line"));
+            }
         }
         self.advance_to(close);
         let text_span = self.span_from(body_mark);
@@ -1401,7 +1409,7 @@ let names = [
     "grace",
 ]
 let n = names
-    .filter(lambda(s) => s.starts_with("a"))   // a line starting with `.` continues
+    .filter(func(s) => s.starts_with("a"))   // a line starting with `.` continues
     .len()
 "#;
         let toks = lex_str(src).unwrap();

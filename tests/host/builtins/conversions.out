@@ -5,7 +5,7 @@ null bool int float str bytes list dict func func error
 3.0 2.5 1000.0 inf -inf nan 0.0
 false false false true false true
 [0, 1, 2, 3] [2, 3, 4] [10, 7, 4, 1] [0, 4, 8] [] []
-[0, 1, 2] [1, 2] [2, 5]
+ArityError: range() takes positional arguments only
 ValueError: invalid int: 'abc'
 ValueError: invalid int: '1_000'
 ValueError: int out of range: '99999999999999999999'

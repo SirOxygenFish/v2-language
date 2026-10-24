@@ -3,7 +3,7 @@ for v in [null, false, 0, 0.0, -0.0, "", b"", [], {}] {
     print(!v, v ? "truthy" : "falsy")
 }
 let inf = 1e308 * 10
-for v in [true, 1, -1, 0.5, inf - inf, "0", " ", b"\x00", [0], {a: null}, lambda() => 1, error("E", "m"), print] {
+for v in [true, 1, -1, 0.5, inf - inf, "0", " ", b"\x00", [0], {a: null}, func() => 1, error("E", "m"), print] {
     print(!!v)
 }
 // Lists and dicts are shared, not copied.

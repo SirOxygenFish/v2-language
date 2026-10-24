@@ -638,8 +638,8 @@ fn a_long_import_chain_is_a_recursion_error_not_a_crash() {
 #[test]
 fn import_messages_show_paths_per_2_1() {
     let main = "func show(f) { try { f() } catch (e) { print(e.message) } }\n\
-                show(lambda() { import \"./lib/../lib/nope.v2\" as a })\n\
-                show(lambda() { import \"./dir\" as b })\n";
+                show(func() { import \"./lib/../lib/nope.v2\" as a })\n\
+                show(func() { import \"./dir\" as b })\n";
     let (code, stdout, stderr) = run_in_project(&[("main.v2", main), ("lib/x.v2", ""), ("dir/keep.v2", "")], ".", &["main.v2"]);
     assert_eq!(code, Some(0), "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
@@ -1149,7 +1149,7 @@ fn doctor_writes_the_probe_cache() {
 #[test]
 fn doctor_reports_configured_problems() {
     // A configured command never falls back to auto-detection (7.6): broken, FROM its source.
-    let files = [("v2.toml", "[engines.py]\ncommand = \"missing/python.exe\"\n")];
+    let files = [("v2.toml", "[engines.py]\ncommand = [\"missing/python.exe\"]\n")];
     let (code, stdout, stderr, home) = run_with_files_env(&files, &["doctor"], &[("V2_ENGINE_JS", "missing/node.exe")]);
     assert_eq!(code, Some(0), "{stderr}");
     let rows = doctor_rows(&stdout);
@@ -1172,7 +1172,7 @@ fn an_uncaught_engine_not_found_exits_3() {
     assert_eq!(code, Some(3), "{stderr}");
     assert_eq!(stdout, "before\n");
     assert!(stderr.starts_with("main.v2:2:1: EngineNotFound: engine 'py' command '") && stderr.contains("not found (set by V2_ENGINE_PY)"), "{stderr}");
-    let files = [("v2.toml", "[engines.py]\ncommand = \"missing/python.exe\"\n"), ("main.v2", script)];
+    let files = [("v2.toml", "[engines.py]\ncommand = [\"missing/python.exe\"]\n"), ("main.v2", script)];
     let (code, _, stderr, _) = run_with_files(&files, &["main.v2"]);
     assert_eq!(code, Some(3), "{stderr}");
     let caught = "try {\n    @py {\n        x = 1\n    }\n} catch (e) {\n    print(e.type)\n}\n";

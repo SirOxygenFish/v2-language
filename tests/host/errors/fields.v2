@@ -12,7 +12,7 @@ try {
     print(e.type, "-", e.message)
     print(f"at ${e.file}:${e.line}:${e.col}")
     print(e.trace)
-    print(e.data, e.lang, e.foreign_type)
+    print(e.data, e.lang, e.foreign_type, e.cause)
 } finally {
     print("done")
 }
@@ -21,8 +21,8 @@ print(made.type, made.message, made.file, made.line, made.col, made.trace, made.
 print(made)
 try { throw "text" } catch (err) { print(err.type, err.message, err.line, err.col) }
 try { throw 5 } catch (err) { print(err.type + ": " + err.message) }
-try { made.frob } catch (err) { print(err.message) }
-try { made.mesage } catch (err) { print(err.message) }
+try { print(made.frob) } catch (err) { print(err.message) }
+try { print(made.mesage) } catch (err) { print(err.message) }
 try { made.type = "x" } catch (err) { print(err.message) }
 // A rethrow keeps the first location and trace.
 func inner() {

@@ -7,27 +7,27 @@ func show(f) {
         return e
     }
 }
-show(lambda() {
+show(func() {
     import "./fixtures/nope.v2" as nope
 })
-show(lambda() {
+show(func() {
     import "./fixtures/cyc_a.v2" as a
 })
-let first = show(lambda() {
+let first = show(func() {
     import "./fixtures/boom.v2" as boom
 })
 print(first.trace)
-let second = show(lambda() {
+let second = show(func() {
     import "./fixtures/boom.v2" as boom
 })
 print(first == second)
-show(lambda() {
+show(func() {
     import "./errors.v2" as me
 })
 // A failed module never runs again: importing a cycle member re-raises its stored error.
-show(lambda() {
+show(func() {
     import "./fixtures/cyc_a.v2" as a
 })
-show(lambda() {
+show(func() {
     import "./fixtures/cyc_b.v2" as b
 })

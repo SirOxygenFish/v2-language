@@ -129,6 +129,7 @@ ts      ok      (js engine, built-in type stripping)      22.14.0   PATH
 c       ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
 cpp     ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
 rust    ok      C:\Users\me\.cargo\bin\rustc.exe          1.91.1    PATH
+...
 config file: none
 ```
 
@@ -170,12 +171,14 @@ let names = [
     "grace",
 ]
 let loud = names
-    .filter(lambda(s) => s.starts_with("a"))   // a line starting with `.` continues
-    .map(lambda(s) => s.upper())
+    .filter(func(s) => s.starts_with("a"))     // a line starting with `.` continues
+    .map(func(s) => s.upper())
 ```
 
 A statement ends at the end of a line **unless** a `(`, `[` or dict `{` is still open, the line
-ends with an operator, a comma or `=>`, or the next line starts with `.` or `?.`.
+ends with an operator, a comma or `=>`, or the next line starts with `.` or `?.`. A line that is
+only an expression must be a call or a block, so `x == 1` meant as `x = 1`, or a line starting
+with `-` meant to continue the previous one, is caught as a `SyntaxError`.
 
 Source files are UTF-8 (a BOM is fine). Identifiers are letters, digits and `_`, not starting
 with a digit. Keywords are listed in the [appendix](#keywords).
@@ -192,11 +195,14 @@ with a digit. Keywords are listed in the [appendix](#keywords).
 | `bytes`  | `b"\x00\xff"`                    | raw binary data, immutable                               |
 | `list`   | `[1, "two", 3.0]`                | ordered, mutable                                         |
 | `dict`   | `{name: "Ada", "age": 36}`       | string keys, keeps insertion order, mutable              |
-| `func`   | `lambda(x) => x * 2`             | V2 functions, and foreign functions you imported         |
+| `func`   | `func(x) => x * 2`               | V2 functions, and foreign functions you imported         |
 | `handle` | (from foreign code)              | a live object inside another language — see [9](#9-values-across-the-boundary) |
 | `error`  | `error("ValueError", "bad")`     | structured error value — see [3.9](#39-errors)           |
 
 `type(x)` returns the type name as a string: `type(3)` is `"int"`, `type([])` is `"list"`.
+
+`str(x)` and `print` show strings inside containers quoted, and whole-number floats keep their
+`.0`: `print({k: [1, "a", 2.0]})` shows `{"k": [1, "a", 2.0]}`, while `print("a")` shows `a`.
 
 **Truthiness.** `null`, `false`, `0`, `0.0`, `""`, `b""`, `[]` and `{}` are *falsy*. Everything
 else, including every handle, is *truthy*.
@@ -265,7 +271,10 @@ Rules worth knowing:
   Values of different types are simply not equal. Two handles are equal when they point at the
   same foreign object.
 - `<`, `>` and friends work on numbers and on strings. Comparing anything else is a `TypeError`.
-- `x in list` checks elements, `k in dict` checks keys, `s in str` checks substrings.
+- Comparisons don't chain: `a < b < c` and `a == b == c` are a `SyntaxError`; write
+  `a < b && b < c`.
+- `x in list` checks elements, `k in dict` checks keys (`false` when `k` isn't a string),
+  `s in str` checks substrings (`s` must be a string).
 - `user?.name` is `null` when `user` is `null`, instead of an error. The rest of the chain is
   skipped too: `user?.address.city` is `null` when `user` is `null`. (A missing dict key is still a
   `KeyError` — `?.` only guards against `null`.)
@@ -302,11 +311,11 @@ String methods:
 | ---------------------------- | ------------------------------------------------ |
 | `s.upper()`, `s.lower()`     | changed case                                     |
 | `s.trim()`                   | without leading/trailing whitespace              |
-| `s.split(sep)`               | list of parts                                    |
+| `s.split(sep = null)`        | list of parts; without `sep`, split on runs of whitespace with no empty parts: `" a  b ".split()` is `["a", "b"]` |
 | `s.lines()`                  | list of lines                                    |
 | `s.replace(old, new)`        | every `old` replaced                             |
 | `s.starts_with(p)`, `s.ends_with(p)` | `bool`                                   |
-| `s.find(sub)`                | index of first match, or `-1`                    |
+| `s.index_of(sub)`            | character index of the first match, or `-1`      |
 | `s.encode()`                 | UTF-8 `bytes`                                    |
 
 `bytes` has `len(b)`, indexing (gives an `int` 0–255), slicing, `b.decode()` (UTF-8 to `str`) and
@@ -335,10 +344,11 @@ Dict keys are always strings. In a literal, a bare word (`name:`) is a string ke
 
 | List method              | Effect                                        |
 | ------------------------ | --------------------------------------------- |
-| `push(x)` / `pop()`      | add to / remove from the end                  |
+| `push(...items)`         | add items to the end (`xs.push(...ys)` appends a whole list) |
+| `pop(i = -1)`            | remove and return the item at index `i` (default: the last) |
 | `insert(i, x)`           | insert at index                               |
-| `remove_at(i)`           | remove and return the item at index           |
-| `sort()` / `reverse()`   | in place                                      |
+| `sort(key = null, reverse = false)` | sort in place, stable; the items (or `key(item)` results) must be all numbers or all strings; `reverse: true` sorts descending |
+| `reverse()`              | in place                                      |
 | `map(f)` / `filter(f)`   | new list                                      |
 | `join(sep)`              | string made of the items                      |
 | `index_of(x)`            | index or `-1`                                 |
@@ -352,8 +362,9 @@ Dict keys are always strings. In a literal, a bare word (`name:`) is a string ke
 | `remove(k)`              | remove and return the value                   |
 | `copy()`                 | shallow copy                                  |
 
-If a dict holds a function under a key, `d.name(args)` calls that function — even when a dict
-method has the same name. Otherwise `d.name(args)` calls the dict method.
+If a dict holds a function (or a foreign function you got as a value) under a key, `d.name(args)`
+calls it — even when a dict method has the same name. Otherwise `d.name(args)` calls the dict
+method.
 
 ### 3.7 Control flow
 
@@ -377,13 +388,14 @@ for key, value in {a: 1, b: 2} { print(key, value) }
 for ch in "héllo" { print(ch) }            // characters
 ```
 
-Parentheses around conditions are optional: `if (x > 0) { }` is fine too. Braces are always
-required, and the opening `{` goes on the same line as `if`, `while`, `for`, `func`, `try` and so
-on. `elif`, `else`, `catch` and `finally` may start a new line. `break` and `continue` work in
-`while` and `for`. `a..b` is only allowed in a `for` head; elsewhere use `range(a, b)`, which
-returns a list. A `for` loop walks over a snapshot of the list or dict taken when the loop starts,
-so changing it inside the loop doesn't affect which items the loop visits. Iterating a handle
-iterates the foreign object (see [chapter 9](#9-values-across-the-boundary)).
+Parentheses around `if` and `while` conditions are optional: `if (x > 0) { }` is fine too; a
+`for` head takes none. Braces are always required, and the opening `{` goes on the same line as
+`if`, `while`, `for`, `func`, `try` and so on. `elif`, `else`, `catch` and `finally` may start a
+new line. `break` and `continue` work in `while` and `for`. `a..b` is only allowed in a `for`
+head; elsewhere use `range(a, b)`, which returns a list. A `for` loop walks over a snapshot of the
+list or dict taken when the loop starts, so changing it inside the loop doesn't affect which items
+the loop visits. Iterating a handle iterates the foreign object (see
+[chapter 9](#9-values-across-the-boundary)).
 
 ### 3.8 Functions
 
@@ -396,27 +408,30 @@ print(greet("Ada"))                          // Hello, Ada!
 print(greet("Ada", greeting: "Welcome"))     // named argument
 
 func total(...nums) {                        // collects extra arguments into a list
-    let sum = 0
-    for n in nums { sum += n }
-    return sum
+    let s = 0
+    for n in nums { s += n }
+    return s
 }
 print(total(1, 2, 3))                        // 6
 print(total(...[4, 5]))                      // spread a list into arguments: 9
 
-let double = lambda(x) => x * 2
-let shout = lambda(s) {
+let double = func(x) => x * 2                // an anonymous function
+let shout = func(s) {
     return s.upper() + "!"
 }
 ```
 
-- A `func` can be called before the line where it is declared (declarations are hoisted within
-  their block).
+- `func` followed by a name declares a function; `func` followed by `(` makes an anonymous one.
+  Messages and stack traces name an anonymous function after where it was written:
+  `func@main.v2:12`.
+- A named `func` can be called before the line where it is declared (declarations are hoisted
+  within their block).
 - A function without `return` returns `null`.
 - Calls are checked: missing arguments, extra arguments and unknown argument names are all an
   `ArityError`.
 - Functions are values: pass them around, store them in lists and dicts, return them.
 - Closures capture variables, not copies. Each loop iteration gets its own variable, so
-  `lambda() => i` made inside `for i in 0..3` remembers that iteration's `i`.
+  `func() => i` made inside `for i in 0..3` remembers that iteration's `i`.
 - Deep recursion stops with a `RecursionError` instead of crashing.
 
 ### 3.9 Errors
@@ -454,10 +469,11 @@ try {
 | `e.data`       | optional extra value                                              |
 | `e.lang`       | `null` for V2 errors, or the engine tag (`"py"`, `"js"`, …)       |
 | `e.foreign_type` | the foreign exception class, e.g. `"ZeroDivisionError"`         |
+| `e.cause`      | the error this one was raised from (a foreign exception's cause, e.g. Python `raise … from …`, JS `cause`), or `null`; `error()` can't set it |
 
 Built-in error types: `Error`, `TypeError`, `ValueError`, `KeyError`, `IndexError`, `NameError`,
-`ArityError`, `IOError`, `RecursionError`, `ImportError`, plus the engine errors in
-[chapter 10](#10-errors-across-the-boundary).
+`ArityError`, `IOError`, `RecursionError`, `ImportError`, `AssertionError`, plus the engine
+errors in [chapter 10](#10-errors-across-the-boundary).
 
 A mistake in the code itself (a missing `}`, a misspelled keyword, declaring a name twice) is a
 `SyntaxError`. It is reported **before anything runs**, so it can't be caught by `try` in the same
@@ -502,30 +518,63 @@ print(util.slug("Hello World"))    // hello-world
 
 ### 3.11 Builtins
 
-The host has only these built-in functions. Everything else — math, dates, HTTP, regex, files
-beyond read/write — comes from the languages you embed.
+The host has only these built-in functions. Dates, HTTP, regex, math beyond these and anything
+bigger come from the languages you embed.
 
 | Function                                | Does                                                        |
 | --------------------------------------- | ----------------------------------------------------------- |
-| `print(...values, sep: " ", end: "\n")` | print values separated by `sep`, followed by `end`          |
+| `print(...values, sep: " ", end: "\n", stderr: false)` | print values separated by `sep`, followed by `end`; `stderr: true` writes to standard error |
 | `input(prompt = "")`                    | read one line from standard input (without the newline); `null` at end of input |
 | `len(x)`                                | length of a str, bytes, list, dict or handle                |
 | `type(x)`                               | type name as a string                                       |
 | `str(x)`, `int(x)`, `float(x)`, `bool(x)` | conversions (`int("42")`, `str(3.5)`, …)                  |
-| `range(end)`, `range(start, end, step = 1)` | list of ints                                            |
+| `range(end)`, `range(start, end, step = 1)` | list of ints; positional arguments only                 |
+| `min(...values)`, `max(...values)`      | smallest / largest of the arguments, or of a list's items when the only argument is a list (`max(xs)`); all numbers or all strings; on a tie the first wins; no values is a `ValueError` |
+| `sum(xs)`                               | sum of a list of numbers: a float if any item is one; `sum([])` is `0` |
+| `abs(x)`                                | absolute value of an int or float                           |
+| `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int (so NaN and infinity are a `ValueError`), more gives a float, fewer is a `ValueError`; an int `x` comes back unchanged |
+| `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
 | `read_file(path, binary: false)`        | file contents as `str` (or `bytes` with `binary: true`)     |
-| `write_file(path, data)`                | write a `str` or `bytes`, replacing the file                |
+| `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
+| `exists(path)`                          | `true` if a file or folder is there (`false` on any error)  |
+| `list_dir(path)`                        | sorted list of the names in a folder                        |
+| `make_dir(path)`                        | create a folder and any missing parents; an existing folder is fine |
+| `remove_file(path)`                     | delete a file (not a folder)                                |
+| `script_dir()`                          | absolute path of the folder of the `.v2` file containing the call |
+| `exec(argv, input = null)`              | run a program without a shell (below)                       |
 | `getenv(name, default = null)`          | environment variable                                        |
 | `args()`                                | command-line arguments after the script name                |
+| `sleep(seconds)`                        | wait (an int or float ≥ 0); Ctrl+C still stops the program  |
+| `time()`                                | seconds since 1970-01-01 UTC, as a float                    |
 | `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run |
 | `error(type, message, data = null)`     | make an error value                                         |
-| `value(h)`                              | convert a foreign handle to plain V2 data                   |
+| `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
+| `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
 | `engine_available(tag)`                 | `true` if that engine's toolchain was found (`false` for unknown tags); never starts the engine |
 
-Relative paths in `read_file` and `write_file` are relative to the folder you run `v2` from (the
-working directory), like in Python and Node. `import` paths and `extern` library paths are relative
-to the `.v2` file instead.
+Relative paths in the file functions and in `exec` are relative to the folder you run `v2` from
+(the working directory), like in Python and Node. For a file next to your script, use
+`script_dir()`: `read_file(f"${script_dir()}/data.csv")` (forward slashes work on Windows too).
+`import` paths and `extern` library paths are relative to the `.v2` file instead. The file
+functions raise `IOError` when they fail (`exists` just returns `false`). `getenv` and `args()`
+turn invalid UTF-8 into U+FFFD instead of failing.
+
+`exec` runs a program directly, without a shell, so its arguments reach it exactly as given:
+
+```v2
+let r = exec(["git", "log", "-1", "--format=%s"])
+if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
+```
+
+`argv` is a non-empty list of strings; a program name without a path separator is searched on
+`PATH` like engine commands. A `str` or `bytes` `input` becomes the program's standard input
+(with `null` it is empty). The result is a dict `{code, stdout, stderr}`, both outputs captured
+whole and decoded as UTF-8 (invalid bytes become U+FFFD). A non-zero `code` is not an error; on
+Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
+can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
+directory and environment with no timeout; what it started is stopped when `exec` returns or on
+Ctrl+C.
 
 ---
 
@@ -546,11 +595,13 @@ An **embedded block** is a piece of another language written directly in a `.v2`
 @tag [label] [(args)] { foreign code }
 ```
 
-- `tag` picks the language: `py`, `js`, `ts`, `c`, `cpp`, `rust` (see [chapter 5](#5-engines)).
+- `tag` picks the language: `py`, `js`, `ts`, `c`, `cpp`, `rust`, a run engine such as `bash` or
+  `go` (see [chapter 5](#5-engines)), or a custom engine ([chapter 13](#13-custom-engines)).
 - `label` is an optional name, so other code can import from this block: `@py stats { ... }`.
 - `(args)` passes V2 values into the block (see 4.4).
 - The opening `{` must be on the **same line** as the end of the header (a long args list may wrap
-  across lines; the `{` goes after its closing `)`).
+  across lines; the `{` goes after its closing `)`). In a block that spans several lines, nothing
+  but whitespace may follow that `{`: the code starts on the next line.
 
 Your code is handed to the other language **as written**. V2 only removes the common indentation
 (so you can indent blocks to match the surrounding V2 code; mixing tabs and spaces in that
@@ -560,9 +611,9 @@ wrappers it generates around compiled blocks (chapter 11).
 
 ### 4.2 Braces inside foreign code
 
-For the built-in languages, V2 finds the closing `}` while understanding that language's strings
-and comments, so code like `print("}")` or `char c = '{';` is fine. For custom engines
-(chapter 13) V2 simply counts braces.
+For `py`, `js`, `ts`, `c`, `cpp` and `rust` blocks, V2 finds the closing `}` while understanding
+that language's strings and comments, so code like `print("}")` or `char c = '{';` is fine. For
+run engines and custom engines (chapter 13) V2 simply counts braces.
 
 Two rules catch mismatched braces early:
 
@@ -613,8 +664,8 @@ print(bump())    // 2 — the definition block's state persists
 
 Blocks run **in program order**, like any other statement. In V2 code, an `@import` must come
 after the block it imports from has run; otherwise V2 reports which block still needs to load.
-(`@import` *inside* a block is resolved when the imported function is first called, so blocks can
-import from each other in any order — see chapter 8.)
+(`@import` *inside* a block looks the function up when it is called, so blocks can import from
+each other in any order — see chapter 8.)
 
 If a definition block fails while loading (say, a Python exception in its top-level code), it
 stays failed: reaching it again raises the same error instead of running its code a second time.
@@ -636,8 +687,8 @@ let nums = [4, 8, 15, 16, 23, 42]
 
 - `@py(nums)` makes a foreign variable `nums` holding a copy of V2's `nums`.
 - `@py(label: expr)` names the foreign variable explicitly and can pass any expression.
-- Args work for `py`, `js` and `ts` blocks and for custom engines. Compiled blocks take their
-  inputs through exported functions instead (chapter 11); `@c(x) { }` is a `SyntaxError`.
+- Args work for `py`, `js` and `ts` blocks, run engines and custom engines. Compiled blocks take
+  their inputs through exported functions instead (chapter 11); `@c(x) { }` is a `SyntaxError`.
 
 Values are **passed as data, never pasted into source code**, so there is no quoting or
 injection problem.
@@ -649,8 +700,8 @@ An action block can be used as an expression. Its value is:
 - for `py`: the value of the **last expression** in the block,
 - for `js`, `ts`: JavaScript's **completion value** — what `eval` of the block would return
   (`undefined` becomes `null`),
-- for compiled languages and custom `run` engines: the program's **standard output** as a `str`,
-  with one trailing newline removed.
+- for compiled languages and `run` engines (built-in or custom): the program's **standard
+  output** as a `str` (invalid UTF-8 becomes U+FFFD), with one trailing newline removed.
 
 When a compiled or `run` block is used as a plain statement instead, its output is printed
 normally, in order.
@@ -696,11 +747,12 @@ mean the same thing: `@python stats` and `@py stats` are the same block kind.
 | Situation                                         | Error                                   |
 | ------------------------------------------------- | --------------------------------------- |
 | `{` on the line after the tag                     | `SyntaxError` with a hint               |
+| code after the `{` of a multi-line block          | `SyntaxError` with a hint               |
 | block never closed, or closing `}` mid-line       | `SyntaxError` at the opening line, suggesting the fence form |
 | args on a compiled block (`@c(x) { }`)            | `SyntaxError`                           |
 | two blocks with the same label                    | `SyntaxError`                           |
 | unknown tag, e.g. `@pyhton`                       | `EngineUnknown` (did you mean `py`?)    |
-| engine not installed or too old                   | `EngineNotFound` with an install hint   |
+| engine not installed or too old                   | `EngineNotFound`, saying how to fix it  |
 | foreign syntax error in a py/js/ts block          | `ForeignError` pointing at the `.v2` line |
 | compile error in a c/cpp/rust block               | `BuildError` pointing at the `.v2` line |
 | reaching a definition block that failed to load   | the same error again                    |
@@ -709,13 +761,14 @@ mean the same thing: `@python stats` and `@py stats` are the same block kind.
 
 ## 5. Engines
 
-An **engine** is what runs one language. V2 ships six built-in engines.
+An **engine** is what runs one language. V2 ships six built-in engines that share functions with
+`@export` / `@import`, plus the [built-in run engines](#built-in-run-engines) below.
 
 | Tag (aliases)          | Language   | Needs                                  | Kind        |
 | ---------------------- | ---------- | -------------------------------------- | ----------- |
-| `py` (`python`)        | Python     | Python 3.8+                            | interpreted |
-| `js` (`javascript`)    | JavaScript | Node.js 18+                            | interpreted |
-| `ts` (`typescript`)    | TypeScript | Node.js 22.13+ or 23.2+                | interpreted |
+| `py` (`python`)        | Python     | Python 3.10+                           | interpreted |
+| `js` (`javascript`)    | JavaScript | Node.js 22.13+ (not 23.0 or 23.1)      | interpreted |
+| `ts` (`typescript`)    | TypeScript | Node.js 22.13+ (not 23.0 or 23.1)      | interpreted |
 | `c`                    | C          | MSVC `cl` on Windows; gcc or clang     | compiled    |
 | `cpp` (`cxx`)          | C++        | MSVC `cl` on Windows; g++ or clang++   | compiled    |
 | `rust` (`rs`)          | Rust       | rustc (stable)                         | compiled    |
@@ -723,12 +776,6 @@ An **engine** is what runs one language. V2 ships six built-in engines.
 Interpreted engines run in a **worker process** that starts the first time you use that language
 and stays alive until your program ends. Compiled engines build a native library the first time a
 block is seen, cache it, and call it directly inside the V2 process.
-
-### Later engines
-
-Shell (`bash`, `sh`, PowerShell, `cmd`), Go, Zig, Lua, Ruby, Java and C# are planned as built-in
-engines after the six above work. Until then, any of them can be added in a few lines as a
-[custom engine](#13-custom-engines).
 
 ### Python — `@py`
 
@@ -745,6 +792,8 @@ engines after the six above work. Until then, any of them can be added in a few 
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
 - `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"`) instead
   of ending your program. In blocks, `__name__` is not `"__main__"`.
+- `multiprocessing` can't pickle functions defined in `@py` blocks: put them in a `.py` file next
+  to the `.v2` file and import them from there.
 
 ### JavaScript — `@js`
 
@@ -756,6 +805,9 @@ engines after the six above work. Until then, any of them can be added in a few 
 - If a function returns a Promise, V2 waits for it.
 - JavaScript has no keyword arguments: calling a JS function with named arguments is an
   `ArityError`.
+- A JS function is called with `new` when it is a `class`, or an old-style constructor whose
+  `prototype` has its own properties besides `constructor` (like Node's `EventEmitter`); other
+  functions are called plainly.
 - `process.exit()` inside a block throws an error instead of stopping the engine.
 - Each block runs in its own JavaScript realm, so values that come from packages or from V2 may
   fail `instanceof Array` / `instanceof Error`; use `Array.isArray(x)` and check `e.name` /
@@ -764,7 +816,7 @@ engines after the six above work. Until then, any of them can be added in a few 
 ### TypeScript — `@ts`
 
 - Runs on the same Node worker as `@js`, with the types stripped first by Node's built-in type
-  stripping (Node 22.13+ or 23.2+). Settings go in `[engines.js]`; `ts` has none of its own.
+  stripping. Settings go in `[engines.js]`; `ts` has none of its own.
 - Types are **not checked** — run `tsc` yourself if you want checking.
 - Stripping only removes type syntax. `enum`, `namespace` and constructor parameter properties
   raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`): write TypeScript without them, or
@@ -779,6 +831,40 @@ engines after the six above work. Until then, any of them can be added in a few 
   Override with `[engines.c] command`, add flags with `[engines.c] flags`.
 - Standards: C11, C++17, Rust edition 2021.
 - See [chapter 11](#11-compiled-blocks-c-c-rust) for how compiled blocks work.
+
+### Built-in run engines
+
+These work exactly like a custom `run` engine ([13.1](#131-run-engines-execute-a-file): output
+printed, or the block's value as a `str`; args as `V2_ARG_<name>` variables; no `@export` or
+`@import`), but need no `v2.toml`.
+
+| Tag (aliases)          | Runs                            | File   | Needs                       |
+| ---------------------- | ------------------------------- | ------ | --------------------------- |
+| `bash` (`sh`)          | `bash {file}`                   | `.sh`  | bash; on Windows Git Bash   |
+| `pwsh` (`powershell`)  | `pwsh -NoProfile -File {file}`  | `.ps1` | PowerShell                  |
+| `cmd`                  | `cmd /d /q /c {file}`           | `.bat` | Windows                     |
+| `lua`                  | `lua {file}`                    | `.lua` | Lua (`lua` or `lua5.4`)     |
+| `ruby`                 | `ruby {file}`                   | `.rb`  | Ruby                        |
+| `go`                   | `go run {file}`                 | `.go`  | Go                          |
+| `java`                 | `java {file}`                   | `.java`| Java 11+                    |
+| `zig`                  | `zig run {file}`                | `.zig` | Zig                         |
+| `cs` (`csharp`)        | `dotnet run {file}`             | `.cs`  | .NET 10+                    |
+
+```v2
+let branch = @sh { git branch --show-current }
+print(f"on branch ${branch}")
+
+@sh(target: "build") { mkdir -p "$V2_ARG_target" }
+```
+
+- On Windows, `bash` is Git Bash (found through `git` on `PATH`, else in `C:\Program Files\Git`),
+  never WSL's `System32\bash.exe`; `pwsh` runs with `-ExecutionPolicy Bypass`, falling back to
+  `powershell.exe`. `cmd` is Windows only (elsewhere: `EngineNotFound: cmd is Windows only`).
+- A `java` block is one source file run directly; a `cs` block is a .NET file-based app.
+- Configure them in `[engines.<tag>]` (`command`, `call_timeout`) or with `V2_ENGINE_<TAG>`
+  ([14](#14-project-file-v2toml)); `v2 doctor` lists them.
+- For `@export` / `@import` in one of these languages, declare a bridged engine under another tag
+  ([13.2](#132-bridged-engines-full-importexport)).
 
 ---
 
@@ -811,12 +897,13 @@ Inside a block, on its own line:
 ```
 
 - The list may span several lines.
-- `@export { * }` exports every function (and, in Python, class) the block **defines**; in
-  Python that leaves out names it imported. In `js` and `ts` blocks it exports the top-level
-  `function` declarations and every top-level `var` holding a function, including one set from
-  `require(...)` (names from the block's `@import` lines are not included); list `const`, `let`
-  and `class` names explicitly. In compiled blocks it exports every non-`static`, non-`inline`
-  function except `main` whose signature V2 can convert; the others are left out.
+- `@export { * }` exports every function (and, in Python, class) the block **defines**. In `py`,
+  `js` and `ts` blocks it skips names starting with `_`; in Python it also leaves out names the
+  block imported. In `js` and `ts` blocks it exports the top-level `function` declarations and
+  every top-level `var` holding a function, including one set from `require(...)` (names from the
+  block's `@import` lines are not included); list `const`, `let` and `class` names explicitly. In
+  compiled blocks it exports every non-`static`, non-`inline` function except `main` whose
+  signature V2 can convert; the others are left out, and an `@import` of one says why.
 - In `py`, `js` and `ts` blocks you may also export a constant, e.g. `@export { VERSION }`; V2
   copies its value when the block loads. Compiled blocks export functions only.
 - Exporting a class (Python) or constructor (JS) gives you a function that returns handles.
@@ -846,13 +933,19 @@ The **selector** says where to look:
 | `js.lodash`        | the npm package `lodash` (`ts.lodash` means the same)           |
 | `v2`               | this file's V2 functions — only inside blocks ([chapter 8](#8-cross-language-calls-and-callbacks)) |
 
-Aliases of a tag work in selectors: `@python.stats` is `@py.stats`, `python.os` is `py.os`. The
-whole-module form `@import MODULE_SELECTOR as alias` only works with package selectors like
-`py.numpy`, and only in V2 code. Inside a block it is a `SyntaxError`: use the language's own
+Aliases of a tag work in selectors: `@python.stats` is `@py.stats`, `python.os` is `py.os`. `@js`
+and `@ts` blocks run on one engine, so `@js`, `@ts`, `@js.x` and `@ts.x` match blocks of either
+tag. The whole-module form `@import MODULE_SELECTOR as alias` only works with package selectors
+like `py.numpy`, and only in V2 code. Inside a block it is a `SyntaxError`: use the language's own
 import there (`import numpy as np` in a `@py` block).
 
 An imported name is an ordinary V2 function in the scope where the `@import` appears. Call it,
 pass it around, store it, or re-export it from a V2 module.
+
+Inside a block, `@import` brings in functions only: naming a constant that a block or package
+exports is an `ImportError` (`'VERSION' is a constant — pass it in as a block arg`), and
+`@import { * }` takes just the functions. It expands when the importing block loads, so the
+blocks it names must have run by then.
 
 ### 6.3 Ambiguity rules
 
@@ -864,6 +957,8 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
              — use @py.stats or @py.calc
 ```
 
+- It doesn't matter which blocks have run: a block counts as soon as its `@export` list names the
+  name, and a block with `@export { * }` counts once it has run.
 - Naming a specific block (`stats` or `@py.stats`) always resolves the ambiguity.
 - `@import { * } from @py` fails the same way if two blocks export the same name.
 - A block exported with `@export { * }` can still be imported selectively.
@@ -874,7 +969,8 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 | -------------------------------------- | ----------------------------------------------------------- |
 | name not exported                      | `'x' is not exported by 'stats' (did the block @export it?)` |
 | selector matches nothing               | `No engine exports found for selector 'stats'`              |
-| block not loaded yet                   | `block 'stats' has not run yet — move this @import below it` |
+| block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
+| block not loaded yet when a block calls `x` | `block 'stats' has not run yet — 'x' can't be called before it loads` |
 | block failed to load                   | `block 'stats' failed to load: <the original error>`        |
 | ambiguous name                         | see 6.3                                                     |
 
@@ -909,7 +1005,7 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
 @import py.numpy as np
 let a = np.array([1, 2, 3])
 print(a.mean())                      // 2.0
-print(value(np.multiply(a, 2)))      // [2, 4, 6] — use functions, not operators, on handles
+print(to_v2(np.multiply(a, 2)))      // [2, 4, 6] — use functions, not operators, on handles
 ```
 
 Names that are V2 keywords can be imported with quotes: `@import { "from" as rx_from } from js.rxjs`.
@@ -932,11 +1028,13 @@ venv = ".venv"
 Python looks in the `.v2` file's folder, the project root, then its normal module path (your
 `PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). Node
 looks the way Node always does: in the `node_modules` folders from the `.v2` file's folder upwards
-(so your project's is found), then in your own `NODE_PATH` if you set one; packages that only ship
-as ES modules work too. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
+(so your project's is found), then in your own `NODE_PATH` if you set one. Packages that only ship
+as ES modules work too, except the rare one whose `package.json` `exports` offers only an
+`import` entry. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
 
 One Python engine serves every `.v2` file in a run, so two local modules with the same name in
-different folders collide — the first one imported wins.
+different folders collide — the first one imported wins. Likewise a JavaScript package imported by
+bare name is loaded once per run, from the folder of the first `.v2` file that imports it.
 
 A module that doesn't exist is an `ImportError` carrying the foreign message
 (`No module named 'pandas'`).
@@ -970,7 +1068,8 @@ print(summary([1, 2, 3]))
 Inside a block, imported names are ordinary functions of that language. Calls are synchronous:
 the JavaScript above simply gets the Python result back. (Note `xs.map(x => square(x))` rather
 than `xs.map(square)`: JavaScript's `map` passes three arguments, and the Python function only
-takes one.)
+takes one.) An imported function is looked up when it is called, so the block it comes from only
+has to have run by then (`@import { * }` excepted, 6.2).
 
 ### 8.1 Calling V2 from a block
 
@@ -989,7 +1088,8 @@ func log_line(msg) {
 
 ### 8.2 Passing functions as callbacks
 
-V2 functions and lambdas can be passed to foreign code, and foreign functions to other languages:
+V2 functions, named or anonymous, can be passed to foreign code, and foreign functions to other
+languages — including ones you got back as values (callable handles, 9.2):
 
 ```v2
 @py sorter {
@@ -1000,11 +1100,11 @@ V2 functions and lambdas can be passed to foreign code, and foreign functions to
 @import { sort_by } from sorter
 
 let people = [{name: "Ada", age: 36}, {name: "Grace", age: 85}, {name: "Linus", age: 21}]
-let by_age = sort_by(people, lambda(p) => p.age)
-print(by_age.map(lambda(p) => p.name))    // ["Linus", "Ada", "Grace"]
+let by_age = sort_by(people, func(p) => p.age)
+print(by_age.map(func(p) => p.name))      // ["Linus", "Ada", "Grace"]
 ```
 
-Python calls the V2 lambda once per item; each call crosses back into V2 and returns.
+Python calls the V2 function once per item; each call crosses back into V2 and returns.
 
 ### 8.3 Compiled code calling other languages
 
@@ -1034,13 +1134,16 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   then, so returning a Promise is an error. Likewise a Python coroutine is awaited unless Python is
   already running an event loop on that thread (an async Python function called into V2, which
   called back into Python).
-- Foreign code can call into V2 (an imported stub or a V2 callback) only while V2 is waiting on
-  that engine — during a call or block V2 started. Calls attempted while the engine is idle (a
-  timer, a background thread, an event handler firing later) fail with an error inside the foreign
-  language. In JavaScript, timers and event handlers run only right after a call returns, or while
-  V2 is waiting on a JS Promise. One that calls V2 right after a call fails. One that fires while V2
-  awaits a JS Promise is allowed. A callback can be stored and used again during a later call.
+- Foreign code can call into V2 (an imported function or a V2 callback) only while V2 is waiting
+  on that engine — during a call or block V2 started. A call from a timer, background thread or
+  event handler that fires while the engine is idle fails with an error inside the foreign
+  language. A callback can be stored and used again during a later call.
+- JavaScript timers, sockets and other async work run only while V2 is waiting on a JS Promise
+  (and for a moment right after each call returns): to let them finish, export an async function
+  and call it.
 - A foreign function may only call V2 from the thread V2 called it on.
+- When an imported function (another language's, or V2's) throws, the foreign code that called it
+  gets a `V2Error` exception with `type`, `message`, `data`, `lang` and `foreign_type`.
 
 ---
 
@@ -1071,7 +1174,8 @@ callables. Foreign functions, methods and classes that come *back* as values are
 (`type()` says `"handle"`); names you bring in with `@import` are ordinary `func` values.
 
 Because data is copied, a Python function that changes a list you passed in does **not** change
-your V2 list. Return the new value instead.
+your V2 list. Return the new value instead. One value crossing between processes can't exceed
+64 MiB (`MarshalError`).
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
 a whole-number JS `number` arrives in V2 as an `int`. Integers are range-checked when they go into
@@ -1105,22 +1209,30 @@ What you can do with a handle:
 | call it                | `h(3)`                     |
 | index                  | `h["col"]`, `h[0]`, `h[k] = v` |
 | length                 | `len(h)`                   |
-| iterate                | `for x in h { }`           |
+| iterate                | `for x in h { }`, `for i, x in h { }` |
 | print / `str(h)`       | the foreign text form      |
-| convert to data        | `value(h)`                 |
+| convert to data        | `to_v2(h)`                 |
 
-`value(h)` asks the engine to turn the object into plain data: containers are converted
-recursively; other objects use their `to_dict()` method if they have one, otherwise `tolist()`.
-If the object can't be converted, it is a `MarshalError`.
+Iterating a Python mapping or a JS `Map` works like a dict: `for k in h` gives keys,
+`for k, v in h` keys and values. Other handles give items, or index and item with two variables.
+
+`to_v2(h)` asks the engine to turn the object into plain data. Containers are converted
+recursively; Python sets and JS `Set`s become lists, JS `Map`s become dicts, and mapping keys that
+are numbers, booleans or `None`/`null` become strings in V2's `str()` form (`1` → `"1"`, `True` → `"true"`, so a
+pandas Series with the default index gives `{"0": …, "1": …}`). Other objects use their
+`to_dict()` method if they have one, otherwise `tolist()`. Anything else — a `datetime`, a class
+instance without those methods, an int beyond 64 bits, other key types, two keys that become the
+same string (`1` and `"1"`) — is a `MarshalError`.
 
 **Handle rules:**
 
 - Arithmetic and comparison operators (`+`, `*`, `<`, …), `in` and slicing don't apply to handles
   (`TypeError`); `==` only checks whether two handles are the same object. Do the work inside a
   block — `@py(df) { df["revenue"] * 1.2 }` — call a function (`np.multiply(a, 2)`), or convert
-  with `value(h)`.
+  with `to_v2(h)`.
 - A handle belongs to its engine. Passing a Python handle to a JavaScript function is a
-  `MarshalError` — convert it with `value(h)` first.
+  `MarshalError` — convert it with `to_v2(h)` first. A callable handle (a function, method,
+  class or callable object) is the exception: the other language gets a function that calls it.
 - A handle stays valid as long as V2 keeps a reference to it. V2 tells the engine when it can let
   the object go.
 - Handles are always truthy and cannot be dict keys.
@@ -1169,9 +1281,9 @@ its original type.
 | `EngineUnknown`    | a block or selector uses a tag that is neither built in nor declared in `v2.toml` |
 | `EngineNotFound`   | the engine's toolchain isn't installed, is too old, or can't start — including a configured command or venv that doesn't exist (message includes how to fix it) |
 | `EngineCrashed`    | the engine process died; every later use of that engine fails too     |
-| `EngineTimeout`    | a call ran longer than `call_timeout`                                 |
-| `EngineExitError`  | a compiled program or custom `run` engine exited with a non-zero status |
-| `MarshalError`     | a value couldn't cross (e.g. a handle sent to another engine), or doesn't fit a C type (range, NUL inside a string, `null` for a `std::string`/`&str`, …), or a native result doesn't fit V2 (an unsigned value above the `int` range, a returned string that isn't valid UTF-8) |
+| `EngineTimeout`    | a call ran longer than `call_timeout`; a worker engine (py, js, bridged) is stopped for the rest of the run, so later uses of it raise `EngineCrashed` |
+| `EngineExitError`  | a compiled program or `run` engine block exited with a non-zero status |
+| `MarshalError`     | a value couldn't cross (e.g. a non-callable handle sent to another engine, or a value over 64 MiB), or doesn't fit a C type (range, NUL inside a string, `null` for a `std::string`/`&str`, …), or a native result doesn't fit V2 (an unsigned value above the `int` range, a returned string that isn't valid UTF-8) |
 | `BuildError`       | a compiled block failed to compile (compiler output, `.v2` line numbers) |
 | `ForeignError`     | the foreign code threw an exception                                   |
 | `ProtocolError`    | an engine adapter broke the protocol (custom engines)                 |
@@ -1237,6 +1349,12 @@ boilerplate: V2 generates a small C-compatible wrapper for each exported functio
 also catches Rust panics and C++ exceptions and turns them into a `ForeignError` instead of
 crashing your program.
 
+**Files next to the script.** The `.v2` file's folder is an include directory for C and C++, so
+`#include "helpers.h"` finds a header there, and native libraries the block links against are
+found there when it loads. In `flags`, a path starting with `./` or `../` (or `.\`, `..\`) — on
+its own or right after `-I`, `-L`, `/I` or `/LIBPATH:` — is relative to the folder of the
+`v2.toml`.
+
 ### 11.2 Types
 
 V2 reads each exported function's signature from the source. Supported types:
@@ -1286,8 +1404,9 @@ print(answer)    // 42
 ```
 
 If there is no `main` function, V2 wraps the block in one: `#include` and `use` lines stay at the
-top, and C/C++ wrappers also include `<stdio.h>`, `<stdlib.h>` and `<string.h>`. A wrapped block
-can only contain statements — to define helper functions, write `main` yourself.
+top, and C/C++ wrappers also include `<stdio.h>`, `<stdlib.h>` and `<string.h>`. A wrapped C or
+C++ block can only contain statements — to define helper functions, write `main` yourself (Rust
+allows functions inside `fn main`, so a wrapped Rust block may define them).
 
 The program's error output is shown live. A non-zero exit status raises `EngineExitError`; the
 last part of the error output is in `e.data.stderr`.
@@ -1295,10 +1414,12 @@ last part of the error output is in `e.data.stderr`.
 ### 11.5 The build cache
 
 The first run of a compiled block compiles it (Rust takes a second or two); later runs load the
-cached library instantly. The cache key covers the source, the compiler and its version, and the
-flags, so changing any of them rebuilds. A cached library that is damaged is rebuilt
-automatically. The cache lives in your user folder (`~/.v2/cache/build`), never inside the
-project. `v2 cache clean` empties it (and the toolchain probe cache).
+cached library instantly. The cache key covers the source and the local headers it includes
+(`#include "x.h"` found beside the including file or the `.v2` file, not through `-I` flags), the
+compiler and its version, and the flags, so changing any of them
+rebuilds. A cached library that is damaged is rebuilt automatically. The cache lives in your user
+folder (`~/.v2/cache/build`), never inside the project, and keeps every version it built until
+`v2 cache clean` empties it (along with the toolchain probe cache).
 
 Compiler errors are reported as a `BuildError` with line numbers pointing into your `.v2` file.
 
@@ -1316,7 +1437,8 @@ See the example in [8.3](#83-compiled-code-calling-other-languages).
 
 Inside compiled blocks only the `@import { names } from SELECTOR` form works (no `*`), and only in
 blocks that `@export` something — a program-style block runs as a separate process and can't call
-back into V2 (`BuildError`).
+back into V2. Each imported name (its alias, if it has one) must be a valid identifier of the
+block's language; rename it with `as` otherwise. Breaking these rules is a `SyntaxError`.
 
 ### 11.7 Limits
 
@@ -1406,28 +1528,30 @@ is the block's value when the block is used as an expression
 
 ```toml
 # v2.toml
-[engines.lua]
+[engines.r]
 kind    = "run"
-command = ["lua", "{file}"]
-ext     = "lua"
+command = ["Rscript", "{file}"]
+ext     = "R"
 
-[engines.sh]
+[engines.perl]
 kind    = "run"
-command = ["bash", "{file}"]      # on Windows use Git Bash's full path, e.g.
-ext     = "sh"                    # "C:/Program Files/Git/bin/bash.exe" — plain "bash" may be WSL
+command = ["perl", "{file}"]
+ext     = "pl"
 ```
 
 ```v2
-@lua { print("hello from Lua") }
+@r { cat("hello from R\n") }
 
-let branch = @sh { git branch --show-current }
-print(f"on branch ${branch}")
+let version = @perl { print $^V }
+print(f"perl ${version}")
 
-@sh(target: "build") { mkdir -p "$V2_ARG_target" }
+@perl(name: "Ada") { print "hi $ENV{V2_ARG_name}\n" }
 ```
 
 - `{file}` is replaced with the temporary file's path (`.bat`/`.cmd` files are written with
-  Windows line endings).
+  Windows line endings). That file lives in V2's private temp folder, so a script that looks for
+  files next to itself sees that folder: use paths relative to the working directory, or pass
+  them in as block args.
 - Block args arrive as environment variables named `V2_ARG_<name>` (lists and dicts as JSON).
   They are never pasted into the code.
 - Error output is shown live. A non-zero exit status raises `EngineExitError`, with the last part
@@ -1449,10 +1573,13 @@ kind    = "bridged"
 command = ["ruby", "adapters/v2_adapter.rb"]   # relative to this v2.toml's folder
 ```
 
-Relative file paths in `command` are resolved against the folder of the `v2.toml` that declares
-them. Custom blocks are scanned by counting braces (4.2), so use the fence form when the code has
-unbalanced braces. The protocol is specified in [INTERNALS.md](INTERNALS.md), with a checklist of
-messages an adapter must handle. To test an adapter, run a two-line `.v2` file that uses it.
+Relative paths in `command` are resolved against the folder of the `v2.toml` that declares them:
+the program when it contains a path separator, and a later element when it starts with `./` or
+`../` (or `.\`, `..\`), or when it names a file that exists there (`adapters/v2_adapter.rb`).
+Options (`-c`) and elements containing `{` are left alone. Custom blocks are scanned by counting
+braces (4.2), so use the fence form when the code has unbalanced braces. The protocol is specified
+in [INTERNALS.md](INTERNALS.md), with a checklist of messages an adapter must handle. To test an
+adapter, run a two-line `.v2` file that uses it.
 
 ---
 
@@ -1461,8 +1588,10 @@ messages an adapter must handle. To test an adapter, run a two-line `.v2` file t
 V2 looks for `v2.toml` in the script's folder and its parents (`v2 doctor` starts from the
 current folder); the folder where it is found is the **project root**. Without one, the script's
 folder is the project root. Every key is optional, except that a custom engine needs `kind` and
-`command` (a `run` command must contain `{file}`; `ext` defaults to the tag). Relative paths are
-relative to the folder of the `v2.toml`.
+`command` (a `run` command, custom or built-in, must contain `{file}`; `ext` defaults to the tag).
+`command` is always an array of strings; a plain string is a configuration error
+(`[engines.lua] command must be an array: write ["lua", "{file}"]`). Relative paths are relative
+to the folder of the `v2.toml`.
 
 ```toml
 [engines.py]
@@ -1479,6 +1608,9 @@ flags = ["-C", "opt-level=3"]
 venv = ".venv"                    # use this virtual environment
 ```
 
+A call that runs past `call_timeout` raises `EngineTimeout`. For a worker engine that stops the
+whole engine for the rest of the run, so later uses of it raise `EngineCrashed`.
+
 If `[engines.py] command` (or `V2_ENGINE_PY`) is set, it is used and `[python] venv` is ignored.
 
 `@ts` blocks run on the js engine, so they are configured in `[engines.js]`: an `[engines.ts]`
@@ -1491,9 +1623,10 @@ C:\proj\v2.toml: config error: unknown key [engines.py] comand (did you mean 'co
 ```
 
 Settings are applied in this order, later ones winning: built-in defaults → the project's
-`v2.toml` → `V2_ENGINE_<TAG>` environment variables, which set one engine's executable
-(`V2_ENGINE_PY=C:/Python312/python.exe`). A `V2_ENGINE_<TAG>` for a tag that is neither built in
-nor declared in `v2.toml` is ignored.
+`v2.toml` → `V2_ENGINE_<TAG>` environment variables, which set one engine's program
+(`V2_ENGINE_PY=C:/Python312/python.exe`). `<TAG>` is the canonical tag in upper case
+(`V2_ENGINE_PY`, not `V2_ENGINE_PYTHON`); a variable naming an alias, or a tag
+that is neither built in nor declared in `v2.toml`, is ignored.
 
 V2 writes nothing into your project: temporary files go to a private folder in your system's
 temp directory, and caches live in `~/.v2/`.
@@ -1531,11 +1664,11 @@ to run a script with such a name, write it as a path: `v2 ./doctor`.
 - `v2 check file.v2` only parses and checks the code; it runs nothing. `v2 doctor`, by contrast,
   runs toolchain commands — including ones a project's `v2.toml` configures — so don't run it on a
   project you don't trust.
-- When V2 searches `PATH` for toolchains it skips relative entries like `.`, so a project folder
-  can't slip in its own fake `python` or `gcc`.
-- Processes started by run-engine blocks and compiled programs (and everything they start) are
-  stopped when the block finishes or times out; processes started from Python or JavaScript code
-  are stopped when V2 exits.
+- When V2 searches `PATH` for toolchains or `exec` programs it skips relative entries like `.`,
+  so a project folder can't slip in its own fake `python` or `gcc`.
+- Processes started by `exec`, run-engine blocks and compiled programs (and everything they start)
+  are stopped when the call or block finishes or times out; processes started from Python or
+  JavaScript code are stopped when V2 exits.
 - `extern` and compiled blocks run native code inside the V2 process. A mistake there can crash
   the program or corrupt memory; V2 checks the values it converts, but cannot check what native
   code does.
@@ -1615,7 +1748,7 @@ print(js_combo(5))           // 47
 
 let df = pd.read_csv("sales.csv")
 let by_region = df.groupby("region")["revenue"].sum()
-for region, total in value(by_region) {      // to_dict() -> V2 dict
+for region, total in to_v2(by_region) {      // to_dict() -> V2 dict
     print(f"${region}: ${total:.2f}")
 }
 ```
@@ -1681,7 +1814,10 @@ process(["a", "b", "c"])
 program     = { statement }                   (a statement ends at a line end or ";", 3.1)
 statement   = let | const | assign | if | while | for | "break" | "continue"
             | return | throw | try | func | import | engine_import | extern
-            | block | expr
+            | block | call
+call        = an expr whose last step is a call: f(), a.b(), x?.y()
+              (parentheses may surround a call or a block; any other expression is not a
+              statement, 3.1)
 let         = "let" NAME [ "=" expr ]
 const       = "const" NAME "=" expr
 assign      = target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr
@@ -1707,14 +1843,14 @@ block_arg   = NAME [ ":" expr ]
 body        = "{" { statement } "}"           (the "{" on the same line as its header)
 expr        = block | ternary                 (a block used as a value must be an action block)
 ternary     = the operator table in 3.4 over primaries: literals, NAME, "(" expr ")", list,
-              dict, f-string and lambda — so a block used as an operand, or followed by a
-              postfix, needs parentheses
-lambda      = "lambda" "(" params ")" ( "=>" expr | body )
+              dict, f-string and func_expr — so a block used as an operand, or followed by a
+              postfix, needs parentheses; comparisons and equality don't chain
+func_expr   = "func" "(" params ")" ( "=>" expr | body )
 ```
 
 ### Keywords
 
-`let` `const` `func` `lambda` `return` `if` `elif` `else` `while` `for` `in` `not` `break`
+`let` `const` `func` `return` `if` `elif` `else` `while` `for` `in` `not` `break`
 `continue` `try` `catch` `finally` `throw` `import` `as` `from` `extern` `true` `false` `null`
 
 Keywords may still be used after a `.` (`h.from`, `result.in`) and, quoted, in import lists.

@@ -23,7 +23,7 @@ impl Version {
         three_numbers(s)
     }
 
-    /// How a minimum is written in messages: `3.8`, `18.0`.
+    /// How a minimum is written in messages: `3.10`, `22.13`.
     pub fn short(&self) -> String {
         format!("{}.{}", self.0, self.1)
     }
@@ -107,7 +107,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             candidates: py_candidates,
             fixed_args: strs(&["-B", "-u", "{adapter}"]),
             env: vec![("PYTHONUTF8".into(), "1".into()), ("PYTHONIOENCODING".into(), "utf-8".into())],
-            min_version: Some(Version(3, 8, 0)),
+            min_version: Some(Version(3, 10, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Python)),
         },
         EngineSpec {
@@ -118,7 +118,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             candidates: vec![strs(&["node"])],
             fixed_args: strs(&["{adapter}"]),
             env: Vec::new(),
-            min_version: Some(Version(18, 0, 0)),
+            min_version: Some(Version(22, 13, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Node)),
         },
         EngineSpec {
@@ -135,9 +135,37 @@ pub fn builtins() -> Vec<EngineSpec> {
     ]
 }
 
+impl EngineSpec {
+    /// Why version `v` can't be used (7.2), or `None` when it can: below the minimum, or a Node
+    /// 23.0 or 23.1 (one Node rule for js and ts, since ts runs on the js engine).
+    pub fn too_old(&self, v: Version) -> Option<String> {
+        let min = self.min_version?;
+        if v < min {
+            return Some(format!("too old: {v} < {}", min.short()));
+        }
+        if self.is_node() && !node_supported(v) {
+            return Some(format!("too old: {v} has no type stripping (needs {})", self.needs(min)));
+        }
+        None
+    }
+
+    /// The minimum as messages state it: `3.10+`, or `22.13+, not 23.0 or 23.1` for Node.
+    pub fn needs(&self, min: Version) -> String {
+        if self.is_node() {
+            format!("{}+, not 23.0 or 23.1", min.short())
+        } else {
+            format!("{}+", min.short())
+        }
+    }
+
+    fn is_node(&self) -> bool {
+        matches!(self.probe, Some((_, VersionPattern::Node)))
+    }
+}
+
 /// Whether a Node version has `module.stripTypeScriptTypes`: 22.13+ on the 22 line, or 23.2+
-/// (7.6).
-pub fn ts_strips(node: Version) -> bool {
+/// (7.2).
+pub fn node_supported(node: Version) -> bool {
     match node.0 {
         22 => node >= Version(22, 13, 0),
         23 => node >= Version(23, 2, 0),
@@ -153,7 +181,7 @@ pub fn install_hint(id: &str) -> &'static str {
         ("py", _) => "sudo apt install python3 / sudo dnf install python3",
         (_, "windows") => "winget install -e --id OpenJS.NodeJS.LTS",
         (_, "macos") => "brew install node",
-        _ => "https://nodejs.org (distro packages may be older than 18, or than 22.13 for ts)",
+        _ => "https://nodejs.org (distro packages may be older than 22.13)",
     }
 }
 
@@ -170,8 +198,8 @@ mod tests {
         let first: Vec<&str> = py.candidates.iter().map(|c| &*c[0]).collect();
         assert_eq!(&first[..2], ["python3", "python"]);
         assert_eq!(py.candidates.len(), if cfg!(windows) { 3 } else { 2 }, "py -3 is Windows-only");
-        assert_eq!(py.min_version, Some(Version(3, 8, 0)));
-        assert_eq!(specs[1].min_version, Some(Version(18, 0, 0)));
+        assert_eq!(py.min_version, Some(Version(3, 10, 0)));
+        assert_eq!(specs[1].min_version, Some(Version(22, 13, 0)));
         assert_eq!(specs[2].session_of.as_deref(), Some("js"));
         assert!(py.env.iter().any(|(k, v)| &**k == "PYTHONUTF8" && &**v == "1"));
     }
@@ -199,12 +227,12 @@ mod tests {
         assert_eq!(node.find("v24.11.1\n"), Some(Version(24, 11, 1)));
         assert_eq!(node.find("noise\nv18.19.1"), Some(Version(18, 19, 1)));
         assert_eq!(node.find("node v24.11.1"), None);
-        assert_eq!(Version(3, 8, 0).short(), "3.8");
+        assert_eq!(Version(3, 10, 0).short(), "3.10");
         assert_eq!(Version(3, 6, 8).to_string(), "3.6.8");
     }
 
     #[test]
-    fn ts_strip_versions() {
+    fn node_versions() {
         for (v, want) in [
             (Version(18, 19, 1), false),
             (Version(22, 12, 0), false),
@@ -213,8 +241,17 @@ mod tests {
             (Version(23, 2, 0), true),
             (Version(24, 11, 1), true),
         ] {
-            assert_eq!(ts_strips(v), want, "{v}");
+            assert_eq!(node_supported(v), want, "{v}");
         }
+        // js and ts share the rule; Python has only its minimum.
+        let specs = builtins();
+        let (py, js) = (&specs[0], &specs[1]);
+        assert_eq!(py.too_old(Version(3, 9, 6)).as_deref(), Some("too old: 3.9.6 < 3.10"));
+        assert_eq!(py.too_old(Version(3, 10, 0)), None);
+        assert_eq!(js.too_old(Version(20, 18, 0)).as_deref(), Some("too old: 20.18.0 < 22.13"));
+        assert_eq!(js.too_old(Version(23, 1, 0)).as_deref(), Some("too old: 23.1.0 has no type stripping (needs 22.13+, not 23.0 or 23.1)"));
+        assert_eq!(js.too_old(Version(22, 13, 0)), None);
+        assert_eq!(js.too_old(Version(24, 11, 1)), None);
     }
 
     #[test]
@@ -222,7 +259,7 @@ mod tests {
         let (py, node) = match std::env::consts::OS {
             "windows" => ("winget install -e --id Python.Python.3.12", "winget install -e --id OpenJS.NodeJS.LTS"),
             "macos" => ("brew install python", "brew install node"),
-            _ => ("sudo apt install python3 / sudo dnf install python3", "https://nodejs.org (distro packages may be older than 18, or than 22.13 for ts)"),
+            _ => ("sudo apt install python3 / sudo dnf install python3", "https://nodejs.org (distro packages may be older than 22.13)"),
         };
         assert_eq!((install_hint("py"), install_hint("js"), install_hint("ts")), (py, node, node));
     }

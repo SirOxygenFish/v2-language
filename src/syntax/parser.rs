@@ -74,6 +74,29 @@ impl<'a> Parser<'a> {
         &self.toks[(self.pos + n).min(self.toks.len() - 1)].tok
     }
 
+    /// At `(` after the name `lambda`: does a parenthesized list follow that ends in `=>` or a
+    /// body `{`, as in another language's `lambda(x) => …`? (16: V2 writes `func(x) => …`.)
+    fn lambda_follows(&self) -> bool {
+        if !matches!(self.peek(), Tok::Op(Op::LParen)) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for n in 0.. {
+            match self.peek_at(n) {
+                Tok::Op(Op::LParen) => depth += 1,
+                Tok::Op(Op::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.peek_at(n + 1), Tok::Op(Op::FatArrow) | Tok::LBrace(_));
+                    }
+                }
+                Tok::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn span(&self) -> Span {
         self.toks[self.pos].span
     }
@@ -372,7 +395,7 @@ impl<'a> Parser<'a> {
                 }
                 StmtKind::Try { body, catch, finally }
             }
-            Tok::Kw(Kw::Func) => {
+            Tok::Kw(Kw::Func) if !matches!(self.peek_at(1), Tok::Op(Op::LParen)) => {
                 self.bump();
                 let name = self.expect_name("a function name after `func`")?;
                 let f = self.func_rest(Some(name), start)?;
@@ -439,7 +462,8 @@ impl<'a> Parser<'a> {
         Ok(StmtKind::For { first, second, iter, body })
     }
 
-    /// `( params ) body` of a `func`, or `( params ) ( => expr | body )` of a lambda.
+    /// `( params ) body` of a `func` statement, or `( params ) ( => expr | body )` of an
+    /// anonymous `func` expression.
     fn func_rest(&mut self, name: Option<Name>, start: Span) -> Result<FuncDecl, Diag> {
         self.expect_op(Op::LParen)?;
         let (params, rest) = self.params()?;
@@ -447,7 +471,7 @@ impl<'a> Parser<'a> {
             self.bump();
             FuncBody::Expr(self.expr()?)
         } else {
-            FuncBody::Block(self.body(if name.is_some() { "func" } else { "lambda" })?)
+            FuncBody::Block(self.body("func")?)
         };
         Ok(FuncDecl { name, params, rest, body, span: start.to(self.prev_span()) })
     }
@@ -859,12 +883,17 @@ impl<'a> Parser<'a> {
         let mark = self.chain_begin();
         let mut e = self.compare()?;
         let mut h = self.operand_height();
+        let mut linked = false;
         loop {
             let op = match self.peek() {
                 Tok::Op(Op::EqEq) => BinOp::Eq,
                 Tok::Op(Op::Ne) => BinOp::Ne,
                 _ => break,
             };
+            if linked {
+                return Err(Diag::new("comparisons cannot be chained; write a == b && b == c", self.span()));
+            }
+            linked = true;
             self.chain_link(&mark, h)?;
             let s = self.bump().span;
             let r = self.compare()?;
@@ -1095,14 +1124,17 @@ impl<'a> Parser<'a> {
             Tok::Str(s) => ExprKind::Str(s),
             Tok::Bytes(b) => ExprKind::Bytes(b),
             Tok::FStr(parts) => ExprKind::FStr(self.fstring(parts)?),
+            Tok::Ident(n) if &*n == "lambda" && self.lambda_follows() => {
+                return Err(Diag::new("V2 has no lambda keyword", t.span).hint("anonymous functions are written func(x) => …"));
+            }
             Tok::Ident(n) => ExprKind::Name(n),
             Tok::Kw(Kw::True) => ExprKind::Bool(true),
             Tok::Kw(Kw::False) => ExprKind::Bool(false),
             Tok::Kw(Kw::Null) => ExprKind::Null,
-            Tok::Kw(Kw::Lambda) => {
+            Tok::Kw(Kw::Func) => {
                 let f = self.func_rest(None, t.span)?;
                 let span = f.span;
-                return Ok(Expr { kind: ExprKind::Lambda(Rc::new(f)), span });
+                return Ok(Expr { kind: ExprKind::Func(Rc::new(f)), span });
             }
             Tok::Op(Op::LParen) => {
                 let inner = self.expr()?;
@@ -1252,7 +1284,7 @@ mod tests {
             ),
             ExprKind::List(xs) => format!("[{}]", xs.iter().map(show).collect::<Vec<_>>().join(", ")),
             ExprKind::Dict(es) => format!("{{{}}}", es.len()),
-            ExprKind::Lambda(_) => "lambda".into(),
+            ExprKind::Func(_) => "func".into(),
             other => format!("{other:?}"),
         }
     }
@@ -1284,8 +1316,8 @@ mod tests {
     fn literals_lambdas_and_calls() {
         assert_eq!(show(&expr_of("[1, 2, 3,]")), "[1, 2, 3]");
         assert_eq!(show(&expr_of("{name: \"Ada\", \"x y\": 1, [k]: 2}")), "{3}");
-        assert_eq!(show(&expr_of("lambda(x) => x * 2")), "lambda");
-        assert!(parse_str("let f = lambda(s) {\n  return s + \"!\"\n}").is_ok());
+        assert_eq!(show(&expr_of("func(x) => x * 2")), "func");
+        assert!(parse_str("let f = func(s) {\n  return s + \"!\"\n}").is_ok());
         let e = expr_of("f(1, ...xs, sep: \"-\", end: \"\")");
         let ExprKind::Call { args, .. } = e.kind else { panic!() };
         assert!(matches!(args[1], Arg::Spread(_)) && matches!(args[3], Arg::Named(..)));
@@ -1437,11 +1469,11 @@ extern "m" as m { double cos(double x); }
         assert_eq!(err("let r = c ? 0 : 1..3"), "a..b is only allowed in a for head; use range(a, b)");
 
         // A body `{` must be on its header's line, inside brackets too.
-        for src in ["print(lambda(x)\n{\n    return x\n})", "let xs = [lambda()\n{ }]", "let d = {f: lambda()\n{ }}"] {
+        for src in ["print(func(x)\n{\n    return x\n})", "let xs = [func()\n{ }]", "let d = {f: func()\n{ }}"] {
             let d = diag(src);
-            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("expected {", Some("put { at the end of the lambda line")), "{src}");
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("expected {", Some("put { at the end of the func line")), "{src}");
         }
-        assert!(parse_str("print(lambda(x) {\n    return x\n})").is_ok());
+        assert!(parse_str("print(func(x) {\n    return x\n})").is_ok());
         assert!(parse_str("if \"a\" == \"\"\"\n    a\n    \"\"\" { }").is_ok(), "a multi-line token ends on the brace's line");
 
         // A compiled function exported twice (15.2); compiled blocks export names only (4.4, 4.5).
@@ -1462,7 +1494,7 @@ extern "m" as m { double cos(double x); }
         for src in ["let café = true\nif café {\n    print(1)\n}", "if é {\n}", "while 日本 { }", "for x in é { }", "if a { } elif 𝔸 { }"] {
             assert!(parse_str(src).is_ok(), "{src}");
         }
-        assert_eq!(err("print(lambda(é)\n{ })"), "expected {");
+        assert_eq!(err("print(func(é)\n{ })"), "expected {");
         // `not in` starting a line is a leading operator; elsewhere `not` gets its own message.
         let d = diag("let a = 1\nnot in xs");
         assert_eq!((d.message.as_str(), d.hint.as_deref()), ("expected an expression, found keyword `not`", Some("end the previous line with the operator")));
@@ -1480,7 +1512,7 @@ extern "m" as m { double cos(double x); }
         let d = diag(src);
         assert_eq!((d.message.as_str(), d.span.line, d.span.col), ("expected an expression, found `}`", 2, 21));
         assert_eq!(err("print(f\"x ${a ? 1} y\")"), "expected `:`, found `}`");
-        assert!(parse_str("print(f\"${ {a: 1} }\", f\"${lambda() { }}\")").is_ok());
+        assert!(parse_str("print(f\"${ {a: 1} }\", f\"${func() { }}\")").is_ok());
         // Quoted export names stay in py, js and ts blocks (4.4).
         assert!(parse_str("@js words {\n    @export { \"default\" }\n}").is_ok());
         // The whole-module form stays at V2 level (4.1).
@@ -1494,7 +1526,7 @@ extern "m" as m { double cos(double x); }
             .stack_size(64 << 20)
             .spawn(|| {
                 let chain = |op: &str, n: usize| format!("let x = a{}", op.repeat(n));
-                for op in [" + a", " && a", " ?? a", " == a", " * a", ".b", "()", "[0]"] {
+                for op in [" + a", " && a", " ?? a", " * a", ".b", "()", "[0]"] {
                     assert!(parse_str(&chain(op, 10_000)).is_ok(), "{op}");
                     assert_eq!(err(&chain(op, 10_001)), "expression too long", "{op}");
                 }
@@ -1513,7 +1545,7 @@ extern "m" as m { double cos(double x); }
                 assert_eq!(err(&format!("let x = (a{}).b{}", ".b".repeat(6_000), ".b".repeat(5_000))), "expression too long");
                 assert_eq!(err(&format!("let x = a{} * a{}", ".b".repeat(6_000), " * a".repeat(5_000))), "expression too long");
                 assert_eq!(err(&format!("let x = f\"${{a{}}}\"{}", " + a".repeat(6_000), " + a".repeat(5_000))), "expression too long");
-                assert_eq!(err(&format!("let f = lambda() {{ return a{} }}{}", " + a".repeat(6_000), ".b".repeat(5_000))), "expression too long");
+                assert_eq!(err(&format!("let f = func() {{ return a{} }}{}", " + a".repeat(6_000), ".b".repeat(5_000))), "expression too long");
             })
             .unwrap()
             .join()

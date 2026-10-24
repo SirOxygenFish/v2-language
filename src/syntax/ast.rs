@@ -70,7 +70,7 @@ pub struct Body {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct FuncDecl {
-    /// `None` for lambdas.
+    /// `None` for anonymous functions.
     pub name: Option<Name>,
     pub params: Vec<(Name, Option<Expr>)>,
     pub rest: Option<Name>,
@@ -119,7 +119,8 @@ pub enum ExprKind {
     Member { obj: Box<Expr>, name: Name, optional: bool },
     /// A postfix chain containing `?.`: a `null` at any `?.` makes the whole chain `null` (4.1).
     OptChain(Box<Expr>),
-    Lambda(Rc<FuncDecl>),
+    /// An anonymous function: `func(x) => x * 2` or `func(x) { … }` (4.1).
+    Func(Rc<FuncDecl>),
     /// An action block used as a value (4.1).
     Block(Rc<EngineBlock>),
 }

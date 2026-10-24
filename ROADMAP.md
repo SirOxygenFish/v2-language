@@ -9,8 +9,8 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.4 Python engine (after the owner's go-ahead: the foundation 1.0–1.3 is done) |
-| **Last update** | 2026-10-16: DOCS, INTERNALS and this roadmap trimmed to the glue-language scope; the code follows in the same change |
+| **Next task** | 1.4 Python engine, or 0.11 Small standard library (both wait for the owner's go-ahead: the foundation 1.0–1.3 is done) |
+| **Last update** | 2026-10-24: docs review, 43 changes approved by the owner; the code follows for every built part |
 
 ## Rules
 
@@ -21,7 +21,7 @@ says *in what order* and *what's done*.
    Nothing from a later phase is stubbed in early: a builtin that doesn't exist yet is a
    `NameError`, an engine that isn't built yet is `EngineUnknown`. The registry holds py, js and
    ts in Phase 1 (so `@c` is `EngineUnknown` there); c, cpp and rust join in Phase 2 with their
-   toolchains, and custom engines in Phase 3. EngineUnknown's list of known engines names only
+   toolchains, and custom engines and the built-in run engines in Phase 3. EngineUnknown's list of known engines names only
    the registered ones, and its `declare it in [engines.<tag>] in v2.toml` hint comes with custom
    engines.
 3. **The docs are the spec.** If code and docs disagree, decide which one is wrong and fix it on
@@ -57,7 +57,7 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
       the methods of str, list, dict and bytes (§5.1–5.5, §5.11)
 - [x] **0.7 Variables, functions, control flow, errors** (§5.6–5.9)
 - [x] **0.8 Modules:** `import "./x.v2" as m` and the import graph (§6.1, §6.4)
-- [x] **0.9 Builtins and JSON:** every engine-free builtin of DOCS 3.11, `codec/json` plain mode
+- [x] **0.9 Builtins and JSON:** every engine-free builtin DOCS 3.11 had then (0.11 adds the rest), `codec/json` plain mode
       (§5.10, §10.1, §10.2)
 - [x] **0.10 Config, CLI and exit paths:** `v2.toml` and `V2_ENGINE_<TAG>` (ch. 18),
       `v2 check FILE` (§19.3), the shutdown paths and exit codes (§6.5, §19.1)
@@ -66,6 +66,15 @@ DOCS chapter 3 runs, and a block like `@py { }` fails cleanly with `EngineUnknow
 R45, R48 (host part), R49 and the ch. 21 Syntax and Host rows pass — **done 2026-10-02**: every
 listed test and ch. 21 row has a test, every DOCS chapter 3 example was run against the binary,
 and the suite passes on Windows and Linux (macOS untested until CI runs).
+
+- [ ] **0.11 Small standard library** (added 2026-10-24, after Phase 0 closed; built when the owner
+      says so): `exec`, `script_dir`, `exists`, `list_dir`, `make_dir`, `remove_file`,
+      `write_file(…, append:)`, `sleep`, `time`, `min`, `max`, `sum`, `abs`, `round`, `div`,
+      `assert`, `print(…, stderr:)`; `sort(key, reverse)`, `split()` on whitespace,
+      `push(...items)` (DOCS 3.5, 3.6, 3.11; §5.10, §5.11). `exec` runs on `engines/process`
+      (§8.3)
+  - **Done when:** every new builtin and method has `tests/host` cases, its errors included, on
+    Windows and Linux, and the DOCS 3.11 examples run against the binary
 
 ---
 
@@ -125,28 +134,35 @@ callbacks and errors that cross languages.
       module per unit, line offsets, last-expression value, block args (§12.1–12.3)
 - [ ] Action vs definition blocks: load once, failed loads re-raise (§12.1)
 - [ ] Python marshaling and the worker handle table (§10.6, §11.1); worker stdio rules (§9.9);
-      `init` paths (§9.3)
+      `init` (§9.3)
+- [ ] `V2Error` for errors from imported functions, with `type`, `message`, `data`, `lang` and
+      `foreign_type`; chained causes as `e.cause` (§9.6, §14.2)
 - **Done when:** R05, R06 (py), R34 and R40 pass; the run dir is removed on every exit path
 
 ### 1.5 JavaScript and TypeScript engine
 - [ ] `adapters/js.js`: sync stdin reads, wrapped stdout/console/fs/child_process (§14.4)
 - [ ] JavaScript load with `vm`, completion value, no `import` statements (§12.4)
-- [ ] TypeScript via Node's built-in `module.stripTypeScriptTypes` (Node 22.13+ or 23.2+; §12.5)
+- [ ] TypeScript via Node's built-in `module.stripTypeScriptTypes` (one Node rule for js and ts:
+      22.13+, not 23.0 or 23.1; §7.2, §12.5)
 - [ ] JS marshaling (§10.7); promises awaited only at depth 0; idle-callback errors (§9.8)
 - **Done when:** R06 (js) and R32 pass
 
 ### 1.6 Handles
-- [ ] Operations, iteration and `value(h)` (§11.3–11.5)
-- [ ] Callable handles, identity, invalid uses, leaks (§11.6, §11.7, §11.9)
-- **Done when:** R04 and R15 pass
+- [ ] Operations (old-style JS constructors called with `new`), iteration (mapping handles like
+      dicts) and `to_v2(h)` with its generous conversion (§11.3–11.5)
+- [ ] Callable handles (passed to other engines as callables), identity, invalid uses, leaks
+      (§11.6, §11.7, §11.9)
+- **Done when:** R04, R15, R53 and R54 pass
 
 ### 1.7 Imports, packages and cross-language calls
-- [ ] Selectors, per-file export registry, resolving names, binding (§13.1–13.4)
-- [ ] Package imports `py.x` / `js.x`, `*`, module handles, ESM fallback (§13.5)
-- [ ] Routes, imports inside blocks, the `v2` selector (§13.6, §13.7)
+- [ ] Selectors (`@js` and `@ts` match each other), per-file export registry, resolving names
+      (ambiguity from declared exports, whatever has loaded), binding (§13.1–13.4)
+- [ ] Package imports `py.x` / `js.x`, `*`, module handles; ES modules through `require` (§13.5)
+- [ ] Routes; imports inside blocks (same-engine stubs looked up at call time, constants
+      refused); the `v2` selector (§13.6, §13.7)
 - [ ] V2 callables inside workers (callbacks both ways) (§11.8)
 - [ ] Named args → Python kwargs; ArityError for JS (§10.8)
-- **Done when:** R08, R10, R12, R13, R14 (first two parts), R18, R19, R26, R27, R38, R43, R44
+- **Done when:** R08, R10, R12, R13, R14 (first two parts), R18, R19, R26, R27, R38, R43, R44, R52, R55
   and R46 pass
 
 ### 1.8 Errors and output across languages
@@ -155,7 +171,11 @@ callbacks and errors that cross languages.
 - **Done when:** R16, R39 (`@py` line part), R14 (V2 error part) and R17 (py/js) pass
 
 ### 1.9 Seed test
-- [ ] Port `old/v2/testsuite/test_engines.v2` as `tests/engines/py/seed_engines.v2` (§22.5)
+- [ ] Port lines 1–111 of `old/v2/testsuite/test_engines.v2` as
+      `tests/engines/py/seed_engines.v2`: `var` → `let`, the probe `try`/`catch` → `// requires: py`,
+      `caught.contains(x)` → `x in caught`, `str(e)` → `e.message`; the missing-export check
+      (`@import { nonexistent } from @py`) asserts `e.type == "ImportError"` and §13.3 step 6's
+      message. No other old file is ported
 - **Done when:** the seed passes
 
 ### 1.10 Phase 1 test sweep
@@ -185,12 +205,17 @@ C, C++ and Rust blocks compiled to cached libraries, and `extern` for existing l
 ### 2.3 C blocks
 - [ ] C/C++ toolchains: `cl` via vswhere + vcvars on Windows, gcc/clang elsewhere (§7.6,
       §15.7); `[engines.c|cpp] command/flags/call_timeout` (§18.2)
-- [ ] Pipeline, exports and inner imports, signature extraction, generated sources and shims,
-      `#line` mapping (§15.1–15.4)
+- [ ] Pipeline, exports and inner imports (why `@export { * }` left a function out),
+      signature extraction (attributes and calling conventions skipped), generated sources and
+      shims, `#line` mapping (§15.1–15.4)
+- [ ] Files next to the script: the `.v2` folder as include directory, relative paths in `flags`,
+      local headers in the cache key, the `.v2` folder in the library's dependency search
+      (§15.6–15.8, §18.1)
 - [ ] Program mode (no `@export`): `main` wrapping, run, capture (§15.5)
 - [ ] Build cache in `~/.v2/cache/build`, `v2 cache clean` (§15.6, §19.4)
-- [ ] Loading and binding: identical-block copies, ABI check, evict-and-rebuild (§15.8)
-- **Done when:** R06 (C), R20 and the `cl` cases of the `engines/resolve` unit tests (§22.3) pass
+- [ ] Loading and binding: evict-and-rebuild only for a damaged library, FFILoadError for a
+      missing dependency (§15.8)
+- **Done when:** R06 (C), R20, R56 and the `cl` cases of the `engines/resolve` unit tests (§22.3) pass
 
 ### 2.4 C++ blocks
 - [ ] `std::string`, `extern "C"` shims with `try`/`catch` (§15.3, §15.4)
@@ -198,19 +223,20 @@ C, C++ and Rust blocks compiled to cached libraries, and `extern` for existing l
 
 ### 2.5 Rust blocks
 - [ ] Rust toolchain: `rustc -vV`, rustup sysroot pin, target check (§7.6, §15.7)
-- [ ] Signature parser, `catch_unwind` shims, `String` returns (§15.3, §15.4)
+- [ ] Signature parser on tokens (lifetimes ignored), `catch_unwind` shims, `String` returns
+      (§15.3, §15.4); program blocks may define helpers without `main` (§15.5)
 - **Done when:** R21 passes
 
 ### 2.6 Calling other languages from compiled code
 - [ ] Generated `v2.h` and Rust `v2` module (§15.4); `host_call` reverse calls (§15.9)
-- **Done when:** the DOCS 8.3 example (Rust calling `py.statistics`) runs as a test
+- **Done when:** R50 passes (the DOCS 8.3 example, Rust calling `py.statistics`, among it)
 
 ### 2.7 Phase 2 test sweep
-- [ ] R17 (native part), R24
+- [ ] R17 (native part), R24, R51, R57
 - [ ] ch. 21 rows: Build and FFI
 
-**Phase 2 complete when:** `tests/compiled`, `tests/ffi`, R06 (C), R17 (native part), R20–R25
-pass.
+**Phase 2 complete when:** `tests/compiled`, `tests/ffi`, R06 (C), R17 (native part), R20–R25,
+R50, R51, R56 and R57 pass.
 
 ---
 
@@ -224,10 +250,13 @@ How any other language gets in.
       (§17.3, §17.4)
 - [ ] `bridged` engines through the normal session code, capability checks (§17.5)
 - [ ] `examples/fake_adapter.rs` (§17.6, §22.3)
+- [ ] Built-in run engines, no `v2.toml` needed: `bash` (`sh`; Git Bash on Windows), `pwsh`
+      (`powershell`), `cmd`, `lua`, `ruby`, `go`, `java`, `zig`, `cs` (`csharp`); their probes and
+      `v2 doctor` rows (§7.2, §17.3, §19.2); R58
 - [ ] Tests: R17 (run part), R35, R37, R47; the custom-engine-table cases of the `engines/spec` and
-      `engines/registry` unit tests (§22.3); ch. 21 custom-engine rows
+      `engines/registry` unit tests (§22.3); the ch. 21 rows for run and custom engines
 
-**Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37 and R47 pass.
+**Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37, R47 and R58 pass.
 
 ---
 
@@ -239,6 +268,8 @@ How any other language gets in.
 - [ ] Drop "being built" and the ROADMAP pointer from the status lines of DOCS.md and INTERNALS.md
       (keep DOCS.md's pointer to INTERNALS.md and INTERNALS.md's "DOCS.md wins" sentence)
 - [ ] New Windows installer
+- [ ] A short `README.md`: what V2 is, the taste example from DOCS 1, install, links to DOCS and
+      this roadmap
 - [ ] Merge `v2-reboot` into `main`, tag `v0.1.0`
 
 ---
@@ -247,11 +278,12 @@ How any other language gets in.
 
 These need a DOCS + INTERNALS design pass **before** any code:
 
-- Built-in engines for shell (bash/sh/PowerShell/cmd), Go, Zig, Lua, Ruby, Java, C# (DOCS 5)
+- Full `@export`/`@import` (bridged adapters) for the Phase 3 built-in run engines: shell, Lua,
+  Ruby, Go, Java, Zig, C# (DOCS 5)
 - FFI structs, callbacks, variadic functions, `#include` headers (DOCS 12)
 - Cargo crates in `@rust` blocks; lists/dicts/callbacks as direct compiled-function
   parameters (DOCS 11.7)
-- Standard library: small — today the DOCS 3.11 builtins; additions need a design pass
+- Standard library beyond 0.11: additions need a design pass
 
 ---
 
@@ -275,3 +307,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-02 | 1.2 + 1.3: the VEP/1 wire and sessions, tested with scripted workers in process and as real children |
 | 2026-10-02 | Reviews of 1.0–1.3: 29 confirmed findings fixed or settled, each fix with a regression test |
 | 2026-10-16 | Docs trimmed to the glue-language scope: `register_engine`, `v2 run`, `v2 doctor TAG`, check's inventory, the global flags, `~/.v2/config.toml`, the ts transpiler and smaller items cut; INTERNALS lost its decision log, salvage map and duplicated text; the code follows in the same change |
+| 2026-10-24 | Docs review, 43 changes approved by the owner. Added: the 0.11 small standard library (docs only), built-in run engines (Phase 3), callable handles that cross engines, a generous `to_v2(h)` (was `value(h)`), `e.cause`, `V2Error` details in foreign code. Changed in code: `func` replaces `lambda`, `index_of` and `pop(i)` replace `find` and `remove_at`, Python 3.10+ and Node 22.13+ (one Node rule), `command` must be an array, canonical `V2_ENGINE_<TAG>` only, narrower path rewriting in `command`, `in` on a dict, positional `range`, dict keys holding handles; new static errors for unused expression values, chained `==`, code after a multi-line block's `{` and compiled-block directives. Spec fixes for in-block imports, ambiguity, mapping handles, JS constructors and compiled blocks using files next to the script; machinery cut before it was built; INTERNALS shortened |

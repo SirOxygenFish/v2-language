@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 
-use super::builtins::{Out, BUILTINS};
+use super::builtins::{Out, BUILTINS, POSITIONAL_ONLY};
 use super::call::{bind, bind_spec, Named, Param};
 use super::env::{self, declare, lookup, new_frame, AssignError, Env};
 use super::error::{fail, type_error, with_suggestion, ErrorValue, Exec, Flow};
@@ -298,7 +298,7 @@ impl Interp {
     fn closure(&mut self, decl: &Rc<FuncDecl>, env: &Env) -> Value {
         let name = match &decl.name {
             Some(n) => n.text.clone(),
-            None => format!("lambda@{}:{}", self.sm.file(decl.span.file).display, decl.span.line).into(),
+            None => format!("func@{}:{}", self.sm.file(decl.span.file).display, decl.span.line).into(),
         };
         env.borrow_mut().closures += 1;
         Value::func(Callable::Closure { decl: decl.clone(), env: env.clone(), name })
@@ -323,9 +323,6 @@ impl Interp {
     }
 
     fn exec(&mut self, s: &Stmt, env: &Env) -> Exec<()> {
-        if !self.sessions.is_empty() {
-            self.flush_releases();
-        }
         match &s.kind {
             StmtKind::Let(name, value) => {
                 let v = match value {
@@ -650,7 +647,7 @@ impl Interp {
                 self.chain(e, env)?.unwrap_or(Value::Null)
             }
             ExprKind::OptChain(x) => self.chain(x, env)?.unwrap_or(Value::Null),
-            ExprKind::Lambda(decl) => self.closure(decl, env),
+            ExprKind::Func(decl) => self.closure(decl, env),
             ExprKind::Block(b) => return Err(self.reach_block(b)),
         })
     }
@@ -770,6 +767,9 @@ impl Interp {
         };
         match &**c {
             Callable::Builtin(def) => {
+                if !named.is_empty() && POSITIONAL_ONLY.contains(&def.name) {
+                    return self.fail_at("ArityError", format!("{}() takes positional arguments only", def.name), call_site);
+                }
                 let args = self.at(bind_spec(def.name, def.params, pos, named), call_site)?;
                 let r = (def.f)(self, args, call_site);
                 self.at(r, call_site)
@@ -825,12 +825,12 @@ impl Interp {
         }
     }
 
-    /// `r.name(args)` (5.5): a dict key holding a function wins over the dict methods.
-    /// The callee of `r.name(args)`, resolved before the arguments run (5.7).
+    /// `r.name(args)` (5.5): a dict key holding a function, or a handle (a foreign callable got as
+    /// a value), wins over the dict methods. The callee is resolved before the arguments run (5.7).
     fn method_target(&self, o: &Value, name: &Name) -> Exec<MethodTarget> {
         if let Value::Dict(d) = o {
             let f = d.borrow().get(&name.text).cloned();
-            if let Some(f @ Value::Func(_)) = f {
+            if let Some(f @ (Value::Func(_) | Value::Handle(_))) = f {
                 return Ok(MethodTarget::Func(f));
             }
         }
@@ -891,8 +891,9 @@ impl Interp {
             "data" => e.data.clone(),
             "lang" => e.lang.clone().map_or(Value::Null, Value::Str),
             "foreign_type" => e.foreign_type.clone().map_or(Value::Null, Value::Str),
+            "cause" => e.cause.clone(),
             _ => {
-                const FIELDS: [&str; 9] = ["type", "message", "file", "line", "col", "trace", "data", "lang", "foreign_type"];
+                const FIELDS: [&str; 10] = ["type", "message", "file", "line", "col", "trace", "data", "lang", "foreign_type", "cause"];
                 return type_error(with_suggestion(format!("error has no field '{n}'"), n, FIELDS));
             }
         })
