@@ -18,8 +18,15 @@ it is loaded automatically into every session and every subagent.
   Bloat to trim is elsewhere: host-language extras, tooling, config, over-detailed spec text.
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: ROADMAP "Where we are". 1.4 (Python engine) and 0.11 (small standard library, so far
-  docs only) wait for the owner's go-ahead.
+- Status: ROADMAP "Where we are". The owner gave the go-ahead on 2026-10-24 for 0.11 and Phase 1;
+  build them in order, one milestone per commit (see "In flight").
+
+## In flight (update at every step boundary; trim when a milestone closes)
+- Plan: alignment commit (done 2026-10-24), then 0.11, then 1.4 → 1.10. Per milestone: read its
+  § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
+  run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
+  check boxes, ROADMAP log, code map below → commit.
+- Now: 0.11 (not started).
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -52,8 +59,9 @@ it is loaded automatically into every session and every subagent.
   output macros `stdout!`/`stdoutln!`/`stderr!`/`stderrln!` (ignore write errors; the stderr
   ones first call `stop_if_interrupted`). Never use `print!`/`eprint!` in src. Debug builds:
   `V2_TEST_PANIC` panics the interpreter thread (for the 101 test).
-- `cli/`: argv parser (`v2 FILE`, `check FILE`, `doctor`, `cache clean`, `--version`, `--help`;
-  no other flags), HELP text. `config/`: the project's `v2.toml` read in file order, then
+- `cli/`: argv parser (`v2 FILE`, `check FILE`, `doctor`, `cache clean` (parsed; main prints
+  "not implemented yet" until 2.3), `--version`, `--help`; no other flags), HELP text.
+  `config/`: the project's `v2.toml` read in file order, then
   `V2_ENGINE_<TAG>` overrides (canonical tags only; a replaced `command` is not validated);
   `command` must be an array; unknown sections/keys and keys that don't apply are config
   errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
@@ -62,15 +70,20 @@ it is loaded automatically into every session and every subagent.
   `canonical_tag`), `directives` (@export/@import, dedent), `parser` (MAX_DEPTH 256, expression
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
   (static checks, 4.5, incl. "this expression's value is not used"), `ast`.
-- `runtime/`: `interp` (exec/eval take `&Env`; only stack = `calls`; `guard()` at 7/8 of the
-  stack; MAX_CALLS 10,000), `value`, `env`, `call` (binder), `ops`, `methods`, `strings`
-  (char cache), `builtins` (+ `Out`, the only stdout writer; `POSITIONAL_ONLY`), `error`
-  (ErrorValue, Flow, rendering, did_you_mean), `module` (import graph, `locate`, `shown`).
+- `runtime/`: `interp` (exec/eval take `&Env`; stacks: `calls` and `import_stack`; `guard()` at
+  7/8 of the stack; MAX_CALLS 10,000; no FileScope/units/export registry yet; `call_value(f,
+  pos, named, at)` calls any V2 value from Rust), `value` (`Callable` = Closure | Builtin),
+  `env`, `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table; `Out`, the only stdout
+  writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
+  rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
+  `fail(..)`; the caller places it at the call site.
 - `Flow { Error, Return, Break, Continue, Exit }`, `Exec<T> = Result<T, Flow>`. Interrupts are
   never a Flow.
 - Deep values are freed iteratively (Drop impls feed a thread-local queue).
 - `codec/json`: plain mode (serde_json, pre-scan for i64 overflow + nesting 1,000).
-  `codec/vep`: the `$v2` wire codec (`Wire` context: session, caps, release queue, callables).
+  `codec/vep`: the `$v2` wire codec (`Wire` context: session, tag, caps, release queue,
+  callables, sm, `route` (always `|_| None` until 1.7)).
 - `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
   prints `check X: N files, M errors`) and `doctor::doctor` (the table).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
@@ -94,13 +107,18 @@ it is loaded automatically into every session and every subagent.
   Session state stays Handshaking until `init`'s `ret`. Reaping a child also drops its timers
   (`process::unregister`). `session/tests.rs`: scripted workers over `std::io::pipe()` or as a
   real child (`V2_WORKER`; `worker_main` writes a newline first because libtest's "test ... "
-  line has none).
+  line has none). Gaps for 1.4+: `Reply.exports`/`missing` are raw JSON; `wire()` is private;
+  `foreign_error` drops the `v2` tag's span/trace/cause and ignores `cause`/`trace`/`text`
+  (1.4 cause, 1.8 mapping); `engines/vep.rs` has no load/module/call/op builders; nothing maps
+  config timeouts to `Timeouts` or finds a session by key.
+- Empty stubs (a doc comment only): `engines/units.rs`, `engines/imports.rs`,
+  `engines/runonly.rs`, `adapters/mod.rs`, `build/*`, `ffi/lib.rs`.
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
   `V2_TEST_REQUIRE`. `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
   tests. `tests/v2.toml` is comment-only (it just stops the upward config search).
 - `ffi/`: `cdecl` (C declarations; `parse_definition_head` waits for 15.3 (roadmap 2.3)),
-  `types` (CType, Sig), `call` (libffi smoke test). `build/`, `adapters/` are empty.
+  `types` (CType, Sig), `call` (libffi smoke test).
 
 ## Reminders for later phases
 - Interrupt path (6.5): once `INTERRUPTED` is set the interpreter prints nothing, runs no

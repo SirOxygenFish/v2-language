@@ -18,7 +18,6 @@ pub struct Stmt {
     pub span: Span,
 }
 
-#[allow(dead_code)] // the interpreter covers these as roadmap 0.6-0.8 land
 #[derive(Debug)]
 pub enum StmtKind {
     Let(Name, Option<Expr>),
@@ -211,7 +210,7 @@ pub struct Exports {
     pub at: Option<Span>,
 }
 
-#[allow(dead_code)] // read by import resolution (roadmap 1.6)
+#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub struct ExportItem {
     pub text: Rc<str>,
@@ -221,7 +220,7 @@ pub struct ExportItem {
 }
 
 /// `@import { items } from SELECTOR` or `@import PACKAGE as NAME` (4.1, 4.3).
-#[allow(dead_code)] // read by import resolution (roadmap 1.6)
+#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub struct EngineImport {
     pub items: ImportItems,
@@ -229,7 +228,7 @@ pub struct EngineImport {
     pub span: Span,
 }
 
-#[allow(dead_code)] // read by import resolution (roadmap 1.6)
+#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub enum ImportItems {
     All(Span),
@@ -238,7 +237,7 @@ pub enum ImportItems {
     Module(Name),
 }
 
-#[allow(dead_code)] // read by import resolution (roadmap 1.6)
+#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub struct ImportItem {
     pub name: Rc<str>,
@@ -248,7 +247,7 @@ pub struct ImportItem {
 }
 
 /// A selector exactly as written; chapter 13 canonicalizes it (4.3).
-#[allow(dead_code)] // read by import resolution (roadmap 1.6)
+#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub enum Selector {
     /// `@py`

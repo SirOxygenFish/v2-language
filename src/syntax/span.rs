@@ -59,7 +59,6 @@ impl UnitLoc {
 
 pub struct SourceFile {
     /// Canonical path without the `\\?\` prefix: the dedupe key.
-    #[allow(dead_code)] // read by module loading (roadmap 0.8)
     pub path: PathBuf,
     /// What messages and `e.file` print.
     pub display: Rc<str>,
@@ -137,7 +136,6 @@ impl SourceMap {
     }
 
     /// 1-based line and column (in chars) of a byte offset.
-    #[allow(dead_code)] // used by block bodies (roadmap 0.4)
     pub fn line_col(&self, id: FileId, offset: u32) -> (u32, u32) {
         let f = self.file(id);
         let line_idx = match f.line_starts.binary_search(&offset) {
@@ -179,7 +177,6 @@ impl SourceMap {
     }
 
     /// A span over `lo..hi` with line and column computed.
-    #[allow(dead_code)] // used by block bodies (roadmap 0.4)
     pub fn span(&self, id: FileId, lo: u32, hi: u32) -> Span {
         let (line, col) = self.line_col(id, lo);
         Span { file: id, lo, hi, line, col }

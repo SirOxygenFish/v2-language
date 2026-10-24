@@ -274,7 +274,8 @@ Rules worth knowing:
 - Comparisons don't chain: `a < b < c` and `a == b == c` are a `SyntaxError`; write
   `a < b && b < c`.
 - `x in list` checks elements, `k in dict` checks keys (`false` when `k` isn't a string),
-  `s in str` checks substrings (`s` must be a string).
+  `s in str` checks substrings (`s` must be a string), and `x in bytes` checks for a byte value
+  (an int) or a sub-sequence (bytes).
 - `user?.name` is `null` when `user` is `null`, instead of an error. The rest of the chain is
   skipped too: `user?.address.city` is `null` when `user` is `null`. (A missing dict key is still a
   `KeyError` — `?.` only guards against `null`.)
@@ -1597,14 +1598,14 @@ define_engine("rb", kind: "bridged", command: ["ruby", "adapters/v2_adapter.rb"]
 ```
 
 - It takes the keys of an `[engines.<tag>]` table, with the same rules. A mistake is a
-  `ValueError` (an unknown key, an `ArityError`).
+  `ValueError` (an unknown key is an `ArityError`).
 - The engine exists from the call on, so declare engines at the top of the file: a block that
   uses the tag must be reached after the call.
 - Relative paths in `command` are relative to the `.v2` file that makes the call.
 - Each tag can be declared once per run (in `v2.toml` or with one call), and built-in tags can't
   be declared: configure those in `v2.toml`. `V2_ENGINE_<TAG>` replaces the program as it does
   for a `v2.toml` engine.
-- `v2 doctor` and `v2 check` don't run your script, so they don't list these engines.
+- `v2 doctor` doesn't run your script, so it doesn't list these engines.
 
 ---
 
