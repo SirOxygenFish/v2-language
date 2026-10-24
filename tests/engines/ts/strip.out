@@ -1,0 +1,6 @@
+5
+42
+set in ts
+ForeignError SyntaxError TypeScript enum is not supported in strip-only mode (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX)
+ForeignError SyntaxError
+ForeignError SyntaxError import statements are not allowed in @ts blocks — use require(...), await import(...) inside an async function, or @import { x } from js.<package>

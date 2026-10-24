@@ -1,0 +1,74 @@
+// requires: js
+// V2 errors through JavaScript keep their data and location, and error values made in
+// JavaScript cross safely (INTERNALS 9.6, 10.3-10.5, 14.2).
+func fields(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.lang, "|", e.line)
+        return e
+    }
+}
+func cb() {
+    return 1
+}
+func thrower(x) {
+    throw error("ValueError", "data inside", {cb: cb, h: x})
+}
+let h = @js { new Map() }
+let d = fields(func() => @js(f: thrower, h) { f(h) })
+print(d.data.cb == cb, type(d.data.h), d.data.h == h)
+// Data that can't cross is left out, but the error keeps its type and location.
+let loop = [1]
+loop.push(loop)
+func cyclic() {
+    throw error("ValueError", "cyclic data", loop)
+}
+print(fields(func() => @js(f: cyclic) { f() }).data)
+// An error value never raised in V2 is placed where it is raised: at the block.
+let never = fields(func() => @js(e: error("Custom", "never raised")) { throw e })
+print(len(never.trace) > 0)
+// A failing V2 call that wraps a foreign error: lang and foreign_type reach JavaScript.
+func risky() {
+    return @js { null.x }
+}
+print(@js(f: risky) {
+    let r;
+    try {
+        f();
+    } catch (e) {
+        r = [e.type, e.lang, e.foreign_type];
+    }
+    r
+})
+// At most 8 chained causes cross (9.6).
+let chain = fields(func() => @js {
+    let e = new Error("level 0");
+    for (let i = 1; i <= 10; i++) e = new Error("level " + i, { cause: e });
+    throw e;
+})
+let n = 0
+let link = chain.cause
+while link != null {
+    n += 1
+    link = link.cause
+}
+print("causes:", n)
+// Error values made in JavaScript are checked: a bad type becomes "Error", and an error in its
+// own data arrives as a handle.
+func boom() {
+    throw error("ValueError", "seed")
+}
+let made = @js(f: boom) {
+    let V2Error;
+    try {
+        f();
+    } catch (e) {
+        V2Error = e.constructor;
+    }
+    const bad = new V2Error(5, "bad type");
+    const self = new V2Error("SelfError", "points at itself");
+    self.data = self;
+    [bad, self]
+}
+print(made[0].type, made[0].message, made[1].type, type(made[1].data))

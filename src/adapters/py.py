@@ -523,14 +523,23 @@ if __name__ == "__main__":
         """A V2Error as an `error` tag (10.3). One that came from V2 keeps its members (location,
         trace), but its data and cause are encoded again, so their handles and stubs belong to
         this frame (11.1, 11.8). An error tag is not a nesting level (10.5)."""
+        path = path if path is not None else set()
+        if id(e) in path:  # an error inside its own data
+            return handle_tag(e)
+        text = lambda v: well_formed(v) if isinstance(v, str) else None
         if e._v2 is not None:
             tag = dict(e._v2)
         else:
-            tag = {"$v2": "error", "type": e.type, "message": well_formed(str(e.message)), "lang": e.lang,
-                   "foreign_type": e.foreign_type, "file": None, "line": None, "col": None, "trace": []}
-        tag["data"] = encode(e.data, depth, path)
-        cause = getattr(e, "_cause", None)
-        tag["cause"] = error_tag(cause, depth, path) if isinstance(cause, V2Error) else None
+            tag = {"$v2": "error", "type": text(e.type) or "Error", "message": well_formed(str(e.message)),
+                   "lang": text(e.lang), "foreign_type": text(e.foreign_type), "file": None, "line": None,
+                   "col": None, "trace": []}
+        path.add(id(e))
+        try:
+            tag["data"] = encode(e.data, depth, path)
+            cause = getattr(e, "_cause", None)
+            tag["cause"] = error_tag(cause, depth, path) if isinstance(cause, V2Error) else None
+        finally:
+            path.discard(id(e))
         return tag
 
     def decode(j):

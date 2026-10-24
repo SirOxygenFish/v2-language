@@ -1,0 +1,19 @@
+// requires: js
+// The worker's handle table (INTERNALS 11.1, 11.2): a handle V2 drops is released with the next
+// frame, and a value that fails to encode gives back the counts it took (10.1).
+@js {
+    process.v2Things = [new Map(), new Map()];
+    process.v2Refs = process.v2Things.map((t) => new WeakRef(t));
+}
+let h = @js { process.v2Things.shift() }
+print(type(h))
+h = null
+@js { }
+print(@js { require("vm").runInNewContext("gc")(); process.v2Refs[0].deref() === undefined })
+try {
+    let value = @js { [process.v2Things.shift(), "\ud800"] }
+} catch (e) {
+    print(e.type)
+}
+@js { }
+print(@js { require("vm").runInNewContext("gc")(); process.v2Refs[1].deref() === undefined })

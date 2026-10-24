@@ -8,6 +8,18 @@ use std::path::PathBuf;
 /// The Python adapter (14.3).
 pub const PY: &str = include_str!("py.py");
 
+/// The JavaScript adapter, which also runs ts blocks (14.4).
+pub const JS: &str = include_str!("js.js");
+
+/// The adapter a built-in bridged engine's session runs: its file name and text.
+pub fn for_session(key: &str) -> Option<(&'static str, &'static str)> {
+    match key {
+        "py" => Some(("py.py", PY)),
+        "js" => Some(("js.js", JS)),
+        _ => None,
+    }
+}
+
 /// `<run>/adapters/<file>`, created new (0600 on Unix) with `text` (14.1, 20.3). A session
 /// starts once per run, so each adapter is written once.
 pub fn materialize(file: &str, text: &str) -> Result<PathBuf, String> {

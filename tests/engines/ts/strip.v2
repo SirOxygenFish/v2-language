@@ -1,0 +1,32 @@
+// requires: ts
+// TypeScript blocks: types are stripped (erasable syntax only) and the code runs in the js
+// engine's process (DOCS 5, INTERNALS 12.5).
+print(@ts {
+    interface Point { x: number; y: number }
+    function norm(p: Point): number { return Math.hypot(p.x, p.y); }
+    norm({ x: 3, y: 4 } as Point)
+})
+let typed = @ts(n: 20) {
+    const twice = (k: number): number => k * 2;
+    twice(n) + 2
+}
+print(typed)
+// ts and js blocks share one process.
+@ts { (process as any).v2FromTs = "set in ts"; }
+print(@js { process.v2FromTs })
+// Syntax TypeScript can't erase is a ForeignError SyntaxError naming Node's code (DOCS 5).
+try {
+    @ts { enum Color { Red } }
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+try {
+    @ts { let x: = 1 }
+} catch (e) {
+    print(e.type, e.foreign_type)
+}
+try {
+    @ts { import fs from "fs" }
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
