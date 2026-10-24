@@ -11,6 +11,10 @@ it is loaded automatically into every session and every subagent.
   `§n.m` = its sections). **ROADMAP.md** = order + what's done ("Where we are", progress log).
 - The docs were trimmed to the glue-language scope on 2026-10-16 (ROADMAP progress log lists
   what went). Don't bring cut features back without the owner's OK.
+- **Never propose cutting how other languages get in**: built-in engines, custom engines (`run`
+  and `bridged`), `extern`, compiled blocks, cross-language `@import`/`@export`, handles. That
+  reach is the language (owner, 2026-10-24: "2 and 3 are the main base of the language").
+  Bloat to trim is elsewhere: host-language extras, tooling, config, over-detailed spec text.
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
 - Status: ROADMAP "Where we are". 1.4 (Python engine) waits for the owner's go-ahead.
