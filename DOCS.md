@@ -551,6 +551,7 @@ bigger come from the languages you embed.
 | `error(type, message, data = null)`     | make an error value                                         |
 | `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
 | `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
+| `define_engine(tag, kind, command, …)`  | declare a custom engine for the rest of the run ([13.3](#133-declaring-an-engine-in-the-script)) |
 | `engine_available(tag)`                 | `true` if that engine's toolchain was found (`false` for unknown tags); never starts the engine |
 
 Relative paths in the file functions and in `exec` are relative to the folder you run `v2` from
@@ -993,7 +994,8 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
 - `py.name` imports a Python module; dotted names work: `@import { join } from py.os.path`.
 - `js.name` imports an npm package (or Node built-in, e.g. `js.fs`, `js.path`). Package names with
   unusual characters are quoted: `@import { format } from js."date-fns"`,
-  `@import { z } from js."@scope/pkg"`.
+  `@import { z } from js."@scope/pkg"`. A local JavaScript file is a quoted relative path, from
+  the `.v2` file's folder: `@import { render } from js."./helpers.js"`.
 - `@import { * } from py.module` imports the module's public names (Python's `__all__` when
   present, otherwise names not starting with `_`).
 - A JavaScript default export is imported by name: `@import { "default" as dayjs } from js.dayjs`.
@@ -1278,7 +1280,7 @@ its original type.
 
 | Error              | When                                                                  |
 | ------------------ | --------------------------------------------------------------------- |
-| `EngineUnknown`    | a block or selector uses a tag that is neither built in nor declared in `v2.toml` |
+| `EngineUnknown`    | a block or selector uses a tag that is neither built in nor declared (in `v2.toml` or with `define_engine`) |
 | `EngineNotFound`   | the engine's toolchain isn't installed, is too old, or can't start — including a configured command or venv that doesn't exist (message includes how to fix it) |
 | `EngineCrashed`    | the engine process died; every later use of that engine fails too     |
 | `EngineTimeout`    | a call ran longer than `call_timeout`; a worker engine (py, js, bridged) is stopped for the rest of the run, so later uses of it raise `EngineCrashed` |
@@ -1514,7 +1516,8 @@ function not in the library), `MarshalError` (argument or result doesn't fit), a
 ## 13. Custom engines
 
 Any language can be added as a custom engine, declared in an `[engines.<tag>]` table in
-`v2.toml` ([chapter 14](#14-project-file-v2toml)). Tags are lowercase letters, digits and `_`,
+`v2.toml` ([chapter 14](#14-project-file-v2toml)) or with `define_engine` in the script
+([13.3](#133-declaring-an-engine-in-the-script)). Tags are lowercase letters, digits and `_`,
 starting with a letter; `v2`, `export` and `import` are reserved. Built-in tags and their aliases
 can't be redefined: a table named after one configures that built-in engine, except `ts`
 (and `typescript`), which runs on the js engine and is configured in `[engines.js]`
@@ -1581,6 +1584,28 @@ braces (4.2), so use the fence form when the code has unbalanced braces. The pro
 in [INTERNALS.md](INTERNALS.md), with a checklist of messages an adapter must handle. To test an
 adapter, run a two-line `.v2` file that uses it.
 
+### 13.3 Declaring an engine in the script
+
+`define_engine` declares a custom engine from V2 code, so a single `.v2` file can bring its own
+languages without a `v2.toml`:
+
+```v2
+define_engine("r", kind: "run", command: ["Rscript", "{file}"], ext: "R")
+define_engine("rb", kind: "bridged", command: ["ruby", "adapters/v2_adapter.rb"])
+
+@r { cat("hello from R\n") }
+```
+
+- It takes the keys of an `[engines.<tag>]` table, with the same rules. A mistake is a
+  `ValueError` (an unknown key, an `ArityError`).
+- The engine exists from the call on, so declare engines at the top of the file: a block that
+  uses the tag must be reached after the call.
+- Relative paths in `command` are relative to the `.v2` file that makes the call.
+- Each tag can be declared once per run (in `v2.toml` or with one call), and built-in tags can't
+  be declared: configure those in `v2.toml`. `V2_ENGINE_<TAG>` replaces the program as it does
+  for a `v2.toml` engine.
+- `v2 doctor` and `v2 check` don't run your script, so they don't list these engines.
+
 ---
 
 ## 14. Project file: `v2.toml`
@@ -1626,7 +1651,7 @@ Settings are applied in this order, later ones winning: built-in defaults → th
 `v2.toml` → `V2_ENGINE_<TAG>` environment variables, which set one engine's program
 (`V2_ENGINE_PY=C:/Python312/python.exe`). `<TAG>` is the canonical tag in upper case
 (`V2_ENGINE_PY`, not `V2_ENGINE_PYTHON`); a variable naming an alias, or a tag
-that is neither built in nor declared in `v2.toml`, is ignored.
+that is neither built in nor declared (in `v2.toml` or with `define_engine`), is ignored.
 
 V2 writes nothing into your project: temporary files go to a private folder in your system's
 temp directory, and caches live in `~/.v2/`.
