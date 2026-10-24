@@ -1,0 +1,29 @@
+// requires: py
+// The worker's handle table (INTERNALS 11.1, 11.2): a handle V2 drops is released with the next
+// frame, and a value that fails to encode gives back the counts it took (10.1).
+@py {
+    import sys, weakref
+    class Thing:
+        pass
+    sys.v2_things = [Thing(), Thing()]
+    sys.v2_refs = [weakref.ref(t) for t in sys.v2_things]
+}
+let h = @py { __import__("sys").v2_things.pop(0) }
+print(type(h))
+h = null
+@py { pass }
+print(@py {
+    import gc, sys
+    gc.collect()
+    sys.v2_refs[0]() is None
+})
+try {
+    let value = @py { [__import__("sys").v2_things.pop(0), "\ud800"] }
+} catch (e) {
+    print(e.type)
+}
+print(@py {
+    import gc, sys
+    gc.collect()
+    sys.v2_refs[1]() is None
+})

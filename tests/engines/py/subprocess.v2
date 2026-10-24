@@ -1,0 +1,19 @@
+// requires: py
+// stderr: child
+// stderr: x
+// stderr: child stdin ''
+// R34: output below the language level (a child process, os.write to fd 1) goes to stderr, not
+// stdout, and the protocol stays intact (INTERNALS 9.9, 14.3).
+@py {
+    import os, subprocess, sys
+    subprocess.run([sys.executable, "-c", "print('child')"])
+    os.write(1, b"x\n")
+    print("language level")
+}
+print(@py { "next block runs" })
+// Fd 0 is the null device: fd-level reads and children that inherit stdin see end of input.
+@py {
+    import os, subprocess, sys
+    print(os.read(0, 10) == b"")
+    subprocess.run([sys.executable, "-c", "import sys; print('child stdin', repr(sys.stdin.read()))"])
+}

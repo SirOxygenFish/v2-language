@@ -1,0 +1,53 @@
+// requires: py
+// stderr: py stderr line
+// stderr: finalized
+// stderr: from atexit
+// Python output joins V2's in program order, with stdout redirected (DOCS 4.6, INTERNALS 9.9).
+print("v2 1")
+@py {
+    import sys
+    print("py 1")
+    sys.stdout.write("no newline;")
+    sys.stdout.buffer.write("bytes é\n".encode())
+    print("py stderr line", file=sys.stderr)
+    sys.stdout.flush()
+}
+print("v2 2")
+@py {
+    import threading
+    t = threading.Thread(target=lambda: print("from a thread during the block"))
+    t.start()
+    t.join()
+    print("héllo 😀 \u2028 tab\tend")
+}
+// Text and bytes cross unchanged, even large ones.
+let s = "héllo 😀\r\n\u{0}"
+print((@py(s) { s }) == s, @py(s) { len(s) })
+let big = @py { "y" * 3000000 }
+print(len(big), @py(big) { len(big) })
+print(@py(b: b"\x00\xff") { b + b"!" })
+// Bytes written to sys.stdout.buffer are UTF-8, also when a character is split between
+// writes; a lone surrogate in printed text becomes U+FFFD (INTERNALS 9.9, 10.4).
+@py {
+    import sys
+    data = "é😀\n".encode()
+    for i in range(len(data)):
+        sys.stdout.buffer.write(data[i:i + 1])
+    print("a\ud800b")
+}
+// A finalizer that prints while the adapter is sending a frame neither deadlocks nor loses its
+// line: the text below is freed inside the send that writes it.
+@py {
+    import sys
+    class Loud(str):
+        def __del__(self):
+            print("finalized", file=sys.stderr)
+    sys.stdout.write(Loud("written by a str subclass, "))
+    print("then flushed")
+}
+// Exit handlers run at the end, and their output still arrives (INTERNALS 9.10).
+@py {
+    import atexit, sys
+    atexit.register(lambda: print("from atexit", file=sys.stderr))
+}
+print("v2 end")

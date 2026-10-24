@@ -1,0 +1,4 @@
+42
+awaited in statement position
+Error | the block's value is a coroutine while another coroutine is being awaited in this thread
+[]

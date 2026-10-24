@@ -1,0 +1,50 @@
+// requires: py
+// Every request gets one well-formed reply, whatever the block leaves behind (INTERNALS 9.7,
+// 10.4, 10.5, 12.2).
+// `@export { * }` leaves out a name V2 can't hold instead of breaking the reply.
+@py star_names {
+    globals()["fine"] = lambda: 1
+    globals()["bad\ud800"] = lambda: 2
+    @export { * }
+}
+print("star exports loaded")
+// A V2 error deep inside a returned value: nesting past 256 levels arrives as a handle.
+func deep_thrower(depth) {
+    let d = []
+    for i in 0..depth {
+        d = [d]
+    }
+    throw error("ValueError", "deep data", d)
+}
+let wrapped = @py(f: deep_thrower) {
+    try:
+        f(250)
+    except Exception as e:
+        err = e
+    [[[[[[[[[[err]]]]]]]]]]
+}
+let e = wrapped
+for i in 0..10 {
+    e = e[0]
+}
+print(e.type, e.message)
+let depth = 0
+let x = e.data
+while type(x) == "list" {
+    depth += 1
+    x = x[0]
+}
+print(depth < 250, type(x))
+// An action's reply that lists missing names (only definitions have them) is ignored.
+@py {
+    import sys
+    M = sys.modules["__main__"]
+    real = M.HANDLERS["load"]
+    def patched(m):
+        reply = real(m)
+        if m["kind"] == "action":
+            reply["missing"] = ["ghost"]
+        return reply
+    M.HANDLERS["load"] = patched
+}
+print(@py { "an action whose reply lists a missing name" })

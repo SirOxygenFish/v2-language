@@ -1,0 +1,7 @@
+// requires: py
+// The adapter runs on Python 3.10, the floor: it uses no syntax from 3.11 or later (INTERNALS 14.3).
+print(@py {
+    import ast, sys
+    path = sys.modules["__main__"].__file__
+    ast.parse(open(path, encoding="utf-8").read(), path, feature_version=(3, 10)) is not None
+})

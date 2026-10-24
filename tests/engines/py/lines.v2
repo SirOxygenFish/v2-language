@@ -1,0 +1,14 @@
+// requires: py
+// A block compiles at its .v2 lines, with the .v2 path as its file (INTERNALS 12.3, 12.6).
+print("line 3")
+@py {
+    import inspect, os
+    def where():
+        return inspect.currentframe().f_lineno
+    print(inspect.currentframe().f_lineno, where(), os.path.basename(__file__))
+}
+let indented = @py {
+        import inspect
+        inspect.currentframe().f_lineno
+    }
+print(indented)

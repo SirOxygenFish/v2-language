@@ -1,0 +1,65 @@
+// requires: py
+// Action and definition blocks, block args and block values (DOCS 4.3-4.5, INTERNALS 6.3, 12.1-12.3).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+// An action block runs on every reach, each time in a fresh namespace.
+for i in 0..3 {
+    @py(i) {
+        try:
+            seen
+        except NameError:
+            seen = []
+        seen.append(i)
+        print("action", i, seen)
+    }
+}
+// A definition block loads once; its args are evaluated once, when it loads.
+func noisy(x) {
+    print("arg evaluated", x)
+    return x
+}
+for i in 0..3 {
+    @py counter(start: noisy(i)) {
+        print("loading with", start)
+        def bump():
+            return 1
+        @export { bump }
+    }
+}
+// Values in expression position: the last expression, or null.
+print(@py { 1 + 1 }, @py { 2.0 }, @py { "s" }, @py { None }, @py { True }, @py { [1, (2, 3), {"a": b"\x00"}] })
+print(@py { x = 1 }, @py { def f(): pass })
+print(type(@py { 2 ** 70 }), type(@py { {1, 2} }), @py { {"$v2": 1, "k": [1.5, float("inf")]} })
+// In statement position the value is computed but never sent, so it can be anything.
+@py { "\ud800" }
+show(func() => @py { "\ud800" })
+// Args: shorthand and named, every kind of value, copied in.
+let nums = [4, 8, 15]
+let info = {name: "Ada", tags: ["x"], none: null, raw: b"\xff", big: 2 ** 60, f: 1.0}
+@py(nums, info, label: "lucky") {
+    nums.append(99)
+    print(label, sum(nums), type(info["f"]).__name__, info["raw"], info["big"], info["none"])
+}
+print(nums)
+// Each block has its own namespace; blocks share one process.
+@py {
+    import sys
+    private = 1
+    sys.shared_by_blocks = "yes"
+}
+print(@py { "private" in dir() }, @py { __import__("sys").shared_by_blocks })
+print(@py { __name__ != "__main__" and __name__.startswith("__v2_") })
+// Bad arg names are refused by the adapter.
+show(func() => @py(pass: 1) { 1 })
+show(func() => @py(__file__: 1) { 1 })
+// A V2 function goes in as a callable and comes back as itself; a value that can't cross is a
+// MarshalError at the arg.
+print(@py(x: [print]) { x }, (@py(x: print) { x }) == print)
+let loop = [1]
+loop.push(loop)
+show(func() => @py(x: loop) { x })

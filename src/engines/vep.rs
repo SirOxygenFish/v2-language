@@ -299,6 +299,28 @@ pub fn init(id: u64, project_root: &str) -> Json {
     json!({"t": "init", "id": id, "project_root": project_root})
 }
 
+/// What a `load` frame carries (9.4, 12.2); `request` gives it its id.
+pub struct Load<'a> {
+    pub unit: &'a str,
+    pub definition: bool,
+    pub lang: &'a str,
+    pub file: &'a str,
+    pub line: u32,
+    pub source: &'a str,
+    pub args: Map<String, Json>,
+    pub imports: Vec<Json>,
+    pub exports: Vec<Json>,
+    pub want_value: bool,
+}
+
+pub fn load(l: Load) -> Json {
+    json!({
+        "t": "load", "unit": l.unit, "kind": if l.definition { "definition" } else { "action" }, "lang": l.lang,
+        "file": l.file, "line": l.line, "source": l.source, "args": l.args, "imports": l.imports,
+        "exports": l.exports, "want_value": l.want_value,
+    })
+}
+
 pub fn ret(id: u64, value: Json) -> Json {
     json!({"t": "ret", "id": id, "value": value})
 }

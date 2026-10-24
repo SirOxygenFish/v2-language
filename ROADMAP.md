@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.4 Python engine (go-ahead from the owner 2026-10-24) |
+| **Next task** | 1.5 JavaScript and TypeScript engine |
 | **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
 
 ## Rules
@@ -135,17 +135,18 @@ callbacks and errors that cross languages.
   **passed 2026-10-02**
 
 ### 1.4 Python engine
-- [ ] `adapters/py.py`: launch, fd rewiring, `out` frames, dispatch loop (§14.1–14.3)
-- [ ] Reaching a block (its session starts at first use), the `load` frame, Python load:
+- [x] `adapters/py.py`: launch, fd rewiring, `out` frames, dispatch loop (§14.1–14.3)
+- [x] Reaching a block (its session starts at first use), the `load` frame, Python load:
       module per unit, line offsets, last-expression value (`want_value`), block args (§6.2,
       §6.3, §12.1–12.3)
-- [ ] Action vs definition blocks: load once, failed loads re-raise (§12.1)
-- [ ] Python marshaling and the worker handle table (§10.6, §11.1); worker stdio rules (§9.9);
+- [x] Action vs definition blocks: load once, failed loads re-raise (§12.1)
+- [x] Python marshaling and the worker handle table (§10.6, §11.1); worker stdio rules (§9.9);
       `init` (§9.3); coroutines awaited on the session's loop (§9.8)
-- [ ] V2 functions passed into Python (block args) as stubs, and `V2Error` with `type`,
+- [x] V2 functions passed into Python (block args) as stubs, and `V2Error` with `type`,
       `message`, `data`, `lang` and `foreign_type` when such a call fails (§11.8, §14.2); errors
       from Python with chained causes as `e.cause` (§9.6)
-- **Done when:** R05, R06 (py), R34 and R40 pass; the run dir is removed on every exit path
+- **Done when:** R05, R06 (py), R34 and R40 pass; the run dir is removed on every exit path —
+  **passed 2026-10-25** (Windows and Linux)
 
 ### 1.5 JavaScript and TypeScript engine
 - [ ] `adapters/js.js`: sync stdin reads, wrapped stdout/console/fs/child_process (§14.4)
@@ -340,3 +341,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-24 | `define_engine` added at the owner's request (DOCS 13.3, §17.2): a script declares its own custom engines without a `v2.toml`; built with Phase 3 |
 | 2026-10-24 | ROADMAP checked against INTERNALS and DOCS: Phase 1 re-cut so each milestone can pass its own tests (V2 function stubs and `V2Error` into 1.4/1.5, named args into 1.6, cross-engine callable handles, leaks, idle callbacks and R54 into 1.7), Phase 2/3 items and citations completed, stale claims fixed; the owner gave the go-ahead for 0.11 and Phase 1 |
 | 2026-10-24 | 0.11: the small standard library (`exec`, `script_dir`, the file and folder functions, `sleep`, `time`, `min`/`max`/`sum`/`abs`/`round`/`div`, `assert`, `print(stderr:)`, `split()`, `push(...items)`, `sort(key, reverse)`); a review found 12 issues, each fixed with a test (drive-relative and `%` program paths, cwd-relative paths, pipes serviced at once, tree kill) |
+| 2026-10-25 | 1.4: the Python engine (`adapters/py.py`, blocks reached and loaded, values, V2 functions as stubs, `V2Error`, causes, coroutines, uncaught foreign errors printed with their class and causes); a review confirmed 34 findings, fixed with tests (error data with functions or handles through Python, a finalizer printing mid-send, replies that can't fail, handle counts given back, sys.path order, 8 causes, split UTF-8) |
