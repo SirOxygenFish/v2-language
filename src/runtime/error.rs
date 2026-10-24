@@ -163,40 +163,60 @@ fn split_message(message: &str) -> (&str, Vec<&str>) {
     (first, lines.collect())
 }
 
-/// An uncaught error, as printed to stderr.
+/// `ValueError`, or `ForeignError: ZeroDivisionError` when the foreign class is known (2.4).
+pub fn kind_text(e: &ErrorValue) -> String {
+    match &e.foreign_type {
+        Some(ft) => format!("{}: {ft}", e.kind),
+        None => e.kind.to_string(),
+    }
+}
+
+/// Most `caused by:` levels printed (2.4).
+const MAX_CAUSES: usize = 8;
+
+/// An uncaught error, as printed to stderr (2.4).
 pub fn render_error(sm: &SourceMap, e: &ErrorValue) -> String {
     let (first, rest) = split_message(&e.message);
     let mut out = match e.span.get().copied() {
         Some(span) => {
             let display = &sm.file(span.file).display;
-            let mut s = format!("{display}:{}:{}: {}: {first}\n", span.line, span.col, e.kind);
+            let mut s = format!("{display}:{}:{}: {}: {first}\n", span.line, span.col, kind_text(e));
             s.push_str(&excerpt(sm, span));
             s
         }
-        None => format!("v2: {}: {first}\n", e.kind),
+        None => format!("v2: {}: {first}\n", kind_text(e)),
     };
     for line in rest {
         out.push_str(&format!("    {line}\n"));
     }
     if let Some(trace) = e.trace.get() {
-        render_frames(&mut out, trace);
+        render_frames(&mut out, trace, "  ");
+    }
+    let mut cause = &e.cause;
+    for _ in 0..MAX_CAUSES {
+        let Value::Error(c) = cause else { break };
+        out.push_str(&format!("  caused by: {}: {}\n", kind_text(c), split_message(&c.message).0));
+        if let Some(trace) = c.trace.get() {
+            render_frames(&mut out, trace, "    ");
+        }
+        cause = &c.cause;
     }
     out
 }
 
 /// More than 100 frames: the first 50, `... N frames omitted`, then the last 20 (2.4).
-fn render_frames(out: &mut String, trace: &[Rc<str>]) {
+fn render_frames(out: &mut String, trace: &[Rc<str>], indent: &str) {
     if trace.len() > 100 {
         for f in &trace[..50] {
-            out.push_str(&format!("  at {f}\n"));
+            out.push_str(&format!("{indent}at {f}\n"));
         }
-        out.push_str(&format!("  ... {} frames omitted\n", trace.len() - 70));
+        out.push_str(&format!("{indent}... {} frames omitted\n", trace.len() - 70));
         for f in &trace[trace.len() - 20..] {
-            out.push_str(&format!("  at {f}\n"));
+            out.push_str(&format!("{indent}at {f}\n"));
         }
     } else {
         for f in trace {
-            out.push_str(&format!("  at {f}\n"));
+            out.push_str(&format!("{indent}at {f}\n"));
         }
     }
 }

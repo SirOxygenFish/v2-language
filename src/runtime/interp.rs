@@ -22,6 +22,7 @@ use super::value::{bytes_repr, float_str, quoted, Callable, Value};
 use crate::engines::process::stop_if_interrupted;
 use crate::engines::registry::Registry;
 use crate::engines::session::Session;
+use crate::engines::units::UnitState;
 use crate::syntax::ast::*;
 use crate::syntax::span::{FileId, SourceMap, Span};
 
@@ -55,6 +56,8 @@ pub struct Interp {
     pub sessions: Vec<Session>,
     /// Cross-language crossings in progress (9.7).
     pub xdepth: u32,
+    /// Definition units by block (12.1).
+    pub units: HashMap<UnitId, UnitState>,
     pub out: Out,
     pub chars: CharCache,
     calls: Vec<CallRecord>,
@@ -91,6 +94,7 @@ impl Interp {
             registry,
             sessions: Vec::new(),
             xdepth: 0,
+            units: HashMap::new(),
             out: Out::new(),
             chars: CharCache::default(),
             calls: Vec::new(),
@@ -264,20 +268,8 @@ impl Interp {
         Ok(())
     }
 
-    /// Reaching a block resolves its engine: `EngineUnknown` or `EngineNotFound` (7.3, 7.8).
-    /// Running it arrives with the engines (roadmap 1.4, 1.5).
-    fn reach_block(&self, b: &EngineBlock) -> Flow {
-        match self.registry.resolve_tag(&b.tag.text) {
-            Err(flow) => self.raise(flow, b.tag.span),
-            Ok(e) => {
-                let milestone = if &*e.spec.id == "py" { "1.4" } else { "1.5" };
-                self.not_yet(&format!("@{} blocks (roadmap {milestone})", e.spec.id), b.tag.span)
-            }
-        }
-    }
-
     /// Temporary until the roadmap milestone named in `what` lands.
-    fn not_yet(&self, what: &str, span: Span) -> Flow {
+    pub(crate) fn not_yet(&self, what: &str, span: Span) -> Flow {
         let msg = format!("{what} doesn't run yet in this build");
         self.raise(Flow::Error(Rc::new(ErrorValue::new("Error", msg))), span)
     }
@@ -377,7 +369,9 @@ impl Interp {
             }
             StmtKind::EngineImport(imp) => return Err(self.not_yet("@import (roadmap phase 1)", imp.span)),
             StmtKind::Extern(_) => return Err(self.not_yet("extern (roadmap phase 2)", Span { hi: s.span.lo + 6, ..s.span })),
-            StmtKind::Block(b) => return Err(self.reach_block(b)),
+            StmtKind::Block(b) => {
+                self.exec_block(b, env, false)?;
+            }
         }
         Ok(())
     }
@@ -648,7 +642,7 @@ impl Interp {
             }
             ExprKind::OptChain(x) => self.chain(x, env)?.unwrap_or(Value::Null),
             ExprKind::Func(decl) => self.closure(decl, env),
-            ExprKind::Block(b) => return Err(self.reach_block(b)),
+            ExprKind::Block(b) => self.exec_block(b, env, true)?,
         })
     }
 
@@ -1106,7 +1100,7 @@ fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
             Callable::Closure { name, .. } => out.push_str(&format!("<func {name}>")),
             Callable::Builtin(def) => out.push_str(&format!("<builtin {}>", def.name)),
         },
-        Value::Error(e) => out.push_str(&format!("{}: {}", e.kind, e.message)),
+        Value::Error(e) => out.push_str(&format!("{}: {}", super::error::kind_text(e), e.message)),
     }
     Ok(())
 }

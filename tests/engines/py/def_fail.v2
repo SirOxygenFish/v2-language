@@ -1,0 +1,45 @@
+// requires: py
+// A definition block that fails to load stays failed: reaching it again throws the same error
+// without running its code again (DOCS 4.3, INTERNALS 12.1).
+let errs = []
+for i in 0..2 {
+    try {
+        @py bad {
+            print("loading")
+            raise ValueError("nope")
+            @export { f }
+        }
+    } catch (e) {
+        errs.push(e)
+    }
+}
+print(errs[0] == errs[1], errs[0].type, errs[0].foreign_type, errs[0].message)
+// An @export name the block doesn't define fails the load, at that item.
+for i in 0..2 {
+    try {
+        @py partial {
+            print("partial runs once")
+            def a():
+                pass
+            @export { a, b }
+        }
+    } catch (e) {
+        print(e.type, "|", e.message, "|", e.line, e.col)
+    }
+}
+// A block reached again during its own load.
+func load_again() {
+    @py again(cb: load_again) {
+        cb()
+        @export { cb }
+    }
+}
+for i in 0..2 {
+    try {
+        load_again()
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+// The adapter keeps no unit for a definition that failed to load (12.2, 12.3).
+print(@py { len(__import__("sys").modules["__main__"].units) })

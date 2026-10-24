@@ -1,0 +1,13 @@
+// requires: py
+// A block that runs past call_timeout stops the engine for the rest of the run (INTERNALS 8.5).
+let t0 = time()
+try {
+    @py { import time; time.sleep(30) }
+} catch (e) {
+    print(e.type, "|", e.message, "|", time() - t0 < 5)
+}
+try {
+    @py { 1 }
+} catch (e) {
+    print(e.type, "|", e.message)
+}

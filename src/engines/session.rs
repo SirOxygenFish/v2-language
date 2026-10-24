@@ -3,8 +3,6 @@
 //! child-process rules and the watchdog are in `engines/process`; frames in `engines/vep`;
 //! values in `codec/vep`.
 
-#![allow(dead_code)] // blocks start sessions from roadmap 1.4 on
-
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -97,12 +95,16 @@ impl Session {
     }
 }
 
-/// A `ret` (9.6): its decoded value, and for `load`/`module` the export lists.
+/// A `ret` (9.6): its decoded value, and for `load`/`module` the export lists (9.4): each
+/// export's name with its constant (`None` for a function), and the names it lacks.
 pub struct Reply {
     pub value: Value,
-    pub exports: Option<Json>,
-    pub missing: Option<Json>,
+    pub exports: Vec<(Rc<str>, Option<Value>)>,
+    pub missing: Vec<Rc<str>>,
 }
+
+/// Most `cause` levels an `err` is read to (9.6).
+const MAX_CAUSES: usize = 8;
 
 /// A worker's argv and environment (8.3, 14.1): the resolved argv, the spec's fixed arguments
 /// with `{adapter}` filled in, and the spec's environment on top of the host's (a `NODE_PATH`
@@ -179,6 +181,7 @@ impl Interp {
     }
 
     /// A session over any channel, before its handshake (the tests' scripted workers).
+    #[cfg(test)]
     pub fn attach_session(
         &mut self,
         engine: Rc<ResolvedEngine>,
@@ -343,7 +346,10 @@ impl Interp {
         }
         self.sessions[s].caps = hello.caps;
         self.sessions[s].hello = Some(hello);
-        let root = self.registry.config().root.to_string_lossy().into_owned();
+        // Canonical, like the `.v2` paths in `load` frames, so a worker sees one spelling of it (2.1, 9.3).
+        let root = &self.registry.config().root;
+        let root = std::fs::canonicalize(root).map_or_else(|_| root.clone(), |c| crate::syntax::span::strip_verbatim(&c));
+        let root = root.to_string_lossy().into_owned();
         // The init request would be one crossing too many: the worker never gets going.
         if self.xdepth >= MAX_XDEPTH {
             drop(startup);
@@ -435,7 +441,10 @@ impl Interp {
     /// A request to the worker (`load`, `module`, `call`, `op`) and its reply, serving the
     /// worker's calls into V2 meanwhile (9.7). `name` describes it for messages.
     pub fn request(&mut self, s: SessionId, frame: Json, name: &str, at: Span) -> Exec<Reply> {
-        self.check_alive(s, at)?;
+        if let Err(flow) = self.check_alive(s, at) {
+            self.sessions[s].callables.release(&crate::codec::vep::fn_ids(&frame));
+            return Err(flow);
+        }
         let timer = self.timer(s, self.sessions[s].timeouts.call);
         let pending = Pending { id: 0, name: name.into(), timer, startup: false };
         self.exchange(s, frame, pending, at)
@@ -443,6 +452,7 @@ impl Interp {
 
     fn exchange(&mut self, s: SessionId, mut frame: Json, mut pending: Pending, at: Span) -> Exec<Reply> {
         if self.xdepth >= MAX_XDEPTH {
+            self.sessions[s].callables.release(&crate::codec::vep::fn_ids(&frame));
             return Err(self.raise(depth_error(), at));
         }
         let session = &mut self.sessions[s];
@@ -477,7 +487,7 @@ impl Interp {
         result
     }
 
-    fn wire(&mut self, s: SessionId) -> Wire<'_> {
+    pub(crate) fn wire(&mut self, s: SessionId) -> Wire<'_> {
         let session = &mut self.sessions[s];
         Wire {
             session: s,
@@ -524,8 +534,12 @@ impl Interp {
                     return Err(self.raise(flow, at));
                 }
                 Frame::Ret { value, exports, missing, .. } => {
-                    return match self.wire(s).decode(&value) {
-                        Ok(value) => Ok(Reply { value, exports, missing }),
+                    let reply = self.wire(s).decode(&value).and_then(|value| {
+                        let (exports, missing) = self.export_lists(s, exports.as_ref(), missing.as_ref())?;
+                        Ok(Reply { value, exports, missing })
+                    });
+                    return match reply {
+                        Ok(reply) => Ok(reply),
                         Err(what) => {
                             let flow = self.protocol_violation(s, &what, &line);
                             Err(self.raise(flow, at))
@@ -534,7 +548,7 @@ impl Interp {
                 }
                 Frame::Err { error: e, .. } => {
                     return match self.foreign_error(s, &e) {
-                        Ok(err) => Err(self.raise(Flow::Error(Rc::new(err)), at)),
+                        Ok(err) => Err(self.raise(Flow::Error(err), at)),
                         Err(what) => {
                             let flow = self.protocol_violation(s, &what, &line);
                             Err(self.raise(flow, at))
@@ -662,21 +676,59 @@ impl Interp {
     /// The `error` of an `err` answering a V2 error: its kind and message, and the error itself
     /// as a tag so that it comes back unchanged (9.6).
     fn error_payload(&mut self, s: SessionId, e: &Rc<ErrorValue>) -> Json {
-        let tag = self.wire(s).encode(&Value::Error(e.clone()), "the error").unwrap_or(Json::Null);
+        let tag = match self.wire(s).encode(&Value::Error(e.clone()), "the error") {
+            Ok(tag) => tag,
+            // Data or a cause that can't cross is left out; type, message, location and trace
+            // still go back.
+            Err(_) => {
+                let mut bare = ErrorValue::with_data(e.kind.clone(), e.message.clone(), Value::Null);
+                bare.lang = e.lang.clone();
+                bare.foreign_type = e.foreign_type.clone();
+                if let Some(span) = e.span.get() {
+                    let _ = bare.span.set(*span);
+                }
+                if let Some(trace) = e.trace.get() {
+                    let _ = bare.trace.set(trace.clone());
+                }
+                self.wire(s).encode(&Value::Error(Rc::new(bare)), "the error").unwrap_or(Json::Null)
+            }
+        };
         json!({"type": &*e.kind, "message": &*e.message, "foreign_type": null, "trace": [], "v2": tag})
     }
 
-    /// An `err` from the worker as a V2 error (9.6). Its location and foreign frames are mapped
-    /// in roadmap 1.8; until then it sits at the V2 call site.
-    fn foreign_error(&mut self, s: SessionId, e: &Map<String, Json>) -> Result<ErrorValue, String> {
+/// A `ret`'s `exports` and `missing` (9.4): absent members are empty lists. `Err`: what is
+    /// wrong, for a fatal ProtocolError (9.11).
+    #[allow(clippy::type_complexity)]
+    fn export_lists(&mut self, s: SessionId, exports: Option<&Json>, missing: Option<&Json>) -> Result<(Vec<(Rc<str>, Option<Value>)>, Vec<Rc<str>>), String> {
+        let mut out = Vec::new();
+        for e in exports.map(|e| e.as_array().ok_or("a 'ret' with a bad 'exports'")).transpose()?.into_iter().flatten() {
+            let bad = || "a 'ret' with a bad 'exports' entry".to_string();
+            let name = e.get("name").and_then(Json::as_str).ok_or_else(bad)?;
+            let value = match e.get("kind").and_then(Json::as_str) {
+                Some("func") => None,
+                Some("value") => Some(self.wire(s).decode(e.get("value").ok_or_else(bad)?)?),
+                _ => return Err(bad()),
+            };
+            out.push((Rc::from(name), value));
+        }
+        let mut names = Vec::new();
+        for m in missing.map(|m| m.as_array().ok_or("a 'ret' with a bad 'missing'")).transpose()?.into_iter().flatten() {
+            names.push(Rc::from(m.as_str().ok_or("a 'ret' with a bad 'missing'")?));
+        }
+        Ok((out, names))
+    }
+
+    /// An `err` from the worker as a V2 error (9.6), with its chained causes. A V2 error that
+    /// went through the worker comes back as it was, location and trace included. Foreign
+    /// frames are mapped in roadmap 1.8; until then a foreign error sits at the V2 call site.
+    fn foreign_error(&mut self, s: SessionId, e: &Map<String, Json>) -> Result<Rc<ErrorValue>, String> {
+        self.foreign_error_at(s, e, 0)
+    }
+
+    fn foreign_error_at(&mut self, s: SessionId, e: &Map<String, Json>, depth: usize) -> Result<Rc<ErrorValue>, String> {
         if let Some(tag) = e.get("v2").filter(|t| !t.is_null()) {
             return match self.wire(s).decode(tag)? {
-                Value::Error(err) => {
-                    let mut restored = ErrorValue::with_data(err.kind.clone(), err.message.clone(), err.data.clone());
-                    restored.lang = err.lang.clone();
-                    restored.foreign_type = err.foreign_type.clone();
-                    Ok(restored)
-                }
+                Value::Error(err) => Ok(err),
                 _ => Err("an 'err' whose 'v2' is not an error".into()),
             };
         }
@@ -695,7 +747,11 @@ impl Interp {
             err
         };
         err.lang = Some(self.tag(s));
-        Ok(err)
+        if let Some(cause) = e.get("cause").filter(|c| !c.is_null() && depth < MAX_CAUSES) {
+            let cause = cause.as_object().ok_or("an 'err' with a bad 'cause'")?;
+            err.cause = Value::Error(self.foreign_error_at(s, cause, depth + 1)?);
+        }
+        Ok(Rc::new(err))
     }
 
     /// The orderly end (8.7): `bye` to every running session, newest first, then one shared

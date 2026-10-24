@@ -1,0 +1,2 @@
+0 json:42 ['@export { x }', '@import y']
+1 json:42 ['@export { x }', '@import y']

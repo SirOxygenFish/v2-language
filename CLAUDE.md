@@ -26,8 +26,11 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 1.4 (not started). Draft adapter: `scratchpad/py.py` of the session (move to
-  `src/adapters/py.py`).
+- Now: 1.5 (not started). A draft `js.js` sits in the session scratchpad (not in the repo); it
+  was driven by hand over VEP (loads, values, BigInt, Promises, causes, ts stripping,
+  callbacks). If the scratchpad is gone, write it again from 12.4, 12.5, 14.4 and py.py.
+- Lessons from 1.4: the same bugs py.py had will apply to js.js (pin encoded stubs, re-encode
+  error tags, roll back handle counts, never re-enter the send path, every request gets a reply).
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -109,12 +112,17 @@ it is loaded automatically into every session and every subagent.
   Session state stays Handshaking until `init`'s `ret`. Reaping a child also drops its timers
   (`process::unregister`). `session/tests.rs`: scripted workers over `std::io::pipe()` or as a
   real child (`V2_WORKER`; `worker_main` writes a newline first because libtest's "test ... "
-  line has none). Gaps for 1.4+: `Reply.exports`/`missing` are raw JSON; `wire()` is private;
-  `foreign_error` drops the `v2` tag's span/trace/cause and ignores `cause`/`trace`/`text`
-  (1.4 cause, 1.8 mapping); `engines/vep.rs` has no load/module/call/op builders; nothing maps
-  config timeouts to `Timeouts` or finds a session by key.
-- Empty stubs (a doc comment only): `engines/units.rs`, `engines/imports.rs`,
-  `engines/runonly.rs`, `adapters/mod.rs`, `build/*`, `ffi/lib.rs`.
+  line has none). `Reply` has typed `exports`/`missing`; `wire()` is pub(crate); `foreign_error`
+  returns a V2 error from a `v2` tag as it was and reads `cause` (8 levels); foreign frames and
+  `text` wait for 1.8. `engines/vep.rs` builds `load` (no module/call/op builders yet). Errors
+  render as `Kind: foreign_type: msg` plus `caused by:` (error.rs `kind_text`).
+- `engines/units.rs`: `exec_block` (12.1: definition units Loading/Loaded/Failed in
+  `Interp.units`; action blocks every reach), `block_name`, `session_for` (one session per key,
+  adapter written by `adapters::materialize`), timeouts from config. `adapters/py.py` (embedded
+  via `adapters/mod.rs`): the whole Python worker; adapter internals are module globals of
+  `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units, HANDLERS).
+- Empty stubs (a doc comment only): `engines/imports.rs`, `engines/runonly.rs`, `build/*`,
+  `ffi/lib.rs`.
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
   `V2_TEST_REQUIRE`. `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
