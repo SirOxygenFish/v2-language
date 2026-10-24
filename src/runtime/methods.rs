@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::rc::Rc;
 
-use super::builtins::str_arg;
+use super::builtins::{bool_arg, str_arg};
 use super::call::ParamSpec;
 use super::error::{fail, type_error, value_error, Exec};
 use super::interp::Interp;
@@ -29,7 +29,7 @@ pub static STR_METHODS: &[MethodDef] = &[
     m("upper", NONE, |_, r, _, _| Ok(Value::Str(the_str(r).to_uppercase().into()))),
     m("lower", NONE, |_, r, _, _| Ok(Value::Str(the_str(r).to_lowercase().into()))),
     m("trim", NONE, |_, r, _, _| Ok(Value::str(the_str(r).trim()))),
-    m("split", &[ParamSpec::req("sep")], str_split),
+    m("split", &[ParamSpec::opt("sep", || Value::Null)], str_split),
     m("lines", NONE, |_, r, _, _| Ok(Value::list(the_str(r).lines().map(Value::str).collect()))),
     m("replace", &[ParamSpec::req("old"), ParamSpec::req("new")], str_replace),
     m("starts_with", &[ParamSpec::req("p")], |_, r, a, _| {
@@ -60,8 +60,11 @@ pub static BYTES_METHODS: &[MethodDef] = &[
 ];
 
 pub static LIST_METHODS: &[MethodDef] = &[
-    m("push", &[ParamSpec::req("x")], |_, r, mut a, _| {
-        the_list(r).borrow_mut().push(a.remove(0));
+    m("push", &[ParamSpec::rest("items")], |_, r, a, _| {
+        // The binder made the rest list, so `xs.push(...xs)` borrows two different lists.
+        let Value::List(items) = &a[0] else { unreachable!("the rest parameter is a list") };
+        let items = items.borrow().clone();
+        the_list(r).borrow_mut().extend(items);
         Ok(Value::Null)
     }),
     m("pop", &[ParamSpec::opt("i", || Value::Int(-1))], |_, r, a, _| {
@@ -91,7 +94,7 @@ pub static LIST_METHODS: &[MethodDef] = &[
         l.insert(k as usize, a.remove(1));
         Ok(Value::Null)
     }),
-    m("sort", NONE, list_sort),
+    m("sort", &[ParamSpec::opt("key", || Value::Null), ParamSpec::opt("reverse", || Value::Bool(false))], list_sort),
     m("reverse", NONE, |_, r, _, _| {
         the_list(r).borrow_mut().reverse();
         Ok(Value::Null)
@@ -221,7 +224,11 @@ pub fn key_error<T>(key: &str, d: &Dict) -> Exec<T> {
     fail("KeyError", msg)
 }
 
+/// `split(sep = null)`: without `sep`, on runs of whitespace with no empty parts (5.11).
 fn str_split(_: &mut Interp, r: &Value, a: Vec<Value>, _: Span) -> Exec<Value> {
+    if let Value::Null = a[0] {
+        return Ok(Value::list(the_str(r).split_whitespace().map(Value::str).collect()));
+    }
     let sep = str_arg(&a[0], "str.split", "sep")?;
     if sep.is_empty() {
         return value_error("str.split() separator must not be empty");
@@ -247,23 +254,45 @@ fn str_index_of(it: &mut Interp, r: &Value, a: Vec<Value>, _: Span) -> Exec<Valu
     }))
 }
 
-/// Stable, in place; all numbers (exact order, NaN last) or all strings (5.11).
-fn list_sort(_: &mut Interp, r: &Value, _: Vec<Value>, _: Span) -> Exec<Value> {
+/// `sort(key = null, reverse = false)`: stable, in place. `key` is called once per item, in
+/// order, on a snapshot; the keys (else the items) must be all numbers (exact order, NaN last)
+/// or all strings. `reverse` reverses the comparator, so equal items keep their order (5.11).
+fn list_sort(it: &mut Interp, r: &Value, a: Vec<Value>, at: Span) -> Exec<Value> {
     let l = the_list(r);
+    let reverse = bool_arg(&a[1], "list.sort", "reverse")?;
+    // No borrow is held across the key function, which may change this list (5.11).
+    let items = l.borrow().clone();
+    let keys = match &a[0] {
+        Value::Null => items.clone(),
+        f => {
+            let mut keys = Vec::with_capacity(items.len());
+            for x in &items {
+                keys.push(it.call_value(f, vec![x.clone()], Vec::new(), at)?);
+            }
+            keys
+        }
+    };
     let kind = |v: &Value| match v {
         Value::Int(_) | Value::Float(_) => Some(0),
         Value::Str(_) => Some(1),
         _ => None,
     };
-    {
-        let items = l.borrow();
-        if let Some(bad) = items.iter().find(|v| kind(v).is_none()) {
-            return type_error(format!("cannot sort a list containing {} (only numbers or strings)", bad.type_name()));
-        }
-        if let (Some(first), Some(other)) = (items.first(), items.iter().find(|v| kind(v) != kind(&items[0]))) {
-            return type_error(format!("cannot sort a list mixing {} and {}", first.type_name(), other.type_name()));
-        }
+    if let Some(bad) = keys.iter().find(|v| kind(v).is_none()) {
+        return type_error(format!("cannot sort a list containing {} (only numbers or strings)", bad.type_name()));
     }
-    l.borrow_mut().sort_by(sort_key_cmp);
+    if let (Some(first), Some(other)) = (keys.first(), keys.iter().find(|v| kind(v) != kind(&keys[0]))) {
+        return type_error(format!("cannot sort a list mixing {} and {}", first.type_name(), other.type_name()));
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&i, &j| {
+        let o = sort_key_cmp(&keys[i], &keys[j]);
+        if reverse {
+            o.reverse()
+        } else {
+            o
+        }
+    });
+    let sorted = order.into_iter().map(|i| items[i].clone()).collect();
+    *l.borrow_mut() = sorted;
     Ok(Value::Null)
 }

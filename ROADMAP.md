@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 0.11 Small standard library, then 1.4 Python engine (go-ahead from the owner 2026-10-24) |
+| **Next task** | 1.4 Python engine (go-ahead from the owner 2026-10-24) |
 | **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
 
 ## Rules
@@ -71,7 +71,7 @@ R45, R48 (host part), R49, the ch. 21 Host rows and Setup's config-file row pass
 2026-10-02**: every listed test and ch. 21 row has a test, every DOCS chapter 3 example was run
 against the binary, and the suite passes on Windows and Linux (macOS untested until CI runs).
 
-- [ ] **0.11 Small standard library** (added 2026-10-24, after Phase 0 closed; built first in
+- [x] **0.11 Small standard library** (added 2026-10-24, after Phase 0 closed; built first in
       Phase 1): `exec`, `script_dir`, `exists`, `list_dir`, `make_dir`, `remove_file`,
       `write_file(…, append:)`, `sleep`, `time`, `min`, `max`, `sum`, `abs`, `round`, `div`,
       `assert` (the `AssertionError` kind), `print(…, stderr:)`; `sort(key, reverse)`, `split()`
@@ -79,7 +79,7 @@ against the binary, and the suite passes on Windows and Linux (macOS untested un
       like an engine command (§7.5) and runs on `engines/process` (§8.3)
   - **Done when:** every new builtin and method has `tests/host` cases, its errors included, on
     Windows and Linux; the ch. 21 Host row for a failed `print(stderr: true)` has a test; the
-    DOCS chapter 3 examples run against the binary
+    DOCS chapter 3 examples run against the binary — **passed 2026-10-24** (Windows and Linux)
 
 ---
 
@@ -339,3 +339,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-24 | Docs review, 43 changes approved by the owner. Added: the 0.11 small standard library (docs only), built-in run engines (Phase 3), callable handles that cross engines, a generous `to_v2(h)` (was `value(h)`), `e.cause`, `V2Error` details in foreign code. Changed in code: `func` replaces `lambda`, `index_of` and `pop(i)` replace `find` and `remove_at`, Python 3.10+ and Node 22.13+ (one Node rule), `command` must be an array, canonical `V2_ENGINE_<TAG>` only, narrower path rewriting in `command`, `in` on a dict, positional `range`, dict keys holding handles; new static errors for unused expression values, chained `==`, code after a multi-line block's `{` and compiled-block directives. Spec fixes for in-block imports, ambiguity, mapping handles, JS constructors and compiled blocks using files next to the script; machinery cut before it was built; INTERNALS shortened |
 | 2026-10-24 | `define_engine` added at the owner's request (DOCS 13.3, §17.2): a script declares its own custom engines without a `v2.toml`; built with Phase 3 |
 | 2026-10-24 | ROADMAP checked against INTERNALS and DOCS: Phase 1 re-cut so each milestone can pass its own tests (V2 function stubs and `V2Error` into 1.4/1.5, named args into 1.6, cross-engine callable handles, leaks, idle callbacks and R54 into 1.7), Phase 2/3 items and citations completed, stale claims fixed; the owner gave the go-ahead for 0.11 and Phase 1 |
+| 2026-10-24 | 0.11: the small standard library (`exec`, `script_dir`, the file and folder functions, `sleep`, `time`, `min`/`max`/`sum`/`abs`/`round`/`div`, `assert`, `print(stderr:)`, `split()`, `push(...items)`, `sort(key, reverse)`); a review found 12 issues, each fixed with a test (drive-relative and `%` program paths, cwd-relative paths, pipes serviced at once, tree kill) |

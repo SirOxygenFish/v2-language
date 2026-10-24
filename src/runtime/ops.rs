@@ -112,7 +112,7 @@ fn cmp_int_float(i: i64, f: f64) -> Option<Ordering> {
 }
 
 /// Number–number or str–str; `None` when a NaN is involved (5.2).
-fn order(a: &Value, b: &Value, op: &str) -> Exec<Option<Ordering>> {
+pub fn order(a: &Value, b: &Value, op: &str) -> Exec<Option<Ordering>> {
     Ok(match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),

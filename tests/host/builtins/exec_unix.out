@@ -1,0 +1,5 @@
+3 "out" "err"
+a b|$HOME
+137
+piped
+"a�b"

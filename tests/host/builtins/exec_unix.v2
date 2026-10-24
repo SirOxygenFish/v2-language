@@ -1,0 +1,11 @@
+// platform: unix
+// exec finds a program on PATH like an engine command (DOCS 3.11, INTERNALS 5.10, 7.5).
+let r = exec(["sh", "-c", "printf out; printf err >&2; exit 3"])
+print(r.code, json_stringify(r.stdout), json_stringify(r.stderr))
+// No shell is involved: the arguments arrive as given.
+print(exec(["sh", "-c", "printf '%s|%s' \"$0\" \"$1\"", "a b", "$HOME"]).stdout)
+// A program killed by a signal has code 128 + the signal number.
+print(exec(["sh", "-c", "kill -9 $$"]).code)
+print(exec(["cat"], input: "piped\n").stdout.trim())
+// Output that isn't UTF-8 is decoded leniently.
+print(json_stringify(exec(["sh", "-c", r"printf 'a\377b'"]).stdout))

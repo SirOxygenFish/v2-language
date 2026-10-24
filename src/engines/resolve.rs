@@ -99,6 +99,12 @@ fn with_extension_appended(p: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Windows `C:tool`: relative to that drive's own current folder, so neither a `PATH` name nor
+/// a file under the base, and never found (7.5).
+pub fn is_drive_relative(p: &Path) -> bool {
+    matches!(p.components().next(), Some(std::path::Component::Prefix(_))) && !p.has_root()
+}
+
 /// Every hit for `name`, in `PATH` order, so the search can go on past a skipped one (7.5).
 /// With a separator, `name` is joined to `l.cwd`; otherwise each absolute `PATH` entry is
 /// tried (never the cwd).
@@ -112,6 +118,9 @@ pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
         }
     };
     let as_path = Path::new(name);
+    if is_drive_relative(as_path) {
+        return hits;
+    }
     if name.contains(['/', '\\']) {
         let p = l.cwd.join(as_path);
         if cfg!(windows) && !has_accepted_extension(as_path) {
@@ -165,8 +174,8 @@ pub struct RealProber;
 
 impl Prober for RealProber {
     fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)]) -> ProbeOutcome {
-        match process::run_captured(argv, env, Some(PROBE_LIMIT)) {
-            Err(msg) => ProbeOutcome::SpawnFailed(msg),
+        match process::run_captured(argv, env, Some(PROBE_LIMIT), None) {
+            Err(e) => ProbeOutcome::SpawnFailed(e.message),
             Ok(c) if c.timed_out => ProbeOutcome::TimedOut,
             Ok(c) => match c.status.signal {
                 Some(sig) => ProbeOutcome::Killed(sig),
