@@ -1,0 +1,22 @@
+a
+b
+a 1
+b 2
+7
+8
+0 7
+1 8
+yield 0
+got 0
+yield 1
+got 1
+yield 2
+got 2
+batched a 1
+batched b 2
+4
+entry x
+got x 1
+entry y
+got y 2
+true

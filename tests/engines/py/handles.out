@@ -1,0 +1,25 @@
+handle 1 3 6 Box(6) Box(6)
+10 {"k": 1}
+handle 11 11
+handle 4.0 2 true
+2
+ForeignError | TypeError | Box.add() got an unexpected keyword argument 'nope'
+ForeignError | AttributeError | 'Box' object has no attribute 'nope'
+ForeignError | TypeError | 'Box' object is not callable
+true false true
+{"a": [1, 2]} [1.5, 2.5]
+MarshalError | null | to_v2(): can't convert __v2_0_310.Box to V2 data
+5 true
+TypeError | null | unsupported operand types for +: 'handle' and 'int' — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | cannot compare handle and handle with '<' — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | 'in' needs a list, dict, str or bytes on the right, got handle — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | cannot slice a handle — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | dict keys must be str, got handle
+TypeError | null | cannot convert handle to JSON at [0] (use to_v2(h) first)
+true true
+3 3 {"a": 3, "b": 1, "z": 5}
+TypeError | null | bad operand type for unary -: 'handle' — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | cannot sort a list containing handle (only numbers or strings) — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | min() needs numbers or strings, got handle — do it inside a block, or convert it with to_v2(h) first
+TypeError | null | dict keys must be str, got handle
+TypeError | null | 'in' on a str needs a str, got handle — do it inside a block, or convert it with to_v2(h) first

@@ -115,8 +115,24 @@ function recv() {
 
 class TooBig extends Error {}
 
+class OrderedPairs {
+  // A dict whose key order JSON.stringify must not change (to_v2 of a Map, 11.5).
+  constructor(pairs) {
+    this.pairs = pairs;
+  }
+}
+let orderedPending = false;
+
+function stringify(v) {
+  if (v instanceof OrderedPairs) return '{' + v.pairs.map(([k, x]) => JSON.stringify(k) + ':' + stringify(x)).join(',') + '}';
+  if (Array.isArray(v)) return '[' + v.map((x) => (x === undefined ? 'null' : stringify(x))).join(',') + ']';
+  if (v !== null && typeof v === 'object') return '{' + Object.keys(v).map((k) => JSON.stringify(k) + ':' + stringify(v[k])).join(',') + '}';
+  return JSON.stringify(v);
+}
+
 function writeFrame(obj) {
-  const data = Buffer.from(JSON.stringify(obj) + '\n', 'utf8');
+  const text = orderedPending ? stringify(obj) : JSON.stringify(obj);
+  const data = Buffer.from(text + '\n', 'utf8');
   if (data.length > LIMIT) throw new TooBig(String(data.length));
   let off = 0;
   while (off < data.length) {
@@ -142,10 +158,9 @@ const fnReleases = []; // callable ids whose stubs died (11.8)
 let pinned = []; // stubs encoded into the frame being built (11.8)
 let counted = []; // handle ids whose counts the frame being built added (10.1)
 
-function rollbackCounts() {
-  const ids = counted;
-  counted = [];
-  releaseHandles(ids);
+function rollbackCounts(mark = 0) {
+  // The counts added since `mark` were for tags that won't be sent (10.1).
+  releaseHandles(counted.splice(mark));
 }
 
 const active = () => stack.length > 0 || closing;
@@ -188,6 +203,7 @@ function send(frame) {
     throw e;
   } finally {
     pinned = [];
+    orderedPending = false;
   }
   counted = [];
 }
@@ -460,6 +476,7 @@ function releaseHandles(ids) {
     if (entry.count <= 0) {
       handles.delete(hid);
       byObj.delete(entry.obj);
+      pendingItems.delete(hid);
     }
   }
 }
@@ -586,10 +603,11 @@ function encode(x, depth = 0, open = new Set()) {
   return handleTag(x);
 }
 
-function encodeValue(x, root) {
-  // encode(x) for the frame member `root` (`value`, `args[0]`); a MarshalError says where (10.5).
+function encodeValue(x, root, depth = 0) {
+  // encode(x) for the frame member `root` (`value`, `args[0]`), `depth` levels down in the value
+  // V2 decodes; a MarshalError says where (10.5).
   try {
-    return encode(x);
+    return encode(x, depth);
   } catch (e) {
     if (e instanceof Fail && !e.located) {
       e.located = true;
@@ -963,7 +981,273 @@ function doInit() {
   return { value: null };
 }
 
-const HANDLERS = { init: doInit, load: doLoad };
+// ---------------------------------------------------------------------------------------------
+// Handles: calls and operations (9.5, 11.3-11.5)
+
+function handleEntry(hid) {
+  const entry = handles.get(hid);
+  if (!entry) throw new Fail('ProtocolError', `unknown handle id ${hid}`);
+  return entry;
+}
+
+// Natives that are functions first: calling them converts rather than constructs (11.3). Every
+// block has its own realm, so they are recognized by name and native code, not identity.
+const PLAIN_NATIVES = new Set(['Number', 'String', 'Boolean', 'Symbol', 'BigInt']);
+const NATIVE_CODE = /\{\s*\[native code\]\s*\}\s*$/;
+
+function isNative(f) {
+  try {
+    return typeof f === 'function' && NATIVE_CODE.test(Function.prototype.toString.call(f));
+  } catch {
+    return false;
+  }
+}
+
+function isConstructor(f) {
+  // A class, or a function whose prototype has own properties besides `constructor` (ES5
+  // constructors such as EventEmitter, natives such as Map and Date) (11.3).
+  if (typeof f !== 'function' || (PLAIN_NATIVES.has(f.name) && isNative(f))) return false;
+  let src = '';
+  try {
+    src = Function.prototype.toString.call(f);
+  } catch {}
+  if (/^class[\s{]/.test(src)) return true;
+  let p;
+  try {
+    p = f.prototype;
+  } catch {
+    return false;
+  }
+  if (p === null || (typeof p !== 'object' && typeof p !== 'function')) return false;
+  return Reflect.ownKeys(p).some((k) => k !== 'constructor');
+}
+
+function invoke(f, self, args) {
+  return isConstructor(f) ? Reflect.construct(f, args) : Reflect.apply(f, self, args);
+}
+
+function doCall(m) {
+  const target = m.target || {};
+  if (!('h' in target)) throw new Fail('ProtocolError', "a call target V2's JavaScript adapter does not serve");
+  const obj = handleEntry(target.h).obj;
+  const args = (m.args || []).map(decode);
+  let name;
+  let result;
+  if ('method' in target) {
+    name = target.method;
+    const f = obj[name];
+    if (typeof f !== 'function') throw new TypeError(`${name} is not a function`);
+    result = invoke(f, obj, args);
+  } else {
+    name = (typeof obj === 'function' && obj.name) || typeName(obj);
+    if (typeof obj !== 'function') throw new TypeError(`${typeName(obj)} is not a function`);
+    result = invoke(obj, undefined, args);
+  }
+  return settle(result, (v) => ({ value: encodeValue(v, 'value') }), `'${name}' returned a Promise`);
+}
+
+// One bound function per (object, method), so `let f = h.m; f()` keeps `this` (11.3).
+const boundMethods = new WeakMap();
+
+function boundMethod(obj, f) {
+  const make = () => new Proxy(f, { apply: (t, _this, args) => Reflect.apply(t, obj, args) });
+  if (obj === null || (typeof obj !== 'object' && typeof obj !== 'function')) return make();
+  let inner = boundMethods.get(obj);
+  if (!inner) boundMethods.set(obj, (inner = new WeakMap()));
+  let p = inner.get(f);
+  if (!p) inner.set(f, (p = make()));
+  return p;
+}
+
+function inheritsObjectToString(obj) {
+  // Whether toString comes from some realm's Object.prototype (a root prototype).
+  let p = obj;
+  while (p !== null && p !== undefined) {
+    if (Object.prototype.hasOwnProperty.call(p, 'toString')) return Object.getPrototypeOf(p) === null;
+    p = Object.getPrototypeOf(p);
+  }
+  return true;
+}
+
+function strOf(obj) {
+  if (typeof obj === 'function' || (obj !== null && typeof obj === 'object' && inheritsObjectToString(obj))) {
+    return util.inspect(obj, { depth: 2, breakLength: Infinity });
+  }
+  return String(obj);
+}
+
+function floatText(x) {
+  // V2's str() of a float: Rust's shortest form (`1e21`, `0.0001`, `1e-5`, `2.0`) (5.10).
+  if (Number.isNaN(x)) return 'nan';
+  if (!Number.isFinite(x)) return x > 0 ? 'inf' : '-inf';
+  if (x === 0) return Object.is(x, -0) ? '-0.0' : '0.0';
+  const a = Math.abs(x);
+  if (a >= 1e16 || a < 1e-4) return x.toExponential().replace('e+', 'e');
+  const t = String(x);
+  return t.includes('.') ? t : t + '.0';
+}
+
+function keyText(k, mapping) {
+  if (typeof k === 'string') return surrogateCheck(k);
+  if (k === null || k === undefined) return 'null';
+  if (typeof k === 'boolean') return k ? 'true' : 'false';
+  if (typeof k === 'number') return Number.isInteger(k) && k >= -(2 ** 63) && k < 2 ** 63 ? BigInt(k).toString() : floatText(k);
+  if (typeof k === 'bigint' && k >= I64_MIN && k <= I64_MAX) return k.toString();
+  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(mapping)} to V2 data (key of type ${typeName(k)})`);
+}
+
+function toV2(x, depth = 0, open = new Set()) {
+  // `op value`: the object as plain data, converted here (11.5). `depth` is the level the value
+  // would sit at, so a container at 256 or deeper is too deep, as for the host (10.5).
+  if (x === undefined || x === null || typeof x === 'boolean' || typeof x === 'number' || typeof x === 'string') return encode(x);
+  if (typeof x === 'bigint') {
+    if (x < I64_MIN || x > I64_MAX) throw new Fail('MarshalError', "to_v2(): can't convert bigint to V2 data (it needs more than 64 bits)");
+    return encode(x);
+  }
+  if (util.types.isUint8Array(x)) return encode(x);
+  if ((typeof x === 'function' && stubCells.has(x)) || x instanceof V2Error) return encode(x, depth, open); // V2's own values (10.7)
+  if (depth >= MAX_DEPTH) throw new Fail('MarshalError', `to_v2(): value nested deeper than ${MAX_DEPTH} levels`);
+  const isMap = util.types.isMap(x);
+  const list = Array.isArray(x) || util.types.isSet(x);
+  if (isMap || list || (typeof x === 'object' && isPlainObject(x))) {
+    if (open.has(x)) throw new Fail('MarshalError', `to_v2(): can't convert a ${typeName(x)} that contains itself`);
+    open.add(x);
+    try {
+      if (list) return Array.from(x, (v) => toV2(v, depth + 1, open));
+      const pairs = [];
+      const seen = new Set();
+      const entries = isMap ? x.entries() : Object.keys(x).map((k) => [k, x[k]]);
+      for (const [k, v] of entries) {
+        const key = keyText(k, x);
+        if (seen.has(key)) throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data (two keys become "${key}")`);
+        seen.add(key);
+        pairs.push([key, toV2(v, depth + 1, open)]);
+      }
+      orderedPending = true;
+      const out = new OrderedPairs(pairs);
+      return seen.has('$v2') ? { $v2: 'dict', v: out } : out;
+    } finally {
+      open.delete(x);
+    }
+  }
+  for (const hook of ['to_dict', 'tolist']) {
+    const f = x[hook];
+    if (typeof f === 'function') {
+      // The object stays on the path, so a hook that returns it (or holds it) is a cycle.
+      if (open.has(x)) throw new Fail('MarshalError', `to_v2(): can't convert a ${typeName(x)} that contains itself`);
+      open.add(x);
+      try {
+        return toV2(Reflect.apply(f, x, []), depth, open);
+      } finally {
+        open.delete(x);
+      }
+    }
+  }
+  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data`);
+}
+
+function isEager(obj) {
+  // Iterating it runs no user code, so `next` may return many items (11.4): a built-in
+  // container whose iteration methods are the built-in ones (a subclass may override them).
+  if (typeof obj === 'string') return true;
+  if (!(Array.isArray(obj) || ArrayBuffer.isView(obj) || util.types.isMap(obj) || util.types.isSet(obj))) return false;
+  return isNative(obj[Symbol.iterator]) && (!util.types.isMap(obj) || isNative(obj.entries));
+}
+
+const pendingItems = new Map(); // iterator handle id -> items taken but not sent yet (11.4)
+
+function doOp(m) {
+  const entry = handleEntry(m.h);
+  const obj = entry.obj;
+  switch (m.op) {
+    case 'getattr': {
+      const v = obj[m.name];
+      return { value: encodeValue(typeof v === 'function' && !isConstructor(v) ? boundMethod(obj, v) : v, 'value') };
+    }
+    case 'setattr':
+      obj[m.name] = decode(m.value);
+      return { value: null };
+    case 'getitem': {
+      const k = decode(m.key);
+      return { value: encodeValue(util.types.isMap(obj) ? obj.get(k) : obj[k], 'value') };
+    }
+    case 'setitem': {
+      const k = decode(m.key);
+      const v = decode(m.value);
+      if (util.types.isMap(obj)) obj.set(k, v);
+      else obj[k] = v;
+      return { value: null };
+    }
+    case 'len': {
+      const n = typeof obj.length === 'number' ? obj.length : typeof obj.size === 'number' ? obj.size : null;
+      if (n === null) throw new TypeError('object has no length');
+      if (!Number.isSafeInteger(n) || n < 0) throw new TypeError(`object has an invalid length (${n})`);
+      return { value: n };
+    }
+    case 'str':
+      return { value: wellFormed(strOf(obj)) };
+    case 'value':
+      return { value: toV2(obj) };
+    case 'iter': {
+      const mapping = util.types.isMap(obj);
+      let it;
+      if (mapping) it = obj.entries();
+      else {
+        const f = obj == null ? undefined : obj[Symbol.iterator];
+        if (typeof f !== 'function') throw new TypeError(`${typeName(obj)} is not iterable`);
+        it = Reflect.apply(f, obj, []);
+      }
+      const tag = handleTag(it);
+      handles.get(tag.id).batch = isEager(obj);
+      return { value: { it: tag, mapping } };
+    }
+    case 'next': {
+      // Items one at a time at their real depth; one that fails, or would make the reply too
+      // big, waits for the next call so the items before it still arrive (11.4).
+      const n = entry.batch ? Math.max(1, Number(m.n) || 1) : 1;
+      let pending = pendingItems.get(m.h);
+      if (!pending) pendingItems.set(m.h, (pending = []));
+      const items = [];
+      let done = false;
+      let size = 0;
+      while (items.length < n) {
+        let x;
+        if (pending.length) x = pending.shift();
+        else {
+          const r = obj.next();
+          if (r === null || (typeof r !== 'object' && typeof r !== 'function')) throw new TypeError(`Iterator result ${String(r)} is not an object`);
+          if (r.done) {
+            done = true;
+            break;
+          }
+          x = r.value;
+        }
+        const mark = counted.length;
+        let j;
+        try {
+          j = encodeValue(x, 'item', 2); // inside {"items": [...]} an item sits two levels down
+        } catch (e) {
+          if (!(e instanceof Fail) || !items.length) throw e;
+          rollbackCounts(mark);
+          pending.unshift(x);
+          break;
+        }
+        if (n > 1) size += (JSON.stringify(j) || 'null').length;
+        if (items.length && size > LIMIT / 2) {
+          rollbackCounts(mark);
+          pending.unshift(x);
+          break;
+        }
+        items.push(j);
+      }
+      if (done) pendingItems.delete(m.h);
+      return { value: { items, done } };
+    }
+  }
+  throw new Fail('ProtocolError', `unknown op '${m.op}'`);
+}
+
+const HANDLERS = { init: doInit, load: doLoad, call: doCall, op: doOp };
 
 // ---------------------------------------------------------------------------------------------
 // The loop (14.2)

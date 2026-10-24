@@ -1,0 +1,50 @@
+// requires: js
+// R53: a JS Map iterates like a dict, anything else like a list (DOCS 9.2, INTERNALS 11.4).
+let m = @js { new Map([["a", 1], ["b", 2]]) }
+for k in m {
+    print(k)
+}
+for k, v in m {
+    print(k, v)
+}
+let s = @js { new Set([7, 8]) }
+for x in s {
+    print(x)
+}
+for i, x in s {
+    print(i, x)
+}
+// A generator gives one item per round trip.
+let gen = @js { (function* () { for (let i = 0; i < 3; i++) { console.log("yield", i); yield i; } })() }
+for x in gen {
+    print("got", x)
+}
+// A Map is read in batches: entries added inside the loop body are not visited.
+let m2 = @js { new Map([["a", 1], ["b", 2]]) }
+for k, v in m2 {
+    m2[k + "2"] = v
+    print("batched", k, v)
+}
+print(len(m2))
+// A subclass that overrides iteration runs its own code, so it gets one item per round trip.
+let custom = @js {
+    class Loud extends Map {
+        *entries() { for (const e of super.entries()) { console.log("entry", e[0]); yield e; } }
+    }
+    new Loud([["x", 1], ["y", 2]])
+}
+for k, v in custom {
+    print("got", k, v)
+}
+// The iterator is released when the loop ends early.
+@js {
+    process.v2Gen = (function* () { yield 1; yield 2; })();
+    process.v2GenRef = new WeakRef(process.v2Gen);
+}
+let gen2 = @js { const g = process.v2Gen; delete process.v2Gen; g }
+for x in gen2 {
+    break
+}
+gen2 = null
+@js { }
+print(@js { require("vm").runInNewContext("gc")(); process.v2GenRef.deref() === undefined })

@@ -1,0 +1,5 @@
+handle 2024 2024-02-29 true true 2024-02-29
+ForeignError | ValueError | day is out of range for month
+2028-02-29
+TypeError | null | unsupported operand types for +: 'handle' and 'int' — do it inside a block, or convert it with to_v2(h) first
+ForeignError | TypeError | object of type 'datetime.date' has no len()

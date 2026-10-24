@@ -1,0 +1,75 @@
+// requires: py
+// Python handles: attributes, items, calls, methods, str(), identity, to_v2 hooks and the
+// operations V2 refuses (DOCS 9.2, INTERNALS 10.8, 11.3-11.7).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message)
+    }
+}
+let obj = @py {
+    class Box:
+        def __init__(self):
+            self.items = {"k": 1}
+            self.n = 1
+        def add(self, x, times=1):
+            self.n += x * times
+            return self.n
+        def __str__(self):
+            return "Box(%d)" % self.n
+    Box()
+}
+print(type(obj), obj.n, obj.add(2), obj.add(1, times: 3), str(obj), obj)
+obj.n = 10
+// A plain dict comes back as a copy, so changing it changes the copy (DOCS 9.1).
+obj.items["k"] = 5
+print(obj.n, obj.items)
+// A method read without calling it is a bound callable handle.
+let add = obj.add
+print(type(add), add(1), obj.n)
+// Functions and classes are callable handles.
+let m = @py { import math; math }
+let sqrt = m.sqrt
+print(type(sqrt), sqrt(16), m.floor(2.5), m.pi > 3)
+let Box = @py { import collections; collections.Counter }
+print(Box("aab")["a"])
+// Unknown keyword arguments and bad calls are Python's own errors.
+show(func() => obj.add(1, nope: 2))
+show(func() => obj.nope)
+show(func() => obj())
+// The same object gives equal handles; another object doesn't.
+let s1 = @py { import sys; sys }
+let s2 = @py { import sys; sys }
+print(s1 == s2, s1 == m, s1 != m)
+// to_v2 uses to_dict, then tolist; other objects can't convert.
+let hooked = @py {
+    class Rows:
+        def to_dict(self):
+            return {"a": [1, 2]}
+    class Arr:
+        def tolist(self):
+            return [1.5, 2.5]
+    [Rows(), Arr()]
+}
+print(to_v2(hooked[0]), to_v2(hooked[1]))
+show(func() => to_v2(obj))
+print(to_v2(5), to_v2([1, obj]) == [1, obj])
+// What V2 refuses to do with a handle (11.7).
+show(func() => obj + 1)
+show(func() => obj < obj)
+show(func() => 1 in obj)
+show(func() => obj[0:1])
+show(func() => {[obj]: 1})
+show(func() => json_stringify([obj]))
+print(bool(obj), type(obj) == "handle")
+// Items and len() of a handle that isn't plain data: a Counter changes in its own worker.
+let c = @py { import collections; collections.Counter("aab") }
+c["z"] = 5
+c["a"] += 1
+print(len(c), c["a"], to_v2(c))
+show(func() => -obj)
+show(func() => [obj].sort())
+show(func() => min(obj, obj))
+show(func() => {}[obj])
+show(func() => obj in "abc")

@@ -1,5 +1,5 @@
-//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `to_v2`, which needs
-//! handles (roadmap 1.6), and `define_engine` (roadmap Phase 3).
+//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `define_engine` (roadmap
+//! Phase 3).
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
@@ -13,7 +13,7 @@ use super::call::ParamSpec;
 use super::error::{fail, type_error, value_error, ErrorValue, Exec, Flow};
 use super::interp::Interp;
 use super::methods::int_arg;
-use super::ops::{binop, order};
+use super::ops::{binop, is_handle, order, HANDLE_HINT};
 use super::value::{float_str, Value};
 use crate::codec::json;
 use crate::engines::process::{self, stop_if_interrupted};
@@ -51,7 +51,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { name: "input", params: &[ParamSpec::opt("prompt", || Value::str(""))], f: input },
     BuiltinDef { name: "len", params: &[ParamSpec::req("x")], f: len },
     BuiltinDef { name: "type", params: &[ParamSpec::req("x")], f: |_, a, _| Ok(Value::str(a[0].type_name())) },
-    BuiltinDef { name: "str", params: &[ParamSpec::req("x")], f: |it, a, _| Ok(Value::Str(it.str_of(&a[0])?.into())) },
+    BuiltinDef { name: "str", params: &[ParamSpec::req("x")], f: |it, a, at| Ok(Value::Str(it.str_of(&a[0], at)?.into())) },
     BuiltinDef { name: "int", params: &[ParamSpec::req("x")], f: int },
     BuiltinDef { name: "float", params: &[ParamSpec::req("x")], f: float },
     BuiltinDef { name: "bool", params: &[ParamSpec::req("x")], f: |_, a, _| Ok(Value::Bool(a[0].truthy())) },
@@ -106,6 +106,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
         params: &[ParamSpec::req("cond"), ParamSpec::opt("message", || Value::str("assertion failed"))],
         f: assert,
     },
+    BuiltinDef { name: "to_v2", params: &[ParamSpec::req("h")], f: to_v2 },
     BuiltinDef { name: "engine_available", params: &[ParamSpec::req("tag")], f: engine_available },
 ];
 
@@ -154,6 +155,15 @@ impl Out {
     }
 }
 
+/// `to_v2(h)`: a handle's object as plain data, converted inside its worker; anything else
+/// unchanged (containers are not walked) (5.10, 11.5).
+fn to_v2(it: &mut Interp, mut args: Vec<Value>, at: Span) -> Exec<Value> {
+    match args.pop().unwrap_or(Value::Null) {
+        Value::Handle(h) => it.handle_value(&h, at),
+        other => Ok(other),
+    }
+}
+
 /// `engine_available(tag)`: false for an unknown tag, else whether the engine resolves; it may
 /// probe (cached) but never starts a session (7.3).
 fn engine_available(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
@@ -167,8 +177,8 @@ fn io_error<T>(message: String) -> Exec<T> {
 
 /// `input(prompt = "")`: one line from stdin without `\n` and one `\r` before it; `null` at end
 /// of input; the prompt is flushed first (5.10).
-fn input(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
-    let prompt = it.str_of(&args[0])?;
+fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
+    let prompt = it.str_of(&args[0], at)?;
     it.out.write_str(&prompt)?;
     if let Err(e) = it.out.flush() {
         return io_error(format!("cannot write to stdout: {}", os_message(&e)));
@@ -191,9 +201,10 @@ fn input(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     }
 }
 
-/// `len(x)`: chars, bytes, items or entries (5.10).
-fn len(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+/// `len(x)`: chars, bytes, items or entries, or a handle's `op len` (5.10, 11.3).
+fn len(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     Ok(Value::Int(match &args[0] {
+        Value::Handle(h) => it.handle_len(h, at)?,
         Value::Str(s) => it.chars.len(s) as i64,
         Value::Bytes(b) => b.len() as i64,
         Value::List(l) => l.borrow().len() as i64,
@@ -472,7 +483,8 @@ fn extreme(args: Vec<Value>, name: &str, want: Ordering) -> Exec<Value> {
         _ => None,
     };
     if let Some(bad) = items.iter().find(|v| kind(v).is_none()) {
-        return type_error(format!("{name}() needs numbers or strings, got {}", bad.type_name()));
+        let hint = if is_handle(bad) { HANDLE_HINT } else { "" };
+        return type_error(format!("{name}() needs numbers or strings, got {}{hint}", bad.type_name()));
     }
     if let Some(other) = items.iter().find(|v| kind(v) != kind(first)) {
         return type_error(format!("{name}() can't compare {} and {}", first.type_name(), other.type_name()));
@@ -602,7 +614,7 @@ pub fn bool_arg(v: &Value, func: &str, param: &str) -> Exec<bool> {
 
 /// `print(...values, sep: " ", end: "\n", stderr: false)`: one write to `Out`, or with
 /// `stderr` one write to the host's stderr after flushing `Out` (5.10).
-fn print(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+fn print(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let sep = str_arg(&args[1], "print", "sep")?;
     let end = str_arg(&args[2], "print", "end")?;
     let to_stderr = bool_arg(&args[3], "print", "stderr")?;
@@ -613,7 +625,7 @@ fn print(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         if i > 0 {
             text.push_str(&sep);
         }
-        text.push_str(&it.str_of(v)?);
+        text.push_str(&it.str_of(v, at)?);
     }
     text.push_str(&end);
     if !to_stderr {

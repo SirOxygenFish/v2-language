@@ -119,7 +119,10 @@ pub fn order(a: &Value, b: &Value, op: &str) -> Exec<Option<Ordering>> {
         (Value::Int(i), Value::Float(f)) => cmp_int_float(*i, *f),
         (Value::Float(f), Value::Int(i)) => cmp_int_float(*i, *f).map(Ordering::reverse),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
-        _ => return type_error(format!("cannot compare {} and {} with '{op}'", a.type_name(), b.type_name())),
+        _ => {
+            let hint = if is_handle(a) || is_handle(b) { HANDLE_HINT } else { "" };
+            return type_error(format!("cannot compare {} and {} with '{op}'{hint}", a.type_name(), b.type_name()));
+        }
     })
 }
 
@@ -330,7 +333,10 @@ pub fn neg(v: &Value) -> Exec<Value> {
     match v {
         Value::Int(n) => n.checked_neg().map(Value::Int).map_or_else(|| overflow("-"), Ok),
         Value::Float(x) => Ok(Value::Float(-x)),
-        other => type_error(format!("bad operand type for unary -: '{}'", other.type_name())),
+        other => {
+            let hint = if is_handle(other) { HANDLE_HINT } else { "" };
+            type_error(format!("bad operand type for unary -: '{}'{hint}", other.type_name()))
+        }
     }
 }
 
@@ -349,13 +355,14 @@ pub fn contains(y: &Value, x: &Value) -> Exec<bool> {
         Value::Dict(d) => Ok(matches!(x, Value::Str(k) if d.borrow().contains_key(k))),
         Value::Str(s) => match x {
             Value::Str(sub) => Ok(s.contains(&**sub)),
-            other => type_error(format!("'in' on a str needs a str, got {}", other.type_name())),
+            other => type_error(format!("'in' on a str needs a str, got {}{}", other.type_name(), if is_handle(other) { HANDLE_HINT } else { "" })),
         },
         Value::Bytes(b) => match x {
             Value::Bytes(sub) => Ok(sub.is_empty() || b.windows(sub.len()).any(|w| w == &sub[..])),
             Value::Int(n) => Ok((0..=255).contains(n) && b.contains(&(*n as u8))),
-            other => type_error(format!("'in' on bytes needs bytes or an int, got {}", other.type_name())),
+            other => type_error(format!("'in' on bytes needs bytes or an int, got {}{}", other.type_name(), if is_handle(other) { HANDLE_HINT } else { "" })),
         },
+        Value::Handle(_) => type_error(format!("'in' needs a list, dict, str or bytes on the right, got handle{HANDLE_HINT}")),
         other => type_error(format!("'in' needs a list, dict, str or bytes on the right, got {}", other.type_name())),
     }
 }

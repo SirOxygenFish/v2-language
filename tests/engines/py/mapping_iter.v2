@@ -1,0 +1,85 @@
+// requires: py
+// R53: a Python mapping iterates like a dict, anything else like a list (DOCS 9.2, INTERNALS 11.4).
+let od = @py { import collections; collections.OrderedDict(a=1, b=2) }
+for k in od {
+    print(k)
+}
+for k, v in od {
+    print(k, v)
+}
+let dq = @py { import collections; collections.deque([7, 8]) }
+for x in dq {
+    print(x)
+}
+for i, x in dq {
+    print(i, x)
+}
+// A generator gives one item per round trip, so its side effects stay in step with the loop.
+let gen = @py {
+    def g():
+        for i in range(3):
+            print("yield", i)
+            yield i
+    g()
+}
+for x in gen {
+    print("got", x)
+    if x == 1 {
+        break
+    }
+}
+// A big eager container comes in batches; the loop sees every item once, in order.
+let total = 0
+let count = 0
+let big = @py { set(range(1000)) }
+for x in big {
+    total += x
+    count += 1
+}
+print(count, total)
+// An eager container is read in batches: changing it inside the loop body doesn't disturb the
+// loop, which sees the original items (per-item reads would hit "changed size").
+let d = @py { {1: "a", 2: "b"} }
+for k, v in d {
+    d[k + 10] = v
+    print("batched", k, v)
+}
+print(len(d))
+// A batch stops before an item that can't cross; the items before it still arrive.
+let bad = @py { {1: "one", 2: "two", 3: "\ud800", 4: "four"} }
+try {
+    for k, v in bad {
+        print("item", k, v)
+    }
+} catch (e) {
+    print(e.type, e.message)
+}
+// Items as deep as a block value may be still arrive inside a loop's batches (10.5).
+let deep = @py {
+    def gen():
+        x = []
+        for i in range(255):
+            x = [x]
+        yield x
+        yield {"k": x}
+    gen()
+}
+for item in deep {
+    print(type(item))
+}
+// The iterator is released when the loop ends early.
+@py {
+    import sys, weakref
+    def g():
+        yield 1
+        yield 2
+    sys.v2_gen = g()
+    sys.v2_gen_ref = weakref.ref(sys.v2_gen)
+}
+let gen2 = @py { __import__("sys").__dict__.pop("v2_gen") }
+for x in gen2 {
+    break
+}
+gen2 = null
+@py { pass }
+print(@py { import gc, sys; gc.collect(); sys.v2_gen_ref() is None })

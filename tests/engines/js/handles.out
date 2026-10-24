@@ -1,0 +1,18 @@
+1 2 null 2 true Map(2) { 'a' => 1, 'b' => 2 }
+{"a": 1, "b": 2} [1, "x"]
+42 21 handle
+1
+true
+0
+hey ada? hey bob? true
+null
+ForeignError | TypeError | suffix is not a function
+ArityError | null | js functions take positional arguments only (got 'n')
+ArityError | null | js functions take positional arguments only (got 'extra')
+ForeignError | TypeError | object has no length
+MarshalError | null | to_v2(): can't convert H to V2 data
+MarshalError | null | to_v2(): can't convert Map to V2 data (two keys become "1")
+{"1": "a", "2.5": "b", "true": "c", "null": "d", "1e21": "e"}
+true [Function (anonymous)] Symbol(s) 1180591620717411303424
+42
+custom text Plain { a: 1 }

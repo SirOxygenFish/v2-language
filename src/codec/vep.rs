@@ -238,7 +238,8 @@ impl Wire<'_> {
                 if !self.caps.handles {
                     return Err("an 'h' tag from a worker without the 'handles' capability".into());
                 }
-                let h = HandleRef::new(self.session, self.tag.clone(), uint("id")?, text("type")?.into(), self.releases.clone());
+                let callable = m.get("callable") == Some(&Json::Bool(true));
+                let h = HandleRef::new(self.session, self.tag.clone(), uint("id")?, text("type")?.into(), self.releases.clone()).with_callable(callable);
                 Value::Handle(Rc::new(h))
             }
             "fn" => match (m.get("id").and_then(Json::as_u64), m.get("route").and_then(Json::as_u64)) {

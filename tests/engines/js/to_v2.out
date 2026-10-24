@@ -1,0 +1,12 @@
+5 5 false handle 5
+{"b": 1, "2": 2, "a": 3, "1": 4}
+{"-9223372036854775808": "min", "9.223372036854776e18": "float"}
+MarshalError | null | to_v2(): can't convert Map to V2 data (key of type bigint)
+ForeignError | RangeError | getter failed
+MarshalError | null | to_v2(): can't convert a Me that contains itself
+list
+MarshalError | null | to_v2(): value nested deeper than 256 levels
+MarshalError | null | to_v2(): value nested deeper than 256 levels
+ForeignError | TypeError | object has an invalid length (1.5)
+ForeignError TypeError Iterator result 5 is not an object
+still running
