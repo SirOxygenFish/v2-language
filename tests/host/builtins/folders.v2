@@ -1,0 +1,33 @@
+// exists, list_dir, make_dir, remove_file and write_file(append:) (DOCS 3.11, INTERNALS 5.10),
+// in the harness's temporary home.
+let home = getenv("HOME") ?? getenv("USERPROFILE")
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        // The OS's own text follows the path; it differs between systems.
+        print(e.type + ": " + e.message.replace(home, "~").split("': ")[0])
+    }
+}
+let root = home + "/v2_folders"
+print(exists(root), make_dir(root + "/a/b/c"), exists(root + "/a/b/c"), make_dir(root + "/a"))
+write_file(root + "/a/z.txt", "z")
+write_file(root + "/a/B.txt", "b")
+write_file(root + "/a/é.txt", "e")
+print(list_dir(root + "/a"))
+let log = root + "/log.txt"
+print(write_file(log, "one\n", append: true), write_file(log, "two\n", append: true))
+print(read_file(log).lines())
+write_file(log, "fresh\n")
+write_file(log, b"\x21\n", append: true)
+print(read_file(log).lines())
+print(remove_file(log), exists(log), list_dir(root))
+show(func() => remove_file(log))
+show(func() => remove_file(root + "/a"))
+show(func() => list_dir(root + "/missing"))
+show(func() => list_dir(root + "/a/z.txt").length)
+show(func() => make_dir(root + "/a/z.txt/sub"))
+show(func() => write_file(log, "x", append: 1))
+show(func() => exists(5))
+show(func() => list_dir(null))
+print(exists(""), exists(root + "/a/z.txt/nested"))

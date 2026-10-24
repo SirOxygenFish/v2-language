@@ -1,0 +1,3 @@
+to stdout
+TypeError: print() argument 'stderr' must be a bool, got int
+TypeError: print() argument 'stderr' must be a bool, got null

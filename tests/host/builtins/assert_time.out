@@ -1,0 +1,15 @@
+null null null
+AssertionError: assertion failed
+AssertionError: zero is falsy
+AssertionError: empty
+TypeError: assert() argument 'message' must be a str, got int
+AssertionError math broke 16 5
+float true
+null null
+true true
+ValueError: sleep() argument 'seconds' must not be negative, got -1
+ValueError: sleep() argument 'seconds' must not be negative, got -0.5
+ValueError: sleep() argument 'seconds' is out of range: nan
+ValueError: sleep() argument 'seconds' is out of range: 1e300
+TypeError: sleep() argument 'seconds' must be an int or float, got str
+ArityError: time() takes 0 positional arguments but 1 was given

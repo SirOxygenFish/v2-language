@@ -1,0 +1,15 @@
+false null true null
+["B.txt", "b", "z.txt", "é.txt"]
+null null
+["one", "two"]
+["fresh", "!"]
+null false ["a"]
+IOError: cannot remove '~/v2_folders/log.txt
+IOError: cannot remove '~/v2_folders/a
+IOError: cannot list '~/v2_folders/missing
+IOError: cannot list '~/v2_folders/a/z.txt
+IOError: cannot create '~/v2_folders/a/z.txt/sub
+TypeError: write_file() argument 'append' must be a bool, got int
+TypeError: exists() argument 'path' must be a str, got int
+TypeError: list_dir() argument 'path' must be a str, got null
+false false

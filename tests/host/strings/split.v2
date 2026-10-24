@@ -1,0 +1,4 @@
+// split() without a separator: runs of whitespace, no empty parts (DOCS 3.5, INTERNALS 5.11).
+print(" a  b\tc\n".split(), "".split(), "   ".split(), "one".split(), "x\u{3000}y".split())
+print(" a  b ".split(" "), "a,,b".split(sep: ","), "a b".split(null))
+print(len("git version 2.44.0\n".split()), "  key = value ".split("=")[1].split())

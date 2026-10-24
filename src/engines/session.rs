@@ -164,8 +164,8 @@ impl Interp {
         let spawned = ChildProc::spawn(&Spawn { argv, env, stdin: Pipe::Piped, stdout: Pipe::Piped, stderr: Pipe::Inherit });
         let mut child = match spawned {
             Ok(c) => c,
-            Err(msg) => {
-                let e = Rc::new(ErrorValue::new("EngineNotFound", msg));
+            Err(spawn) => {
+                let e = Rc::new(ErrorValue::new("EngineNotFound", spawn.message));
                 let s = self.new_session(key, engine, None, None, None, timeouts);
                 self.sessions[s].state = State::Dead(DeadReason::SpawnFailed(e.clone()));
                 return Err(self.raise(Flow::Error(e), at));

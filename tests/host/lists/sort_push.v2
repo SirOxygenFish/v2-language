@@ -1,0 +1,52 @@
+// sort(key, reverse) and push(...items) (DOCS 3.6, INTERNALS 5.11).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let xs = [1]
+print(xs.push(2, 3), xs.push(), xs.push(...[4, 5]), xs)
+xs.push(...xs)
+print(xs)
+// reverse: descending, and equal items keep their order (stable).
+let people = [{name: "ann", age: 30}, {name: "bob", age: 25}, {name: "cy", age: 30}, {name: "di", age: 25}]
+people.sort(key: func(p) => p.age)
+print(people.map(func(p) => p.name))
+people.sort(key: func(p) => p.age, reverse: true)
+print(people.map(func(p) => p.name))
+let words = ["pear", "Fig", "apple"]
+words.sort(key: func(w) => w.lower())
+print(words)
+words.sort(reverse: true)
+print(words)
+let nums = [3, float("nan"), 1, 2.5]
+nums.sort(reverse: true)
+print(nums)
+// The key runs once per item, in order, before any comparison.
+let calls = []
+let ys = [3, 1, 2]
+ys.sort(key: func(x) {
+    calls.push(x)
+    return -x
+})
+print(ys, calls)
+// A key that changes the list: the sorted snapshot replaces its contents.
+let zs = [2, 1]
+zs.sort(key: func(x) {
+    zs.push(99)
+    return x
+})
+print(zs)
+// An error in the key leaves the list as it was.
+let ws = [2, 1]
+show(func() => ws.sort(key: func(x) => x.nope))
+print(ws)
+show(func() => [1, 2].sort(key: func(x) => [x]))
+show(func() => [1, 2].sort(key: func(x) => x == 1 ? "a" : 2))
+show(func() => [1, 2].sort(key: 5))
+show(func() => [1, 2].sort(reverse: "yes"))
+show(func() => [1, 2].sort(func(x) => x, true, 3))
+show(func() => [].sort(key: 5))
+show(func() => [1].push(x: 2))

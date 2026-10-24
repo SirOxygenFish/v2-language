@@ -1,15 +1,24 @@
 //! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `to_v2`, which needs
-//! handles (roadmap Phase 1), and without the roadmap 0.11 additions.
+//! handles (roadmap 1.6), and `define_engine` (roadmap Phase 3).
 
+use std::cmp::Ordering;
+use std::ffi::OsString;
 use std::io::{BufRead, BufWriter, IsTerminal, StdoutLock, Write};
 use std::rc::Rc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use indexmap::IndexMap;
 
 use super::call::ParamSpec;
 use super::error::{fail, type_error, value_error, ErrorValue, Exec, Flow};
 use super::interp::Interp;
 use super::methods::int_arg;
-use super::value::Value;
+use super::ops::{binop, order};
+use super::value::{float_str, Value};
 use crate::codec::json;
+use crate::engines::process::{self, stop_if_interrupted};
+use crate::engines::resolve::{find_program, is_drive_relative, Lookup};
+use crate::syntax::ast::BinOp;
 use crate::syntax::span::{os_message, Span};
 
 pub type BuiltinFn = fn(&mut Interp, Vec<Value>, Span) -> Exec<Value>;
@@ -26,7 +35,12 @@ pub const POSITIONAL_ONLY: &[&str] = &["range"];
 pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef {
         name: "print",
-        params: &[ParamSpec::rest("values"), ParamSpec::opt("sep", || Value::str(" ")), ParamSpec::opt("end", || Value::str("\n"))],
+        params: &[
+            ParamSpec::rest("values"),
+            ParamSpec::opt("sep", || Value::str(" ")),
+            ParamSpec::opt("end", || Value::str("\n")),
+            ParamSpec::opt("stderr", || Value::Bool(false)),
+        ],
         f: print,
     },
     BuiltinDef {
@@ -61,7 +75,25 @@ pub static BUILTINS: &[BuiltinDef] = &[
         params: &[ParamSpec::req("path"), ParamSpec::opt("binary", || Value::Bool(false))],
         f: read_file,
     },
-    BuiltinDef { name: "write_file", params: &[ParamSpec::req("path"), ParamSpec::req("data")], f: write_file },
+    BuiltinDef {
+        name: "write_file",
+        params: &[ParamSpec::req("path"), ParamSpec::req("data"), ParamSpec::opt("append", || Value::Bool(false))],
+        f: write_file,
+    },
+    BuiltinDef { name: "exists", params: &[ParamSpec::req("path")], f: exists },
+    BuiltinDef { name: "list_dir", params: &[ParamSpec::req("path")], f: list_dir },
+    BuiltinDef { name: "make_dir", params: &[ParamSpec::req("path")], f: make_dir },
+    BuiltinDef { name: "remove_file", params: &[ParamSpec::req("path")], f: remove_file },
+    BuiltinDef { name: "script_dir", params: &[], f: script_dir },
+    BuiltinDef { name: "exec", params: &[ParamSpec::req("argv"), ParamSpec::opt("input", || Value::Null)], f: exec },
+    BuiltinDef { name: "sleep", params: &[ParamSpec::req("seconds")], f: sleep },
+    BuiltinDef { name: "time", params: &[], f: time },
+    BuiltinDef { name: "min", params: &[ParamSpec::rest("values")], f: |_, a, _| extreme(a, "min", Ordering::Less) },
+    BuiltinDef { name: "max", params: &[ParamSpec::rest("values")], f: |_, a, _| extreme(a, "max", Ordering::Greater) },
+    BuiltinDef { name: "sum", params: &[ParamSpec::req("xs")], f: sum },
+    BuiltinDef { name: "abs", params: &[ParamSpec::req("x")], f: abs },
+    BuiltinDef { name: "round", params: &[ParamSpec::req("x"), ParamSpec::opt("digits", || Value::Int(0))], f: round },
+    BuiltinDef { name: "div", params: &[ParamSpec::req("a"), ParamSpec::req("b")], f: div },
     BuiltinDef { name: "getenv", params: &[ParamSpec::req("name"), ParamSpec::opt("default", || Value::Null)], f: getenv },
     BuiltinDef {
         name: "args",
@@ -69,6 +101,11 @@ pub static BUILTINS: &[BuiltinDef] = &[
         f: |it, _, _| Ok(Value::list(it.args.iter().map(|a| Value::str(a)).collect())),
     },
     BuiltinDef { name: "exit", params: &[ParamSpec::opt("code", || Value::Int(0))], f: exit },
+    BuiltinDef {
+        name: "assert",
+        params: &[ParamSpec::req("cond"), ParamSpec::opt("message", || Value::str("assertion failed"))],
+        f: assert,
+    },
     BuiltinDef { name: "engine_available", params: &[ParamSpec::req("tag")], f: engine_available },
 ];
 
@@ -254,10 +291,7 @@ fn json_stringify(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> 
 /// BOM kept, no newline translation (5.10).
 fn read_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
-    let binary = match &args[1] {
-        Value::Bool(b) => *b,
-        other => return type_error(format!("read_file() argument 'binary' must be a bool, got {}", other.type_name())),
-    };
+    let binary = bool_arg(&args[1], "read_file", "binary")?;
     let bytes = match std::fs::read(&*path) {
         Ok(b) => b,
         Err(e) => return io_error(format!("cannot read '{path}': {}", os_message(&e))),
@@ -271,17 +305,261 @@ fn read_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     }
 }
 
-/// `write_file(path, data)`: a str as UTF-8 or bytes as is; creates or truncates (5.10).
+/// `write_file(path, data, append: false)`: a str as UTF-8 or bytes as is; creates or
+/// truncates, or with `append` adds to the end, creating a missing file (5.10).
 fn write_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "write_file", "path")?;
-    let r = match &args[1] {
-        Value::Str(s) => std::fs::write(&*path, s.as_bytes()),
-        Value::Bytes(b) => std::fs::write(&*path, b),
+    let bytes: &[u8] = match &args[1] {
+        Value::Str(s) => s.as_bytes(),
+        Value::Bytes(b) => b,
         other => return type_error(format!("write_file() argument 'data' must be a str or bytes, got {}", other.type_name())),
+    };
+    let r = if bool_arg(&args[2], "write_file", "append")? {
+        std::fs::OpenOptions::new().append(true).create(true).open(&*path).and_then(|mut f| f.write_all(bytes))
+    } else {
+        std::fs::write(&*path, bytes)
     };
     match r {
         Ok(()) => Ok(Value::Null),
         Err(e) => io_error(format!("cannot write '{path}': {}", os_message(&e))),
+    }
+}
+
+/// `exists(path)`: whether `fs::metadata` succeeds, symlinks followed; never an error (5.10).
+fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let path = str_arg(&args[0], "exists", "path")?;
+    Ok(Value::Bool(std::fs::metadata(&*path).is_ok()))
+}
+
+/// `list_dir(path)`: the entry names, sorted by code point (5.10).
+fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let path = str_arg(&args[0], "list_dir", "path")?;
+    let failed = |e: std::io::Error| io_error(format!("cannot list '{path}': {}", os_message(&e)));
+    let entries = match std::fs::read_dir(&*path) {
+        Ok(rd) => rd,
+        Err(e) => return failed(e),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let name = match entry {
+            Ok(entry) => entry.file_name(),
+            Err(e) => return failed(e),
+        };
+        match name.into_string() {
+            Ok(name) => names.push(name),
+            Err(_) => return io_error(format!("cannot list '{path}': a name is not valid UTF-8")),
+        }
+    }
+    names.sort();
+    Ok(Value::list(names.into_iter().map(|n| Value::Str(n.into())).collect()))
+}
+
+/// `make_dir(path)`: with any missing parents; an existing folder is fine (5.10).
+fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let path = str_arg(&args[0], "make_dir", "path")?;
+    match std::fs::create_dir_all(&*path) {
+        Ok(()) => Ok(Value::Null),
+        Err(e) => io_error(format!("cannot create '{path}': {}", os_message(&e))),
+    }
+}
+
+/// `remove_file(path)`: a file, never a folder (5.10).
+fn remove_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let path = str_arg(&args[0], "remove_file", "path")?;
+    match std::fs::remove_file(&*path) {
+        Ok(()) => Ok(Value::Null),
+        Err(e) => io_error(format!("cannot remove '{path}': {}", os_message(&e))),
+    }
+}
+
+/// `script_dir()`: the folder of the file containing the call, not the entry file's (5.10).
+fn script_dir(it: &mut Interp, _args: Vec<Value>, at: Span) -> Exec<Value> {
+    let path = &it.sm.file(at.file).path;
+    Ok(Value::str(&path.parent().unwrap_or(path).to_string_lossy()))
+}
+
+/// `exec(argv, input = null)`: a program run without a shell, found like an engine command
+/// (7.5) with the cwd as base; its outputs captured whole and decoded leniently, its tree
+/// killed when it ends. Returns `{code, stdout, stderr}`; a non-zero code is not an error (5.10).
+fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let items = match &args[0] {
+        Value::List(l) => l.borrow().clone(),
+        other => return type_error(format!("exec() argument 'argv' must be a list, got {}", other.type_name())),
+    };
+    let mut argv = Vec::with_capacity(items.len());
+    for (i, v) in items.iter().enumerate() {
+        match v {
+            Value::Str(s) => argv.push(OsString::from(&**s)),
+            other => return type_error(format!("exec() argument 'argv' must hold only str, got {} at [{i}]", other.type_name())),
+        }
+    }
+    let Some(Value::Str(name)) = items.first() else {
+        return value_error("exec() argument 'argv' must not be empty");
+    };
+    let input = match &args[1] {
+        Value::Null => None,
+        Value::Str(s) => Some(s.as_bytes().to_vec()),
+        Value::Bytes(b) => Some(b.to_vec()),
+        other => return type_error(format!("exec() argument 'input' must be a str, bytes or null, got {}", other.type_name())),
+    };
+    let lookup = Lookup::from_env();
+    argv[0] = match find_program(name, &lookup).into_iter().next() {
+        Some(p) => p.into_os_string(),
+        None if is_drive_relative(std::path::Path::new(&**name)) => {
+            return io_error(format!("exec: cannot start '{name}': a drive-relative path: write it relative to the working directory, or absolute"));
+        }
+        // A path that names nothing usable: starting it gives the OS's reason.
+        None if name.contains(['/', '\\']) => lookup.cwd.join(&**name).into_os_string(),
+        None => return io_error(format!("exec: cannot start '{name}': not found on PATH")),
+    };
+    let _ = it.out.flush();
+    let c = match process::run_captured(&argv, &[], None, input) {
+        Ok(c) => c,
+        Err(e) => return io_error(format!("exec: cannot start '{name}': {}", e.reason)),
+    };
+    let code = match (c.status.code, c.status.signal) {
+        (_, Some(signal)) => 128 + signal as i64,
+        (Some(code), None) if cfg!(windows) => code as u32 as i64,
+        (Some(code), None) => code as i64,
+        (None, None) => -1,
+    };
+    let mut result = IndexMap::new();
+    result.insert(Rc::from("code"), Value::Int(code));
+    result.insert(Rc::from("stdout"), Value::str(&String::from_utf8_lossy(&c.stdout)));
+    result.insert(Rc::from("stderr"), Value::str(&String::from_utf8_lossy(&c.stderr)));
+    Ok(Value::dict(result))
+}
+
+/// `sleep(seconds)` on the interpreter thread; an interrupt still ends the run through the
+/// watchdog (5.10, 6.5).
+fn sleep(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let (secs, shown) = match &args[0] {
+        Value::Int(n) => (*n as f64, n.to_string()),
+        Value::Float(x) => (*x, float_str(*x)),
+        other => return type_error(format!("sleep() argument 'seconds' must be an int or float, got {}", other.type_name())),
+    };
+    if secs < 0.0 {
+        return value_error(format!("sleep() argument 'seconds' must not be negative, got {shown}"));
+    }
+    match Duration::try_from_secs_f64(secs) {
+        Ok(d) => std::thread::sleep(d),
+        Err(_) => return value_error(format!("sleep() argument 'seconds' is out of range: {shown}")),
+    }
+    Ok(Value::Null)
+}
+
+/// `time()`: seconds since 1970-01-01 UTC as a float (5.10).
+fn time(_it: &mut Interp, _args: Vec<Value>, _at: Span) -> Exec<Value> {
+    Ok(Value::Float(match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs_f64(),
+        Err(e) => -e.duration().as_secs_f64(),
+    }))
+}
+
+/// `min`/`max`: the arguments, or a single list argument's items; all numbers or all strings.
+/// An item replaces the best only when strictly smaller (larger), so the first wins ties (5.10).
+fn extreme(args: Vec<Value>, name: &str, want: Ordering) -> Exec<Value> {
+    let Value::List(values) = &args[0] else { unreachable!("the rest parameter is a list") };
+    let mut items = values.borrow().clone();
+    if let [Value::List(only)] = &items[..] {
+        let inner = only.borrow().clone();
+        items = inner;
+    }
+    let Some(first) = items.first() else { return value_error(format!("{name}() of an empty list")) };
+    let kind = |v: &Value| match v {
+        Value::Int(_) | Value::Float(_) => Some(0),
+        Value::Str(_) => Some(1),
+        _ => None,
+    };
+    if let Some(bad) = items.iter().find(|v| kind(v).is_none()) {
+        return type_error(format!("{name}() needs numbers or strings, got {}", bad.type_name()));
+    }
+    if let Some(other) = items.iter().find(|v| kind(v) != kind(first)) {
+        return type_error(format!("{name}() can't compare {} and {}", first.type_name(), other.type_name()));
+    }
+    let mut best = first.clone();
+    for x in &items[1..] {
+        if order(x, &best, name)? == Some(want) {
+            best = x.clone();
+        }
+    }
+    Ok(best)
+}
+
+/// `sum(xs)`: a list of numbers folded from `0` with 5.3's `+` (5.10).
+fn sum(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let items = match &args[0] {
+        Value::List(l) => l.borrow().clone(),
+        other => return type_error(format!("sum() argument 'xs' must be a list, got {}", other.type_name())),
+    };
+    let mut total = Value::Int(0);
+    for (i, x) in items.iter().enumerate() {
+        if !matches!(x, Value::Int(_) | Value::Float(_)) {
+            return type_error(format!("sum() needs a list of numbers, got {} at [{i}]", x.type_name()));
+        }
+        total = binop(BinOp::Add, &total, x)?;
+    }
+    Ok(total)
+}
+
+/// `abs(x)` of an int (overflow is a ValueError) or a float (5.10).
+fn abs(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    match &args[0] {
+        Value::Int(n) => match n.checked_abs() {
+            Some(a) => Ok(Value::Int(a)),
+            None => value_error("integer overflow in abs()"),
+        },
+        Value::Float(x) => Ok(Value::Float(x.abs())),
+        other => type_error(format!("abs() needs an int or float, got {}", other.type_name())),
+    }
+}
+
+/// `round(x, digits = 0)`: a float printed as `${x:.Nf}` prints it (ties to even on the exact
+/// binary value) and read back; `digits` 0 gives an int. An int comes back unchanged (5.10).
+fn round(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let digits = int_arg(&args[1], "round", "digits")?;
+    if digits < 0 {
+        return value_error(format!("round() argument 'digits' must be >= 0, got {digits}"));
+    }
+    let x = match &args[0] {
+        Value::Int(n) => return Ok(Value::Int(*n)),
+        Value::Float(x) => *x,
+        other => return type_error(format!("round() argument 'x' must be an int or float, got {}", other.type_name())),
+    };
+    if digits == 0 {
+        // NaN, infinity and floats beyond i64 have no int, as in int() (5.10).
+        return match format!("{x:.0}").parse::<i64>() {
+            Ok(n) if x.is_finite() => Ok(Value::Int(n)),
+            _ => value_error(format!("cannot convert {} to int", float_str(x))),
+        };
+    }
+    // No f64 needs more than 323 decimals.
+    if digits >= 324 || !x.is_finite() {
+        return Ok(Value::Float(x));
+    }
+    let text = format!("{x:.prec$}", prec = digits as usize);
+    Ok(Value::Float(text.parse().expect("a formatted finite float")))
+}
+
+/// `div(a, b)`: integer division rounded down, so `div(a, b) * b + a % b == a` (5.10).
+fn div(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let a = int_arg(&args[0], "div", "a")?;
+    let b = int_arg(&args[1], "div", "b")?;
+    if b == 0 {
+        return value_error("division by zero");
+    }
+    let Some(q) = a.checked_div(b) else { return value_error("integer overflow in div()") };
+    Ok(Value::Int(if a % b != 0 && (a < 0) != (b < 0) { q - 1 } else { q }))
+}
+
+/// `assert(cond, message = "assertion failed")`: a falsy `cond` throws an AssertionError at
+/// the call (5.10).
+fn assert(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+    let message = str_arg(&args[1], "assert", "message")?;
+    if args[0].truthy() {
+        Ok(Value::Null)
+    } else {
+        fail("AssertionError", message)
     }
 }
 
@@ -314,10 +592,20 @@ pub fn str_arg(v: &Value, func: &str, param: &str) -> Exec<Rc<str>> {
     }
 }
 
-/// `print(...values, sep: " ", end: "\n")`: one write to `Out`.
+/// A `bool` argument, or `TypeError: read_file() argument 'binary' must be a bool, got int`.
+pub fn bool_arg(v: &Value, func: &str, param: &str) -> Exec<bool> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        other => type_error(format!("{func}() argument '{param}' must be a bool, got {}", other.type_name())),
+    }
+}
+
+/// `print(...values, sep: " ", end: "\n", stderr: false)`: one write to `Out`, or with
+/// `stderr` one write to the host's stderr after flushing `Out` (5.10).
 fn print(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let sep = str_arg(&args[1], "print", "sep")?;
     let end = str_arg(&args[2], "print", "end")?;
+    let to_stderr = bool_arg(&args[3], "print", "stderr")?;
     let Value::List(values) = &args[0] else { unreachable!("the rest parameter is a list") };
     let values = values.borrow().clone();
     let mut text = String::new();
@@ -328,8 +616,17 @@ fn print(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         text.push_str(&it.str_of(v)?);
     }
     text.push_str(&end);
-    it.out.write_str(&text)?;
-    Ok(Value::Null)
+    if !to_stderr {
+        it.out.write_str(&text)?;
+        return Ok(Value::Null);
+    }
+    let _ = it.out.flush();
+    stop_if_interrupted();
+    let mut err = std::io::stderr().lock();
+    match err.write_all(text.as_bytes()).and_then(|_| err.flush()) {
+        Ok(()) => Ok(Value::Null),
+        Err(e) => io_error(format!("cannot write to stderr: {}", os_message(&e))),
+    }
 }
 
 /// `error(type, message, data = null)`: an error value with no location until raised (5.9).
