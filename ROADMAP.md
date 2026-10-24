@@ -10,7 +10,7 @@ says *in what order* and *what's done*.
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
 | **Next task** | 1.4 Python engine, or 0.11 Small standard library (both wait for the owner's go-ahead: the foundation 1.0–1.3 is done) |
-| **Last update** | 2026-10-24: docs review, 43 changes approved by the owner; the code follows for every built part |
+| **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), then `define_engine` (Phase 3) |
 
 ## Rules
 
@@ -249,6 +249,8 @@ How any other language gets in.
 - [ ] `run` engines on the 2.1 helper: `{file}`, `V2_ARG_*`, CRLF for `.bat`/`.cmd`, tree kill
       (§17.3, §17.4)
 - [ ] `bridged` engines through the normal session code, capability checks (§17.5)
+- [ ] `define_engine(…)`: a custom engine declared from a script, through the same validation,
+      registered at run time (§17.1, §17.2, §18.4); R59
 - [ ] `examples/fake_adapter.rs` (§17.6, §22.3)
 - [ ] Built-in run engines, no `v2.toml` needed: `bash` (`sh`; Git Bash on Windows), `pwsh`
       (`powershell`), `cmd`, `lua`, `ruby`, `go`, `java`, `zig`, `cs` (`csharp`); their probes and
@@ -256,7 +258,7 @@ How any other language gets in.
 - [ ] Tests: R17 (run part), R35, R37, R47; the custom-engine-table cases of the `engines/spec` and
       `engines/registry` unit tests (§22.3); the ch. 21 rows for run and custom engines
 
-**Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37, R47 and R58 pass.
+**Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37, R47, R58 and R59 pass.
 
 ---
 
@@ -308,3 +310,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-02 | Reviews of 1.0–1.3: 29 confirmed findings fixed or settled, each fix with a regression test |
 | 2026-10-16 | Docs trimmed to the glue-language scope: `register_engine`, `v2 run`, `v2 doctor TAG`, check's inventory, the global flags, `~/.v2/config.toml`, the ts transpiler and smaller items cut; INTERNALS lost its decision log, salvage map and duplicated text; the code follows in the same change |
 | 2026-10-24 | Docs review, 43 changes approved by the owner. Added: the 0.11 small standard library (docs only), built-in run engines (Phase 3), callable handles that cross engines, a generous `to_v2(h)` (was `value(h)`), `e.cause`, `V2Error` details in foreign code. Changed in code: `func` replaces `lambda`, `index_of` and `pop(i)` replace `find` and `remove_at`, Python 3.10+ and Node 22.13+ (one Node rule), `command` must be an array, canonical `V2_ENGINE_<TAG>` only, narrower path rewriting in `command`, `in` on a dict, positional `range`, dict keys holding handles; new static errors for unused expression values, chained `==`, code after a multi-line block's `{` and compiled-block directives. Spec fixes for in-block imports, ambiguity, mapping handles, JS constructors and compiled blocks using files next to the script; machinery cut before it was built; INTERNALS shortened |
+| 2026-10-24 | `define_engine` added at the owner's request (DOCS 13.3, §17.2): a script declares its own custom engines without a `v2.toml`; built with Phase 3 |
