@@ -19,6 +19,7 @@ use super::module::{self, Parsed};
 use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
+use crate::engines::handles::HandleRef;
 use crate::engines::process::stop_if_interrupted;
 use crate::engines::registry::Registry;
 use crate::engines::session::Session;
@@ -29,10 +30,12 @@ use crate::syntax::span::{FileId, SourceMap, Span};
 /// Past this many nested calls a call raises `RecursionError` (5.9).
 const MAX_CALLS: usize = 10_000;
 
-/// What `r.name(args)` calls: a function held under a dict key, or a method (5.5).
+/// What `r.name(args)` calls: a function held under a dict key, a method (5.5), or a handle's
+/// method in one round trip (11.3).
 enum MethodTarget {
     Func(Value),
     Method(&'static methods::MethodDef),
+    Handle(Rc<HandleRef>),
 }
 
 /// One active call of a V2 function, or a module import (nameless) (5.8).
@@ -434,12 +437,14 @@ impl Interp {
                 let new = match op {
                     None => self.eval(value, env)?,
                     Some((op, op_span)) => {
-                        let old = self.at(self.member(&o, name), name.span)?;
+                        let old = self.member(&o, name);
+                        let old = self.at(old, name.span)?;
                         let rhs = self.eval(value, env)?;
                         self.at(ops::binop(op, &old, &rhs), op_span)?
                     }
                 };
-                self.at(self.set_member(&o, name, new), name.span)
+                let r = self.set_member(&o, name, new);
+                self.at(r, name.span)
             }
             Target::Index(obj, index, bracket) => {
                 let o = self.eval(obj, env)?;
@@ -447,13 +452,14 @@ impl Interp {
                 let new = match op {
                     None => self.eval(value, env)?,
                     Some((op, op_span)) => {
-                        let old = self.index(&o, &k);
+                        let old = self.index(&o, &k, *bracket);
                         let old = self.at(old, *bracket)?;
                         let rhs = self.eval(value, env)?;
                         self.at(ops::binop(op, &old, &rhs), op_span)?
                     }
                 };
-                self.at(self.set_index(&o, &k, new), *bracket)
+                let r = self.set_index(&o, &k, new, *bracket);
+                self.at(r, *bracket)
             }
         }
     }
@@ -538,10 +544,49 @@ impl Interp {
                         }
                     }
                 }
+                Value::Handle(h) => self.for_handle(&h, first, second, body, env, e.span)?,
                 other => return self.fail_at("TypeError", format!("cannot iterate over {}", other.type_name()), e.span),
             },
         }
         Ok(())
+    }
+
+    /// `for` over a handle (11.4): batches of items from the worker's iterator. A mapping gives
+    /// `[key, value]` pairs, so one variable is the key and two are key and value, as for a
+    /// dict; anything else gives items, or index and item, as for a list.
+    fn for_handle(&mut self, h: &HandleRef, first: &Name, second: Option<&Name>, body: &Body, env: &Env, at: Span) -> Exec<()> {
+        let (it, mapping) = self.handle_iter(h, at)?;
+        let mut index = 0;
+        loop {
+            let (items, done) = self.handle_next(&it, at)?;
+            for item in items {
+                let vars = if mapping {
+                    let (k, v) = match &item {
+                        Value::List(pair) if pair.borrow().len() == 2 => {
+                            let pair = pair.borrow();
+                            (pair[0].clone(), pair[1].clone())
+                        }
+                        _ => return self.fail_at("ProtocolError", format!("engine '{}' sent a mapping item that is not a pair", h.tag), at),
+                    };
+                    match second {
+                        Some(s) => vec![(first, k), (s, v)],
+                        None => vec![(first, k)],
+                    }
+                } else {
+                    match second {
+                        Some(s) => vec![(first, Value::Int(index)), (s, item)],
+                        None => vec![(first, item)],
+                    }
+                };
+                index += 1;
+                if !self.iteration(body, env, &vars)? {
+                    return Ok(());
+                }
+            }
+            if done {
+                return Ok(());
+            }
+        }
     }
 
     /// `try`/`catch`/`finally` (5.8): `catch` sees errors only; `finally` runs after every
@@ -655,12 +700,13 @@ impl Interp {
                 if *optional && matches!(o, Value::Null) {
                     return Ok(None);
                 }
-                Ok(Some(self.at(self.member(&o, name), name.span)?))
+                let r = self.member(&o, name);
+                Ok(Some(self.at(r, name.span)?))
             }
             ExprKind::Index { obj, index, bracket } => {
                 let Some(o) = self.chain(obj, env)? else { return Ok(None) };
                 let k = self.eval(index, env)?;
-                let r = self.index(&o, &k);
+                let r = self.index(&o, &k, *bracket);
                 Ok(Some(self.at(r, *bracket)?))
             }
             ExprKind::Slice { obj, lo, hi, bracket } => {
@@ -725,7 +771,7 @@ impl Interp {
                     let v = self.eval(expr, env)?;
                     match fixed {
                         None => {
-                            let text = self.str_of(&v);
+                            let text = self.str_of(&v, expr.span);
                             s.push_str(&self.at(text, expr.span)?);
                         }
                         Some(n) => {
@@ -756,6 +802,9 @@ impl Interp {
     /// Call any value with already evaluated arguments; errors without a location get
     /// `call_site` (5.7).
     pub fn call_value(&mut self, f: &Value, pos: Vec<Value>, named: Vec<(Rc<str>, Value)>, call_site: Span) -> Exec<Value> {
+        if let Value::Handle(h) = f {
+            return self.handle_call(h, None, pos, named, call_site);
+        }
         let Value::Func(c) = f else {
             return self.fail_at("TypeError", format!("'{}' is not callable", f.type_name()), call_site);
         };
@@ -822,6 +871,9 @@ impl Interp {
     /// `r.name(args)` (5.5): a dict key holding a function, or a handle (a foreign callable got as
     /// a value), wins over the dict methods. The callee is resolved before the arguments run (5.7).
     fn method_target(&self, o: &Value, name: &Name) -> Exec<MethodTarget> {
+        if let Value::Handle(h) = o {
+            return Ok(MethodTarget::Handle(h.clone()));
+        }
         if let Value::Dict(d) = o {
             let f = d.borrow().get(&name.text).cloned();
             if let Some(f @ (Value::Func(_) | Value::Handle(_))) = f {
@@ -846,6 +898,7 @@ impl Interp {
     fn call_method(&mut self, o: &Value, name: &Name, target: MethodTarget, pos: Vec<Value>, named: Named) -> Exec<Value> {
         let def = match target {
             MethodTarget::Func(f) => return self.call_value(&f, pos, named, name.span),
+            MethodTarget::Handle(h) => return self.handle_call(&h, Some(&name.text), pos, named, name.span),
             MethodTarget::Method(def) => def,
         };
         let fname = format!("{}.{}", o.type_name(), def.name);
@@ -856,9 +909,10 @@ impl Interp {
 
     // -- members, indexing, slicing (5.4, 5.5) --------------------------------------------------
 
-    fn member(&self, o: &Value, name: &Name) -> Exec<Value> {
+    fn member(&mut self, o: &Value, name: &Name) -> Exec<Value> {
         let n = &name.text;
         match o {
+            Value::Handle(h) => self.handle_getattr(h, n, name.span),
             Value::Dict(d) => {
                 let found = d.borrow().get(n).cloned();
                 match found {
@@ -893,9 +947,10 @@ impl Interp {
         })
     }
 
-    fn set_member(&self, o: &Value, name: &Name, v: Value) -> Exec<()> {
+    fn set_member(&mut self, o: &Value, name: &Name, v: Value) -> Exec<()> {
         let n = &name.text;
         match o {
+            Value::Handle(h) => self.handle_setattr(h, n, &v, name.span),
             Value::Dict(d) => {
                 d.borrow_mut().insert(n.clone(), v);
                 Ok(())
@@ -914,8 +969,9 @@ impl Interp {
         }
     }
 
-    fn index(&mut self, o: &Value, k: &Value) -> Exec<Value> {
+    fn index(&mut self, o: &Value, k: &Value, at: Span) -> Exec<Value> {
         match o {
+            Value::Handle(h) => self.handle_getitem(h, k, at),
             Value::List(l) => {
                 let i = self.index_of(k, "list")?;
                 let l = l.borrow();
@@ -957,8 +1013,9 @@ impl Interp {
         }
     }
 
-    fn set_index(&self, o: &Value, k: &Value, v: Value) -> Exec<()> {
+    fn set_index(&mut self, o: &Value, k: &Value, v: Value, at: Span) -> Exec<()> {
         match o {
+            Value::Handle(h) => self.handle_setitem(h, k, &v, at),
             Value::List(l) => {
                 let i = self.index_of(k, "list")?;
                 let mut l = l.borrow_mut();
@@ -1022,6 +1079,7 @@ impl Interp {
                 let (x, y) = (self.chars.byte_of(s, a), self.chars.byte_of(s, b));
                 Ok(Value::str(&s[x..y]))
             }
+            Value::Handle(_) => type_error(format!("cannot slice a handle{}", ops::HANDLE_HINT)),
             other => type_error(format!("cannot slice {}", other.type_name())),
         }
     }
@@ -1029,19 +1087,18 @@ impl Interp {
     // -- str() (5.10) -----------------------------------------------------------------------------
 
     /// `str(v)`: a str unchanged, anything else in its canonical form.
-    pub fn str_of(&mut self, v: &Value) -> Exec<String> {
+    pub fn str_of(&mut self, v: &Value, at: Span) -> Exec<String> {
         if let Value::Str(s) = v {
             return Ok(s.to_string());
         }
         let mut out = String::new();
-        repr(v, &mut out, &mut Vec::new())?;
+        self.repr(v, &mut out, &mut Vec::new(), at)?;
         Ok(out)
     }
-}
 
-/// The canonical text of `v` inside a container; `path` holds the containers being printed,
-/// so a cycle prints as `[...]`/`{...}` (5.2).
-fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
+    /// The canonical text of `v` inside a container; `path` holds the containers being printed,
+    /// so a cycle prints as `[...]`/`{...}` (5.2). A handle asks its worker (`op str`, 11.3).
+    fn repr(&mut self, v: &Value, out: &mut String, path: &mut Vec<usize>, at: Span) -> Exec<()> {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -1049,8 +1106,7 @@ fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
         Value::Float(x) => out.push_str(&float_str(*x)),
         Value::Str(s) => quoted(s, out),
         Value::Bytes(b) => out.push_str(&bytes_repr(b)),
-        // `<py datetime.date>`, built from the type name (11.6); `op str` arrives in roadmap 1.6.
-        Value::Handle(h) => out.push_str(&format!("<{} {}>", h.tag, h.type_name)),
+        Value::Handle(h) => out.push_str(&self.handle_str(h, at)?),
         Value::List(l) => {
             let id = l.addr();
             if path.contains(&id) {
@@ -1068,7 +1124,7 @@ fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                repr(x, out, path)?;
+                self.repr(x, out, path, at)?;
             }
             out.push(']');
             path.pop();
@@ -1091,7 +1147,7 @@ fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
                 }
                 quoted(k, out);
                 out.push_str(": ");
-                repr(x, out, path)?;
+                self.repr(x, out, path, at)?;
             }
             out.push('}');
             path.pop();
@@ -1103,4 +1159,5 @@ fn repr(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Exec<()> {
         Value::Error(e) => out.push_str(&format!("{}: {}", super::error::kind_text(e), e.message)),
     }
     Ok(())
+    }
 }

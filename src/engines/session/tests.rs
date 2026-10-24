@@ -1056,16 +1056,26 @@ fn a_handshake_at_depth_64_leaves_no_ready_session() {
 #[test]
 fn a_dict_key_holding_a_handle_wins_over_the_dict_methods() {
     // INTERNALS 5.5, DOCS 3.6 and 3.10: a module that re-exports a foreign function value
-    // (`let keys = pymod.keys`) is called through its key, even when a dict method has that name.
-    // Handles are not callable until roadmap 1.6, so reaching the handle is a TypeError; before
-    // the fix `d.keys()` silently ran the dict method.
+    // (`let keys = pymod.keys`) is called through its key, even when a dict method has that name:
+    // the worker gets `call {h}` (11.3). Before the fix `d.keys()` silently ran the dict method.
     let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.start();
+        let c = w.recv_t("call");
+        assert_eq!(c["target"], json!({"h": 1}));
+        w.ret(&c, json!("the foreign keys"));
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
     let env = crate::runtime::env::new_frame(None);
-    let h = Value::Handle(Rc::new(crate::engines::handles::HandleRef::new(0, "py".into(), 1, "function".into(), Default::default())));
+    let releases = it.sessions[s].releases.clone();
+    let h = Value::Handle(Rc::new(crate::engines::handles::HandleRef::new(s, "py".into(), 1, "function".into(), releases)));
     let d = Value::dict([("keys".into(), h)].into_iter().collect());
     crate::runtime::env::declare(&env, "d".into(), d, false);
     let prog = crate::syntax::parser::parse_str("d.keys()").unwrap();
     let crate::syntax::ast::StmtKind::Expr(e) = &prog[0].kind else { panic!("expression") };
-    let Err(Flow::Error(err)) = it.eval(e, &env) else { panic!("the dict method ran") };
-    assert_eq!(&*err.message, "'handle' is not callable");
+    let Ok(Value::Str(r)) = it.eval(e, &env) else { panic!("the dict method ran") };
+    assert_eq!(&*r, "the foreign keys");
+    it.shutdown_sessions();
+    t.join().unwrap();
 }

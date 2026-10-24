@@ -1,0 +1,5 @@
+handle a {"1": "a"}
+{"null": 0, "true": 1, "2.5": 2}
+{"1e-5": "small", "1e20": "big", "-0.0": "negative zero"}
+MarshalError: to_v2(): can't convert dict to V2 data (key of type tuple)
+MarshalError: to_v2(): can't convert dict to V2 data (two keys become "1")

@@ -1,0 +1,16 @@
+// requires: py
+// R15: a datetime is a handle: attributes, str(), methods with named args, identity, and the
+// operations V2 refuses (DOCS 9.2, INTERNALS 11.3, 11.7, 10.8).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message)
+    }
+}
+let d = @py { import datetime; datetime.date(2024, 2, 29) }
+print(type(d), d.year, str(d), d.isoformat() == str(d), d == d, f"${d}")
+show(func() => d.replace(year: 2025))
+print(d.replace(year: 2028))
+show(func() => d + 1)
+show(func() => len(d))

@@ -1,0 +1,16 @@
+// requires: py
+// R04: a dict with non-str keys is a handle; to_v2 turns its keys into V2 str() forms and refuses
+// keys it can't (INTERNALS 10.6, 11.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let h = @py { {1: "a"} }
+print(type(h), h[1], to_v2(h))
+print(to_v2(@py { {None: 0, True: 1, 2.5: 2} }))
+print(to_v2(@py { {1e-05: "small", 1e20: "big", -0.0: "negative zero"} }))
+show(func() => to_v2(@py { {(1, 2): "a"} }))
+show(func() => to_v2(@py { {1: "a", "1": "b"} }))
