@@ -7,7 +7,7 @@
 if __name__ == "__main__":
     # 1. Every stdlib module the adapter uses, before any project folder is on sys.path (14.3).
     import sys, os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback
-    import linecache, weakref, threading, signal, base64, codecs, collections, numbers, atexit
+    import linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit
 
     if os.name == "nt":
         import msvcrt, ctypes
@@ -165,9 +165,10 @@ if __name__ == "__main__":
     # Handle ids whose counts the frame being built added: given back if it is never sent (10.1).
     _counted = []
 
-    def rollback_counts():
-        ids = list(_counted)
-        del _counted[:]
+    def rollback_counts(mark=0):
+        """The counts added since `mark` were for tags that won't be sent (10.1)."""
+        ids = _counted[mark:]
+        del _counted[mark:]
         release_handles(ids)
 
     def active():
@@ -375,6 +376,7 @@ if __name__ == "__main__":
             if entry[1] <= 0:
                 del _handles[hid]
                 _by_obj.pop(id(entry[0]), None)
+                _pending.pop(hid, None)
 
     class _Cell(object):
         __slots__ = ("id", "n")
@@ -471,10 +473,11 @@ if __name__ == "__main__":
             return error_tag(x, depth, path)
         return handle_tag(x)
 
-    def encode_value(x, root):
-        """encode(x) for the frame member `root` (`value`, `args[0]`); a MarshalError says where (10.5)."""
+    def encode_value(x, root, depth=0):
+        """encode(x) for the frame member `root` (`value`, `args[0]`), `depth` levels down in the
+        value V2 decodes; a MarshalError says where (10.5)."""
         try:
-            return encode(x)
+            return encode(x, depth)
         except Fail as f:
             if not f.located:
                 f.located = True
@@ -822,7 +825,176 @@ if __name__ == "__main__":
             units[m["unit"]] = (mod, {e["name"]: e["kind"] for e in reply["exports"]})
         return reply
 
-    HANDLERS = {"init": do_init, "load": do_load}
+    # ----------------------------------------------------------------------------------------
+    # Handles: calls and operations (9.5, 11.3-11.5)
+
+    _pending = {}  # iterator handle id -> items taken but not sent yet (11.4)
+
+    def handle_entry(hid):
+        entry = _handles.get(hid)
+        if entry is None:
+            raise Fail("ProtocolError", "unknown handle id %s" % hid)
+        return entry
+
+    def eager(obj):
+        """Iterating it runs no user code, so `next` may return many items (11.4)."""
+        t = type(obj)
+        if t in (list, tuple, dict, set, frozenset, str, bytes, range):
+            return True
+        if t.__module__ == "builtins" and t.__name__ in ("dict_keys", "dict_values", "dict_items"):
+            return True
+        return t.__module__ == "numpy" and t.__name__ == "ndarray"
+
+    def do_call(m):
+        target = m.get("target") or {}
+        if "h" not in target:
+            raise Fail("ProtocolError", "a call target V2's Python adapter does not serve")
+        obj = handle_entry(target["h"])[0]
+        method = target.get("method")
+        f = getattr(obj, method) if method is not None else obj
+        name = method if method is not None else getattr(obj, "__name__", type_name(obj))
+        args = [decode(a) for a in m.get("args") or []]
+        kwargs = {k: decode(v) for k, v in (m.get("kwargs") or {}).items()}
+        value = f(*args, **kwargs)
+        value = await_if_awaitable(value, "'%s' returned a coroutine while another coroutine is being awaited; call it directly from V2" % name)
+        return {"value": encode_value(value, "value")}
+
+    def float_text(x):
+        """V2's str() of a float: Rust's shortest form, `1e-5` not Python's `1e-05` (5.10)."""
+        r = repr(x)
+        if "e" in r:
+            mant, exp = r.split("e")
+            r = mant + "e" + str(int(exp))
+        return r
+
+    def key_text(k, mapping):
+        if isinstance(k, str):
+            return surrogate_check(str.__str__(k))
+        if k is None:
+            return "null"
+        if isinstance(k, bool) or is_numpy(k, "bool_", "bool"):
+            return "true" if k else "false"
+        if isinstance(k, numbers.Integral) and I64_MIN <= int(k) <= I64_MAX:
+            return str(int(k))
+        if isinstance(k, float) or (is_numpy(k) and isinstance(k, numbers.Real)):
+            return float_text(float(k))
+        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data (key of type %s)" % (type_name(mapping), type_name(k)))
+
+    def to_v2(x, depth=0, path=None):
+        """`op value`: the object as plain data, converted here (11.5). `depth` is the level the
+        value would sit at, so a container at 256 or deeper is too deep, as for the host (10.5)."""
+        path = path if path is not None else set()
+        t = type(x)
+        if x is None or t is bool:
+            return x
+        if isinstance(x, bool) or is_numpy(x, "bool_", "bool"):
+            return bool(x)
+        if isinstance(x, numbers.Integral):
+            n = int(x)
+            if not I64_MIN <= n <= I64_MAX:
+                raise Fail("MarshalError", "to_v2(): can't convert int to V2 data (it needs more than 64 bits)")
+            return n
+        if isinstance(x, float) or (is_numpy(x) and isinstance(x, numbers.Real)):
+            return float_json(float(x))
+        if isinstance(x, str):
+            return surrogate_check(str.__str__(x))
+        if t is bytes:
+            return {"$v2": "bytes", "b64": base64.b64encode(x).decode("ascii")}
+        if isinstance(x, (V2Function, V2Error)):
+            return encode(x, depth, path)  # V2's own values go back as they came (10.6)
+        if depth >= MAX_DEPTH:
+            raise Fail("MarshalError", "to_v2(): value nested deeper than %d levels" % MAX_DEPTH)
+        mapping = isinstance(x, collections.abc.Mapping)
+        if mapping or isinstance(x, (list, tuple, set, frozenset)):
+            if id(x) in path:
+                raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
+            path.add(id(x))
+            try:
+                if not mapping:
+                    return [to_v2(v, depth + 1, path) for v in x]
+                out = {}
+                for k, v in x.items():
+                    key = key_text(k, x)
+                    if key in out:
+                        raise Fail("MarshalError", 'to_v2(): can\'t convert %s to V2 data (two keys become "%s")' % (type_name(x), key))
+                    out[key] = to_v2(v, depth + 1, path)
+                return {"$v2": "dict", "v": out} if "$v2" in out else out
+            finally:
+                path.discard(id(x))
+        for hook in ("to_dict", "tolist"):
+            f = getattr(x, hook, None)
+            if callable(f):
+                # The object stays on the path, so a hook that returns it (or holds it) is a cycle.
+                if id(x) in path:
+                    raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
+                path.add(id(x))
+                try:
+                    return to_v2(f(), depth, path)
+                finally:
+                    path.discard(id(x))
+        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data" % type_name(x))
+
+    def do_op(m):
+        op = m.get("op")
+        entry = handle_entry(m.get("h"))
+        obj = entry[0]
+        if op == "getattr":
+            return {"value": encode_value(getattr(obj, m["name"]), "value")}
+        if op == "setattr":
+            setattr(obj, m["name"], decode(m.get("value")))
+            return {"value": None}
+        if op == "getitem":
+            return {"value": encode_value(obj[decode(m.get("key"))], "value")}
+        if op == "setitem":
+            obj[decode(m.get("key"))] = decode(m.get("value"))
+            return {"value": None}
+        if op == "len":
+            return {"value": len(obj)}
+        if op == "str":
+            return {"value": well_formed(str(obj))}
+        if op == "value":
+            return {"value": to_v2(obj)}
+        if op == "iter":
+            mapping = isinstance(obj, collections.abc.Mapping)
+            it = iter(obj.items()) if mapping else iter(obj)
+            tag = handle_tag(it)
+            _handles[tag["id"]][2] = eager(obj)
+            return {"value": {"it": tag, "mapping": mapping}}
+        if op == "next":
+            n = max(1, int(m.get("n") or 1)) if entry[2] else 1
+            pending = _pending.setdefault(m.get("h"), collections.deque())
+            items, done, size = [], False, 0
+            while len(items) < n:
+                if pending:
+                    x = pending.popleft()
+                else:
+                    try:
+                        x = next(obj)
+                    except StopIteration:
+                        done = True
+                        break
+                # Inside {"items": [...]} an item sits two levels down (10.5).
+                mark = len(_counted)
+                try:
+                    j = encode_value(x, "item", 2)
+                except Fail:
+                    if not items:
+                        raise
+                    rollback_counts(mark)
+                    pending.appendleft(x)
+                    break
+                size += len(dumps(j)) if n > 1 else 0
+                if items and size > LIMIT // 2:
+                    rollback_counts(mark)
+                    pending.appendleft(x)
+                    break
+                items.append(j)
+            if done:
+                _pending.pop(m.get("h"), None)
+            return {"value": {"items": items, "done": done}}
+        raise Fail("ProtocolError", "unknown op '%s'" % op)
+
+    HANDLERS = {"init": do_init, "load": do_load, "call": do_call, "op": do_op}
 
     def plain_err(rid, kind, message):
         return {"t": "err", "id": rid, "error": {"type": kind, "message": message, "foreign_type": None, "trace": []}}

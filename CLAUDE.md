@@ -26,9 +26,9 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 1.6 (not started): handle ops (11.3-11.5), callable handles, named args (10.8). Both
-  adapters need `op` and `call {h}` handlers; py.py and js.js should stay parallel (same rules,
-  same bugs: see the 1.4/1.5 review lessons in the ROADMAP log).
+- Now: 1.7 (not started): selectors, export registry, @import binding (Proxies), module units
+  and packages, routes, in-block imports, cross-engine callable handles, leaks, idle callbacks.
+  Biggest Phase 1 milestone; consider splitting its commit into parts if the review gets large.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -121,6 +121,10 @@ it is loaded automatically into every session and every subagent.
   globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
   HANDLERS). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
   JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`.
+- `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`), `CallableTable`, and the host's
+  handle ops on `Interp`: `handle_getattr/setattr/getitem/setitem/len/str/value/call/iter/next`.
+  interp.rs routes members, indexing, calls (`MethodTarget::Handle`), `for` and `str()` to them;
+  `str_of(v, at)` and `index(o, k, at)` take a span for that.
 - Empty stubs (a doc comment only): `engines/imports.rs`, `engines/runonly.rs`, `build/*`,
   `ffi/lib.rs`.
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.

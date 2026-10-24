@@ -8,6 +8,7 @@ func show(f) {
         return e
     }
 }
+let kept = @py { object() }
 show(func() => @py { import os; os._exit(3) })
 try {
     @py { 1 }
@@ -15,3 +16,9 @@ try {
     print(e.type, "|", e.message)
 }
 print("the script continues")
+// A handle of the dead engine fails the same way (INTERNALS 11.7).
+try {
+    print(kept.anything)
+} catch (e) {
+    print(e.type)
+}

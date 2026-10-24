@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.6 Handles |
+| **Next task** | 1.7 Imports, packages and cross-language calls |
 | **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
 
 ## Rules
@@ -159,11 +159,11 @@ callbacks and errors that cross languages.
 - **Done when:** R06 (js) and R32 pass — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.6 Handles
-- [ ] Operations (old-style JS constructors called with `new`), iteration (mapping handles like
+- [x] Operations (old-style JS constructors called with `new`), iteration (mapping handles like
       dicts) and `to_v2(h)` with its generous conversion (§11.3–11.5)
-- [ ] Callable handles, identity, invalid uses (§11.6, §11.7)
-- [ ] Named args → Python kwargs; ArityError for JS (§10.8)
-- **Done when:** R04, R15 and R53 pass
+- [x] Callable handles, identity, invalid uses (§11.6, §11.7)
+- [x] Named args → Python kwargs; ArityError for JS (§10.8)
+- **Done when:** R04, R15 and R53 pass — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.7 Imports, packages and cross-language calls
 - [ ] Selectors (`@js` and `@ts` match each other), per-file export registry, resolving names
@@ -343,3 +343,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-24 | 0.11: the small standard library (`exec`, `script_dir`, the file and folder functions, `sleep`, `time`, `min`/`max`/`sum`/`abs`/`round`/`div`, `assert`, `print(stderr:)`, `split()`, `push(...items)`, `sort(key, reverse)`); a review found 12 issues, each fixed with a test (drive-relative and `%` program paths, cwd-relative paths, pipes serviced at once, tree kill) |
 | 2026-10-25 | 1.4: the Python engine (`adapters/py.py`, blocks reached and loaded, values, V2 functions as stubs, `V2Error`, causes, coroutines, uncaught foreign errors printed with their class and causes); a review confirmed 34 findings, fixed with tests (error data with functions or handles through Python, a finalizer printing mid-send, replies that can't fail, handle counts given back, sys.path order, 8 causes, split UTF-8) |
 | 2026-10-25 | 1.5: the JavaScript and TypeScript engine (`adapters/js.js`, one vm context per unit, Promises awaited for outermost requests, ts through Node's type stripping); the 1.4 lessons applied up front; a review confirmed 24 findings, fixed with tests (Node's fs shortcuts and `fork` past the stdio wrappers, `import()` without a flag, chunks splitting surrogate pairs, a Promise that can never settle, accessor globals like `crypto`, quoted missing exports, ts error codes) |
+| 2026-10-25 | 1.6: handles (attributes, items, calls and method calls in one round trip, `len`, `str`, iteration with batching, `to_v2` with the key rule and hooks, JS `new` for constructors, bound methods, named args only with `kwargs`); a review confirmed 23 findings, fixed with tests (depth limits in `to_v2` and iteration replies, natives across JS realms, Map order, i64 keys, batching only for built-in iteration, batches that stop before a bad item, hook cycles, hints) |

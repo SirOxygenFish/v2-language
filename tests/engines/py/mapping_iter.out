@@ -1,0 +1,22 @@
+a
+b
+a 1
+b 2
+7
+8
+0 7
+1 8
+yield 0
+got 0
+yield 1
+got 1
+1000 499500
+batched 1 a
+batched 2 b
+4
+item 1 one
+item 2 two
+MarshalError string contains an unpaired surrogate (U+D800) at index 0 (at item[1])
+list
+dict
+true

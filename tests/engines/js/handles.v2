@@ -1,0 +1,47 @@
+// requires: js
+// JavaScript handles: properties, Map items, calls with and without `new`, bound methods, str(),
+// to_v2 and positional-only calls (DOCS 5, 9.2; INTERNALS 10.8, 11.3-11.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message)
+    }
+}
+let m = @js { new Map([["a", 1]]) }
+m["b"] = 2
+print(m["a"], m["b"], m["missing"], len(m), m.has("b"), str(m))
+print(to_v2(m), to_v2(@js { new Set([1, "x"]) }))
+// A class and an old-style constructor are called with `new`; a plain function is not.
+let K = @js { class K { constructor(x) { this.x = x; } twice() { return this.x * 2; } }; K }
+let k = K(21)
+print(k.twice(), k.x, type(k))
+let P = @js {
+    function P() { this.n = 1; }
+    P.prototype.get = function () { return this.n; };
+    P
+}
+print(P().get())
+let plain = @js { function plain() { return new.target === undefined; } plain }
+print(plain())
+print((@js { require("events") }).EventEmitter().listenerCount("x"))
+// A method read without calling it keeps its `this`, and reading it twice gives one handle.
+let holder = @js { new (class H { constructor() { this.suffix = "?"; } greet(n) { return "hey " + n + this.suffix; } })() }
+let greet = holder.greet
+print(greet("ada"), holder.greet("bob"), holder.greet == holder.greet)
+// A missing property is null; a property that isn't a function can't be called.
+print(holder.nothing)
+show(func() => holder.suffix())
+// JavaScript functions take positional arguments only (10.8).
+show(func() => holder.greet(n: "x"))
+show(func() => greet("a", extra: 1))
+show(func() => len(holder))
+show(func() => to_v2(holder))
+show(func() => to_v2(@js { new Map([[1, "a"], ["1", "b"]]) }))
+print(to_v2(@js { new Map([[1, "a"], [2.5, "b"], [true, "c"], [null, "d"], [1e21, "e"]]) }))
+// str() shows objects with Node's inspect and everything else with String().
+print(str(@js { new Date(0) }) != "", str(@js { () => 1 }), str(@js { Symbol("s") }), str(@js { 2n ** 70n }))
+// Promises from method calls are awaited.
+print((@js { ({ later: (x) => Promise.resolve(x * 2) }) }).later(21))
+// An object with its own toString prints with it; others with Node's inspect.
+print(str(@js { new (class Named { toString() { return "custom text"; } })() }), str(@js { new (class Plain { constructor() { this.a = 1; } })() }))

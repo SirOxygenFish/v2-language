@@ -117,7 +117,7 @@ pub static LIST_METHODS: &[MethodDef] = &[
         }
         Ok(Value::list(out))
     }),
-    m("join", &[ParamSpec::req("sep")], |it, r, a, _| {
+    m("join", &[ParamSpec::req("sep")], |it, r, a, at| {
         let sep = str_arg(&a[0], "list.join", "sep")?;
         let items = the_list(r).borrow().clone();
         let mut out = String::new();
@@ -125,7 +125,7 @@ pub static LIST_METHODS: &[MethodDef] = &[
             if i > 0 {
                 out.push_str(&sep);
             }
-            out.push_str(&it.str_of(x)?);
+            out.push_str(&it.str_of(x, at)?);
         }
         Ok(Value::Str(out.into()))
     }),
@@ -278,7 +278,8 @@ fn list_sort(it: &mut Interp, r: &Value, a: Vec<Value>, at: Span) -> Exec<Value>
         _ => None,
     };
     if let Some(bad) = keys.iter().find(|v| kind(v).is_none()) {
-        return type_error(format!("cannot sort a list containing {} (only numbers or strings)", bad.type_name()));
+        let hint = if super::ops::is_handle(bad) { super::ops::HANDLE_HINT } else { "" };
+        return type_error(format!("cannot sort a list containing {} (only numbers or strings){hint}", bad.type_name()));
     }
     if let (Some(first), Some(other)) = (keys.first(), keys.iter().find(|v| kind(v) != kind(&keys[0]))) {
         return type_error(format!("cannot sort a list mixing {} and {}", first.type_name(), other.type_name()));

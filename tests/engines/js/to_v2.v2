@@ -1,0 +1,46 @@
+// requires: js
+// to_v2(h) and calls in the JavaScript worker (INTERNALS 11.3, 11.5): natives from a block's own
+// realm, Map key order, the key rule at the edges, hooks, and the limits that are MarshalErrors.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message)
+    }
+}
+// Number, String, Boolean, Symbol and BigInt convert rather than construct, in any realm.
+print((@js { Number })("5"), (@js { String })(5), (@js { Boolean })(0), type((@js { Symbol })("s")), (@js { BigInt })(5))
+// A Map keeps its insertion order, also for keys that look like numbers.
+print(to_v2(@js { new Map([["b", 1], ["2", 2], ["a", 3], [1, 4]]) }))
+print(to_v2(@js { new Map([[-(2 ** 63), "min"], [2 ** 63, "float"]]) }))
+show(func() => to_v2(@js { new Map([[2n ** 64n, "too big"]]) }))
+// A hook getter that throws is a ForeignError; a hook that returns the object is a cycle.
+let hooks = @js {
+    class Throws { get to_dict() { throw new RangeError("getter failed"); } }
+    class Me { tolist() { return this; } }
+    [new Throws(), new Me()]
+}
+show(func() => to_v2(hooks[0]))
+show(func() => to_v2(hooks[1]))
+// 256 nested containers convert; one more is a MarshalError, and the engine goes on.
+let Deep = @js {
+    class Deep {
+        constructor(n, inner) { this.n = n; this.inner = inner; }
+        tolist() { let x = this.inner; for (let i = 0; i < this.n - 1; i++) x = [x]; return x; }
+    }
+    Deep
+}
+print(type(to_v2(Deep(256, []))))
+show(func() => to_v2(Deep(257, [])))
+show(func() => to_v2(Deep(257, [1])))
+// A length that isn't a count, and an iterator result that isn't an object, are TypeErrors.
+show(func() => len(@js { new (class Odd { get length() { return 1.5; } })() }))
+let odd = @js { new (class OddIter { [Symbol.iterator]() { return { next: () => 5 }; } })() }
+try {
+    for x in odd {
+        print("got", x)
+    }
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+print(@js { "still running" })

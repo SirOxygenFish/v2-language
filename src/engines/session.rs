@@ -74,7 +74,7 @@ pub struct Session {
     reader: Option<FrameReader<Box<dyn Read + Send>>>,
     writer: Option<Box<dyn Write>>,
     pub hello: Option<Hello>,
-    caps: Caps,
+    pub(crate) caps: Caps,
     next_id: u64,
     pending: Vec<Pending>,
     pub releases: ReleaseQueue,

@@ -1,0 +1,76 @@
+// requires: py
+// to_v2(h) in the Python worker (INTERNALS 11.5): containers converted recursively, the key
+// rule, hooks, V2's own values, and the limits that are MarshalErrors.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message)
+    }
+}
+let mixed = @py {
+    import collections
+    Point = collections.namedtuple("Point", "x y")
+    class Rows(list):
+        pass
+    Rows([collections.OrderedDict(b=1, a=2), {3, 1}, frozenset([5]), Point(1, 2), (1, (2,))])
+}
+print(type(mixed), to_v2(mixed))
+// Keys: ints within 64 bits; a bigger int is no V2 int, so it is refused.
+print(to_v2(@py { {2**63 - 1: "max", -2**63: "min"} }))
+show(func() => to_v2(@py { {2**63: "too big"} }))
+// Hooks: to_dict first, then tolist; their results convert too; a hook that raises is a
+// ForeignError; one that returns the object itself is a cycle.
+let hooked = @py {
+    class Both:
+        def to_dict(self):
+            return {1: "from to_dict"}
+        def tolist(self):
+            return ["from tolist"]
+    class Raises:
+        def to_dict(self):
+            raise RuntimeError("hook failed")
+    class Me:
+        def tolist(self):
+            return self
+    [Both(), Raises(), Me()]
+}
+print(to_v2(hooked[0]))
+show(func() => to_v2(hooked[1]))
+show(func() => to_v2(hooked[2]))
+// V2's own values inside a foreign object come back as themselves.
+func cb() {
+    return 1
+}
+let holder = @py(cb, err: error("Custom", "kept")) {
+    class Holder:
+        def to_dict(self):
+            return {"cb": cb, "err": err}
+    Holder()
+}
+let back = to_v2(holder)
+print(back.cb == cb, back.err.type, back.err.message)
+// 256 nested containers convert; one more is a MarshalError, and the engine goes on.
+let deep = @py {
+    def nest(n, inner):
+        x = inner
+        for i in range(n - 1):
+            x = [x]
+        return x
+    class Deep:
+        def __init__(self, n, inner):
+            self.n, self.inner = n, inner
+        def tolist(self):
+            return nest(self.n, self.inner)
+    Deep
+}
+let ok = to_v2(deep(256, []))
+print(type(ok))
+show(func() => to_v2(deep(257, [])))
+show(func() => to_v2(deep(257, [1])))
+show(func() => to_v2(@py {
+    d = {1: None}
+    d[1] = d
+    d
+}))
+print(@py { "still running" })
