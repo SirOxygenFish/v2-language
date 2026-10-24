@@ -619,6 +619,7 @@ Statements return `Exec<()>`, expressions `Exec<Value>`: `type Exec<T> = Result<
 | `exit` | `code`: an `Int` in i32 range (else TypeError / `ValueError: exit code 1099511627776 is out of range`; POSIX keeps the low 8 bits). Returns `Flow::Exit(code)` (5.8, 6.5). |
 | `error`, `assert` | `error`: `type` (non-empty) and `message` must be `Str`, `data` anything; no location until raised. `assert`: a falsy `cond` (5.2) throws `error("AssertionError", message)` (`message` a `Str`), raised at the call (2.2). |
 | `to_v2` | A handle → `op value` (11.5; native pointer → MarshalError, 16.6); anything else is returned unchanged (containers are not walked). |
+| `define_engine` | 17.2: one custom engine, for the rest of the run. |
 | `engine_available` | 7.3. |
 
 **Output.** `Out` (`BufWriter<StdoutLock<'static>>`, 64 KiB, owned by `Interp`) is the only writer of the host's stdout: `print` and the stdout text of worker `out` frames (9.9). `Out` is flushed after every write when stdout is a terminal (`IsTerminal`, checked once), and before every in-process native call (16.7), every frame written to a worker (9.9), every child spawn (a statement-position compiled or `run` block inherits stdout, 6.3), every `input()` read, every write to stderr (diagnostics, `out` stderr text, `print(stderr: true)`), and at the end of the run; dirty native stdio is flushed before every write to `Out` (16.7). A failed write of `print` to either stream (closed pipe; Rust ignores SIGPIPE, so it is `EPIPE`) raises IOError at the `print`. Stdin belongs to `input()` alone (workers: 9.9; other children: 8.3).
@@ -767,14 +768,14 @@ The Run rows are the built-in run engines (17.3, 17.4; configuration 18.2), with
 ### 7.3 Tags, EngineUnknown and `engine_available`
 
 - **Canonical tags.** `canonical(tag)` maps an id or alias to `spec.id` everywhere: block headers (`@python stats` is a `py` block), selectors (`@python.stats` = `@py.stats`, `python.os.path` = `py.os.path`), `engine_available` and `[engines.<tag>]`; `V2_ENGINE_<TAG>` takes canonical tags only (18.4). Messages print the canonical form (2.5).
-- **Profiles are static.** The lexer takes a tag's scanning profile from the fixed built-in table; every other tag, declared in `v2.toml` or not, is Plain (3.8). The parser never rejects a tag as unknown.
-- **EngineUnknown.** `resolve_tag(tag, span)` runs when a block is reached or a selector is bound. A miss raises `EngineUnknown: unknown engine '@pyhton' (did you mean '@py'?)` (did-you-mean per 5.9, over ids and aliases); with no close match, `unknown engine '@perl' — known engines: py, js, ts, c, cpp, rust, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.perl] in v2.toml` (the list is the registry's engines). Custom tags have 17.1's lowercase shape, so a tag the lexer accepts outside it (`@PY`) is simply unknown.
+- **Profiles are static.** The lexer takes a tag's scanning profile from the fixed built-in table; every other tag, declared or not, is Plain (3.8). The parser never rejects a tag as unknown.
+- **EngineUnknown.** `resolve_tag(tag, span)` runs when a block is reached or a selector is bound. A miss raises `EngineUnknown: unknown engine '@pyhton' (did you mean '@py'?)` (did-you-mean per 5.9, over ids and aliases); with no close match, `unknown engine '@perl' — known engines: py, js, ts, c, cpp, rust, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.perl] in v2.toml` (the list is the registry's engines); the text ends `in v2.toml, or with define_engine` (17.2). Custom tags have 17.1's lowercase shape, so a tag the lexer accepts outside it (`@PY`) is simply unknown.
 - **`engine_available(tag)`:** `false` for an unknown tag (no error); otherwise `true` iff resolution succeeds (7.4, 7.6). It may run probes (cached, 7.7) but never starts a session or compiles, and a later crash (8.2) does not change its answer.
 
 ### 7.4 Custom engines in the registry
 
-- Custom engines come only from `[engines.<tag>]` tables in `v2.toml`: spec, validation and tag rules 17.1, registration 17.2, `V2_ENGINE_<TAG>` 18.4.
-- Resolving one only finds `command[0]` (7.5) and runs nothing (`version` is `None`; doctor VERSION `-`). A miss is `EngineNotFound: 'perl' not found on PATH (engine declared in C:\proj\v2.toml)`.
+- Custom engines come from `[engines.<tag>]` tables in `v2.toml` and from `define_engine` calls: spec, validation and tag rules 17.1, registration 17.2, `V2_ENGINE_<TAG>` 18.4.
+- Resolving one only finds `command[0]` (7.5) and runs nothing (`version` is `None`; doctor VERSION `-`). A miss is `EngineNotFound: 'perl' not found on PATH (engine declared in C:\proj\v2.toml)`, or `(engine declared at main.v2:3)` for a `define_engine` call.
 
 ### 7.5 Finding an executable
 
@@ -2213,7 +2214,7 @@ In-process calls have no timeout (`call_timeout` cannot interrupt a thread runni
 
 ## 17. Custom engines
 
-A custom engine is any engine that isn't built in. It comes from an `[engines.<tag>]` table in the project's `v2.toml` (18.2) and has one of two kinds:
+A custom engine is any engine that isn't built in. It comes from an `[engines.<tag>]` table in the project's `v2.toml` (18.2) or a `define_engine` call (17.2) and has one of two kinds:
 
 - **`run`** (`engines/runonly`): writes the block to a temp file, runs a command and returns its stdout (DOCS 13.1).
 - **`bridged`**: an adapter process that speaks VEP/1 through the same `engines/session` code as `py` and `js` (DOCS 13.2).
@@ -2222,7 +2223,7 @@ Every custom tag is scanned with the Plain profile (3.8): braces are counted and
 
 ### 17.1 Specs and validation
 
-A custom spec is a 7.1 `EngineSpec` of kind `Run` or `Bridged` with no candidates, minimum or probe, and with `custom` set: its `command`, `ext`, timeouts, the `base_dir` used for path rewriting (the project root) and its origin, the declaring `v2.toml`, which messages and doctor print. The table (18.2) goes through one validator, `engines/spec::validate`:
+A custom spec is a 7.1 `EngineSpec` of kind `Run` or `Bridged` with no candidates, minimum or probe, and with `custom` set: its `command`, `ext`, timeouts, the `base_dir` used for path rewriting (the project root; for `define_engine`, the calling file's folder) and its origin, the declaring `v2.toml` or call site, which messages and doctor print. The table (18.2) goes through one validator, `engines/spec::validate`:
 
 | Key | Kinds | Rule | Default |
 | --- | --- | --- | --- |
@@ -2233,8 +2234,8 @@ A custom spec is a 7.1 `EngineSpec` of kind `Run` or `Bridged` with no candidate
 | `call_timeout` | both | as `startup_timeout` | 0 |
 
 - **Tags** match `[a-z][a-z0-9_]{0,31}`; `v2`, `export` and `import` are reserved. A table named after a built-in tag or alias configures that built-in engine instead (17.2). Custom engines have no aliases.
-- **Problems** are configuration errors in 18.5's format (exit 2, before anything runs), with these texts: `command must contain {file}`, `invalid engine tag '{t}'`, `'{t}' is reserved`, `'{k}' does not apply to {kind} engines`, `'{k}' must be {expected}, got {type}`. Unknown keys are errors with 18.5's did-you-mean text.
-- **Command paths** are rewritten per 18.1, against the project root; `V2_ENGINE_<TAG>` replaces `command[0]` only (18.4).
+- **Problems** in a table are configuration errors in 18.5's format (exit 2, before anything runs); from `define_engine` they are 17.2's `ValueError`s. The texts: `command must contain {file}`, `invalid engine tag '{t}'`, `'{t}' is reserved`, `'{k}' does not apply to {kind} engines`, `'{k}' must be {expected}, got {type}`. Unknown keys are errors with 18.5's did-you-mean text.
+- **Command paths** are rewritten per 18.1, against `base_dir`; `V2_ENGINE_<TAG>` replaces `command[0]` only (18.4).
 
 ### 17.2 Registration
 
@@ -2242,6 +2243,12 @@ The registry (7.1) maps every tag to its spec; built-in aliases canonicalize eve
 
 - A table named after a built-in tag or alias is an override table (18.2); `kind` in it is the config error `built-in engine '{tag}' can't change 'kind'`, and `ext` is an unknown key (18.5).
 - Every other table defines a custom engine (17.1); `V2_ENGINE_<TAG>` then replaces its `command[0]` (18.4).
+
+**`define_engine(tag, kind, command, ext = null, startup_timeout = null, call_timeout = null)`** (DOCS 13.3) registers a custom engine at run time; `null` means the key is not given. The arguments are 17.1's keys and go through the same validator, with the calling file's folder as `base_dir` and the call site as origin. Problems raise `ValueError` with 17.1's texts after `define_engine: ` (`define_engine: command must contain {file}`); an unknown key is the binder's `ArityError` (5.7). Refused, also as `ValueError`:
+- a built-in tag or alias: `define_engine: 'py' is a built-in engine — configure it in [engines.py] in v2.toml`;
+- a tag already declared by `v2.toml` or by an earlier call, from any file: `define_engine: engine 'r' is already declared (main.v2:3)`, or `(C:\proj\v2.toml)`. The registry is per run, so each tag is declared once.
+
+A `V2_ENGINE_<TAG>` kept from startup for that tag replaces `command[0]` now (18.4). The engine exists from the call on: a block reached before it raised EngineUnknown (7.3). The call returns `null`. `v2 doctor` and `v2 check` run no script, so they never see these engines (19.2, 19.3).
 
 Nothing is resolved or started at registration. `engine_available(tag)` is `false` for an unknown tag and, for a custom tag, `true` when `command[0]` resolves to an executable file; it never spawns anything.
 
@@ -2357,7 +2364,7 @@ Built-in defaults < the project's `v2.toml` < `V2_ENGINE_<TAG>` (DOCS 14).
 ### 18.4 Environment overrides
 
 - `V2_ENGINE_<X>` holds one executable path, never split; empty = unset. The name is matched case-insensitively on Windows (as Windows matches variable names) and must be upper case elsewhere (`V2_ENGINE_Py` is ignored), so two variables never name one engine. `X`, lower-cased, must be a canonical tag (`V2_ENGINE_PY`, not `V2_ENGINE_PYTHON`): an alias is ignored like any unknown tag. A path with a separator resolves against the cwd; a bare name (`node`) is left for the `PATH` walk (18.1, 7.5).
-- Effect: a built-in bridged or compiled engine gets `command = [PATH]`, dropping any prefix such as `py -3` (a `cl.exe` path follows 7.6 step 3); a built-in run engine or a custom engine gets `command[0] = PATH`, the rest kept (a configured `command`'s, else 7.2's fixed args). A tag that no engine has is ignored, because environments hold unrelated variables. `V2_ENGINE_TS` is a configuration error that names the variable as written: `V2_ENGINE_TS: ts runs on the js engine; set V2_ENGINE_JS`.
+- Effect: a built-in bridged or compiled engine gets `command = [PATH]`, dropping any prefix such as `py -3` (a `cl.exe` path follows 7.6 step 3); a built-in run engine or a custom engine gets `command[0] = PATH`, the rest kept (a configured `command`'s, else 7.2's fixed args). A tag that no engine has is ignored, because environments hold unrelated variables; one a later `define_engine` declares gets it then (17.2). `V2_ENGINE_TS` is a configuration error that names the variable as written: `V2_ENGINE_TS: ts runs on the js engine; set V2_ENGINE_JS`.
 
 ### 18.5 Parsing and validation
 
@@ -2396,7 +2403,7 @@ Built-in defaults < the project's `v2.toml` < `V2_ENGINE_<TAG>` (DOCS 14).
 
 ### 19.2 v2 doctor
 
-1. Load config from the cwd (18.1; error: exit 2); the registry is the built-ins (7.2, the built-in run engines included), then the config's custom engines, one row each. Resolve every engine with fresh probes (7.7), rewriting the probe cache. Doctor executes toolchain commands, including project-configured ones (`v2.toml` commands, the venv python, vswhere and vcvarsall), so it is not safe on an untrusted project (20.2).
+1. Load config from the cwd (18.1; error: exit 2); the registry is the built-ins (7.2, the built-in run engines included), then the config's custom engines, one row each (doctor runs no script, so `define_engine` engines are not listed). Resolve every engine with fresh probes (7.7), rewriting the probe cache. Doctor executes toolchain commands, including project-configured ones (`v2.toml` commands, the venv python, vswhere and vcvarsall), so it is not safe on an untrusted project (20.2).
 2. Print a table to stdout, columns `ENGINE STATUS COMMAND VERSION FROM`, each as wide as its longest cell + 2 (DOCS 2). COMMAND: `shown` plus prefix args (a built-in run engine's: the rest of its template, `{file}` included), space-joined, unquoted; ts: `(js engine, built-in type stripping)`; custom: the argv template. VERSION: the probed version (ts: Node's); `-` for `cmd` and custom engines, which have no probe. FROM: `PATH`, `vswhere`, `venv`, `git`, `v2.toml`, `V2_ENGINE_<TAG>` or `-` (ts: js's; bash on Windows: `git`, 7.6). STATUS: `ok`; `missing` (other columns `-`; also `cmd` off Windows); `old` (only too-old versions, 7.6; VERSION the newest); `broken` (probe failed or timed out, wrong target, or a configured command or venv missing).
 3. Then `notes:` (skipped hits, such as Store placeholders; cl's and rustc's targets; a line for each engine that is not `ok`) and the config file used (`config file: <path>`, or `config file: none`). Exit 0: missing engines are information, not failure. For example:
    ```text
@@ -2618,6 +2625,7 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R56 | `compiled/c/local_files/` (run.rs) | with the cwd elsewhere: `#include "helper.h"` finds `helper.h` beside the `.v2` file; `flags = ["-I./inc"]` finds `inc/` beside the `v2.toml` (18.1); a block linked through `flags` against a library that run.rs first builds into the `.v2` folder loads; after `helper.h` changes, the next run (same HOME) rebuilds and prints the new value |
 | R57 | `compiled/{c,cpp,rust}/signatures.v2` | exports are found behind attributes and calling conventions: C `__declspec(noinline) int __cdecl twice(int x)` (Windows) or `__attribute__((noinline)) int twice(int x)`, C++ `[[nodiscard]] int thrice(int x)`; Rust `fn chars(s: &'static str) -> usize` gives `chars("héllo") == 5`; a Rust export taking `&mut str` raises BuildError naming `&mut str` |
 | R58 | `custom/builtin/{bash,pwsh,cmd}.v2` (each `requires:` its tag), `custom/builtin/cmd_unix.v2` (`// platform: unix`), run.rs (doctor) | with no `v2.toml`: `@sh { echo hi }` prints `hi` and `let b = @bash { printf ok }` gives `"ok"`, through Git Bash on Windows (never `System32\bash.exe`); `@pwsh { Write-Output 5 }` gives `"5"`; on Windows `@cmd(x: 1) { echo %V2_ARG_x% }` gives `"1"`; in `cmd_unix.v2`, `@cmd { }` raises EngineNotFound `cmd is Windows only`; `v2 doctor` has a row for each built-in run engine (run.rs `doctor_rows`; 7.2, 19.2) |
+| R59 | `custom/define_engine/` (requires js) | with no `v2.toml`, `define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")` then `@nd { console.log(1 + 2) }` prints `3`; a block `@nq` reached before its `define_engine` raises EngineUnknown ending `or with define_engine`; declaring `nd` again, or `py`, raises ValueError (17.2); `command: ["node"]` raises `ValueError: define_engine: command must contain {file}`; in `sub/lib.v2`, imported from `main.v2`, a command `["node", "./runner.js", "{file}"]` runs `sub/runner.js` (the caller's folder, 18.1) |
 
 ### 22.6 CI matrix
 
