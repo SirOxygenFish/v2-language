@@ -91,9 +91,6 @@ impl Interp {
         if let Some(imp) = b.directives.imports.first() {
             return Err(self.not_yet("@import inside blocks (roadmap 1.7)", imp.span));
         }
-        if &*engine.spec.id != "py" {
-            return Err(self.not_yet(&format!("@{} blocks (roadmap 1.5)", engine.spec.id), at));
-        }
         let s = self.session_for(&engine, at)?;
         let mut encoded = Map::new();
         for (name, value, span) in args {
@@ -139,20 +136,26 @@ impl Interp {
         Ok((if want_value { reply.value } else { Value::Null }, reply.exports))
     }
 
-    /// The session of `e`'s engine, started at its first use (8.2, 8.3). A session that failed
-    /// to start stays, so each later use raises its error again (8.2).
+    /// The session of `e`'s engine, started at its first use (8.2, 8.3); a ts block starts the
+    /// js engine's. A session that failed to start stays, so each later use raises its error
+    /// again (8.2).
     fn session_for(&mut self, e: &Rc<ResolvedEngine>, at: Span) -> Exec<SessionId> {
         let key = e.spec.session_of.clone().unwrap_or_else(|| e.spec.id.clone());
         if let Some(s) = self.sessions.iter().position(|s| s.key == key) {
             return Ok(s);
         }
-        let adapter = match crate::adapters::materialize("py.py", crate::adapters::PY) {
+        let engine = match &e.spec.session_of {
+            Some(owner) => self.registry.resolve_tag(owner).map_err(|f| self.raise(f, at))?,
+            None => e.clone(),
+        };
+        let (file, text) = crate::adapters::for_session(&key).expect("a built-in bridged engine");
+        let adapter = match crate::adapters::materialize(file, text) {
             Ok(path) => path,
             Err(msg) => return Err(self.raise(error("IOError", msg), at)),
         };
-        let (argv, env) = worker_command(e, &adapter);
+        let (argv, env) = worker_command(&engine, &adapter);
         let timeouts = self.timeouts(&key);
-        self.start_session(e.clone(), &argv, &env, timeouts, at)
+        self.start_session(engine, &argv, &env, timeouts, at)
     }
 
     /// `[engines.<key>] startup_timeout` (default 30 s) and `call_timeout` (default none); 0 is

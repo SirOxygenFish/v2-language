@@ -1,0 +1,18 @@
+ForeignError | TypeError | Cannot read properties of null (reading 'x') | js | 12
+ForeignError | RangeError | out of range | js | 13
+ForeignError | string | just a string | js | 15
+ForeignError | number | 42 | js | 16
+ForeignError | SyntaxError | Unexpected identifier 'b' | js | 18
+ForeignError | SyntaxError | import statements are not allowed in @js blocks — use require(...), await import(...) inside an async function, or @import { x } from js.<package> | js | 19
+ForeignError | SyntaxError | export statements are not allowed in @js blocks — use @export { name } | js | 20
+ForeignError | SyntaxError | top-level await is not allowed in @js blocks — end the block with a Promise (it is awaited) or export an async function | js | 21
+ForeignError | Error | process.exit(3) can't end V2's JavaScript engine; throw an error instead | js | 23
+the worker is still running
+ForeignError | Error | outer | js | 26
+ForeignError TypeError inner null
+ValueError | null | bad 1 | null | 30
+{"n": 1}
+["V2Error", false, "ValueError", "bad 2", {"n": 2}, null, null]
+ForeignError | V2Error | fake | js | 45
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | js | 55
+MarshalError | null | string contains an unpaired surrogate (U+DC80) at index 1 (at value[1]["k"][0]) | js | 57

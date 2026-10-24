@@ -1,0 +1,44 @@
+// requires: js
+// stderr: js stderr line
+// stderr: child output
+// stderr: forked child output
+// JavaScript output joins V2's in program order (DOCS 4.6, INTERNALS 9.9, 14.4); output below
+// the language level goes to stderr.
+print("v2 1")
+@js {
+    console.log("js 1");
+    process.stdout.write("no newline;");
+    process.stdout.write(Buffer.from("bytes é\n"));
+    require("fs").writeSync(1, "through fs.writeSync\n");
+    console.error("js stderr line");
+}
+print("v2 2")
+// Every fs entry point for fd 1 is captured, Node's native shortcuts included.
+@js {
+    const fs = require("fs");
+    fs.writeFileSync(1, "through writeFileSync\n");
+    fs.appendFileSync(1, Buffer.from("through appendFileSync\n"));
+    fs.writevSync(1, [Buffer.from("through "), Buffer.from("writevSync\n")]);
+    new Promise((resolve) => fs.writeFile(1, "through writeFile\n", resolve))
+}
+print("v2 3")
+// Children never get fd 0 or 1: inherited stdout goes to stderr, also for fork's default.
+@js {
+    const { execSync, spawnSync } = require("child_process");
+    execSync('node -e "console.log(\'child output\')"', { stdio: "inherit" });
+    const r = spawnSync(process.execPath, ["-e", "process.stdout.write('captured')"]);
+    console.log("child stdout captured:", String(r.stdout));
+}
+@js {
+    const { fork } = require("child_process");
+    const child = fork(require("path").join(__dirname, "fixtures", "child.js"));
+    new Promise((resolve) => child.on("exit", (code) => resolve(console.log("fork exited with", code))))
+}
+print(@js { require("util").promisify(require("child_process").execFile)(process.execPath, ["-e", "process.stdout.write('promisified')"]).then((r) => r.stdout) })
+print("v2 4")
+// require() resolves from the .v2 file's folder (12.4).
+print(@js { const h = require("./fixtures/helper.js"); [h.shout("hi"), require("path").basename(h.where)] })
+// Output is chunked into frames without splitting a character: over 1 Mi UTF-16 units here,
+// with a chunk boundary inside a pair.
+@js { console.error("x" + "😀".repeat(600000)); }
+print("after a large output")

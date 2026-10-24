@@ -1,0 +1,23 @@
+action 0 [0]
+action 1 [1]
+action 2 [2]
+arg evaluated 0
+loading with 0
+2 2 1.5 s null null true
+int float [1, null, 3] {"a": [1, {"b": "x"}]}
+1152921504606846976 int 1e20 float 4611686018427387904
+handle handle handle handle
+true -inf b"\x00\xff" b"\x01"
+{"$v2": 1, "k": 2} ["2", "b"]
+completion of an if
+MarshalError: string contains an unpaired surrogate (U+D800) at index 0 (at value)
+lucky 126 true 1 bigint number true 1
+[4, 8, 15]
+undefined yes
+ValueError: block arg 'undefined' is not a valid JavaScript name
+ValueError: block arg 'class' is not a valid JavaScript name
+[<builtin print>] true function
+["string", "function", "function", "function", "function", "function", "function"]
+5
+b.txt
+[42, "default export"]

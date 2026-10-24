@@ -1,0 +1,25 @@
+// requires: py js
+// R32: V2's input() owns stdin; Python and JavaScript blocks can't read it (DOCS 4.6, INTERNALS 9.9).
+try {
+    @py { import sys; sys.stdin.read() }
+} catch (e) {
+    print("py:", e.type, e.foreign_type)
+}
+try {
+    @js { require("fs").readFileSync(0) }
+} catch (e) {
+    print("js:", e.type)
+}
+print(input(), input(), input())
+// Node's shortcuts for fd 0 are refused too, and the protocol stays intact.
+try {
+    @js { require("fs").readFileSync(0, "utf8") }
+} catch (e) {
+    print("js utf8:", e.type)
+}
+try {
+    @js { new Promise((resolve, reject) => require("fs").readFile(0, (e) => (e ? reject(e) : resolve("read")))) }
+} catch (e) {
+    print("js readFile:", e.type)
+}
+print(@js { "protocol intact" })

@@ -1,0 +1,10 @@
+// requires: js
+// R06 (js): braces inside JavaScript strings, templates, regexes in classes and comments don't
+// close the block (INTERNALS 3.8).
+@js { console.log("}") }
+@js {
+    const s = `${"}"} and ${ {a: "{"}.a }`;  // } in a comment
+    /* { */
+    console.log(s, '}'.length);
+}
+print(@js { `${"}"}` })
