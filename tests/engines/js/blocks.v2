@@ -62,3 +62,14 @@ print(@js(crypto: 5) { crypto })
 // import() loads built-ins and ES modules, relative to the .v2 file (12.4).
 print(@js { (async () => (await import("node:path")).basename("/a/b.txt"))() })
 print(@ts { (async (): Promise<unknown[]> => { const m = await import("./fixtures/esm.mjs"); return [m.answer, m.default()]; })() })
+// A failing action block keeps nothing: each reach runs it again (INTERNALS 12.1, 21.2).
+for i in 0..2 {
+    try {
+        @js(i) {
+            console.log("js action runs", i);
+            throw new RangeError("fail " + i);
+        }
+    } catch (e) {
+        print(e.type, e.foreign_type, e.message)
+    }
+}

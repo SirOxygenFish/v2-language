@@ -1,0 +1,10 @@
+// requires: py
+// R31: a lone surrogate can't be V2 text: a block value carrying one is a MarshalError naming
+// where it is, output replaces it with U+FFFD, and the engine keeps working (INTERNALS 10.4).
+try {
+    let s = @py { "a\ud800b" }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+@py { print("out: a\ud800b") }
+print(@py { "still running" })

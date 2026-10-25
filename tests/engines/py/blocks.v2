@@ -63,3 +63,14 @@ print(@py(x: [print]) { x }, (@py(x: print) { x }) == print)
 let loop = [1]
 loop.push(loop)
 show(func() => @py(x: loop) { x })
+// A failing action block keeps nothing: each reach runs it again (INTERNALS 12.1, 21.2).
+for i in 0..2 {
+    try {
+        @py(i) {
+            print("py action runs", i)
+            raise ValueError("fail %d" % i)
+        }
+    } catch (e) {
+        print(e.type, e.foreign_type, e.message)
+    }
+}

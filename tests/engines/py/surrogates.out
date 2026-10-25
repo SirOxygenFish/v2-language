@@ -1,0 +1,3 @@
+MarshalError | string contains an unpaired surrogate (U+D800) at index 1 (at value)
+out: a�b
+still running

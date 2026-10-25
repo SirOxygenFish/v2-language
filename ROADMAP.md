@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.10 Phase 1 test sweep |
-| **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
+| **Current phase** | Phase 1 complete (Windows and Linux); Phase 2 waits for the owner's go-ahead |
+| **Next task** | 2.1 Process helper |
+| **Last update** | 2026-10-25: 0.11 and all of Phase 1 built, one commit per milestone, each reviewed by finders and refuters and every confirmed finding fixed with a regression test (progress log) |
 
 ## Rules
 
@@ -191,11 +191,12 @@ callbacks and errors that cross languages.
 - **Done when:** the seed passes — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.10 Phase 1 test sweep
-- [ ] R01, R02, R03, R11, R29, R30, R31, R33, R42, and every R of 1.4–1.9 again
-- [ ] ch. 21 rows for bridged engines: Setup, Blocks and imports, Calls and values
+- [x] R01, R02, R03, R11, R29, R30, R31, R33, R42, and every R of 1.4–1.9 again
+- [x] ch. 21 rows for bridged engines: Setup, Blocks and imports, Calls and values
 
 **Phase 1 complete when:** `tests/engines/{py,js,ts}`, `tests/cross`, `tests/imports`, the seed
-and protocol tests, and every R listed in 1.1–1.10 pass.
+and protocol tests, and every R listed in 1.1–1.10 pass. — **complete 2026-10-25** on Windows and Linux (CI has not run
+yet: nothing is pushed; macOS untested).
 
 ---
 
@@ -347,3 +348,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-25 | 1.7: imports, packages and cross-language calls (`engines/imports.rs`: selectors, 13.3 resolution and its messages, `@import` binding with Proxies, module units for `py.x`/`js.x` with `*` and whole-module handles, routes, imports inside blocks with same-engine stubs and constants refused, the `v2` selector; callable handles cross engines as functions); a review confirmed 11 findings, fixed with tests that fail without the fix: names bound by `*` could be declared again, a worker started before its block's import checks, Windows `.\x.js` specifiers shared one unit, JS stubs broke `extends`/`instanceof`, a CommonJS module ran twice on a nested top-level await, a subpath missing from `exports` and a null module gave the wrong errors, a dead session said "cannot import packages", plus tests for `@js`/`@ts` selectors, leak releases reaching V2 and two 13.7 paths. Found while building: the JS idle-turn collection never freed stubs, since V8 keeps `WeakRef` targets until the job ends |
 | 2026-10-25 | 1.8: errors and output across languages (`engines/traces.rs`: a worker error's frames mapped to `.v2` lines and columns and printed as 2.5 says, located at the innermost block frame with that block's tag as `e.lang`; a V2 error crossing foreign code keeps its frames with the foreign ones between; output order checked with stdout captured); a review confirmed 7 findings, fixed with tests that fail without the fix: TS strip errors past a block's first line lost their position on Node 24, JS syntax errors had no column, a V2 error first raised by foreign code lost V2's frames, Python compiler errors counted bytes, `<module>` was dropped for library frames, a huge column from a worker panicked the host, and frames went to the wrong block or line (shared lines across engines, U+2028 in JS, `@@export` lines) |
 | 2026-10-25 | 1.9: the seed test, lines 1-111 of the old `test_engines.v2` ported as `tests/engines/py/seed_engines.v2` (15 checks, the missing-export check asserting 13.3 step 6's message) |
+| 2026-10-25 | 1.10: the Phase 1 sweep: R01-R03, R11, R29-R31 and R33 got their tests (`tests/engines/{py,js}`), R42 its js part in `ts/strip.v2`; every R of 1.1-1.10 and the ch. 21 rows for bridged engines have tests; an audit confirmed 3 test gaps, all closed (a failing action block reached again, the idle turn after a call reply, the dead state after a startup timeout or exit 9009). Phase 1 complete on Windows and Linux |

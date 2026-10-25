@@ -1,0 +1,28 @@
+// requires: py
+// R11: an exported coroutine function is awaited; its exception is a ForeignError; a coroutine
+// returned while one is being awaited in the thread is 9.8's Error (DOCS 8.4, INTERNALS 9.8).
+@py work {
+    import asyncio
+    async def answer():
+        await asyncio.sleep(0.01)
+        return 42
+    async def fail():
+        raise LookupError("failed")
+    async def via_v2(f):
+        await asyncio.sleep(0)
+        return f()
+    @export { answer, fail, via_v2 }
+}
+@import { answer, fail, via_v2 } from work
+print(answer())
+try {
+    fail()
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+// py (awaiting) -> V2 -> py: the inner coroutine can't be awaited on the running loop.
+try {
+    via_v2(func() => answer())
+} catch (e) {
+    print(e.type, "|", e.message)
+}
