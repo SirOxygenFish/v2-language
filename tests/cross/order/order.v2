@@ -1,0 +1,30 @@
+// requires: py js
+// R17 (py and js): with stdout captured, output keeps program order across V2 and its blocks,
+// also text without a newline and output around a callback (DOCS 4.6, INTERNALS 9.9). The
+// compiled and run-engine parts come with Phases 2 and 3.
+print("v2 1")
+@py { print("py print") }
+@py {
+    import sys
+    sys.stdout.write("py write, no newline: ")
+}
+print("v2 2")
+@js { console.log("js log") }
+@js { process.stdout.write("js write, no newline: ") }
+print("v2 3")
+@py(cb: func() => print("v2 inside py")) {
+    print("py before")
+    cb()
+    print("py after")
+}
+@js(cb: func() => print("v2 inside js")) {
+    console.log("js before");
+    cb();
+    console.log("js after");
+}
+@py(js_say: @js { (s) => console.log("js called from py: " + s) }) {
+    print("py first")
+    js_say("hi")
+    print("py last")
+}
+print("v2 end")

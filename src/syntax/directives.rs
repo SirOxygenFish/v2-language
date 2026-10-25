@@ -90,6 +90,7 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
     // Step 2: directives.
     let compiled = COMPILED_TAGS.contains(&tag);
     let mut directives = Directives::default();
+    let mut escapes = Vec::new(); // (line index, byte where the `@` was)
     let mut i = 0;
     while i < lines.len() {
         let t = lines[i].text.trim_start_matches([' ', '\t']);
@@ -105,6 +106,7 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         }
         if is_directive(t, "@@export") || is_directive(t, "@@import") {
             lines[i].text.remove(lead); // the escape loses one `@`
+            escapes.push((i, lead));
         }
         i += 1;
     }
@@ -141,9 +143,11 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
                 kept.push(k as u32 + 1);
             }
         }
-        return Ok(finish(file, lines, first_line, header_col.unwrap_or(m as u32 + 1), m as u32, kept, directives));
+        let escaped = escapes.iter().map(|&(k, lead)| (k as u32 + 1, if kept.contains(&(k as u32 + 1)) { lead + 1 } else { lead - m + 1 } as u32)).collect();
+        return Ok(finish(file, lines, first_line, header_col.unwrap_or(m as u32 + 1), (m as u32, kept, escaped), directives));
     }
-    Ok(finish(file, lines, first_line, header_col.unwrap_or(1), 0, Vec::new(), directives))
+    let escaped = escapes.iter().map(|&(k, lead)| (k as u32 + 1, lead as u32 + 1)).collect();
+    Ok(finish(file, lines, first_line, header_col.unwrap_or(1), (0, Vec::new(), escaped), directives))
 }
 
 fn finish(
@@ -151,8 +155,7 @@ fn finish(
     lines: Vec<Line>,
     first_line: u32,
     body_col: u32,
-    dedent_width: u32,
-    kept: Vec<u32>,
+    (dedent_width, kept, escaped): (u32, Vec<u32>, Vec<(u32, u32)>),
     directives: Directives,
 ) -> Processed {
     let line_count = lines.len() as u32;
@@ -165,7 +168,7 @@ fn finish(
     };
     Processed {
         body: body.into(),
-        loc: UnitLoc { file, body_first_line: first_line, body_col, dedent_width, line_count, kept: kept.into() },
+        loc: UnitLoc { file, body_first_line: first_line, body_col, dedent_width, line_count, kept: kept.into(), escaped: escaped.into() },
         directives,
     }
 }
@@ -952,7 +955,14 @@ mod tests {
     #[test]
     fn unit_loc_columns() {
         let (p, _) = run("@py {\n    x = 1\n    y = 2\n}").unwrap();
-        assert_eq!(p.loc.col(1, 1), 5);
-        assert_eq!(p.loc.col(2, 3), 7);
+        assert_eq!(p.loc.col(1, 1), Some(5));
+        assert_eq!(p.loc.col(2, 3), Some(7));
+        // A worker's column can be anything: past every line is no column, not an overflow.
+        assert_eq!(p.loc.col(2, u32::MAX), None);
+        assert_eq!(p.loc.col(1, u32::MAX), None);
+        // An `@@export` escape loses one `@`; columns after it move back by one (4.4).
+        let (p, _) = run("@py {\n    x = 1\n    @@export (1/0)\n}").unwrap();
+        assert_eq!(&*p.body, "x = 1\n@export (1/0)\n");
+        assert_eq!((p.loc.col(2, 1), p.loc.col(2, 2)), (Some(6), Some(7)), "the kept `@`, then `e`");
     }
 }

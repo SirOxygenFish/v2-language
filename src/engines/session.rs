@@ -547,7 +547,7 @@ impl Interp {
                     };
                 }
                 Frame::Err { error: e, .. } => {
-                    return match self.foreign_error(s, &e) {
+                    return match self.foreign_error(s, &e, at) {
                         Ok(err) => Err(self.raise(Flow::Error(err), at)),
                         Err(what) => {
                             let flow = self.protocol_violation(s, &what, &line);
@@ -728,16 +728,33 @@ impl Interp {
     /// An `err` from the worker as a V2 error (9.6), with its chained causes. A V2 error that
     /// went through the worker comes back as it was, location and trace included. Foreign
     /// frames are mapped in roadmap 1.8; until then a foreign error sits at the V2 call site.
-    fn foreign_error(&mut self, s: SessionId, e: &Map<String, Json>) -> Result<Rc<ErrorValue>, String> {
-        self.foreign_error_at(s, e, 0)
+    /// A worker's `err` as a V2 error raised at `at` (9.6): located at its innermost frame in a
+    /// block, with the foreign frames before V2's (12.6).
+    fn foreign_error(&mut self, s: SessionId, e: &Map<String, Json>, at: Span) -> Result<Rc<ErrorValue>, String> {
+        self.foreign_error_at(s, e, 0, Some(at))
     }
 
-    fn foreign_error_at(&mut self, s: SessionId, e: &Map<String, Json>, depth: usize) -> Result<Rc<ErrorValue>, String> {
+    /// `at`: the V2 call site, whose frames follow the foreign ones; `None` for a cause.
+    fn foreign_error_at(&mut self, s: SessionId, e: &Map<String, Json>, depth: usize, at: Option<Span>) -> Result<Rc<ErrorValue>, String> {
         if let Some(tag) = e.get("v2").filter(|t| !t.is_null()) {
-            return match self.wire(s).decode(tag)? {
-                Value::Error(err) => Ok(err),
-                _ => Err("an 'err' whose 'v2' is not an error".into()),
+            let mut err = match self.wire(s).decode(tag)? {
+                Value::Error(err) => err,
+                _ => return Err("an 'err' whose 'v2' is not an error".into()),
             };
+            // A V2 error that crossed foreign code keeps its own frames, with the foreign ones
+            // between the callback's and those below the request (9.6).
+            let foreign = self.foreign_frames(s, e).frames;
+            if let (Some(x), false) = (Rc::get_mut(&mut err), foreign.is_empty()) {
+                let mut old: Vec<Rc<str>> = x.trace.take().map(|t| t.to_vec()).unwrap_or_default();
+                if old.is_empty() {
+                    // Never raised in V2: this is its first raise (5.9).
+                    old = at.map_or_else(Vec::new, |at| self.trace_at(at).to_vec());
+                }
+                let keep = old.len().saturating_sub(self.call_depth() + 1);
+                let trace: Vec<Rc<str>> = old[..keep].iter().cloned().chain(foreign).chain(old[keep..].iter().cloned()).collect();
+                let _ = x.trace.set(trace.into());
+            }
+            return Ok(err);
         }
         let kind = e.get("type").and_then(Json::as_str).ok_or("an 'err' without a string 'type'")?;
         let message = e.get("message").and_then(Json::as_str).ok_or("an 'err' without a string 'message'")?;
@@ -753,10 +770,20 @@ impl Interp {
             err.foreign_type = Some(kind.into());
             err
         };
+        let frames = self.foreign_frames(s, e);
         err.lang = Some(self.tag(s));
+        if let Some((span, lang)) = frames.at {
+            let _ = err.span.set(span);
+            err.lang = Some(lang);
+        }
+        let mut trace = frames.frames;
+        if let Some(at) = at {
+            trace.extend(self.trace_at(at).iter().cloned());
+        }
+        let _ = err.trace.set(trace.into());
         if let Some(cause) = e.get("cause").filter(|c| !c.is_null() && depth < MAX_CAUSES) {
             let cause = cause.as_object().ok_or("an 'err' with a bad 'cause'")?;
-            err.cause = Value::Error(self.foreign_error_at(s, cause, depth + 1)?);
+            err.cause = Value::Error(self.foreign_error_at(s, cause, depth + 1, None)?);
         }
         Ok(Rc::new(err))
     }

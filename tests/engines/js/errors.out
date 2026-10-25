@@ -13,6 +13,6 @@ ForeignError TypeError inner null
 ValueError | null | bad 1 | null | 30
 {"n": 1}
 ["V2Error", false, "ValueError", "bad 2", {"n": 2}, null, null]
-ForeignError | V2Error | fake | js | 45
+ForeignError | V2Error | fake | js | 50
 ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | js | 55
 MarshalError | null | string contains an unpaired surrogate (U+DC80) at index 1 (at value[1]["k"][0]) | js | 57

@@ -1,0 +1,84 @@
+// requires: js
+// R16 for JavaScript: foreign frames carry .v2 lines and columns, which V8 counts in UTF-16
+// units (INTERNALS 2.3, 2.5, 12.6). Lines 10-15 are the block `risky`; its error is raised on 12.
+func show(e) {
+    print(e.type, e.foreign_type, e.lang, e.line, e.col)
+    print(e.trace)
+}
+
+
+@js risky {
+    function boom(x) {
+        throw new RangeError(`bad ${x}`);
+    }
+    @export { boom }
+}
+@import { boom } from risky
+try {
+    boom(1)
+} catch (e) {
+    show(e)
+}
+// A ts block's top level, unlabeled: the lang is ts.
+try {
+    @ts { throw new TypeError("ts top"); }
+} catch (e) {
+    show(e)
+}
+// Columns count characters: the emoji is two UTF-16 units.
+@js wide {
+    function f() { const s = "😀😀"; throw new Error(s); }
+    @export { f }
+}
+@import { f } from wide
+try {
+    f()
+} catch (e) {
+    print(e.line, e.col)
+}
+// Error.cause becomes e.cause, with its own frames.
+@js chain {
+    function outer() {
+        try {
+            null.x;
+        } catch (inner) {
+            throw new Error("outer", { cause: inner });
+        }
+    }
+    @export { outer }
+}
+@import { outer } from chain
+try {
+    outer()
+} catch (e) {
+    print(e.message, "|", e.cause.foreign_type, e.cause.line, e.cause.trace)
+}
+// A syntax error's column is V8's caret, in multi-line and one-line blocks.
+try {
+    @js {
+        let x = 1;
+        let y = (x +* 2);
+    }
+} catch (e) {
+    print(e.foreign_type, e.line, e.col)
+}
+let n = 1
+try {
+    let v = n + (@js { let q = (1 +* 2); })
+} catch (e) {
+    print(e.foreign_type, e.line, e.col)
+}
+// V8 counts a raw U+2028 or U+2029 as a line break, even in a string; lines stay .v2 lines.
+@js sep {
+    function boom() {
+        const s = "a b c";
+        throw new Error("after the separators: " + s.length);
+    }
+    @export { boom }
+}
+@import { boom as sep_boom } from sep
+try {
+    sep_boom()
+} catch (e) {
+    print(e.message, e.line, e.col, e.trace[0])
+}

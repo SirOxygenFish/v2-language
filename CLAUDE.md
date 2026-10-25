@@ -26,9 +26,9 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 1.8 (not started): foreign tracebacks mapped to .v2 lines/columns (2.3, 12.6; the host
-  ignores `trace`/`text` beyond the location so far), output order with captured stdout (9.9).
-  R16, R39, R14's V2-error part, R17.
+- Now: 1.9 (seed test drafted: tests/engines/py/seed_engines.v2 + .out, passes; not committed),
+  then 1.10: drafts of R01-R03, R11, R29-R31, R33 in scratchpad/t110/engines/ (all checked with
+  the binary); R42 is in ts/strip.v2; ch. 21 bridged rows all map to existing tests.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -55,6 +55,8 @@ it is loaded automatically into every session and every subagent.
 - For review workflows, copy `target/debug/v2.exe` to the scratchpad and let agents use that
   snapshot (never cargo in the repo while agents run).
 - `cargo test` = unit tests + `tests/run.rs` (the .v2 harness + CLI tests). Clippy must be clean.
+- Never name a file `nul`, `con`, `aux`, `prn`, `com1`… (any extension): Windows device names;
+  git can't add them.
 
 ## Code map (src/)
 - `main.rs`: threads (interp thread 256 MiB stack), exit codes, panic hook → 101. Defines the
@@ -113,7 +115,7 @@ it is loaded automatically into every session and every subagent.
   real child (`V2_WORKER`; `worker_main` writes a newline first because libtest's "test ... "
   line has none). `Reply` has typed `exports`/`missing`; `wire()` is pub(crate); `foreign_error`
   returns a V2 error from a `v2` tag as it was and reads `cause` (8 levels); foreign frames and
-  `text` wait for 1.8. `engines/vep.rs` builds `load` (no module/call/op builders yet). Errors
+  `text` are mapped by `engines/traces.rs` (1.8). `engines/vep.rs` builds `load` (no module/call/op builders yet). Errors
   render as `Kind: foreign_type: msg` plus `caused by:` (error.rs `kind_text`).
 - `engines/units.rs`: `exec_block` (12.1: definition units Loading/Loaded/Failed in
   `Interp.units`; action blocks every reach), `block_name`, `session_for` (one session per key,
@@ -135,6 +137,10 @@ it is loaded automatically into every session and every subagent.
   `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.
   Adapters: py `do_module`/`module_attr`/`unit_stub`/`RouteFunction`; js `doModule` (resolve
   first; TLA via import() only for the module itself)/`moduleAttr`/`unitStub` (a Proxy)/`routeStub`.
+- `engines/traces.rs` (2.3, 2.5, 12.6): `foreign_frames(s, err)` → frame texts + the innermost
+  block position and tag; `block_at` uses `FileScope.bodies` (every block) limited to the
+  reporting engine. `UnitLoc::col` returns Option (checked) and knows `@@` escape lines.
+  js.js `realPosition` maps V8 lines past U+2028/2029 back (`shifted`).
 - Empty stubs (a doc comment only): `engines/runonly.rs`, `build/*`, `ffi/lib.rs`.
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under

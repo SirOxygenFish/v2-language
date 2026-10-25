@@ -5,7 +5,7 @@ ForeignError | SystemExit | 3 | py | 16
 the worker is still running
 ForeignError | ValueError | bad value | py | 19
 ForeignError: ValueError: bad value
-ForeignError | RuntimeError | outer | py | 22
+ForeignError | RuntimeError | outer | py | 26
 ForeignError ValueError invalid literal for int() with base 10: 'x' null
 ForeignError | RuntimeError | no cause | py | 29
 null
@@ -23,7 +23,7 @@ Custom | null | never raised | null | 73
 true
 ForeignError | V2Error | fake | py | 76
 ["ForeignError", "division by zero", "py", "ZeroDivisionError"]
-ForeignError | ValueError | level 10 | py | 89
+ForeignError | ValueError | level 10 | py | 96
 level 9
 level 8
 level 7
