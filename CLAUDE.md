@@ -26,9 +26,9 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 1.9 (seed test drafted: tests/engines/py/seed_engines.v2 + .out, passes; not committed),
-  then 1.10: drafts of R01-R03, R11, R29-R31, R33 in scratchpad/t110/engines/ (all checked with
-  the binary); R42 is in ts/strip.v2; ch. 21 bridged rows all map to existing tests.
+- Now: 1.10 (Phase 1 sweep): drafts of R01-R03, R11, R29-R31, R33 in scratchpad/t110/engines/
+  (all checked with the binary) go to tests/engines/{py,js}; R42 is in ts/strip.v2; ch. 21
+  bridged rows all map to existing tests. Then the full sweep, review, Phase 1 exit audit.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
