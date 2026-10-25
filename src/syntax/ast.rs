@@ -210,17 +210,14 @@ pub struct Exports {
     pub at: Option<Span>,
 }
 
-#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub struct ExportItem {
+    /// Quoted items (a foreign name V2 cannot write bare, 4.4) are names like any other here.
     pub text: Rc<str>,
-    /// A quoted name, for a foreign name V2 cannot write bare (py, js and ts blocks, 4.4).
-    pub quoted: bool,
     pub span: Span,
 }
 
 /// `@import { items } from SELECTOR` or `@import PACKAGE as NAME` (4.1, 4.3).
-#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub struct EngineImport {
     pub items: ImportItems,
@@ -228,7 +225,6 @@ pub struct EngineImport {
     pub span: Span,
 }
 
-#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub enum ImportItems {
     All(Span),
@@ -237,17 +233,14 @@ pub enum ImportItems {
     Module(Name),
 }
 
-#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub struct ImportItem {
     pub name: Rc<str>,
-    pub quoted: bool,
     pub alias: Option<Name>,
     pub span: Span,
 }
 
 /// A selector exactly as written; chapter 13 canonicalizes it (4.3).
-#[allow(dead_code)] // read by import resolution (roadmap 1.7)
 #[derive(Debug)]
 pub enum Selector {
     /// `@py`

@@ -13,20 +13,30 @@ use crate::runtime::env::Env;
 use crate::runtime::error::{ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
 use crate::runtime::value::Value;
-use crate::syntax::ast::EngineBlock;
+use crate::syntax::ast::{EngineBlock, UnitId};
 use crate::syntax::span::Span;
 
-/// An export of a loaded definition unit: its name and its constant, copied at load (`None` for
-/// a function) (12.2).
-pub type Export = (Rc<str>, Option<Value>);
+/// An export of a loaded unit (12.2, 13.2): a Proxy for a function, else the constant copied at
+/// load.
+#[derive(Clone)]
+pub struct Export {
+    pub name: Rc<str>,
+    pub value: Value,
+    pub func: bool,
+}
 
-/// A definition unit's state for the run (12.1); an action run leaves nothing behind.
+/// A definition unit's state for the run (12.1); an action run leaves nothing behind but its
+/// routes (13.6).
 pub enum UnitState {
     Loading,
-    /// Its exports, which import resolution reads (roadmap 1.7).
-    #[allow(dead_code)]
+    /// Its exports, which import resolution reads (13.3).
     Loaded(Rc<[Export]>),
     Failed(Rc<ErrorValue>),
+}
+
+/// A block's wire unit id: `"<FileId>:<byte offset of @>"` (9.4).
+pub fn wire_unit(id: UnitId) -> String {
+    format!("{}:{}", id.file.0, id.offset)
 }
 
 fn error(kind: &str, message: String) -> Flow {
@@ -48,7 +58,7 @@ impl Interp {
     /// A block is reached (12.1): a definition block loads on its first reach, and later reaches
     /// do nothing or throw its stored load error; an action block runs on every reach.
     /// `want_value`: the block is in expression position (6.3).
-    pub fn exec_block(&mut self, b: &EngineBlock, env: &Env, want_value: bool) -> Exec<Value> {
+    pub fn exec_block(&mut self, b: &Rc<EngineBlock>, env: &Env, want_value: bool) -> Exec<Value> {
         let definition = b.directives.exports.is_some();
         if definition {
             match self.units.get(&b.unit_id) {
@@ -81,17 +91,17 @@ impl Interp {
     }
 
     /// 12.1 steps 2-8 for one run of the unit.
-    fn run_unit(&mut self, b: &EngineBlock, env: &Env, want_value: bool) -> Exec<(Value, Vec<Export>)> {
+    fn run_unit(&mut self, b: &Rc<EngineBlock>, env: &Env, want_value: bool) -> Exec<(Value, Vec<Export>)> {
         let at = b.tag.span;
         let engine = self.registry.resolve_tag(&b.tag.text).map_err(|f| self.raise(f, at))?;
         let mut args = Vec::with_capacity(b.args.len());
         for (name, expr) in &b.args {
             args.push((name, self.eval(expr, env)?, expr.span));
         }
-        if let Some(imp) = b.directives.imports.first() {
-            return Err(self.not_yet("@import inside blocks (roadmap 1.7)", imp.span));
-        }
+        let key = engine.spec.session_of.clone().unwrap_or_else(|| engine.spec.id.clone());
+        let imports = self.inner_imports(b, &key)?;
         let s = self.session_for(&engine, at)?;
+        self.check_alive(s, at)?;
         let mut encoded = Map::new();
         for (name, value, span) in args {
             match self.wire(s).encode(&value, &name.text) {
@@ -103,7 +113,7 @@ impl Interp {
                 }
             };
         }
-        let unit = format!("{}:{}", b.unit_id.file.0, b.unit_id.offset);
+        let unit = wire_unit(b.unit_id);
         let file = self.sm.file(b.unit_id.file).path.to_string_lossy().into_owned();
         let exports: Vec<Json> = match &b.directives.exports {
             Some(ex) => ex.items.iter().map(|i| Json::from(&*i.text)).chain(ex.star.map(|_| Json::from("*"))).collect(),
@@ -117,7 +127,7 @@ impl Interp {
             line: b.loc.body_first_line,
             source: &b.body,
             args: encoded,
-            imports: Vec::new(),
+            imports,
             exports,
             want_value,
         });
@@ -133,13 +143,15 @@ impl Interp {
             let msg = format!("@export lists '{missing}' but {} does not define it", self.block_name(b));
             return Err(self.raise(error("ImportError", msg), span));
         }
-        Ok((if want_value { reply.value } else { Value::Null }, reply.exports))
+        let unit: Rc<str> = unit.into();
+        let exports = reply.exports.into_iter().map(|(name, v)| super::imports::export(s, &unit, name, v)).collect();
+        Ok((if want_value { reply.value } else { Value::Null }, exports))
     }
 
     /// The session of `e`'s engine, started at its first use (8.2, 8.3); a ts block starts the
     /// js engine's. A session that failed to start stays, so each later use raises its error
     /// again (8.2).
-    fn session_for(&mut self, e: &Rc<ResolvedEngine>, at: Span) -> Exec<SessionId> {
+    pub(crate) fn session_for(&mut self, e: &Rc<ResolvedEngine>, at: Span) -> Exec<SessionId> {
         let key = e.spec.session_of.clone().unwrap_or_else(|| e.spec.id.clone());
         if let Some(s) = self.sessions.iter().position(|s| s.key == key) {
             return Ok(s);

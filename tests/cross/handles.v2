@@ -1,0 +1,28 @@
+// requires: py js
+// Handles between engines (INTERNALS 11.6-11.8): a callable handle goes to another engine as a
+// function that its own engine runs; any other handle stays with its engine.
+let upper = @py { str.upper }
+print(type(upper), @js(f: upper) { f("abc") })
+let inc = @js { (x) => x + 1 }
+print(@py(g: inc) { g(41) })
+// Through an imported function's args too, and back as the same handle.
+@js keep {
+    function call(f, x) { return f(x); }
+    function same(f) { return f; }
+    @export { call, same }
+}
+@import { call, same } from keep
+print(call(upper, "def"), same(upper) == upper)
+// Other handles are a MarshalError naming where they were, and nothing is sent.
+let date = @py { import datetime; datetime.date(2024, 1, 2) }
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(func() => @js(d: date) { d })
+show(func() => @js(xs: [1, {when: date}]) { xs })
+show(func() => call(func(x) => x, date))
+print(@js { "js still runs" }, date.year)

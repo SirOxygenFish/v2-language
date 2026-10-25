@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.7 Imports, packages and cross-language calls |
+| **Next task** | 1.8 Errors and output across languages |
 | **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
 
 ## Rules
@@ -166,16 +166,16 @@ callbacks and errors that cross languages.
 - **Done when:** R04, R15 and R53 pass — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.7 Imports, packages and cross-language calls
-- [ ] Selectors (`@js` and `@ts` match each other), per-file export registry, resolving names
+- [x] Selectors (`@js` and `@ts` match each other), per-file export registry, resolving names
       (ambiguity from declared exports, whatever has loaded), binding (§13.1–13.4)
-- [ ] Package imports `py.x` / `js.x`, `*`, module handles; ES modules through `require` (§13.5)
-- [ ] Routes; imports inside blocks (same-engine stubs looked up at call time, constants
+- [x] Package imports `py.x` / `js.x`, `*`, module handles; ES modules through `require` (§13.5)
+- [x] Routes; imports inside blocks (same-engine stubs looked up at call time, constants
       refused); the `v2` selector (§13.6, §13.7)
-- [ ] Callable handles passed to another engine as `fn` tags, the MarshalError for other
+- [x] Callable handles passed to another engine as `fn` tags, the MarshalError for other
       handles (§11.6–11.8); leaks (§11.9); idle-callback errors (§9.8)
 - **Done when:** R08, R10, R12, R13, R14 (first two parts), R18, R19, R26, R27, R38, R43, R44,
   R46, R52, R54 and R55 pass, plus `tests/cross` cases for a callable handle crossing engines and
-  a non-callable one refused
+  a non-callable one refused — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.8 Errors and output across languages
 - [ ] Foreign tracebacks mapped to `.v2` lines and columns (§2.3, §12.6)
@@ -344,3 +344,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-25 | 1.4: the Python engine (`adapters/py.py`, blocks reached and loaded, values, V2 functions as stubs, `V2Error`, causes, coroutines, uncaught foreign errors printed with their class and causes); a review confirmed 34 findings, fixed with tests (error data with functions or handles through Python, a finalizer printing mid-send, replies that can't fail, handle counts given back, sys.path order, 8 causes, split UTF-8) |
 | 2026-10-25 | 1.5: the JavaScript and TypeScript engine (`adapters/js.js`, one vm context per unit, Promises awaited for outermost requests, ts through Node's type stripping); the 1.4 lessons applied up front; a review confirmed 24 findings, fixed with tests (Node's fs shortcuts and `fork` past the stdio wrappers, `import()` without a flag, chunks splitting surrogate pairs, a Promise that can never settle, accessor globals like `crypto`, quoted missing exports, ts error codes) |
 | 2026-10-25 | 1.6: handles (attributes, items, calls and method calls in one round trip, `len`, `str`, iteration with batching, `to_v2` with the key rule and hooks, JS `new` for constructors, bound methods, named args only with `kwargs`); a review confirmed 23 findings, fixed with tests (depth limits in `to_v2` and iteration replies, natives across JS realms, Map order, i64 keys, batching only for built-in iteration, batches that stop before a bad item, hook cycles, hints) |
+| 2026-10-25 | 1.7: imports, packages and cross-language calls (`engines/imports.rs`: selectors, 13.3 resolution and its messages, `@import` binding with Proxies, module units for `py.x`/`js.x` with `*` and whole-module handles, routes, imports inside blocks with same-engine stubs and constants refused, the `v2` selector; callable handles cross engines as functions); a review confirmed 11 findings, fixed with tests that fail without the fix: names bound by `*` could be declared again, a worker started before its block's import checks, Windows `.\x.js` specifiers shared one unit, JS stubs broke `extends`/`instanceof`, a CommonJS module ran twice on a nested top-level await, a subpath missing from `exports` and a null module gave the wrong errors, a dead session said "cannot import packages", plus tests for `@js`/`@ts` selectors, leak releases reaching V2 and two 13.7 paths. Found while building: the JS idle-turn collection never freed stubs, since V8 keeps `WeakRef` targets until the job ends |

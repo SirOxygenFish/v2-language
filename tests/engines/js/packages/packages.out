@@ -1,0 +1,19 @@
+true
+42 1.0.0
+handle 8
+handle hello-world
+9 hello Ada
+HI!
+[4, "1.0.0"]
+ImportError | null | Cannot find module 'v2-no-such-pkg'
+ForeignError | Error | Cannot find module 'v2-missing-dependency'
+ImportError | null | 'nope' is not exported by 'js."v2-test-pkg"'
+a
+ImportError | Package subpath './b' is not defined by "exports"
+3
+wraptla.js runs
+ForeignError | Error | require() cannot be used on an ESM graph with top-level await. Use import() instead. To see where the top-level await comes from, use --experimental-print-required-tla.
+ImportError | null | 'x' is not exported by 'js."./null_export.js"'
+null
+no names
+true

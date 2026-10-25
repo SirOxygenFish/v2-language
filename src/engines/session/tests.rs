@@ -1079,3 +1079,43 @@ fn a_dict_key_holding_a_handle_wins_over_the_dict_methods() {
     it.shutdown_sessions();
     t.join().unwrap();
 }
+
+#[test]
+fn a_worker_without_modules_is_sent_no_module_frame() {
+    // 13.5, 17.5: the host raises before sending anything; the worker sees only init and bye.
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.send(json!({"t":"hello","vep":1,"version":"3.12.1","pid":1,"caps":["handles","kwargs","reverse"]}));
+        let init = w.recv_t("init");
+        w.send(json!({"t":"ret","id":init["id"],"value":null}));
+        w.recv_t("bye");
+    });
+    it.handshake(s, at()).unwrap();
+    let file = it.sm.add(PathBuf::from("C:/proj/mods.v2"), "mods.v2".into(), "@import { mean } from py.statistics\n");
+    let toks = crate::syntax::lexer::lex(&it.sm, file).unwrap();
+    let program = crate::syntax::parser::parse_program(&it.sm, toks).unwrap();
+    let e = err_of(it.run(file, &program));
+    assert_eq!((&*e.kind, &*e.message), ("ImportError", "engine 'py' cannot import packages"));
+    it.shutdown_sessions();
+    t.join().unwrap();
+}
+
+#[test]
+fn a_session_that_failed_to_start_reports_its_own_error_first() {
+    // 8.2: a dead session's caps say nothing; a module import or a call with a function arg
+    // raises its stored EngineNotFound, not 'cannot import packages' or a reverse-cap MarshalError.
+    let (mut it, _) = interp();
+    let (s, t) = scripted(&mut it, |mut w| {
+        w.send(json!({"t":"hello","vep":1,"version":"3.9.0","pid":7,"caps":ALL_CAPS}));
+    });
+    assert_eq!(&*err_of(it.handshake(s, at())).kind, "EngineNotFound");
+    t.join().unwrap();
+    let file = it.sm.add(PathBuf::from("C:/proj/mods.v2"), "mods.v2".into(), "@import { mean } from py.statistics\n");
+    let toks = crate::syntax::lexer::lex(&it.sm, file).unwrap();
+    let program = crate::syntax::parser::parse_program(&it.sm, toks).unwrap();
+    let e = err_of(it.run(file, &program));
+    assert_eq!((&*e.kind, e.message.contains("too old")), ("EngineNotFound", true), "{}", e.message);
+    let proxy = Value::func(Callable::Proxy { session: s, unit: "0:0".into(), name: "f".into() });
+    let e = err_of(it.call_value(&proxy, vec![func(&ADD)], Vec::new(), at()));
+    assert_eq!(&*e.kind, "EngineNotFound", "{}", e.message);
+}

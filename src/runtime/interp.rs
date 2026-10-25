@@ -20,6 +20,7 @@ use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
 use super::value::{bytes_repr, float_str, quoted, Callable, Value};
 use crate::engines::handles::HandleRef;
+use crate::engines::imports::{FileScope, Route};
 use crate::engines::process::stop_if_interrupted;
 use crate::engines::registry::Registry;
 use crate::engines::session::Session;
@@ -61,6 +62,11 @@ pub struct Interp {
     pub xdepth: u32,
     /// Definition units by block (12.1).
     pub units: HashMap<UnitId, UnitState>,
+    /// Each file whose top level has started (6.2).
+    pub files: HashMap<FileId, FileScope>,
+    /// The inner `@import` routes (13.6), and each one's (importing unit, directive, name).
+    pub routes: Vec<Route>,
+    pub route_keys: HashMap<(UnitId, usize, Rc<str>), usize>,
     pub out: Out,
     pub chars: CharCache,
     calls: Vec<CallRecord>,
@@ -98,6 +104,9 @@ impl Interp {
             sessions: Vec::new(),
             xdepth: 0,
             units: HashMap::new(),
+            files: HashMap::new(),
+            routes: Vec::new(),
+            route_keys: HashMap::new(),
             out: Out::new(),
             chars: CharCache::default(),
             calls: Vec::new(),
@@ -117,12 +126,14 @@ impl Interp {
         let path = self.sm.file(file).path.clone();
         self.modules.insert(path.clone(), ModuleState::Running);
         self.import_stack.push(path);
-        self.run_top_level(program).map(|_| ())
+        self.run_top_level(file, program).map(|_| ())
     }
 
-    /// A file's top level in a new module frame whose parent is the builtins frame.
-    fn run_top_level(&mut self, program: &[Stmt]) -> Exec<Env> {
+    /// A file's top level in a new module frame whose parent is the builtins frame; its
+    /// `FileScope` is kept for the run (6.2).
+    fn run_top_level(&mut self, file: FileId, program: &[Stmt]) -> Exec<Env> {
         let module = new_frame(Some(&self.builtins));
+        self.files.insert(file, FileScope::new(program, module.clone()));
         self.hoist(program.iter(), &module);
         for s in program {
             self.exec(s, &module)?;
@@ -166,8 +177,8 @@ impl Interp {
                 }
             },
         };
-        let program = match parsed {
-            Parsed::Ok { program, .. } => program,
+        let (file, program) = match parsed {
+            Parsed::Ok { file, program } => (file, program),
             Parsed::Failed(diags) => {
                 let d = &diags[0];
                 let msg = format!("cannot import '{spec}': {}:{}:{}: SyntaxError: {}", d.display, d.line, d.col, d.message);
@@ -195,7 +206,7 @@ impl Interp {
         self.modules.insert(path.clone(), ModuleState::Running);
         self.import_stack.push(path.clone());
         self.calls.push(CallRecord { name: None, call_site: at });
-        let r = self.run_top_level(&program);
+        let r = self.run_top_level(file, &program);
         self.calls.pop();
         self.import_stack.pop();
         match r {
@@ -324,10 +335,12 @@ impl Interp {
                     Some(e) => self.eval(e, env)?,
                     None => Value::Null,
                 };
+                self.not_star_bound(env, name)?;
                 declare(env, name.text.clone(), v, false);
             }
             StmtKind::Const(name, e) => {
                 let v = self.eval(e, env)?;
+                self.not_star_bound(env, name)?;
                 declare(env, name.text.clone(), v, true);
             }
             StmtKind::Expr(e) => {
@@ -368,13 +381,22 @@ impl Interp {
             StmtKind::Func(_) => {} // hoisted on entry to its body
             StmtKind::Import { path, alias } => {
                 let ns = self.import(path, s.span)?;
+                self.not_star_bound(env, alias)?;
                 declare(env, alias.text.clone(), ns, false);
             }
-            StmtKind::EngineImport(imp) => return Err(self.not_yet("@import (roadmap phase 1)", imp.span)),
+            StmtKind::EngineImport(imp) => self.exec_import(imp, env)?,
             StmtKind::Extern(_) => return Err(self.not_yet("extern (roadmap phase 2)", Span { hi: s.span.lo + 6, ..s.span })),
             StmtKind::Block(b) => {
                 self.exec_block(b, env, false)?;
             }
+        }
+        Ok(())
+    }
+
+    /// A name `@import { * }` bound in this body can't be declared again (5.6, 13.4).
+    pub(crate) fn not_star_bound(&self, env: &Env, name: &Name) -> Exec<()> {
+        if env::star_bound(env, &name.text) {
+            return self.fail_at("NameError", format!("'{}' is already declared in this block", name.text), name.span);
         }
         Ok(())
     }
@@ -817,6 +839,11 @@ impl Interp {
                 let r = (def.f)(self, args, call_site);
                 self.at(r, call_site)
             }
+            Callable::Proxy { session, unit, name } => {
+                let target = serde_json::json!({"unit": &**unit, "name": &**name});
+                self.foreign_call(*session, target, pos, named, &format!("a call to '{name}'"), call_site)
+            }
+            Callable::Route { route, .. } => self.call_route(*route, pos, named, call_site),
             Callable::Closure { decl, env, name } => {
                 let params: Vec<Param> = decl
                     .params
@@ -1155,6 +1182,8 @@ impl Interp {
         Value::Func(c) => match &**c {
             Callable::Closure { name, .. } => out.push_str(&format!("<func {name}>")),
             Callable::Builtin(def) => out.push_str(&format!("<builtin {}>", def.name)),
+            Callable::Proxy { session, name, .. } => out.push_str(&format!("<func {name} ({})>", self.sessions[*session].key)),
+            Callable::Route { name, .. } => out.push_str(&format!("<func {name}>")),
         },
         Value::Error(e) => out.push_str(&format!("{}: {}", super::error::kind_text(e), e.message)),
     }

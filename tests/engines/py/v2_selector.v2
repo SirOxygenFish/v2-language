@@ -1,0 +1,48 @@
+// requires: py
+// The v2 selector: a block imports this file's top-level V2 functions, looked up at every call
+// (DOCS 8.1, INTERNALS 13.6, 13.7).
+func log_line(msg) {
+    print(f"[log] ${msg}")
+}
+
+@py {
+    @import { log_line } from v2
+    log_line("hello from Python")
+}
+// `*` takes the top-level funcs not starting with `_`.
+func _hidden() {
+    return "hidden"
+}
+func shout(s) {
+    return s.upper()
+}
+print(@py {
+    @import { * } from v2
+    [shout("hi"), "_hidden" in dir()]
+})
+// A name declared later is found once it is set; until then it is a NameError, and a value that
+// isn't a function is a TypeError.
+@py later {
+    @import { late, DATA } from v2
+    def call(name):
+        try:
+            return {"late": late, "DATA": DATA}[name]()
+        except Exception as e:
+            return [e.type, e.message]
+    @export { call }
+}
+@import { call } from later
+print(call("late"))
+let late = func() => "late"
+print(call("late"))
+let DATA = [1]
+print(call("DATA"))
+// A name that isn't declared at the top level is refused at load.
+try {
+    @py {
+        @import { nowhere } from v2
+        pass
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}

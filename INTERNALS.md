@@ -474,6 +474,7 @@ pub enum Callable {
     Closure { decl: Rc<FuncDecl>, env: Env, name: Rc<str> },         // name: `greet` or `func@main.v2:12` (5.7)
     Builtin(&'static BuiltinDef),                                    // 5.10
     Proxy { session: SessionId, unit: Rc<str>, name: Rc<str> },      // bridged export; unit = wire unit id (13.4)
+    Route { route: usize, name: Rc<str> },                           // a route stub passed back unresolved (11.8)
     Native { lib: LibId, sym: Rc<str>, sig: Rc<Sig> },               // compiled export (15.8) or extern (16.1)
     HandleMethod { handle: Rc<HandleRef>, method: Rc<str> },         // built only as the callee of h.m(...) (11.3)
 }
@@ -501,7 +502,7 @@ pub struct ErrorValue {
 | `Str`, `Bytes` | byte equality |
 | `List`, `Dict` | `Rc::ptr_eq`, else pairwise `eq` (list) or the same key set with `eq` values (dict, order ignored) |
 | `Handle` | same session and id (11.6); native pointers: same address (16.6) |
-| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same session, unit, name; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
+| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same session, unit, name; `Route`: same route; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
 | `Error` | `Rc::ptr_eq` |
 | different types (`Int` vs `Bool` too) | `false`, never an error |
 
@@ -554,7 +555,7 @@ A `Str` is always valid UTF-8 (lone surrogates never enter, 10.4); user-visible 
 `Env = Rc<RefCell<Frame>>`; `Frame { vars: IndexMap<Rc<str>, Slot { value, is_const: bool }>, parent: Option<Env>, closures: u32 }`.
 
 - **Frames:** builtins frame (shared, read-only: assigning to a builtin's name is `TypeError: cannot assign to builtin 'print' — shadow it with let`) ← one module frame per file ← call frames ← block frames. Each `if`/`elif`/`else` arm and `try`/`catch`/`finally` body gets a new frame; loops get **one fresh frame per iteration**, holding a `for`'s variables, in which the body runs directly; a call frame holds the parameters and is the body's top-level frame; a catch body's frame holds the catch name. Parameters, loop variables and the catch name are therefore declared in the body they introduce (4.5); inner blocks may shadow. Lookup walks `parent`; a `RefCell` borrow is held only while one slot is read or written.
-- **Declarations:** `let x = e` evaluates `e`, then declares `x` (`let x = x + 1` in an inner block reads the outer `x`); `let x` binds `null`. `const`, `@import` names (13.4) and `extern` names (16.1) are const slots: assigning → `TypeError: cannot assign to constant 'LIMIT'` (shallow: a const list can still `push`). A name declared twice in one body is a static SyntaxError (4.5). Only `@import { * }` declares names the parser cannot see; there `Frame::declare` raises `NameError: 'x' is already declared in this block`. An undeclared name → `NameError: 'x' is not declared` + did-you-mean (an assignment adds `— declare it with let`).
+- **Declarations:** `let x = e` evaluates `e`, then declares `x` (`let x = x + 1` in an inner block reads the outer `x`); `let x` binds `null`. `const`, `@import` names (13.4) and `extern` names (16.1) are const slots: assigning → `TypeError: cannot assign to constant 'LIMIT'` (shallow: a const list can still `push`). A name declared twice in one body is a static SyntaxError (4.5). Only `@import { * }` declares names the parser cannot see, so its slots are marked: binding an existing name, or declaring one of its names again later in that body (`let`, `const`, `import`, an `@import` item), raises `NameError: 'x' is already declared in this block`. An undeclared name → `NameError: 'x' is not declared` + did-you-mean (an assignment adds `— declare it with let`).
 - **Hoisting:** entering a body turns each `func` declaration directly inside it into a `Closure` over that frame before the first statement runs; reaching the statement later does nothing. **Closures** capture the `Env`, so `func() => i` made in a loop keeps its iteration's `i`.
 - **Cycle trimming:** a closure stored in the frame it captures (every local `func` declaration, `let f = func(…) …`) is an `Rc` cycle, counted in `Frame.closures`. When such a frame goes out of scope, let `k` = its slots holding a `Closure` over it with `Rc::strong_count == 1`; if `Rc::strong_count(&frame) == 1 + k`, nothing else reaches it and its `vars` are cleared (releasing held handles). Cycles through containers are not trimmed.
 
@@ -650,11 +651,10 @@ Arguments bind as for builtins, and messages name the method with its type: `Ari
 ### 6.2 FileScope
 
 ```rust
-pub struct FileScope {
-    file: FileId, path: PathBuf,              // canonical path, the dedupe key (2.1)
+pub struct FileScope {                        // Interp.files, by FileId
     frame: Env,                               // module frame; parent: the builtins frame
-    blocks: Rc<[EngineBlock]>,                // static side: labels, tags, declared exports (4.3, 13.2)
-    exports: RefCell<ExportRegistry>,         // exports of loaded definition units (13.2)
+    blocks: Vec<Rc<EngineBlock>>,             // the definition blocks, in source order (13.2, 13.3)
+    top: HashSet<Rc<str>>, funcs: Vec<Rc<str>>, star: bool,  // top-level names, for `v2` (13.7)
 }
 ```
 
@@ -1340,7 +1340,7 @@ When the host encodes for session S a V2 `func` (a closure, a builtin, a `Proxy`
 - **Worker stubs.** The worker keeps one stub per id in a weak map (Python `weakref.WeakValueDictionary`, JS `Map<id, WeakRef>`), so one V2 function is one foreign object (`f is g`); its name is the V2 name (a callable handle's is its diagnostic form, `<py function>`, 11.6). Each stub owns a cell `{id, n}` counting the `fn` tags it absorbed.
 - **Release.** When a stub is collected, its finalizer (Python `weakref.finalize`, JS `FinalizationRegistry`) only appends the id `n` times to the release queue, which goes out as `release {fn: [...]}` before the worker's next frame. A stub encoded into a frame stays referenced until that frame is written, so its release never goes out ahead of a frame that names it. The host subtracts once per occurrence and drops the entry at 0. A stub that dies just as its id is sent again is safe, because the new stub gets its own cell.
 - **Calls.** Calling a stub sends `call {"fn": n}` (9.5, 14.2). The host calls the value (a callable handle: `call {h}` to its own session, 11.3), re-entering the interpreter, and encodes the result for S; a V2 error goes back as `err` with `v2` (9.6).
-- **Passing back.** A stub passed to the host is sent as `{"$v2":"fn","id":n}` and decodes to the original V2 value; counts do not change. An inner `@import`'s route stub (13.7) is sent as `{"$v2":"fn","route":r}` and decodes to that route's target (a `Pending` route resolves first). Routes live in `Interp.routes` (13.6), not in this table, and are never released. A same-session stub (13.7) is an ordinary worker function, so it arrives as a callable handle.
+- **Passing back.** A stub passed to the host is sent as `{"$v2":"fn","id":n}` and decodes to the original V2 value; counts do not change. An inner `@import`'s route stub (13.7) is sent as `{"$v2":"fn","route":r}` and decodes to that route's target, or, while the route is `Pending` (and always for a `v2` route), to a `Callable::Route` that calls the route as 13.6 says. Routes live in `Interp.routes` (13.6), not in this table, and are never released. A same-session stub (13.7) is an ordinary worker function, so it arrives as a callable handle.
 
 ### 11.9 Leaks
 
@@ -1417,7 +1417,7 @@ bridged engines (py, js, ts, custom bridged), not compiled.
 **Adapter side.** Arg names and import aliases must be identifiers of the adapter's language that are neither keywords
 nor names the adapter provides (Python: `str.isidentifier()`, not `keyword.iskeyword()`, no dunders; JS: 12.4's identifier
 pattern, not reserved, not `undefined NaN Infinity globalThis __proto__`), else `err ValueError: block arg 'pass' is not
-a valid Python name`. Args bind first, then imports, then the code runs. The completion value (py: the last statement
+a valid Python name` (`@import name 'pass' …` for an alias). Args bind first, then imports, then the code runs. The completion value (py: the last statement
 if it is an expression; js/ts: the script's completion value from `runInContext`) is always computed and awaited if
 awaitable (9.8), and encoded only if `want_value`.
 
@@ -1580,12 +1580,11 @@ selectors as written.
 
 ### 13.2 ExportRegistry
 
-The registry (`FileScope.exports`, 6.2) maps a key to the `(name, unit, value)` entries pushed under it. When a
-definition unit becomes `Loaded`, each export is pushed under `"@<tag>"` and, if labeled, under `"<label>"` and
-`"@<tag>.<label>"`, where `<tag>` is canonical and `js` for ts blocks too (13.1); duplicates within a block collapse
-and entries are never removed. Bridged blocks register `Proxy{session, unit, name}`, compiled blocks `Native` callables
-(15.8), `value` exports their copy. The file's `EngineBlock` list is the static side (labels, tags, declared names, `*`)
-that 13.3 takes its candidates from.
+The registry is `Interp.units`: when a definition unit becomes `Loaded`, it keeps the unit's exports in reply order,
+each once, as `Proxy{session, unit, name}` for a bridged function, a `Native` callable for a compiled one (15.8), or the
+copy of a `value` export. Entries are never removed. The file's definition blocks (`FileScope.blocks`, collected from
+the AST: labels, tags, declared names, `*`) are the static side that 13.3 takes its candidates from; a selector's
+tags compare by engine, `js` for ts blocks too (13.1).
 
 ### 13.3 Resolving a name from a block selector
 
@@ -1622,10 +1621,10 @@ a module handle (13.5).
 ### 13.5 Module units
 
 A `Module` selector names one unit per module per session, `"<canonical tag>:<name>"` (9.4): `py:statistics`,
-`py:os.path`, `js:date-fns`; for a relative or absolute JS specifier `<name>` is the absolute path joined from the
+`py:os.path`, `js:date-fns`; for a relative (`./`, `../`; on Windows also `.\`, `..\`) or absolute JS specifier `<name>` is the absolute path joined from the
 importing file's folder. `ts.X` and `js.X` share the js session's unit `js:X`. Only bridged engines take module
 selectors (`ImportError: module imports need a bridged engine — 'c' is compiled` / `— 'lua' is a run engine`), and only
-with the `modules` cap (17.5). Python names must be dotted identifiers, each segment passing `str.isidentifier()` and not `keyword.iskeyword()` (`ImportError: 'my-mod' is not a valid Python module name`); a JS name is any non-empty specifier
+with the `modules` cap (17.5). Python names must be dotted identifiers, each segment a letter or `_` followed by letters, digits or `_`, and not a Python keyword, checked before anything is sent (`ImportError: 'my-mod' is not a valid Python module name`); a JS name is any non-empty specifier
 (package, `node:` built-in, `./path` from the `.v2` file). Every `@import` from a module sends one `module` frame; the
 adapter imports once per unit, so a bare name's first import wins for the session, as in `sys.modules` (a JS package
 resolves from the folder of the first `.v2` file that imports it):
@@ -1641,8 +1640,8 @@ value?}], "missing":[...]}`.
 
 | Step | Python | JavaScript |
 | --- | --- | --- |
-| load | `importlib.import_module(name)`, the folder of `from` on `sys.path` (9.3) | `createRequire(from)(name)`, which loads ES modules too (require(esm)); only a module with top-level await (`ERR_REQUIRE_ASYNC_MODULE`) goes through `import(entryUrl(name, from))` (14.4), awaited as 9.8 allows |
-| failure | not found → `err ImportError` with the foreign message (`No module named 'pandas'`); any other exception → `ForeignError` (9.4) | the same, with Node's message |
+| load | `importlib.import_module(name)`, the folder of `from` on `sys.path` (9.3) | `createRequire(from)(name)`, which loads ES modules too (require(esm)); only a module with top-level await in itself or its ES module graph (`ERR_REQUIRE_ASYNC_MODULE` whose `From` line, when Node prints one, names the importing `.v2` file; a CommonJS module that requires one has already run) goes through `import(entryUrl(name, from))` (14.4), awaited as 9.8 allows |
+| failure | the module (or a parent package) not found → `err ImportError` with the foreign message (`No module named 'pandas'`); any other exception, a missing dependency of the module included → `ForeignError` (9.4) | `require.resolve(name)` runs first, so not found is decided for the module itself: `MODULE_NOT_FOUND`, `ERR_PACKAGE_PATH_NOT_EXPORTED` or `ERR_UNKNOWN_BUILTIN_MODULE` there → `ImportError` with the first line of Node's message (`Cannot find module 'pandas'`); errors while loading → `ForeignError` |
 | name `n` | `getattr(mod, n)`, else the submodule `import_module(name + "." + n)` | `mod[n]` unless inherited from `Object.prototype`/`Function.prototype`; `"default"` → `mod.default ?? mod`; else `mod.default[n]` |
 | `*` | `__all__` if present (absent entries go to `missing`), else the names in `vars(mod)` not starting with `_`, in dict order | own enumerable keys of `mod` (and of an object `mod.default`), minus `default`, `__esModule` and `_` names |
 | kind | callable (classes too) → `func`, else `value` (copied; non-plain values arrive as handles) | function (classes too; constructed or called per 11.3) → `func`, else `value` |
@@ -1650,7 +1649,8 @@ value?}], "missing":[...]}`.
 - `@import js.pkg as x` binds the module object as a handle; for a CommonJS package that exports a function it is a
   callable handle (`@import js.slugify as slugify`). `@import { "default" as x } from js.pkg` takes `mod.default ?? mod`.
 - A missing requested name → `ImportError: 'x' is not exported by 'py.statistics'`. A module Proxy targets
-  `{"unit":"py:statistics","name":"mean"}`; the adapter repeats the lookup on every call.
+  `{"unit":"py:statistics","name":"mean"}`; the adapter repeats the lookup on every call (JS calls the function with the
+  object it was read from as `this`).
 
 ### 13.6 Routes
 
@@ -1661,7 +1661,8 @@ index, and routes are never released. Each holds:
 ```rust
 pub enum Route {
     Target(Value),                                           // a resolved Func: Proxy, Native or Closure
-    Pending { file: FileId, sel: Selector, name: Rc<str> },  // resolved when called; stays Pending while that fails
+    Pending { block: Rc<EngineBlock>, import: usize, name: Rc<str> },  // that directive's selector, resolved when
+                                                             // called; stays Pending while that fails
     V2 { file: FileId, name: Rc<str> },                      // `v2` selector: looked up at every call
 }
 ```
@@ -1685,7 +1686,7 @@ the imported name).
 
 | Target | Entry | The adapter binds |
 | --- | --- | --- |
-| an export of a block of **this session** (py→py, js↔ts), loaded or not, or an attribute of a module of this session (imported first with a `module` frame, 13.5) | `{"as","unit","name"}`; for a block also `block`, its `block_name` | a stub that looks `name` up in the unit at every call (12.3's `g[name]`, 12.4's getter, 13.5's lookup) and calls it in the worker (JS: per 11.3): no host hop, exceptions propagate natively, later rebinding is seen |
+| an export of a block of **this session** (py→py, js↔ts), loaded or not, or an attribute of a module of this session (imported first with a `module` frame, 13.5) | `{"as","unit","name"}`; for a block also `block`, its `block_name` | a stub that looks `name` up in the unit at every call (12.3's `g[name]`, 12.4's getter, 13.5's lookup) and calls it in the worker (JS: per 11.3; the stub is a `Proxy` whose `new`, `extends`, `instanceof` and property reads also reach the current target): no host hop, exceptions propagate natively, later rebinding is seen |
 | anything else: another session's block or module, a compiled export, `v2` | `{"as","route"}` | a stub that sends `call {"route": r}` (14.2) |
 
 - Errors that no later load can fix are raised at load: a selector matching no block (13.3 step 1); an ambiguous name
@@ -1823,8 +1824,9 @@ event loop runs dry, Node's `beforeExit`) is answered with `err` type `Error`: `
 can never settle: nothing is left for it to wait on`, and the worker keeps serving. The event loop cannot turn while `fs.readSync` blocks,
 so after the reply to every outermost (stack depth 1) request, before the next `fs.readSync`, the loop yields one
 event-loop turn (`await new Promise(r => setImmediate(r))`). If more than 1,000 `fn` stubs were created since the last
-turn, it first calls `gc()` synchronously, because V8 runs `FinalizationRegistry` callbacks only after a collection
-(11.9). During this turn the stack is empty, so a timer or event handler that calls V2 raises 9.8's idle-call `V2Error`; the
+turn, it then calls `gc()` synchronously and yields one more turn: V8 keeps a new `WeakRef`'s target (every new stub,
+through the stub map) alive until the job that made it ends, and runs `FinalizationRegistry` callbacks only after a
+collection (11.9). During this turn the stack is empty, so a timer or event handler that calls V2 raises 9.8's idle-call `V2Error`; the
 `FinalizationRegistry` cleanups run, and their queued `release` goes out with the next frame. The turn sends nothing and never waits on the host; a frame the host writes during it is read by the next `fs.readSync`. Calls use
 `Reflect.apply`/`Reflect.construct` as 11.3 decides; named arguments never arrive, since js declares no `kwargs` cap and
 the host raises `ArityError` before sending (10.8).

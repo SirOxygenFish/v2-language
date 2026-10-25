@@ -74,3 +74,29 @@ print(@py { __import__("sys").v2_saved(4) })
 }
 sleep(0.6)
 print(@py { __import__("sys").v2_res })
+// R14: DOCS 8.2 and 17.5 verbatim.
+@py sorter {
+    def sort_by(items, key):
+        return sorted(items, key=key)
+    @export { sort_by }
+}
+@import { sort_by } from sorter
+
+let people2 = [{name: "Ada", age: 36}, {name: "Grace", age: 85}, {name: "Linus", age: 21}]
+let by_age2 = sort_by(people2, func(p) => p.age)
+print(by_age2.map(func(p) => p.name))      // ["Linus", "Ada", "Grace"]
+
+func progress(done, total) {
+    print(f"${done}/${total}")
+}
+
+@py worker {
+    @import { progress } from v2
+    def process(items):
+        for i, item in enumerate(items, 1):
+            progress(i, len(items))
+        return len(items)
+    @export { process }
+}
+@import { process } from worker
+print(process(["a", "b", "c"]))

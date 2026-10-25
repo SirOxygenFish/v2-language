@@ -1712,3 +1712,24 @@ fn doctor_without_engines_notes_install_hints() {
         assert!(stdout.contains(&format!("\n  {id}: not found; install: ")), "{stdout}");
     }
 }
+
+#[test]
+fn an_inner_import_that_fails_at_load_starts_no_worker() {
+    // INTERNALS 12.1: a block's inner imports (step 5) are checked before its engine's worker
+    // starts (step 6). A sitecustomize.py on PYTHONPATH marks every Python start; the probe
+    // (`--version`) doesn't run it.
+    if !needs("py", "an_inner_import_that_fails_at_load_starts_no_worker") {
+        return;
+    }
+    let mark = "import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'started'), 'a').write('x')\n";
+    let failing = "try {\n    @py {\n        @import { nope } from v2\n        pass\n    }\n} catch (e) {\n    print(e.type, e.message)\n}\n";
+    let files = [("site/sitecustomize.py", mark), ("main.v2", failing), ("v2.toml", "")];
+    let (code, out, err, home) = run_with_files_env(&files, &["main.v2"], &[("PYTHONPATH", "site")]);
+    assert_eq!((code, out.as_str()), (Some(0), "ImportError 'nope' is not a top-level name in main.v2\n"), "{err}");
+    assert!(!home.0.join("site/started").exists(), "no Python worker was started");
+    // The control: a block that loads starts one.
+    let files = [("site/sitecustomize.py", mark), ("main.v2", "@py { pass }\n"), ("v2.toml", "")];
+    let (code, _, err, home) = run_with_files_env(&files, &["main.v2"], &[("PYTHONPATH", "site")]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(home.0.join("site/started").exists(), "the marker works");
+}

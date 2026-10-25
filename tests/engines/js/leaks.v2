@@ -1,0 +1,32 @@
+// requires: js
+// V8 runs FinalizationRegistry callbacks only after a collection, so a request that made more
+// than 1,000 V2 function stubs makes the adapter collect in its idle turn: the stubs die and
+// their releases reach V2, which drops the functions, and with them a handle they held
+// (INTERNALS 11.2, 11.9, 14.4).
+let m = @js {
+    // Not a top-level const: the WeakRef keeps this block's realm, and so its globals, alive.
+    (() => {
+        const o = new Map();
+        process.v2MapRef = new WeakRef(o);
+        return o;
+    })()
+}
+func holder(h) {
+    return func() => h
+}
+let fs = []
+for i in 0..1500 {
+    fs.push(holder(m))
+}
+m = null
+@js(fs) {
+    process.v2Refs = fs.map((f) => new WeakRef(f));
+    fs = null; // the refs keep this block's realm, so its globals, alive
+}
+fs = null
+// The idle turn after that request collected the stubs; their releases ride this request's
+// reply, and the handle's release rides the next request.
+@js { }
+@js { }
+print(@js { process.v2Refs.filter((r) => r.deref() === undefined).length })
+print(@js { require("vm").runInNewContext("gc")(); process.v2MapRef.deref() === undefined })

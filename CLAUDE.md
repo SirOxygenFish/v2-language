@@ -26,9 +26,9 @@ it is loaded automatically into every session and every subagent.
   § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
   run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
   check boxes, ROADMAP log, code map below → commit.
-- Now: 1.7 (not started): selectors, export registry, @import binding (Proxies), module units
-  and packages, routes, in-block imports, cross-engine callable handles, leaks, idle callbacks.
-  Biggest Phase 1 milestone; consider splitting its commit into parts if the review gets large.
+- Now: 1.8 (not started): foreign tracebacks mapped to .v2 lines/columns (2.3, 12.6; the host
+  ignores `trace`/`text` beyond the location so far), output order with captured stdout (9.9).
+  R16, R39, R14's V2-error part, R17.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -73,9 +73,10 @@ it is loaded automatically into every session and every subagent.
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
   (static checks, 4.5, incl. "this expression's value is not used"), `ast`.
 - `runtime/`: `interp` (exec/eval take `&Env`; stacks: `calls` and `import_stack`; `guard()` at
-  7/8 of the stack; MAX_CALLS 10,000; no FileScope/units/export registry yet; `call_value(f,
-  pos, named, at)` calls any V2 value from Rust), `value` (`Callable` = Closure | Builtin),
-  `env`, `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  7/8 of the stack; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
+  `call_value(f, pos, named, at)` calls any V2 value from Rust), `value` (`Callable` = Closure |
+  Builtin | Proxy {session, unit, name} | Route {route, name}),
+  `env` (`Slot.star`: bound by `@import { * }`, `star_bound`), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
@@ -85,7 +86,7 @@ it is loaded automatically into every session and every subagent.
 - Deep values are freed iteratively (Drop impls feed a thread-local queue).
 - `codec/json`: plain mode (serde_json, pre-scan for i64 overflow + nesting 1,000).
   `codec/vep`: the `$v2` wire codec (`Wire` context: session, tag, caps, release queue,
-  callables, sm, `route` (always `|_| None` until 1.7)).
+  callables, sm, `routes`; a route `fn` tag decodes via `Route::value`).
 - `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
   prints `check X: N files, M errors`) and `doctor::doctor` (the table).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
@@ -121,12 +122,20 @@ it is loaded automatically into every session and every subagent.
   globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
   HANDLERS). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
   JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`.
-- `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`), `CallableTable`, and the host's
-  handle ops on `Interp`: `handle_getattr/setattr/getitem/setitem/len/str/value/call/iter/next`.
+- `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`), `CallableTable` (Values: functions
+  and other sessions' callable handles, keyed by Rc address), and the host's handle ops on
+  `Interp`: `handle_getattr/setattr/getitem/setitem/len/str/value/call/iter/next`; `foreign_call`
+  (handles and Proxies; `check_alive` first, then the kwargs cap).
   interp.rs routes members, indexing, calls (`MethodTarget::Handle`), `for` and `str()` to them;
   `str_of(v, at)` and `index(o, k, at)` take a span for that.
-- Empty stubs (a doc comment only): `engines/imports.rs`, `engines/runonly.rs`, `build/*`,
-  `ffi/lib.rs`.
+- `engines/imports.rs` (ch. 13): `FileScope` (frame, definition blocks collected from the AST,
+  top-level names), `candidates`/`provides`/`provider` (13.3 steps), `exec_import` (V2 level),
+  `module_unit` (ids, py name check) + `import_module` (one `module` frame), `inner_imports`
+  (13.7 entries: same-session `{as,unit,name,block}` or routes), `call_route`/`resolve_route`,
+  `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.
+  Adapters: py `do_module`/`module_attr`/`unit_stub`/`RouteFunction`; js `doModule` (resolve
+  first; TLA via import() only for the module itself)/`moduleAttr`/`unitStub` (a Proxy)/`routeStub`.
+- Empty stubs (a doc comment only): `engines/runonly.rs`, `build/*`, `ffi/lib.rs`.
 - `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
   `V2_TEST_REQUIRE`. `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI

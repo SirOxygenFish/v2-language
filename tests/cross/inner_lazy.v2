@@ -1,0 +1,36 @@
+// requires: py js
+// R52 across engines: a Python block imports a JavaScript block's function, which goes through a
+// route resolved when called (INTERNALS 13.6, 13.7).
+@py a {
+    @import { f } from b
+    def call_f(x):
+        try:
+            return f(x)
+        except Exception as e:
+            return [type(e).__name__, e.type, e.message]
+    @export { call_f }
+}
+@import { call_f } from a
+print(call_f(1))
+@js b {
+    function f(x) {
+        if (x < 0) throw new RangeError("negative");
+        return x * 10;
+    }
+    @export { f }
+}
+print(call_f(2))
+print(call_f(-1)[0:2])
+// A route stub passed back to V2 calls what it reaches; once resolved it is that function
+// (INTERNALS 11.8).
+@py a2 {
+    @import { f } from b
+    def give():
+        return f
+    @export { give }
+}
+@import { give } from a2
+@import { f as bf } from b
+let g = give()
+print(type(g), g(3))
+print(give() == bf)

@@ -1,0 +1,24 @@
+// requires: py
+// A worker that dies during a block: EngineCrashed now and at every later use (INTERNALS 8.2, 8.6).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message.starts_with("engine 'py' (pid "), "|", e.message.split(") exited")[-1])
+        return e
+    }
+}
+let kept = @py { object() }
+show(func() => @py { import os; os._exit(3) })
+try {
+    @py { 1 }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print("the script continues")
+// A handle of the dead engine fails the same way (INTERNALS 11.7).
+try {
+    print(kept.anything)
+} catch (e) {
+    print(e.type)
+}

@@ -1,0 +1,27 @@
+// requires: js
+// js and ts are one engine: @js, @ts, @js.x and @ts.x match blocks of either tag, also inside
+// blocks; another engine's tag matches none of them (DOCS 6.2, INTERNALS 13.1).
+@ts t {
+    function dbl(x: number): number { return x * 2; }
+    @export { dbl }
+}
+@js j {
+    function tri(x) { return x * 3; }
+    @export { tri }
+}
+@import { dbl } from @js
+@import { tri } from @ts
+@import { dbl as d2 } from @js.t
+@import { tri as t2 } from @ts.j
+@import { tri as t3 } from @javascript.j
+print(dbl(1), tri(1), d2(2), t2(2), t3(3))
+print(@ts {
+    @import { tri } from @js.j
+    @import { dbl } from @ts
+    tri(dbl(1))
+})
+try {
+    @import { tri } from @py.j
+} catch (e) {
+    print(e.type, "|", e.message)
+}

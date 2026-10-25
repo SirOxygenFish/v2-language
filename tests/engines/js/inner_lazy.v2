@@ -1,0 +1,81 @@
+// requires: js
+// R52 for JavaScript: a @js block imports from a @ts block further down, on the same engine; the
+// function is looked up when called (INTERNALS 13.7).
+@js a {
+    @import { f } from b
+    function callF(x) {
+        try {
+            return f(x);
+        } catch (e) {
+            if (e.name === "RangeError") return "RangeError: " + e.message;
+            return [e.name, e.type, e.message];
+        }
+    }
+    @export { callF }
+}
+@import { callF } from a
+print(callF(1))
+@ts b {
+    const VERSION: string = "1.0";
+    var f = function (x: number): number {
+        if (x < 0) throw new RangeError("negative");
+        return x * 10;
+    };
+    function rebind(): void {
+        f = (x: number): any => "rebound";
+    }
+    @export { f, rebind, VERSION }
+}
+print(callF(2))
+print(callF(-1))
+@import { rebind } from b
+rebind()
+print(callF(3))
+try {
+    @js {
+        @import { VERSION } from b
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+// A constant of a block that hasn't run when the importer loads is refused at the first call.
+@js c {
+    @import { LATER } from d
+    function get() {
+        try {
+            return LATER();
+        } catch (e) {
+            return [e.name, e.type, e.message];
+        }
+    }
+    @export { get }
+}
+@ts d {
+    const LATER: number = 5;
+    @export { LATER }
+}
+@import { get } from c
+print(get())
+// A name only a not yet loaded `*` block could provide goes through V2 (a route), even on this
+// engine, so after the load its exceptions arrive as V2Error.
+@js e {
+    @import { g } from f
+    function callG(x) {
+        try {
+            return g(x);
+        } catch (err) {
+            return [err.name, err.type, err.message];
+        }
+    }
+    @export { callG }
+}
+@import { callG } from e
+print(callG(1))
+@js f {
+    function g(x) {
+        if (x < 0) throw new RangeError("negative");
+        return x + 100;
+    }
+    @export { * }
+}
+print(callG(1), callG(-1))

@@ -88,7 +88,7 @@ impl Registry {
     }
 
     /// `unknown engine '@pyhton' (did you mean '@py'?)`, or the list of known engines (7.3).
-    fn unknown_message(&self, tag: &str) -> String {
+    pub fn unknown_message(&self, tag: &str) -> String {
         let names = self.specs.iter().flat_map(|s| std::iter::once(&s.id).chain(&s.aliases)).map(|n| &**n);
         match did_you_mean(tag, names).and_then(|n| self.canonical(n)) {
             Some(spec) => format!("unknown engine '@{tag}' (did you mean '@{}'?)", spec.id),

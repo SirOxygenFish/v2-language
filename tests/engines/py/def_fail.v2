@@ -14,6 +14,12 @@ for i in 0..2 {
     }
 }
 print(errs[0] == errs[1], errs[0].type, errs[0].foreign_type, errs[0].message)
+// R46: an @import from it says why (INTERNALS 13.3 step 5).
+try {
+    @import { f } from bad
+} catch (e) {
+    print(e.type, "|", e.message)
+}
 // An @export name the block doesn't define fails the load, at that item.
 for i in 0..2 {
     try {

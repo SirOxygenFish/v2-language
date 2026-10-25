@@ -273,7 +273,7 @@ impl Checker {
 }
 
 /// The names a statement declares directly in its body (4.5).
-fn declarations(s: &Stmt) -> Vec<(Rc<str>, Span)> {
+pub(crate) fn declarations(s: &Stmt) -> Vec<(Rc<str>, Span)> {
     match &s.kind {
         StmtKind::Let(n, _) | StmtKind::Const(n, _) => vec![(n.text.clone(), n.span)],
         StmtKind::Func(f) => f.name.iter().map(|n| (n.text.clone(), n.span)).collect(),

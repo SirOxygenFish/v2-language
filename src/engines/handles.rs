@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value as Json};
 
 use crate::runtime::error::{fail, Exec};
 use crate::runtime::interp::Interp;
-use crate::runtime::value::{Func, Value};
+use crate::runtime::value::Value;
 use crate::syntax::span::Span;
 
 /// A session's queue of handle ids to release, sent before its next frame (9.10, 11.2).
@@ -60,19 +60,30 @@ impl Drop for HandleRef {
     }
 }
 
-/// The V2 functions a session holds stubs for (11.8): one id per function, counted per `fn` tag
-/// sent, dropped when the worker has released every count.
+/// The V2 functions (and other sessions' callable handles) a session holds stubs for (11.8): one
+/// id per value, counted per `fn` tag sent, dropped when the worker has released every count.
 #[derive(Default)]
 pub struct CallableTable {
     next: u64,
-    entries: HashMap<u64, (Func, u32)>,
+    entries: HashMap<u64, (Value, u32)>,
     by_addr: HashMap<usize, u64>,
 }
 
+/// The `Rc` address that identifies a `Func` or a callable handle in the table.
+fn addr(v: &Value) -> usize {
+    match v {
+        Value::Func(f) => f.addr(),
+        Value::Handle(h) => Rc::as_ptr(h) as *const u8 as usize,
+        _ => unreachable!("only functions and callable handles are registered"),
+    }
+}
+
 impl CallableTable {
-    /// The id for `f`; sending the same function again reuses its id and adds a count.
-    pub fn register(&mut self, f: &Func) -> u64 {
-        if let Some(&id) = self.by_addr.get(&f.addr()) {
+    /// The id for `v` (a `Func` or a callable handle); sending the same value again reuses its id
+    /// and adds a count.
+    pub fn register(&mut self, v: &Value) -> u64 {
+        let key = addr(v);
+        if let Some(&id) = self.by_addr.get(&key) {
             if let Some(entry) = self.entries.get_mut(&id) {
                 entry.1 += 1;
                 return id;
@@ -80,14 +91,14 @@ impl CallableTable {
         }
         self.next += 1;
         let id = self.next;
-        self.entries.insert(id, (f.clone(), 1));
-        self.by_addr.insert(f.addr(), id);
+        self.entries.insert(id, (v.clone(), 1));
+        self.by_addr.insert(key, id);
         id
     }
 
-    /// The function behind a `fn` tag the worker sends back; counts do not change.
+    /// The value behind a `fn` tag the worker sends back; counts do not change.
     pub fn get(&self, id: u64) -> Option<Value> {
-        self.entries.get(&id).map(|(f, _)| Value::Func(f.clone()))
+        self.entries.get(&id).map(|(v, _)| v.clone())
     }
 
     /// One count less per occurrence of each id; an entry goes at 0 (11.8). Unknown ids are
@@ -97,14 +108,14 @@ impl CallableTable {
             let Some(entry) = self.entries.get_mut(id) else { continue };
             entry.1 -= 1;
             if entry.1 == 0 {
-                if let Some((f, _)) = self.entries.remove(id) {
-                    self.by_addr.remove(&f.addr());
+                if let Some((v, _)) = self.entries.remove(id) {
+                    self.by_addr.remove(&addr(&v));
                 }
             }
         }
     }
 
-#[cfg(test)]
+    #[cfg(test)]
     pub fn count(&self, id: u64) -> u32 {
         self.entries.get(&id).map_or(0, |e| e.1)
     }
@@ -126,6 +137,8 @@ impl Interp {
 
     /// `v` for `h`'s session, or the MarshalError naming `root` (10.5).
     fn encode_for(&mut self, h: &HandleRef, v: &Value, root: &str, at: Span) -> Exec<Json> {
+        // A dead session's caps say nothing; its own error comes first (8.2).
+        self.check_alive(h.session, at)?;
         self.wire(h.session).encode(v, root).map_err(|f| self.raise(f, at))
     }
 
@@ -189,13 +202,27 @@ impl Interp {
         self.handle_op(h, "value", Map::new(), &what, at)
     }
 
-    /// `h(args)`, or `h.method(args)` in one round trip (9.5, 11.3). Named args need the
-    /// session's `kwargs` capability (10.8).
+    /// `h(args)`, or `h.method(args)` in one round trip (9.5, 11.3).
     pub fn handle_call(&mut self, h: &HandleRef, method: Option<&str>, pos: Vec<Value>, named: Vec<(Rc<str>, Value)>, at: Span) -> Exec<Value> {
-        let s = h.session;
+        let target = match method {
+            Some(m) => json!({"h": h.id, "method": m}),
+            None => json!({"h": h.id}),
+        };
+        let what = match method {
+            Some(m) => format!("a call to '{m}'"),
+            None => format!("a call to {}", h.text()),
+        };
+        self.foreign_call(h.session, target, pos, named, &what, at)
+    }
+
+    /// A `call` frame to session `s` (9.5): a handle or a Proxy (13.4). Named args need the
+    /// session's `kwargs` capability (10.8); `what` names the call in crash and timeout messages.
+    pub fn foreign_call(&mut self, s: usize, target: Json, pos: Vec<Value>, named: Vec<(Rc<str>, Value)>, what: &str, at: Span) -> Exec<Value> {
+        self.check_alive(s, at)?;
         if let Some((k, _)) = named.first() {
             if !self.sessions[s].caps.kwargs {
-                return fail("ArityError", format!("{} functions take positional arguments only (got '{k}')", h.tag)).map_err(|f| self.raise(f, at));
+                let tag = self.sessions[s].key.clone();
+                return fail("ArityError", format!("{tag} functions take positional arguments only (got '{k}')")).map_err(|f| self.raise(f, at));
             }
         }
         let mut args = Vec::with_capacity(pos.len());
@@ -217,16 +244,8 @@ impl Interp {
                 }
             }
         }
-        let target = match method {
-            Some(m) => json!({"h": h.id, "method": m}),
-            None => json!({"h": h.id}),
-        };
-        let what = match method {
-            Some(m) => format!("a call to '{m}'"),
-            None => format!("a call to {}", h.text()),
-        };
         let frame = json!({"t": "call", "target": target, "args": args, "kwargs": kwargs});
-        Ok(self.request(s, frame, &what, at)?.value)
+        Ok(self.request(s, frame, what, at)?.value)
     }
 
     /// `for x in h` starts here (11.4): the iterator's handle, and whether `h` is a mapping
@@ -269,10 +288,10 @@ impl Interp {
 mod tests {
     use super::*;
     use crate::runtime::builtins::BUILTINS;
-    use crate::runtime::value::Callable;
+    use crate::runtime::value::{Callable, Func};
 
-    fn builtin(name: &str) -> Func {
-        Func::new(Callable::Builtin(BUILTINS.iter().find(|b| b.name == name).unwrap()))
+    fn builtin(name: &str) -> Value {
+        Value::Func(Func::new(Callable::Builtin(BUILTINS.iter().find(|b| b.name == name).unwrap())))
     }
 
     #[test]
@@ -301,7 +320,12 @@ mod tests {
         let l = t.register(&len);
         assert_ne!(p, l);
         assert_eq!((t.count(p), t.count(l)), (2, 1));
-        assert!(matches!(t.get(p), Some(Value::Func(f)) if Func::ptr_eq(&f, &print)));
+        assert!(matches!((t.get(p), &print), (Some(Value::Func(f)), Value::Func(g)) if Func::ptr_eq(&f, g)));
+        // A callable handle is keyed by its `HandleRef`, like a function by its `Rc`.
+        let h = Value::Handle(Rc::new(HandleRef::new(1, "js".into(), 3, "function".into(), Rc::default()).with_callable(true)));
+        let id = t.register(&h);
+        assert_eq!(t.register(&h.clone()), id);
+        assert!(matches!(t.get(id), Some(Value::Handle(r)) if r.id == 3));
         t.release(&[p, 99]);
         assert_eq!(t.count(p), 1);
         t.release(&[p, l]);

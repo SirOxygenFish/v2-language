@@ -1,0 +1,44 @@
+// requires: py
+// R43: @export { * } takes the block's own functions and classes, not imported names, `_`
+// names or constants (DOCS 6.1, INTERNALS 12.3).
+@py tools {
+    from math import sqrt
+    import functools
+    def double(x):
+        return x * 2
+    @functools.lru_cache(maxsize=None)
+    def cached(x):
+        return x + 1
+    class Box:
+        pass
+    def _private():
+        pass
+    VALUE = 3
+    @export { * }
+}
+@import { * } from tools
+print(double(2), cached(1), type(Box()))
+func show(name, f) {
+    try {
+        f()
+    } catch (e) {
+        print(name, "|", e.message)
+    }
+}
+show("sqrt", func() {
+    @import { sqrt } from tools
+})
+show("_private", func() {
+    @import { _private } from tools
+})
+show("VALUE", func() {
+    @import { VALUE } from tools
+})
+// Listing a name next to * exports it whatever it is.
+@py more {
+    from math import sqrt
+    LIMIT = 10
+    @export { *, sqrt, LIMIT }
+}
+@import { sqrt, LIMIT } from more
+print(sqrt(16), LIMIT)
