@@ -254,7 +254,7 @@ impl Interp {
     }
 
     /// Innermost first: the raise location, then each call's site (5.9, 2.5).
-    fn trace_at(&self, span: Span) -> Rc<[Rc<str>]> {
+    pub(crate) fn trace_at(&self, span: Span) -> Rc<[Rc<str>]> {
         let mut out: Vec<Rc<str>> = Vec::with_capacity(self.calls.len() + 1);
         let mut loc = span;
         for rec in self.calls.iter().rev() {
@@ -280,6 +280,11 @@ impl Interp {
             return self.fail_at("RecursionError", format!("maximum call depth ({MAX_CALLS}) exceeded"), span);
         }
         Ok(())
+    }
+
+    /// Active V2 calls (5.8): the frames below a request to a worker.
+    pub(crate) fn call_depth(&self) -> usize {
+        self.calls.len()
     }
 
     /// Temporary until the roadmap milestone named in `what` lands.

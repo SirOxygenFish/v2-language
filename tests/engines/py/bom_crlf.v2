@@ -1,0 +1,14 @@
+﻿// requires: py
+// R39, the @py part: a file saved with a byte-order mark and Windows line endings, whose @py
+// error reports the right line and column (INTERNALS 2.3, 12.6).
+@py risky {
+    def f():
+        raise ValueError('on line 6')
+    @export { f }
+}
+@import { f } from risky
+try {
+    f()
+} catch (e) {
+    print(e.message, e.line, e.col)
+}

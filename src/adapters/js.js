@@ -702,11 +702,38 @@ function decodeTag(j) {
 // Errors as `err` payloads (9.6, 12.6)
 
 const sources = new Map(); // .v2 path -> Map(line -> body text line), kept by rememberSource
+// .v2 path -> Map(body's first line -> rows) for bodies holding U+2028 or U+2029, which V8 counts
+// as line breaks: row k is V8's line first + k as [.v2 line, UTF-16 offset of its segment].
+const shifted = new Map();
 
 function rememberSource(file, first, source) {
   let lines = sources.get(file);
   if (!lines) sources.set(file, (lines = new Map()));
   source.split('\n').forEach((text, i) => lines.set(first + i, text));
+  if (!/[\u2028\u2029]/.test(source)) return;
+  const rows = [];
+  source.split('\n').forEach((text, i) => {
+    rows.push([first + i, 0]);
+    for (let j = 0; j < text.length; j++) if (text[j] === '\u2028' || text[j] === '\u2029') rows.push([first + i, j + 1]);
+  });
+  if (!shifted.has(file)) shifted.set(file, new Map());
+  shifted.get(file).set(first, rows);
+}
+
+function realPosition(file, line, utf16col) {
+  // V8's line and 1-based UTF-16 column (or null) as the .v2 line and the code-point column
+  // within it; columns only for .v2 files (12.6).
+  let real = line;
+  let offset = 0;
+  for (const [first, rows] of shifted.get(file) || []) {
+    const row = rows[line - first];
+    if (row) {
+      [real, offset] = row;
+      break;
+    }
+  }
+  const text = sources.get(file)?.get(real);
+  return [real, text === undefined || utf16col === null ? null : codePointCol(text, utf16col + offset)];
 }
 
 function codePointCol(text, utf16col) {
@@ -725,9 +752,9 @@ function frames(e) {
     let [, func, file, lineNo, col] = m;
     if (file.startsWith('node:') || file === ADAPTER || file.startsWith('evalmachine.')) continue;
     if (file.startsWith('file://')) file = url.fileURLToPath(file);
-    const text = sources.get(file)?.get(Number(lineNo));
+    const [real, cp] = realPosition(file, Number(lineNo), Number(col));
     out.push({
-      file: wellFormed(file), line: Number(lineNo), col: text === undefined ? null : codePointCol(text, Number(col)),
+      file: wellFormed(file), line: real, col: cp,
       func: func ? wellFormed(func.replace(/^(?:async |new )/, '')) : null,
     });
   }
@@ -870,9 +897,13 @@ function compileOrExplain(src, m) {
     if (e && e.name === 'SyntaxError') {
       const hit = EXPLAIN.find(([needle]) => String(e.message).includes(needle));
       if (hit) e.message = hit[1](m.lang);
-      // V8 puts the location on the stack's first line: `file:line`.
-      const loc = /^(.*):(\d+)\r?\n/.exec(e.stack || '');
-      if (loc && loc[1] === m.file) e.v2Frame = { file: m.file, line: Number(loc[2]), col: null, func: null };
+      // V8 puts the location on the stack's first line, `file:line`, then the source line and
+      // a caret under the column.
+      const loc = /^(.*):(\d+)\r?\n(?:[^\n]*\r?\n([ \t]*)\^)?/.exec(e.stack || '');
+      if (loc && loc[1] === m.file) {
+        const [line, col] = realPosition(m.file, Number(loc[2]), loc[3] === undefined ? null : loc[3].length + 1);
+        e.v2Frame = { file: m.file, line, col, func: null };
+      }
     }
     throw e;
   }
@@ -884,15 +915,15 @@ function stripTypes(src, m) {
   } catch (e) {
     const message = String(e && e.message ? e.message : e);
     const err = new SyntaxError(e && e.code ? `${message} (${e.code})` : message);
-    // The body position: a `[line:col]` marker, or (Node 24) the stack's first line `:line`
-    // with a caret under the column.
+    // The body position: a `[line:col]` marker, or (Node 24) the stack's first line `:line`,
+    // then source lines (the one before too) and a caret under the column.
     const stack = e && typeof e.stack === 'string' ? e.stack : '';
     const marker = /\[(\d+):(\d+)\]/.exec(message);
-    const header = /^[^\n]*:(\d+)\r?\n([^\n]*)\r?\n(\s*)\^/.exec(stack);
+    const header = /^[^\n]*:(\d+)\r?\n(?:[^\n]*\r?\n)*?([ \t]*)\^+[ \t]*(?:\r?\n|$)/.exec(stack);
     let line = null;
     let col = null;
     if (marker) [line, col] = [Number(marker[1]), Number(marker[2])];
-    else if (header) [line, col] = [Number(header[1]), [...header[3]].length + 1];
+    else if (header) [line, col] = [Number(header[1]), [...header[2]].length + 1];
     if (line !== null) err.v2Frame = { file: m.file, line: m.line + line - 1, col, func: null };
     err.stack = stack || 'SyntaxError: ' + err.message;
     throw err;

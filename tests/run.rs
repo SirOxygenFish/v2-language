@@ -1733,3 +1733,23 @@ fn an_inner_import_that_fails_at_load_starts_no_worker() {
     assert_eq!(code, Some(0), "{err}");
     assert!(home.0.join("site/started").exists(), "the marker works");
 }
+
+#[test]
+fn an_uncaught_foreign_error_prints_like_docs_10() {
+    // R16 (uncaught): the header at the foreign frame's .v2 position, the excerpt and caret, then
+    // the foreign frames before V2's (DOCS 10, INTERNALS 2.4, 2.5, 12.6). Python 3.11+ reports
+    // columns; 3.10 would put the caret at the line's first character.
+    let py = "@py risky {\n    def ratio(a, b):\n        return a / b\n    @export { ratio }\n}\n@import { ratio } from risky\n\n\nratio(1, 0)\n";
+    let js = "@js calc {\n    function ratio(a, b) {\n        if (b === 0) throw new RangeError(\"division by zero\");\n        return a / b;\n    }\n    @export { ratio }\n}\n@import { ratio } from calc\nfunc go() {\n    return ratio(1, 0)\n}\ngo()\n";
+    let cases = [
+        ("py", py, "main.v2:3:16: ForeignError: ZeroDivisionError: division by zero\n    return a / b\n           ^\n  at ratio (main.v2:3, in @py risky)\n  at main.v2:9\n"),
+        ("js", js, "main.v2:3:28: ForeignError: RangeError: division by zero\n    if (b === 0) throw new RangeError(\"division by zero\");\n                       ^\n  at ratio (main.v2:3, in @js calc)\n  at go (main.v2:10)\n  at main.v2:12\n"),
+    ];
+    for (tag, src, expected) in cases {
+        if !needs(tag, "an_uncaught_foreign_error_prints_like_docs_10") {
+            continue;
+        }
+        let (code, out, err, _home) = run_with_files(&[("main.v2", src), ("v2.toml", "")], &["main.v2"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (Some(1), "", expected), "{tag}");
+    }
+}

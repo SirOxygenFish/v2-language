@@ -623,7 +623,8 @@ if __name__ == "__main__":
             colno = getattr(fs, "colno", None)  # Python 3.11+
             if text is not None and colno is not None:
                 col = len(text.encode("utf-8")[:colno].decode("utf-8", "ignore")) + 1
-            func = None if fs.name == "<module>" else well_formed(fs.name)
+            # A block's top level has no name; a module's keeps Python's `<module>` (2.5, 9.6).
+            func = None if fs.name == "<module>" and name in _lines else well_formed(fs.name)
             out.append({"file": well_formed(name), "line": fs.lineno, "col": col, "func": func})
         return out
 
@@ -873,13 +874,20 @@ if __name__ == "__main__":
         bind_imports(g, m.get("imports") or [])
         try:
             tree = ast.parse("\n" * (first - 1) + m["source"], path, "exec")
-            tail = None
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                tail = ast.Expression(tree.body.pop().value)
+        except SyntaxError as e:
+            raise e.with_traceback(None)  # its frame is the .v2 line, not ast's or ours (12.6)
+        tail = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            tail = ast.Expression(tree.body.pop().value)
+        try:
             code = compile(tree, path, "exec", dont_inherit=True)
             tail_code = compile(tail, path, "eval", dont_inherit=True) if tail is not None else None
         except SyntaxError as e:
-            raise e.with_traceback(None)  # its frame is the .v2 line, not ast's or ours (12.6)
+            # The compiler's columns are UTF-8 byte offsets, the parser's are characters (12.6).
+            text = _lines.get(path, {}).get(e.lineno)
+            if text is not None and isinstance(e.offset, int) and e.offset > 0:
+                e.offset = len(text.encode("utf-8")[:e.offset - 1].decode("utf-8", "ignore")) + 1
+            raise e.with_traceback(None)
         sys.modules[name] = mod
         keep = False
         try:

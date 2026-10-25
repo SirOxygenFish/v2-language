@@ -14,3 +14,5 @@ true
 2/3
 3/3
 3
+ValueError negative: -2 kept 107
+["check (callbacks.v2:107)", "each (callbacks.v2:115, in @py apply)", "run (callbacks.v2:123)", "callbacks.v2:129"]
