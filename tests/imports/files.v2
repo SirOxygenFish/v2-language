@@ -1,0 +1,13 @@
+// requires: py
+// Imports across V2 files (INTERNALS 6.2, 6.4, 5.1): a module re-exports what it imported, and
+// selectors only see the blocks of the file the @import is written in, whoever calls it.
+@py stats {
+    def mean(xs):
+        return "main's mean"
+    @export { mean }
+}
+import "fixtures/util.v2" as util
+print(util.mean([1, 2, 3]), util.local())
+print(util.from_main_py())
+@import { mean } from @py
+print(mean([1]))

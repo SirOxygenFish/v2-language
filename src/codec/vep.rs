@@ -9,9 +9,10 @@ use indexmap::IndexMap;
 use serde_json::{json, Map, Number, Value as Json};
 
 use crate::engines::handles::{CallableTable, HandleRef, ReleaseQueue};
+use crate::engines::imports::Route;
 use crate::engines::vep::Caps;
 use crate::runtime::error::{fail, ErrorValue, Exec};
-use crate::runtime::value::{Func, Value};
+use crate::runtime::value::Value;
 use crate::syntax::span::SourceMap;
 
 /// Lists and dicts nest at most this deep on the wire (10.5).
@@ -28,8 +29,8 @@ pub struct Wire<'a> {
     pub releases: &'a ReleaseQueue,
     pub callables: &'a mut CallableTable,
     pub sm: &'a SourceMap,
-    /// The target of an inner `@import` route (13.6).
-    pub route: &'a dyn Fn(u64) -> Option<Value>,
+    /// The inner `@import` routes, which `fn` tags with a `route` name (11.8, 13.6).
+    pub routes: &'a [Route],
 }
 
 /// A step of the path an error names: `args[0]["when"]` (10.5).
@@ -122,8 +123,12 @@ impl Encoder<'_, '_> {
                     Json::Object(out)
                 }
             }
-            Value::Func(f) => self.func(f)?,
+            Value::Func(f) => self.callable(v, f.name())?,
             Value::Handle(h) => {
+                // Another session's callable handle goes as a function its own session calls (11.6).
+                if h.session != self.wire.session && h.callable {
+                    return self.callable(v, &h.text());
+                }
                 if h.session != self.wire.session {
                     return self.fail(format!(
                         "this handle belongs to engine '{}' and can't be passed to '{}' — convert it with to_v2(h) first",
@@ -136,13 +141,14 @@ impl Encoder<'_, '_> {
         })
     }
 
-    fn func(&mut self, f: &Func) -> Exec<Json> {
+    /// A `Func` or another session's callable handle, registered in the callable table (11.8).
+    fn callable(&mut self, v: &Value, name: &str) -> Exec<Json> {
         if !self.wire.caps.reverse {
             return self.fail(format!("engine '{}' can't receive V2 functions (no 'reverse' capability)", self.wire.tag));
         }
-        let id = self.wire.callables.register(f);
+        let id = self.wire.callables.register(v);
         self.added.push(id);
-        Ok(json!({"$v2": "fn", "id": id, "name": f.name()}))
+        Ok(json!({"$v2": "fn", "id": id, "name": name}))
     }
 
     /// A V2 error, with its location and frames (10.3).
@@ -244,7 +250,11 @@ impl Wire<'_> {
             }
             "fn" => match (m.get("id").and_then(Json::as_u64), m.get("route").and_then(Json::as_u64)) {
                 (Some(id), None) => self.callables.get(id).ok_or_else(|| format!("an 'fn' tag with an unknown id {id}"))?,
-                (None, Some(r)) => (self.route)(r).ok_or_else(|| format!("an 'fn' tag with an unknown route {r}"))?,
+                (None, Some(r)) => {
+                    let n = usize::try_from(r).ok().filter(|&n| n < self.routes.len());
+                    let n = n.ok_or_else(|| format!("an 'fn' tag with an unknown route {r}"))?;
+                    self.routes[n].value(n)
+                }
                 _ => return Err("an 'fn' tag without 'id' or 'route'".into()),
             },
             "error" => Value::Error(Rc::new(self.error(m, depth)?)),
@@ -355,18 +365,21 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::runtime::builtins::BUILTINS;
-    use crate::runtime::value::Callable;
+    use crate::runtime::value::{Callable, Func};
+    use crate::syntax::span::FileId;
     use std::cell::RefCell;
 
     struct Fixture {
         releases: ReleaseQueue,
         callables: CallableTable,
         sm: SourceMap,
+        routes: Vec<Route>,
     }
 
     impl Fixture {
         fn new() -> Fixture {
-            Fixture { releases: Rc::new(RefCell::new(Vec::new())), callables: CallableTable::default(), sm: SourceMap::new() }
+            let routes = vec![Route::Target(Value::str("route zero")), Route::V2 { file: FileId(0), name: "log".into() }];
+            Fixture { releases: Rc::new(RefCell::new(Vec::new())), callables: CallableTable::default(), sm: SourceMap::new(), routes }
         }
 
         fn wire(&mut self, caps: Caps) -> Wire<'_> {
@@ -377,7 +390,7 @@ mod tests {
                 releases: &self.releases,
                 callables: &mut self.callables,
                 sm: &self.sm,
-                route: &|r| (r == 5).then(|| Value::str("route five")),
+                routes: &self.routes,
             }
         }
     }
@@ -513,8 +526,17 @@ mod tests {
         let back: Json = serde_json::from_str(r#"{"$v2":"fn","id":1}"#).unwrap();
         assert!(matches!(fx.wire(ALL).decode(&back), Ok(Value::Func(_))));
         assert_eq!(fx.callables.count(1), 2);
-        let route: Json = serde_json::from_str(r#"{"$v2":"fn","route":5}"#).unwrap();
-        assert!(matches!(fx.wire(ALL).decode(&route), Ok(Value::Str(s)) if &*s == "route five"));
+        // A route stub: a resolved route's target, else a function that resolves it (11.8).
+        let route = |r: u64| json!({"$v2": "fn", "route": r});
+        assert!(matches!(fx.wire(ALL).decode(&route(0)), Ok(Value::Str(s)) if &*s == "route zero"));
+        let Ok(Value::Func(f)) = fx.wire(ALL).decode(&route(1)) else { panic!("a function") };
+        assert!(matches!(&*f, Callable::Route { route: 1, name } if &**name == "log"));
+        assert_eq!(fx.wire(ALL).decode(&route(2)).err().unwrap(), "an 'fn' tag with an unknown route 2");
+        // Another session's callable handle goes as a function; a handle of this session as itself.
+        let other = Value::Handle(Rc::new(HandleRef::new(1, "js".into(), 4, "function".into(), fx.releases.clone()).with_callable(true)));
+        let mine = Value::Handle(Rc::new(HandleRef::new(0, "py".into(), 4, "function".into(), fx.releases.clone()).with_callable(true)));
+        let j = fx.wire(ALL).encode(&Value::list(vec![other, mine]), "args").unwrap();
+        assert_eq!(j.to_string(), r#"[{"$v2":"fn","id":2,"name":"<js function>"},{"$v2":"h","id":4}]"#);
         assert_eq!(fx.wire(ALL).decode(&serde_json::from_str(r#"{"$v2":"fn","id":77}"#).unwrap()).err().unwrap(), "an 'fn' tag with an unknown id 77");
         // A failed encode rolls back the counts it added.
         let bad = Value::list(vec![print.clone(), Value::Handle(Rc::new(HandleRef::new(1, "js".into(), 1, "x".into(), fx.releases.clone())))]);

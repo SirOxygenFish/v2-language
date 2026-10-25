@@ -1,0 +1,55 @@
+// requires: py
+// R26: a name two blocks export is ambiguous from @py, by name or by `*`; naming the block
+// resolves it (DOCS 6.3, INTERNALS 13.3).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+@py stats {
+    def mean(xs):
+        return sum(xs) / len(xs)
+    @export { mean }
+}
+@py calc {
+    def mean(xs):
+        return "calc"
+    @export { mean }
+}
+show(func() {
+    @import { mean } from @py
+    return mean
+})
+show(func() {
+    @import { * } from @py
+    return mean
+})
+@import { mean } from @py.stats
+print(mean([1, 2, 3]))
+@import { mean as calc_mean } from calc
+print(calc_mean([1]))
+// A block with @export { * } can still be imported selectively.
+@py helpers {
+    def a():
+        return "a"
+    def b():
+        return "b"
+    @export { * }
+}
+@import { b } from helpers
+print(b())
+// The other 13.3 messages.
+show(func() {
+    @import { mean } from nothing
+    return mean
+})
+show(func() {
+    @import { median } from stats
+    return median
+})
+show(func() {
+    @import { x } from @pyhton
+    return x
+})

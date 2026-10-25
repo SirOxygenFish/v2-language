@@ -68,10 +68,17 @@ fn eq_at(a: &Value, b: &Value, depth: usize) -> Exec<bool> {
             }
             true
         }
-        (Value::Func(x), Value::Func(y)) => match (&**x, &**y) {
-            (super::value::Callable::Builtin(p), super::value::Callable::Builtin(q)) => std::ptr::eq(*p, *q),
-            _ => Func::ptr_eq(x, y),
-        },
+        (Value::Func(x), Value::Func(y)) => {
+            use super::value::Callable;
+            match (&**x, &**y) {
+                (Callable::Builtin(p), Callable::Builtin(q)) => std::ptr::eq(*p, *q),
+                (Callable::Proxy { session: s1, unit: u1, name: n1 }, Callable::Proxy { session: s2, unit: u2, name: n2 }) => {
+                    s1 == s2 && u1 == u2 && n1 == n2
+                }
+                (Callable::Route { route: r1, .. }, Callable::Route { route: r2, .. }) => r1 == r2,
+                _ => Func::ptr_eq(x, y),
+            }
+        }
         (Value::Error(x), Value::Error(y)) => Rc::ptr_eq(x, y),
         // The same foreign object: same session and id (11.6).
         (Value::Handle(x), Value::Handle(y)) => x.same(y),

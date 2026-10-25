@@ -1,0 +1,98 @@
+// requires: py
+// R52: a block imports a function from a block further down; it is looked up when called, in
+// the worker, so its exceptions arrive unwrapped and rebinding is seen (INTERNALS 13.7).
+@py a {
+    @import { f } from b
+    def call_f(x):
+        try:
+            return f(x)
+        except ValueError as e:
+            return "ValueError: " + str(e)
+        except Exception as e:
+            return [type(e).__name__, e.type, e.message]
+    @export { call_f }
+}
+@import { call_f } from a
+print(call_f(1))
+@py b {
+    VERSION = "1.0"
+    def f(x):
+        if x < 0:
+            raise ValueError("negative")
+        return x * 10
+    def rebind():
+        global f
+        f = lambda x: "rebound"
+    @export { f, rebind, VERSION }
+}
+print(call_f(2))
+print(call_f(-1))
+@import { rebind } from b
+rebind()
+print(call_f(3))
+// A constant: refused at load when its block has run...
+try {
+    @py {
+        @import { VERSION } from b
+        pass
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+// ...else at the first call.
+@py c {
+    @import { LATER } from d
+    def get():
+        try:
+            return LATER()
+        except Exception as e:
+            return [e.type, e.message]
+    @export { get }
+}
+@py d {
+    LATER = 5
+    @export { LATER }
+}
+@import { get } from c
+print(get())
+// Errors no later load can fix are raised at load.
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(func() {
+    @py {
+        @import { nothing } from b
+        pass
+    }
+})
+show(func() {
+    @py {
+        @import { x } from no_such_block
+        pass
+    }
+})
+// A name only a not yet loaded `*` block could provide goes through V2 (a route), even on this
+// engine, so after the load its exceptions arrive as V2Error.
+@py e {
+    @import { g } from f
+    def call_g(x):
+        try:
+            return g(x)
+        except Exception as err:
+            return [type(err).__name__, err.type, err.message]
+    @export { call_g }
+}
+@import { call_g } from e
+print(call_g(1))
+@py f {
+    def g(x):
+        if x < 0:
+            raise ValueError("negative")
+        return x + 100
+    @export { * }
+}
+print(call_g(1), call_g(-1))

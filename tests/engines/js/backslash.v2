@@ -1,0 +1,7 @@
+// platform: windows
+// requires: js
+// On Windows `.\x.js` is a relative path too: each .v2 file gets the file next to it, not the
+// first one imported under that text (DOCS 7, INTERNALS 13.5).
+import "fixtures/bs/main.v2" as top
+import "fixtures/bs/sub/util.v2" as sub
+print(top.who(), sub.who())

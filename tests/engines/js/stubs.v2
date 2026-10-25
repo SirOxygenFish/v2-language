@@ -1,0 +1,31 @@
+// requires: js
+// A function imported into a block from this engine is an ordinary function of the block's
+// language: it can be called, constructed, subclassed and tested with instanceof, and its static
+// members are there (DOCS 8, INTERNALS 11.3, 13.7).
+@js base {
+    class Base {
+        constructor(n) { this.n = n; }
+        hi() { return "hi " + this.n; }
+        static make(n) { return new Base(n); }
+    }
+    @export { Base }
+}
+print(@js {
+    @import { Base } from base
+    class Sub extends Base {
+        bye() { return "bye " + this.n; }
+    }
+    const s = new Sub(3);
+    [s instanceof Sub, s instanceof Base, s.hi(), s.bye(), new Base(1) instanceof Base, Base(5).n, Base.make(2).n, Sub.make(4).hi()]
+})
+print(@js {
+    @import { EventEmitter } from js.events
+    class Bus extends EventEmitter {
+        ping() { return "pong"; }
+    }
+    const b = new Bus();
+    let got = null;
+    b.on("x", (v) => { got = v; });
+    b.emit("x", 7);
+    [b instanceof Bus, b instanceof EventEmitter, b.ping(), got]
+})

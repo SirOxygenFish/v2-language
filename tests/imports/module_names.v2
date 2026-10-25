@@ -1,0 +1,37 @@
+// requires: py
+// R44: a Python module name must be dotted identifiers; nothing is sent for one that isn't
+// (INTERNALS 13.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(func() {
+    @import { x } from py."os; print(1)"
+    return x
+})
+show(func() {
+    @import { x } from py."my-mod"
+    return x
+})
+show(func() {
+    @import { x } from py.os."if"
+    return x
+})
+show(func() {
+    @import { x } from py.v2_no_such_module
+    return x
+})
+show(func() {
+    @import { nope } from py.os
+    return nope
+})
+// A dotted name, a submodule by name, and a whole module.
+@import { join } from py.os.path
+@import { path } from py.os
+@import py.os.path as osp
+print(type(join), type(path), type(osp), osp.basename("a/b.txt"))
+@import { "dumps" as to_json } from py.json
+print(to_json([1]))

@@ -1,0 +1,78 @@
+// requires: py
+// R55: ambiguity does not depend on what has run, except for `*` blocks, which count once they
+// have run (DOCS 6.3, INTERNALS 13.3).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+@py stats {
+    def mean(xs):
+        return 1
+    @export { mean }
+}
+// `calc` lists mean too, though it hasn't run yet.
+show(func() {
+    @import { mean } from @py
+    return mean
+})
+@py calc {
+    def mean(xs):
+        return 2
+    @export { mean }
+}
+// Only `solo` lists median, and it hasn't run.
+show(func() {
+    @import { median } from @py
+    return median
+})
+@py solo {
+    def median(xs):
+        return 3
+    @export { median }
+}
+@py one {
+    def total():
+        return "one"
+    @export { total }
+}
+// `star` hasn't run, so only `one` provides total.
+@import { total } from @py
+print(total())
+@py star {
+    def total():
+        return "star"
+    @export { * }
+}
+show(func() {
+    @import { total } from @py
+    return total
+})
+// A block reached while it is still loading.
+func early() {
+    @import { x } from loading
+    return x
+}
+@py loading(early) {
+    try:
+        early()
+    except Exception as e:
+        print(e.type, "|", e.message)
+    def x():
+        return 1
+    @export { x }
+}
+// A block that failed to load (R46 has the definition-block side).
+try {
+    @py broken {
+        raise RuntimeError("no")
+        @export { y }
+    }
+} catch (e) {
+}
+show(func() {
+    @import { y } from broken
+    return y
+})

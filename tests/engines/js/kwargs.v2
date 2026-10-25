@@ -1,0 +1,22 @@
+// requires: js
+// R10: JavaScript functions take positional arguments only; a named arg is an ArityError raised
+// before anything is sent (INTERNALS 10.8, 17.5).
+@js text {
+    function join(...parts) {
+        return parts.join("-");
+    }
+    @export { join }
+}
+@import { join } from text
+print(join(1, 2))
+try {
+    join(1, sep: "-")
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+@import { basename } from js.path
+try {
+    basename("a/b.txt", ext: ".txt")
+} catch (e) {
+    print(e.type, "|", e.message)
+}

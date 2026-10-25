@@ -1,0 +1,25 @@
+// requires: py
+// R38: V2 and Python calling each other nest up to 64 crossings; the 65th is a RecursionError
+// that V2 catches (DOCS 8.4, INTERNALS 9.7).
+func down(n) {
+    if n == 0 {
+        return 0
+    }
+    return py_down(n - 1) + 1
+}
+@py rec {
+    @import { down } from v2
+    def py_down(n):
+        if n == 0:
+            return 0
+        return down(n - 1) + 1
+    @export { py_down }
+}
+@import { py_down } from rec
+print(py_down(63))
+try {
+    py_down(64)
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(py_down(5))

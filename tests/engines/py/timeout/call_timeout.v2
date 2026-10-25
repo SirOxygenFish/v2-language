@@ -1,0 +1,22 @@
+// requires: py
+// R19: a call that runs past call_timeout raises EngineTimeout quickly, and the engine is gone
+// for the rest of the run (INTERNALS 8.5).
+@py slow {
+    import time
+    def nap(s):
+        time.sleep(s)
+        return s
+    @export { nap }
+}
+@import { nap } from slow
+let t0 = time()
+try {
+    nap(30)
+} catch (e) {
+    print(e.type, "|", e.message, "|", time() - t0 < 5)
+}
+try {
+    nap(0)
+} catch (e) {
+    print(e.type, "|", e.message)
+}

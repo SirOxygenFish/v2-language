@@ -1,0 +1,5 @@
+["V2Error", "ImportError", "block 'b' has not run yet — 'f' can't be called before it loads"]
+20
+["V2Error", "ForeignError"]
+func 30
+true

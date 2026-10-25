@@ -1,0 +1,18 @@
+// requires: py
+// R27: tag aliases in selectors, and one process for @python and @py (DOCS 6.2, INTERNALS 13.1).
+@python stats {
+    import sys
+    sys.v2_shared = "set in @python"
+    def mean(xs):
+        return sum(xs) / len(xs)
+    @export { mean }
+}
+@import { mean } from stats
+@import { mean as m2 } from @py.stats
+@import { mean as m3 } from @python.stats
+print(mean([1, 2]), m2([2, 4]), m3([3, 5]), mean == m2, m2 == m3)
+@import { median } from python.statistics
+@import { median as med2 } from py.statistics
+print(median([1, 2, 3]), median == med2)
+print(@py { __import__("sys").v2_shared })
+print(str(mean), str(median))

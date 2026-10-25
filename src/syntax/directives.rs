@@ -375,13 +375,13 @@ impl<'a> DirParser<'a> {
                     exports.star.get_or_insert(span);
                 }
                 // Keywords are accepted bare here: they name foreign functions (4.4).
-                DK::Name(n) | DK::Kw(n) => push_export(exports, n, false, span)?,
+                DK::Name(n) | DK::Kw(n) => push_export(exports, n, span)?,
                 // Compiled blocks export functions by name (15.2).
                 DK::Str(_) if compiled => {
                     return Err(Diag::new("compiled blocks export functions by name", span)
                         .hint("export a wrapper function with a plain signature"))
                 }
-                DK::Str(s) => push_export(exports, s, true, span)?,
+                DK::Str(s) => push_export(exports, s, span)?,
                 DK::End => return Err(Diag::new("unterminated @export list", open)),
                 other => return Err(Diag::new(format!("expected a name in the @export list, found {}", describe(&other)), span)),
             }
@@ -414,9 +414,8 @@ impl<'a> DirParser<'a> {
                 loop {
                     let t = self.bump();
                     let span = t.span;
-                    let (name, quoted) = match t.kind.clone() {
-                        DK::Name(n) => (n, false),
-                        DK::Str(s) => (s, true),
+                    let name = match t.kind.clone() {
+                        DK::Name(n) | DK::Str(n) => n,
                         DK::Kw(k) => {
                             return Err(Diag::new(format!("expected a name in the @import list, found keyword `{k}`"), span)
                                 .hint(format!("quote a name that is a V2 keyword: \"{k}\"")))
@@ -430,7 +429,7 @@ impl<'a> DirParser<'a> {
                     } else {
                         None
                     };
-                    items.push(ImportItem { name, quoted, alias, span });
+                    items.push(ImportItem { name, alias, span });
                     match self.peek().clone() {
                         DK::Comma => {
                             self.bump();
@@ -543,11 +542,11 @@ impl<'a> DirParser<'a> {
     }
 }
 
-fn push_export(exports: &mut Exports, text: Rc<str>, quoted: bool, span: Span) -> Result<(), Diag> {
+fn push_export(exports: &mut Exports, text: Rc<str>, span: Span) -> Result<(), Diag> {
     if let Some(prev) = exports.items.iter().find(|e| e.text == text) {
         return Err(Diag::new(format!("'{text}' is exported twice"), span).note("first exported here", prev.span));
     }
-    exports.items.push(ExportItem { text, quoted, span });
+    exports.items.push(ExportItem { text, span });
     Ok(())
 }
 
@@ -799,7 +798,7 @@ mod tests {
         let imps = &p.directives.imports;
         assert_eq!(imps.len(), 4);
         assert!(matches!(&imps[0].selector, Selector::Exact { tag, label } if &*tag.text == "py" && &*label.text == "calc"));
-        assert!(matches!(&imps[0].items, ImportItems::Names(v) if v.len() == 2 && v[1].quoted && v[1].alias.as_ref().unwrap().text.as_ref() == "odd"));
+        assert!(matches!(&imps[0].items, ImportItems::Names(v) if v.len() == 2 && v[1].alias.as_ref().unwrap().text.as_ref() == "odd"));
         assert!(matches!(&imps[1].items, ImportItems::All(_)));
         assert!(matches!(&imps[1].selector, Selector::Module { lang, path } if &*lang.text == "py" && path.len() == 1));
         assert!(matches!(&imps[2].selector, Selector::V2 { .. }));

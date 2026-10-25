@@ -1,0 +1,21 @@
+// requires: js
+// R54: imported classes and ES5 constructors are called with `new`, plain functions are not
+// (INTERNALS 11.3, 13.5).
+@js shapes {
+    class Point {
+        constructor(x) { this.x = x; }
+        twice() { return this.x * 2; }
+    }
+    function P() { this.n = 1; }
+    P.prototype.get = function () { return this.n; };
+    function plain() { return new.target === undefined; }
+    @export { Point, P, plain }
+}
+@import { Point, P, plain } from shapes
+print(Point(21).twice(), P().get() == 1, plain())
+@import { EventEmitter } from js.events
+let em = EventEmitter()
+print(type(em), em.listenerCount("x"))
+// A whole module that is a class: the handle is callable and constructs.
+@import js.events as Events
+print(Events().listenerCount("y"))

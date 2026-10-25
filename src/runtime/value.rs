@@ -30,18 +30,22 @@ pub enum Value {
     Error(Rc<ErrorValue>),
 }
 
-/// Something callable (5.1). Proxies, native functions and handle methods arrive with Phases 1-2.
+/// Something callable (5.1). Native functions arrive with Phase 2.
 pub enum Callable {
     /// A `func` (named or anonymous) with the frame it closes over. `name` is the function's
     /// name, or `func@main.v2:12` (5.7).
     Closure { decl: Rc<FuncDecl>, env: Env, name: Rc<str> },
     Builtin(&'static BuiltinDef),
+    /// A bridged export: `name` in the worker's unit `unit` (the wire unit id) (13.4).
+    Proxy { session: usize, unit: Rc<str>, name: Rc<str> },
+    /// An inner `@import`'s route stub passed back before its route resolved (11.8, 13.6).
+    Route { route: usize, name: Rc<str> },
 }
 
 impl Callable {
     pub fn name(&self) -> &str {
         match self {
-            Callable::Closure { name, .. } => name,
+            Callable::Closure { name, .. } | Callable::Proxy { name, .. } | Callable::Route { name, .. } => name,
             Callable::Builtin(def) => def.name,
         }
     }
