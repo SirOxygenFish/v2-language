@@ -1,0 +1,3 @@
+42
+ForeignError RangeError rejected
+Error | 'answer' returned a Promise during a nested cross-language call; only an outermost call can be awaited

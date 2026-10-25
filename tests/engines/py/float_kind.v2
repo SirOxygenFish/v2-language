@@ -1,0 +1,11 @@
+// requires: py
+// R02: Python keeps a float a float, both ways (INTERNALS 10.2, 10.6).
+@py rt {
+    def echo(x):
+        return x
+    @export { echo }
+}
+@import { echo } from rt
+print(type(echo(1.0)), echo(1.0), type(echo(1)))
+print(@py(x: 1.0) { type(x).__name__ }, @py(x: 1) { type(x).__name__ })
+print(type(@py { 2.0 }), type(@py { -0.0 }), @py { -0.0 })

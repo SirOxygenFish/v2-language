@@ -1,0 +1,12 @@
+// requires: js
+// R03: NaN and infinities cross as `float` tags (INTERNALS 10.2).
+@js rt {
+    function echo(x) { return x; }
+    @export { echo }
+}
+@import { echo } from rt
+let n = @js { NaN }
+print(n != n, type(n))
+let inf = 1e308 * 10
+print(echo(inf), echo(-inf), echo(inf) == inf, echo(-inf) == -inf)
+print(@js(x: inf, y: n) { [x === Infinity, Number.isNaN(y)] })

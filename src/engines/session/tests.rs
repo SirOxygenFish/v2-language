@@ -576,6 +576,13 @@ fn startup_timeout() {
     assert!(e.message.starts_with("engine 'py' did not start within 0.3 s ("), "{}", e.message);
     assert!(e.message.ends_with("); raise [engines.py] startup_timeout if it is only slow"), "{}", e.message);
     assert!(started.elapsed() < Duration::from_secs(5));
+    // 21.2: killed and Dead; a later use says why (8.2).
+    let s = it.sessions.len() - 1;
+    let later = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!(
+        (&*later.kind, &*later.message),
+        ("EngineCrashed", "engine 'py' is not running (stopped earlier: did not start within 0.3 s); engines are not restarted")
+    );
 }
 
 #[test]
@@ -598,6 +605,10 @@ fn status_9009_before_hello_is_engine_not_found() {
     let e = err_of(start(&mut it, "placeholder", no_timeouts()));
     assert_eq!(&*e.kind, "EngineNotFound");
     assert!(e.message.ends_with("is the Microsoft Store placeholder (exit code 9009)"), "{}", e.message);
+    // 21.2: Dead (SpawnFailed); a later use raises this EngineNotFound again (8.2).
+    let s = it.sessions.len() - 1;
+    let later = err_of(it.request(s, call("f"), "a call to 'f'", at()));
+    assert_eq!((&*later.kind, &*later.message), (&*e.kind, &*e.message));
 }
 
 #[test]

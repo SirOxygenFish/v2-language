@@ -1,0 +1,10 @@
+// requires: js
+// R30: a dict key "__proto__" is an ordinary key in JavaScript, not the prototype (INTERNALS 10.7).
+@js rt {
+    function echo(x) { return x; }
+    @export { echo }
+}
+@import { echo } from rt
+let d = {"__proto__": {"x": 1}}
+print(@js(d) { d.x === undefined && Object.keys(d).length === 1 })
+print(echo(d) == d, echo(d))

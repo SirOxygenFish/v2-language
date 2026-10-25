@@ -1,0 +1,3 @@
+true float
+inf -inf true true
+[true, true]

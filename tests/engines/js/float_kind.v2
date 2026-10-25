@@ -1,0 +1,11 @@
+// requires: js
+// R02: JavaScript has one number type, so a whole-valued float comes back an int, and a
+// fraction stays a float (INTERNALS 10.2, 10.7).
+@js rt {
+    function echo(x) { return x; }
+    @export { echo }
+}
+@import { echo } from rt
+print(type(echo(1.0)), echo(1.0))
+print(type(@js { 1.5 }), @js { 1.5 })
+print(@js(x: 1.0) { typeof x }, type(@js { -0 }))
