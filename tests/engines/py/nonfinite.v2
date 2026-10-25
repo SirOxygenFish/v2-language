@@ -1,0 +1,13 @@
+// requires: py
+// R03: NaN and infinities cross as `float` tags (INTERNALS 10.2).
+@py rt {
+    def echo(x):
+        return x
+    @export { echo }
+}
+@import { echo } from rt
+let n = @py { float("nan") }
+print(n != n, type(n))
+let inf = 1e308 * 10
+print(echo(inf), echo(-inf), echo(inf) == inf, echo(-inf) == -inf)
+print(@py(x: inf, y: n) { [x == float("inf"), y != y] })

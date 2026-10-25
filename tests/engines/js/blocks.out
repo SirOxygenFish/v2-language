@@ -21,3 +21,7 @@ ValueError: block arg 'class' is not a valid JavaScript name
 5
 b.txt
 [42, "default export"]
+js action runs 0
+ForeignError RangeError fail 0
+js action runs 1
+ForeignError RangeError fail 1

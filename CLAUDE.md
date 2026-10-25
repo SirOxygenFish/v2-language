@@ -18,17 +18,17 @@ it is loaded automatically into every session and every subagent.
   Bloat to trim is elsewhere: host-language extras, tooling, config, over-detailed spec text.
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: ROADMAP "Where we are". The owner gave the go-ahead on 2026-10-24 for 0.11 and Phase 1;
-  build them in order, one milestone per commit (see "In flight").
+- Status: ROADMAP "Where we are". 0.11 and Phase 1 are done (2026-10-25); Phase 2 needs the
+  owner's go-ahead.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
-- Plan: alignment commit (done 2026-10-24), then 0.11, then 1.4 → 1.10. Per milestone: read its
-  § sections, ch. 21 rows and R-tests → build + tests → cargo test + clippy on Windows and WSL →
-  run its DOCS examples → review workflow (finders + refuters) → fix with regression tests →
-  check boxes, ROADMAP log, code map below → commit.
-- Now: 1.10 (Phase 1 sweep): drafts of R01-R03, R11, R29-R31, R33 in scratchpad/t110/engines/
-  (all checked with the binary) go to tests/engines/{py,js}; R42 is in ts/strip.v2; ch. 21
-  bridged rows all map to existing tests. Then the full sweep, review, Phase 1 exit audit.
+- Plan of 2026-10-24 (0.11 + Phase 1) is done: Phase 1 complete 2026-10-25 on Windows and WSL.
+  Waiting for the owner before Phase 2 (2.1 process helper, then extern, compiled blocks).
+- Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
+  clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
+  with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
+- Scratchpad helpers (session-local): mkout.py writes a test's .out from the binary (set
+  PYTHONIOENCODING=utf-8 for output with U+FFFD); prove17/18.py are swap-out proof templates.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,

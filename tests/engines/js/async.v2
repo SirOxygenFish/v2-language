@@ -1,0 +1,29 @@
+// requires: js
+// R11: an exported async function is awaited; a rejected Promise is a ForeignError; a Promise
+// returned during a nested call is 9.8's Error (DOCS 8.4, INTERNALS 9.8).
+@js work {
+    async function answer() {
+        await new Promise((r) => setTimeout(r, 10));
+        return 42;
+    }
+    async function fail() {
+        throw new RangeError("rejected");
+    }
+    function viaV2(f) {
+        return f();
+    }
+    @export { answer, fail, viaV2 }
+}
+@import { answer, fail, viaV2 } from work
+print(answer())
+try {
+    fail()
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+// JS -> V2 -> JS: the inner call's Promise can't be awaited while JS waits on V2.
+try {
+    viaV2(func() => answer())
+} catch (e) {
+    print(e.type, "|", e.message)
+}

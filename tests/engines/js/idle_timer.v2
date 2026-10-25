@@ -1,0 +1,34 @@
+// requires: js
+// R33: a setImmediate callback scheduled during a call runs in the event-loop turn after the
+// reply, when V2 isn't waiting: calling V2 then throws 9.8's Error in JavaScript, the V2
+// function doesn't run, and the stored callback works again during a later call (INTERNALS
+// 9.8, 14.4).
+let runs = 0
+func note() {
+    runs += 1
+    return "noted"
+}
+@js timers {
+    @import { note } from v2
+    function schedule() {
+        process.v2Late = null;
+        setImmediate(() => {
+            try {
+                note();
+                process.v2Late = "ran";
+            } catch (e) {
+                process.v2Late = [e.name, e.type, e.message];
+            }
+        });
+        return "scheduled";
+    }
+    function now() {
+        return note();
+    }
+    @export { schedule, now }
+}
+@import { schedule, now } from timers
+print(schedule())
+// The turn after schedule()'s own reply ran the callback, before this block's load.
+print(@js { process.v2Late }, runs)
+print(now(), runs)

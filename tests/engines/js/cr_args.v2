@@ -1,0 +1,18 @@
+// requires: js
+// R01: a string with CR, CRLF and U+2028 crosses intact, and the replies stay in step (INTERNALS
+// 9.1: frames split on "\n" only).
+@js rt {
+    function echo(x) { return x; }
+    @export { echo }
+}
+@import { echo } from rt
+let s = "a\rb\r\nc\u{2028}d"
+let back = echo(s)
+print(back == s, len(back))
+let ok = true
+for i in 0..50 {
+    if echo(i) != i {
+        ok = false
+    }
+}
+print(ok)

@@ -1,0 +1,12 @@
+// requires: js
+// R29: ints beyond 2^53 cross as BigInt and come back unchanged; safe ints are numbers; a large
+// float stays a float (INTERNALS 10.2, 10.7).
+@js rt {
+    function echo(x) { return x; }
+    @export { echo }
+}
+@import { echo } from rt
+print(echo(2 ** 60) == 2 ** 60, type(echo(2 ** 60)))
+print(@js(x: 2 ** 60) { typeof x }, @js(x: 2 ** 53 - 1) { typeof x })
+print(type(@js { 1e20 }), @js { 1e20 })
+print(@js { 2n ** 60n }, type(@js { 2n ** 60n }))

@@ -15,3 +15,7 @@ ValueError: block arg 'pass' is not a valid Python name
 ValueError: block arg '__file__' is not a valid Python name
 [<builtin print>] true
 MarshalError: cannot send a list that contains itself (at x[1])
+py action runs 0
+ForeignError ValueError fail 0
+py action runs 1
+ForeignError ValueError fail 1
