@@ -576,13 +576,10 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    let plain = Kw::from_word(&name).is_none()
-                        && name.chars().next().is_some_and(|c| c == '_' || c.is_alphabetic())
-                        && name.chars().all(|c| c == '_' || c.is_alphabetic() || c.is_ascii_digit());
-                    if quoted && alias.is_none() && !plain {
+                    if quoted && alias.is_none() && !super::lexer::is_plain_name(&name) {
                         return Err(Diag::new(format!("quoted name '{name}' needs an alias: \"{name}\" as NAME"), t.span));
                     }
-                    items.push(ImportItem { name, quoted, alias, span: t.span });
+                    items.push(ImportItem { name, alias, span: t.span });
                     if self.at_op(Op::Comma) {
                         self.bump();
                         if matches!(self.peek(), Tok::RBrace) {

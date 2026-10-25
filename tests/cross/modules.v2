@@ -1,0 +1,57 @@
+// requires: py js
+// Modules imported inside blocks (INTERNALS 13.7): one of the block's own engine is imported at
+// load and called in the worker; another engine's goes through a route, imported when first
+// called.
+@js report {
+    @import { mean } from py.statistics
+    @import { basename } from js.path
+    function summary(xs) {
+        return `mean ${mean(xs)} of ${basename("/data/xs.txt")}`;
+    }
+    @export { summary }
+}
+@import { summary } from report
+print(summary([1, 2, 3]))
+// `*` takes just the functions, and imports the module at load even from another engine.
+@js {
+    @import { * } from py.math
+    console.log(typeof sqrt, sqrt(16), typeof pi);
+}
+// A constant: refused at load from the block's own engine, at the first call from another.
+try {
+    @py {
+        @import { pi } from py.math
+        pass
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(@js {
+    @import { pi } from py.math
+    let r;
+    try {
+        r = pi();
+    } catch (e) {
+        r = [e.type, e.message];
+    }
+    r
+})
+// A module that doesn't exist: at load from the block's own engine, at the call from another.
+try {
+    @py {
+        @import { x } from py.v2_no_such_module
+        pass
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(@js {
+    @import { x } from py.v2_no_such_module
+    let r;
+    try {
+        r = x();
+    } catch (e) {
+        r = [e.type, e.message];
+    }
+    r
+})

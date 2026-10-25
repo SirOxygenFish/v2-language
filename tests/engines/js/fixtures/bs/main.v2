@@ -1,0 +1,2 @@
+// For engines/js/backslash.v2: the who.js next to this file.
+@import { who } from js.".\\who.js"

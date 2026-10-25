@@ -1,0 +1,16 @@
+// requires: py
+// R08: a definition block in a loop loads on its first reach only; the @import after it binds
+// on every pass (INTERNALS 12.1, 13.4).
+for i in 0..3 {
+    @py counter {
+        print("loaded")
+        n = 0
+        def bump():
+            global n
+            n += 1
+            return n
+        @export { bump }
+    }
+    @import { bump } from counter
+    print(bump())
+}

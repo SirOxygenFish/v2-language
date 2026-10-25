@@ -1,0 +1,8 @@
+["V2Error", "ImportError", "block 'b' has not run yet — 'f' can't be called before it loads"]
+20
+RangeError: negative
+rebound
+ImportError | 'VERSION' is a constant — pass it in as a block arg
+["V2Error", "ImportError", "'LATER' is a constant — pass it in as a block arg"]
+["V2Error", "ImportError", "block 'f' has not run yet — 'g' can't be called before it loads"]
+101 ["V2Error", "ForeignError", "negative"]

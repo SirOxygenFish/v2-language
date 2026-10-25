@@ -1,0 +1,78 @@
+// requires: js
+// R12: packages come from Node's own lookup, here the committed node_modules folder next to
+// this file (DOCS 7, INTERNALS 13.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message)
+    }
+}
+@import { join } from js.path
+print(join("a", "b") in ["a/b", "a\\b"])
+@import { twice, VERSION } from js."v2-test-pkg"
+print(twice(21), VERSION)
+// The whole module as a handle; a package that is a function is a callable handle.
+@import js."v2-test-pkg" as pkg
+print(type(pkg), pkg.twice(4))
+@import js."v2-test-fn" as slug
+print(type(slug), slug("Hello World"))
+// An ES module through require, its default export by name.
+@import { triple, "default" as greet } from js."v2-test-esm"
+print(triple(3), greet("Ada"))
+// A local file, by a quoted path from this file's folder.
+@import { shout } from js."./helpers.js"
+print(shout("hi"))
+// `*`: the public names, functions and constants.
+func star() {
+    @import { * } from js."v2-test-pkg"
+    return [twice(2), VERSION]
+}
+print(star())
+// A missing package is an ImportError with Node's message; a missing dependency of a package
+// that exists is the package's own error.
+show(func() {
+    @import { x } from js."v2-no-such-pkg"
+    return x
+})
+try {
+    @import { x } from js."v2-test-broken"
+} catch (e) {
+    print(e.type, "|", e.foreign_type, "|", e.message.split("\n")[0])
+}
+show(func() {
+    @import { nope } from js."v2-test-pkg"
+    return nope
+})
+// A subpath a package's `exports` map doesn't list is not found either.
+@import { a } from js."v2-test-exports/a"
+print(a())
+try {
+    @import { b } from js."v2-test-exports/b"
+} catch (e) {
+    print(e.type, "|", e.message.split(" in ")[0])
+}
+// A module with top-level await goes through import(); a CommonJS module that requires one
+// runs once and fails with Node's error.
+@import { N } from js."./tla.mjs"
+print(N)
+try {
+    @import { val } from js."./wraptla.js"
+} catch (e) {
+    print(e.type, "|", e.foreign_type, "|", e.message.split("\n")[0])
+}
+// A module whose export is null has no names.
+show(func() {
+    @import { x } from js."./null_export.js"
+    return x
+})
+@import js."./null_export.js" as nul
+print(nul)
+func nothing() {
+    @import { * } from js."./null_export.js"
+    return "no names"
+}
+print(nothing())
+// ts.x is the module js.x: one unit, so the same function.
+@import { twice as t2 } from ts."v2-test-pkg"
+print(t2 == twice)

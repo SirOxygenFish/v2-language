@@ -1,0 +1,6 @@
+[log] hello from Python
+["HI", false]
+["NameError", "'late' is not defined at the top level of v2_selector.v2"]
+late
+["TypeError", "'DATA' is not a function"]
+ImportError | 'nowhere' is not a top-level name in v2_selector.v2

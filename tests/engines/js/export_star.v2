@@ -1,0 +1,31 @@
+// requires: js
+// R43: in a JavaScript block @export { * } takes top-level function declarations and vars
+// holding functions; const, let and class names must be listed (DOCS 6.1, INTERNALS 12.4).
+@js tools {
+    function double(x) { return x * 2; }
+    var viaVar = function () { return "var"; };
+    var base = require("path").basename;
+    var notAFunction = 5;
+    const arrow = () => "arrow";
+    const listed = () => "listed";
+    function _private() {}
+    @export { *, listed }
+}
+@import { double, viaVar, base, listed } from tools
+print(double(2), viaVar(), base("a/b.txt"), listed())
+func show(name, f) {
+    try {
+        f()
+    } catch (e) {
+        print(name, "|", e.message)
+    }
+}
+show("arrow", func() {
+    @import { arrow } from tools
+})
+show("notAFunction", func() {
+    @import { notAFunction } from tools
+})
+show("_private", func() {
+    @import { _private } from tools
+})

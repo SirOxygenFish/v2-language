@@ -1,0 +1,44 @@
+// requires: py
+// 13.3's lists: three blocks, and an unlabeled block named by its place (INTERNALS 13.3).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+@py stats {
+    def mean(xs):
+        return 1
+    def spread(xs):
+        return 0
+    @export { mean, spread }
+}
+@py calc {
+    def mean(xs):
+        return 2
+    @export { mean }
+}
+@py third {
+    def mean(xs):
+        return 3
+    @export { mean }
+}
+show(func() {
+    @import { mean } from @py
+    return mean
+})
+// An unlabeled block: the advice changes.
+@py {
+    def solo():
+        return "solo"
+    def spread(xs):
+        return 1
+    @export { solo, spread }
+}
+show(func() {
+    @import { spread } from @py
+    return spread
+})
+@import { solo } from @python
+print(solo())

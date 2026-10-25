@@ -1,0 +1,47 @@
+// requires: py js
+// R13: DOCS 17.1, the full tour, verbatim (with math_ops.py next to it).
+@import { bonus } from py.math_ops           // a local Python file
+@import { mean } from py.statistics          // Python's standard library
+
+print(bonus(5))                              // 22
+print(mean([10, 20, 30]))                    // 20
+
+@py {
+    from math_ops import bonus
+    def py_bonus(x):
+        return bonus(x)
+    @export { py_bonus }
+}
+
+@py calculations {
+    def py_square(x):
+        return x * x
+    @export { py_square }
+}
+
+@import { py_bonus } from @py                // all @py blocks
+@import { py_square } from calculations      // by label
+@import { py_square as square } from @py.calculations   // exact
+
+@js {
+    @import { py_bonus } from @py
+    function js_bonus_twice(x) {
+        return py_bonus(x) * 2;
+    }
+    @export { js_bonus_twice }
+}
+
+@js reports {
+    @import { py_bonus } from @py
+    @import { py_square } from @py.calculations
+    function js_combo(x) {
+        return py_bonus(x) + py_square(x);
+    }
+    @export { js_combo }
+}
+
+@import { js_bonus_twice } from @js
+@import { js_combo } from reports
+
+print(js_bonus_twice(5))     // 44
+print(js_combo(5))           // 47

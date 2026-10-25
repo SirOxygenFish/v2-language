@@ -399,6 +399,20 @@ if __name__ == "__main__":
         def __repr__(self):
             return "<V2 function " + self.__name__ + ">"
 
+    class RouteFunction(object):
+        """A function an inner @import brings in through V2: another engine's, or V2's (13.7)."""
+
+        def __init__(self, route, name):
+            self._route = route
+            self.__name__ = name
+            self.__qualname__ = name
+
+        def __call__(self, *args, **kwargs):
+            return host_call({"route": self._route}, args, kwargs, self.__name__)
+
+        def __repr__(self):
+            return "<V2 function " + self.__name__ + ">"
+
     _stubs = weakref.WeakValueDictionary()  # callable id -> its one stub
 
     def _release_fn(cell):
@@ -469,6 +483,8 @@ if __name__ == "__main__":
         if isinstance(x, V2Function):
             _pinned.append(x)
             return {"$v2": "fn", "id": x._cell.id}
+        if isinstance(x, RouteFunction):
+            return {"$v2": "fn", "route": x._route}
         if isinstance(x, V2Error):
             return error_tag(x, depth, path)
         return handle_tag(x)
@@ -718,7 +734,7 @@ if __name__ == "__main__":
 
     _root = [None]
     _file_dirs = set()
-    units = {}  # wire unit id -> (module, {name: kind}) for loaded definitions (14.2)
+    units = {}  # wire unit id -> (namespace, {name: kind}); modules: (module, None) (14.2)
 
     def add_file_dir(path):
         """A .v2 file's folder goes before the project root on sys.path at its first load (9.3)."""
@@ -733,10 +749,65 @@ if __name__ == "__main__":
             sys.path.remove(d)
         sys.path.insert(sys.path.index(root) if root in sys.path else 0, d)
 
-    def check_name(k):
+    def check_name(k, what="block arg"):
         if not k.isidentifier() or keyword.iskeyword(k) or (k.startswith("__") and k.endswith("__")):
-            raise Fail("ValueError", "block arg '%s' is not a valid Python name" % k)
+            raise Fail("ValueError", "%s '%s' is not a valid Python name" % (what, k))
         return k
+
+    _absent = object()
+
+    def module_attr(mod, n):
+        """`n` of a module: an attribute, else its submodule (13.5); _absent when neither."""
+        try:
+            return getattr(mod, n)
+        except AttributeError:
+            pass
+        sub = "%s.%s" % (mod.__name__, n)
+        try:
+            return importlib.import_module(sub)
+        except ModuleNotFoundError as e:
+            if e.name == sub:
+                return _absent
+            raise
+
+    def unit_attr(unit, name):
+        """`name` in a unit of this session, looked up now (12.3, 13.5)."""
+        ns, kinds = units[unit]
+        if kinds is None:
+            v = module_attr(ns, name)
+            if v is _absent:
+                raise Fail("NameError", "'%s' is no longer defined" % name)
+            return v
+        g = ns.__dict__
+        if name not in g:
+            raise Fail("NameError", "'%s' is no longer defined" % name)
+        return g[name]
+
+    def unit_stub(unit, name, block, alias):
+        """An inner @import from this session: calls it here, looked up at every call (13.7)."""
+
+        def stub(*args, **kwargs):
+            u = units.get(unit)
+            if u is None:
+                raise V2Error("ImportError", "%s has not run yet — '%s' can't be called before it loads" % (block, name))
+            if u[1] is not None and u[1].get(name) == "value":
+                raise V2Error("ImportError", "'%s' is a constant — pass it in as a block arg" % name)
+            try:
+                f = unit_attr(unit, name)
+            except Fail as e:
+                raise NameError(e.message)
+            return f(*args, **kwargs)
+
+        stub.__name__ = stub.__qualname__ = alias
+        return stub
+
+    def bind_imports(g, imports):
+        for e in imports:
+            alias = check_name(e["as"], "@import name")
+            if "route" in e:
+                g[alias] = RouteFunction(e["route"], alias)
+            else:
+                g[alias] = unit_stub(e["unit"], e["name"], e.get("block"), alias)
 
     def unique_name(base):
         name, n = base, 1
@@ -799,6 +870,7 @@ if __name__ == "__main__":
         g["__file__"], g["__builtins__"] = path, builtins
         for k, v in m["args"].items():
             g[check_name(k)] = decode(v)
+        bind_imports(g, m.get("imports") or [])
         try:
             tree = ast.parse("\n" * (first - 1) + m["source"], path, "exec")
             tail = None
@@ -845,14 +917,56 @@ if __name__ == "__main__":
             return True
         return t.__module__ == "numpy" and t.__name__ == "ndarray"
 
+    def do_module(m):
+        """A module unit (13.5): imported once per unit, then the names asked for."""
+        add_file_dir(m["from"])
+        unit = m["unit"]
+        if unit not in units:
+            name = m["name"]
+            try:
+                mod = importlib.import_module(name)
+            except ModuleNotFoundError as e:
+                # Only the module asked for (or a parent of it) missing is an ImportError; a
+                # missing dependency is the module's own failure.
+                if e.name is not None and (name == e.name or name.startswith(e.name + ".")):
+                    raise Fail("ImportError", str(e))
+                raise
+            units[unit] = (mod, None)
+        mod = units[unit][0]
+        names = m.get("names")
+        if names is None:
+            return {"value": handle_tag(mod), "exports": [], "missing": []}
+        if names == "*":
+            public = getattr(mod, "__all__", None)
+            names = list(public) if public is not None else [k for k in list(vars(mod)) if not k.startswith("_")]
+        exports, missing, seen = [], [], set()
+        for n in names:
+            if not isinstance(n, str) or n != well_formed(n) or n in seen:
+                continue
+            seen.add(n)
+            v = module_attr(mod, n)
+            if v is _absent:
+                missing.append(n)
+            elif callable(v):
+                exports.append({"name": n, "kind": "func"})
+            else:
+                exports.append({"name": n, "kind": "value", "value": encode_value(v, n)})
+        return {"value": None, "exports": exports, "missing": missing}
+
     def do_call(m):
         target = m.get("target") or {}
-        if "h" not in target:
+        if "unit" in target:
+            if target["unit"] not in units:
+                raise Fail("ProtocolError", "unknown unit %s" % target["unit"])
+            name = target["name"]
+            f = unit_attr(target["unit"], name)
+        elif "h" in target:
+            obj = handle_entry(target["h"])[0]
+            method = target.get("method")
+            f = getattr(obj, method) if method is not None else obj
+            name = method if method is not None else getattr(obj, "__name__", type_name(obj))
+        else:
             raise Fail("ProtocolError", "a call target V2's Python adapter does not serve")
-        obj = handle_entry(target["h"])[0]
-        method = target.get("method")
-        f = getattr(obj, method) if method is not None else obj
-        name = method if method is not None else getattr(obj, "__name__", type_name(obj))
         args = [decode(a) for a in m.get("args") or []]
         kwargs = {k: decode(v) for k, v in (m.get("kwargs") or {}).items()}
         value = f(*args, **kwargs)
@@ -900,7 +1014,7 @@ if __name__ == "__main__":
             return surrogate_check(str.__str__(x))
         if t is bytes:
             return {"$v2": "bytes", "b64": base64.b64encode(x).decode("ascii")}
-        if isinstance(x, (V2Function, V2Error)):
+        if isinstance(x, (V2Function, RouteFunction, V2Error)):
             return encode(x, depth, path)  # V2's own values go back as they came (10.6)
         if depth >= MAX_DEPTH:
             raise Fail("MarshalError", "to_v2(): value nested deeper than %d levels" % MAX_DEPTH)
@@ -994,7 +1108,7 @@ if __name__ == "__main__":
             return {"value": {"items": items, "done": done}}
         raise Fail("ProtocolError", "unknown op '%s'" % op)
 
-    HANDLERS = {"init": do_init, "load": do_load, "call": do_call, "op": do_op}
+    HANDLERS = {"init": do_init, "load": do_load, "module": do_module, "call": do_call, "op": do_op}
 
     def plain_err(rid, kind, message):
         return {"t": "err", "id": rid, "error": {"type": kind, "message": message, "foreign_type": None, "trace": []}}

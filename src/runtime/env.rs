@@ -22,6 +22,8 @@ pub struct Frame {
 pub struct Slot {
     pub value: Value,
     pub is_const: bool,
+    /// Bound by `@import { * }`, which the static checks can't see (5.6).
+    pub star: bool,
 }
 
 pub enum AssignError {
@@ -35,9 +37,21 @@ pub fn new_frame(parent: Option<&Env>) -> Env {
     Rc::new(RefCell::new(Frame { vars: IndexMap::new(), parent: parent.cloned(), closures: 0 }))
 }
 
-/// Declare `name` in `env` itself. Redeclaration is a static error (4.5), so this replaces.
+/// Declare `name` in `env` itself. Redeclaration is a static error (4.5), so this replaces;
+/// only a name `@import { * }` bound can clash at run time (`star_bound`).
 pub fn declare(env: &Env, name: Rc<str>, value: Value, is_const: bool) {
-    env.borrow_mut().vars.insert(name, Slot { value, is_const });
+    env.borrow_mut().vars.insert(name, Slot { value, is_const, star: false });
+}
+
+/// A const bound by `@import { * }` (13.4).
+pub fn declare_star(env: &Env, name: Rc<str>, value: Value) {
+    env.borrow_mut().vars.insert(name, Slot { value, is_const: true, star: true });
+}
+
+/// Whether `name` in `env` itself was bound by `@import { * }`: declaring it again is 5.6's
+/// NameError.
+pub fn star_bound(env: &Env, name: &str) -> bool {
+    env.borrow().vars.get(name).is_some_and(|s| s.star)
 }
 
 pub fn lookup(env: &Env, name: &str) -> Option<Value> {

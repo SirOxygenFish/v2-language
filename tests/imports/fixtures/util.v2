@@ -1,0 +1,20 @@
+// A module for imports/files.v2: it imports a Python module's function and has a block of
+// its own.
+@import { mean } from py.statistics
+
+@py helpers {
+    def local():
+        return "util's block"
+    @export { local }
+}
+@import { local } from helpers
+
+// `@py` here means util.v2's blocks only, so this finds only `helpers`, not main's `stats`.
+func from_main_py() {
+    try {
+        @import { mean } from @py
+        return mean([1])
+    } catch (e) {
+        return e.message
+    }
+}

@@ -1,0 +1,18 @@
+// requires: py
+// R10: named args reach Python as keyword arguments (INTERNALS 10.8, 13.4).
+@py text {
+    def join(*parts, sep=" "):
+        return sep.join(str(p) for p in parts)
+    @export { join }
+}
+@import { join } from text
+print(join(1, 2, sep: "-"))
+print(join(1, 2))
+try {
+    join(1, colour: "red")
+} catch (e) {
+    print(e.type, "|", e.foreign_type, "|", e.message)
+}
+// A module's functions take them too.
+@import { dumps } from py.json
+print(dumps({b: 1, a: 2}, sort_keys: true))

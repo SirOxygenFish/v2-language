@@ -1,8 +1,9 @@
 loading
 true ForeignError ValueError nope
+ImportError | block 'bad' failed to load: nope
 partial runs once
-ImportError | @export lists 'b' but block 'partial' does not define it | 24 26
-ImportError | @export lists 'b' but block 'partial' does not define it | 24 26
+ImportError | @export lists 'b' but block 'partial' does not define it | 30 26
+ImportError | @export lists 'b' but block 'partial' does not define it | 30 26
 ImportError | block 'again' is still loading (reached again during its own load)
 ImportError | block 'again' is still loading (reached again during its own load)
 0

@@ -1,24 +1,26 @@
 // requires: py
-// A worker that dies during a block: EngineCrashed now and at every later use (INTERNALS 8.2, 8.6).
+// R18: a worker that dies during a call: EngineCrashed naming its exit status, then "is not
+// running" at the next call; the script goes on (INTERNALS 8.2, 8.6).
 func show(f) {
     try {
         f()
     } catch (e) {
         print(e.type, "|", e.message.starts_with("engine 'py' (pid "), "|", e.message.split(") exited")[-1])
-        return e
     }
 }
-let kept = @py { object() }
-show(func() => @py { import os; os._exit(3) })
+@py dies {
+    import os
+    def die():
+        os._exit(3)
+    def fine():
+        return 1
+    @export { die, fine }
+}
+@import { die, fine } from dies
+show(die)
 try {
-    @py { 1 }
+    fine()
 } catch (e) {
     print(e.type, "|", e.message)
 }
 print("the script continues")
-// A handle of the dead engine fails the same way (INTERNALS 11.7).
-try {
-    print(kept.anything)
-} catch (e) {
-    print(e.type)
-}

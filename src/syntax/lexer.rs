@@ -115,6 +115,12 @@ enum StrKind {
     Bytes,
 }
 
+/// A name V2 can write bare: an identifier that is not a keyword (13.4).
+pub fn is_plain_name(s: &str) -> bool {
+    let mut cs = s.chars();
+    cs.next().is_some_and(is_ident_start) && cs.all(is_ident_continue) && crate::syntax::token::Kw::from_word(s).is_none()
+}
+
 fn is_ident_start(c: char) -> bool {
     c == '_' || c.is_alphabetic()
 }

@@ -1,0 +1,4 @@
+4 var b.txt listed
+arrow | 'arrow' is not exported by 'tools' (did the block @export it?)
+notAFunction | 'notAFunction' is not exported by 'tools' (did the block @export it?)
+_private | '_private' is not exported by 'tools' (did the block @export it?)

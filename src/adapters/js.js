@@ -504,6 +504,17 @@ function stubFor(id, name) {
   return s;
 }
 
+const routeStubs = new WeakMap(); // route stub -> route id (13.7)
+
+function routeStub(route, name) {
+  // A function an inner @import brings in through V2: another engine's, or V2's (13.7).
+  const s = { [name]: function (...args) { return hostCall({ route }, args, name); } }[name];
+  routeStubs.set(s, route);
+  return s;
+}
+
+const isV2Function = (x) => typeof x === 'function' && (stubCells.has(x) || routeStubs.has(x));
+
 // ---------------------------------------------------------------------------------------------
 // Marshaling (10.2-10.5, 10.7)
 
@@ -556,6 +567,7 @@ function encode(x, depth = 0, open = new Set()) {
     pinned.push(x);
     return { $v2: 'fn', id: stubCells.get(x).id };
   }
+  if (t === 'function' && routeStubs.has(x)) return { $v2: 'fn', route: routeStubs.get(x) };
   if (t !== 'object') return handleTag(x);
   if (x instanceof V2Error) return errorTag(x, depth, open);
   if (util.types.isUint8Array(x)) return { $v2: 'bytes', b64: Buffer.from(x.buffer, x.byteOffset, x.byteLength).toString('base64') };
@@ -812,8 +824,8 @@ const RESERVED = new Set(('break case catch class const continue debugger defaul
   'yield let static implements interface package private protected public await').split(' '));
 const PROVIDED = new Set(['undefined', 'NaN', 'Infinity', 'globalThis', '__proto__']);
 
-function checkName(k) {
-  if (!IDENT.test(k) || RESERVED.has(k) || PROVIDED.has(k)) throw new Fail('ValueError', `block arg '${k}' is not a valid JavaScript name`);
+function checkName(k, what = 'block arg') {
+  if (!IDENT.test(k) || RESERVED.has(k) || PROVIDED.has(k)) throw new Fail('ValueError', `${what} '${k}' is not a valid JavaScript name`);
   return k;
 }
 
@@ -887,7 +899,93 @@ function stripTypes(src, m) {
   }
 }
 
-const units = new Map(); // wire unit id -> {ctx, get, kinds} for loaded definitions (14.2)
+const units = new Map(); // wire unit id -> {ctx, get, kinds} for definitions, {mod} for modules (14.2)
+
+function inheritedBuiltin(o, n) {
+  // `n` found on Object.prototype or Function.prototype only (13.5).
+  for (let p = o; p !== null && p !== undefined; p = Object.getPrototypeOf(p)) {
+    if (Object.prototype.hasOwnProperty.call(p, n)) return p === Object.prototype || p === Function.prototype;
+  }
+  return false;
+}
+
+function holds(o, n) {
+  if (o === null || (typeof o !== 'object' && typeof o !== 'function')) return false;
+  try {
+    return n in o && !inheritedBuiltin(o, n);
+  } catch {
+    return false;
+  }
+}
+
+function moduleAttr(mod, n) {
+  // [value, the object it is read from] of a module's `n`, or null (13.5).
+  if (mod === null || mod === undefined) return null;
+  if (n === 'default') return [mod.default ?? mod, mod];
+  if (holds(mod, n)) return [mod[n], mod];
+  const d = mod.default;
+  if (holds(d, n)) return [d[n], d];
+  return null;
+}
+
+function unitAttr(u, name) {
+  // [value, this] of `name` in a unit of this session, looked up now (12.4, 13.5).
+  if ('mod' in u) {
+    const r = moduleAttr(u.mod, name);
+    if (!r) throw new Fail('NameError', `'${name}' is no longer defined`);
+    return r;
+  }
+  try {
+    return [exportLookup(u, name), undefined];
+  } catch (e) {
+    if (e && e.name === 'ReferenceError') throw new Fail('NameError', `'${name}' is no longer defined`);
+    throw e;
+  }
+}
+
+function unitStub(unit, name, block, alias) {
+  // An inner @import from this session, looked up at every use (13.7). A Proxy, so calls, `new`,
+  // `instanceof`, `class X extends` and static members all reach the current target (11.3).
+  const current = () => {
+    const u = units.get(unit);
+    if (!u) throw new V2Error('ImportError', `${block} has not run yet \u2014 '${name}' can't be called before it loads`);
+    if (u.kinds && u.kinds.get(name) === 'value') throw new V2Error('ImportError', `'${name}' is a constant \u2014 pass it in as a block arg`);
+    try {
+      return unitAttr(u, name);
+    } catch (e) {
+      if (e instanceof Fail) throw new ReferenceError(e.message);
+      throw e;
+    }
+  };
+  const stub = new Proxy({ [alias]: function () {} }[alias], {
+    apply(_, _this, args) {
+      const [f, self] = current();
+      if (typeof f !== 'function') throw new TypeError(`${name} is not a function`);
+      return invoke(f, self, args);
+    },
+    construct(_, args, newTarget) {
+      const [f] = current();
+      if (typeof f !== 'function') throw new TypeError(`${name} is not a constructor`);
+      return Reflect.construct(f, args, newTarget === stub ? f : newTarget);
+    },
+    get(_, k) {
+      const [f] = current();
+      return f === null || f === undefined ? undefined : Reflect.get(Object(f), k);
+    },
+  });
+  return stub;
+}
+
+function bindImports(ctx, imports) {
+  for (const e of imports) {
+    const alias = checkName(e.as, '@import name');
+    defineData(ctx, alias, 'route' in e ? routeStub(e.route, alias) : unitStub(e.unit, e.name, e.block, alias));
+  }
+}
+
+function defineData(ctx, k, v) {
+  Object.defineProperty(ctx, k, { value: v, writable: true, configurable: true, enumerable: true });
+}
 
 function exportLookup(unit, name) {
   let get = unit.get.get(name);
@@ -962,9 +1060,8 @@ function doLoad(m) {
   const src = m.lang === 'ts' ? stripTypes(m.source, m) : m.source;
   rememberSource(m.file, m.line, src);
   const ctx = newContext(m.file);
-  for (const [k, v] of Object.entries(m.args)) {
-    Object.defineProperty(ctx, checkName(k), { value: decode(v), writable: true, configurable: true, enumerable: true });
-  }
+  for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));
+  bindImports(ctx, m.imports || []);
   const script = compileOrExplain(src, m);
   const before = new Set(Object.getOwnPropertyNames(ctx));
   return settle(script.runInContext(ctx), (v) => {
@@ -980,6 +1077,66 @@ function doLoad(m) {
 function doInit() {
   return { value: null };
 }
+
+function moduleReply(mod, names) {
+  const nothing = mod === null || mod === undefined;
+  if (names === null || names === undefined) return { value: nothing ? null : handleTag(mod), exports: [], missing: [] };
+  if (names === '*') {
+    const keys = new Set();
+    const d = nothing ? null : mod.default;
+    for (const o of [nothing ? null : mod, d !== null && typeof d === 'object' && d !== mod ? d : null]) {
+      if (o === null || (typeof o !== 'object' && typeof o !== 'function')) continue;
+      for (const k of Object.keys(o)) if (k !== 'default' && k !== '__esModule' && !k.startsWith('_')) keys.add(k);
+    }
+    names = [...keys];
+  }
+  const exports = [];
+  const missing = [];
+  const seen = new Set();
+  for (const n of names) {
+    if (typeof n !== 'string' || !n.isWellFormed() || seen.has(n)) continue;
+    seen.add(n);
+    const r = moduleAttr(mod, n);
+    if (!r) missing.push(n);
+    else if (typeof r[0] === 'function') exports.push({ name: n, kind: 'func' });
+    else exports.push({ name: n, kind: 'value', value: encodeValue(r[0], n) });
+  }
+  return { value: null, exports, missing };
+}
+
+function doModule(m) {
+  // A module unit (13.5): loaded once per unit through require (ES modules too), then the names
+  // asked for.
+  const u = units.get(m.unit);
+  if (u) return moduleReply(u.mod, m.names);
+  const loaded = (mod) => {
+    units.set(m.unit, { mod });
+    return moduleReply(mod, m.names);
+  };
+  const req = Module.createRequire(m.from);
+  try {
+    req.resolve(m.name);
+  } catch (e) {
+    // Not found: resolving looks only for the module asked for, not the ones it requires.
+    if (e && NOT_FOUND.has(e.code)) throw new Fail('ImportError', String(e.message).split('\n')[0]);
+    throw e;
+  }
+  let mod;
+  try {
+    mod = req(m.name);
+  } catch (e) {
+    // Top-level await in the module or its ES module graph; when a CommonJS module it loads
+    // requires one, Node names that module on the "From" line, and the module has already run.
+    const from = /\n\s*From (.*\S)\s*(\n|$)/.exec(String(e && e.message));
+    if (e && e.code === 'ERR_REQUIRE_ASYNC_MODULE' && (!from || from[1] === m.from)) {
+      return settle(import(entryUrl(m.name, m.from)), loaded, `the module '${m.name}' uses top-level await, so its import is a Promise`);
+    }
+    throw e;
+  }
+  return loaded(mod);
+}
+
+const NOT_FOUND = new Set(['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_UNKNOWN_BUILTIN_MODULE']);
 
 // ---------------------------------------------------------------------------------------------
 // Handles: calls and operations (9.5, 11.3-11.5)
@@ -1028,11 +1185,20 @@ function invoke(f, self, args) {
 
 function doCall(m) {
   const target = m.target || {};
-  if (!('h' in target)) throw new Fail('ProtocolError', "a call target V2's JavaScript adapter does not serve");
-  const obj = handleEntry(target.h).obj;
   const args = (m.args || []).map(decode);
   let name;
   let result;
+  if ('unit' in target) {
+    const u = units.get(target.unit);
+    if (!u) throw new Fail('ProtocolError', `unknown unit ${target.unit}`);
+    name = target.name;
+    const [f, self] = unitAttr(u, name);
+    if (typeof f !== 'function') throw new TypeError(`${name} is not a function`);
+    result = invoke(f, self, args);
+    return settle(result, (v) => ({ value: encodeValue(v, 'value') }), `'${name}' returned a Promise`);
+  }
+  if (!('h' in target)) throw new Fail('ProtocolError', "a call target V2's JavaScript adapter does not serve");
+  const obj = handleEntry(target.h).obj;
   if ('method' in target) {
     name = target.method;
     const f = obj[name];
@@ -1105,7 +1271,7 @@ function toV2(x, depth = 0, open = new Set()) {
     return encode(x);
   }
   if (util.types.isUint8Array(x)) return encode(x);
-  if ((typeof x === 'function' && stubCells.has(x)) || x instanceof V2Error) return encode(x, depth, open); // V2's own values (10.7)
+  if (isV2Function(x) || x instanceof V2Error) return encode(x, depth, open); // V2's own values (10.7)
   if (depth >= MAX_DEPTH) throw new Fail('MarshalError', `to_v2(): value nested deeper than ${MAX_DEPTH} levels`);
   const isMap = util.types.isMap(x);
   const list = Array.isArray(x) || util.types.isSet(x);
@@ -1247,7 +1413,7 @@ function doOp(m) {
   throw new Fail('ProtocolError', `unknown op '${m.op}'`);
 }
 
-const HANDLERS = { init: doInit, load: doLoad, call: doCall, op: doOp };
+const HANDLERS = { init: doInit, load: doLoad, module: doModule, call: doCall, op: doOp };
 
 // ---------------------------------------------------------------------------------------------
 // The loop (14.2)
@@ -1369,10 +1535,15 @@ async function main() {
     if (m.t === 'ret' || m.t === 'err') fatal(`a reply to request ${m.id}, which V2's adapter is not waiting for`);
     if (Object.prototype.hasOwnProperty.call(HANDLERS, m.t)) {
       await handle(m);
-      // One event-loop turn after each outermost reply: timers, finalizers (14.4, 11.9).
-      if (stubsSinceTurn > GC_AFTER) gc();
-      stubsSinceTurn = 0;
+      // One event-loop turn after each outermost reply: timers, finalizers (14.4, 11.9). V8
+      // keeps WeakRef targets (every new stub) until the job ends, so a collection for many new
+      // stubs comes after the turn, and its finalizers run in one more.
       await new Promise((r) => setImmediate(r));
+      if (stubsSinceTurn > GC_AFTER) {
+        gc();
+        await new Promise((r) => setImmediate(r));
+      }
+      stubsSinceTurn = 0;
     } else {
       dispatchOther(m);
     }

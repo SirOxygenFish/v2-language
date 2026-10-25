@@ -402,7 +402,7 @@ impl Interp {
     }
 
     /// The use of a session that is not running (8.2, 8.6).
-    fn check_alive(&mut self, s: SessionId, at: Span) -> Exec<()> {
+    pub(crate) fn check_alive(&mut self, s: SessionId, at: Span) -> Exec<()> {
         let tag = self.tag(s);
         if let Some(flow) = self.not_running(s) {
             return Err(self.raise(flow, at));
@@ -496,7 +496,7 @@ impl Interp {
             releases: &session.releases,
             callables: &mut session.callables,
             sm: &self.sm,
-            route: &|_| None,
+            routes: &self.routes,
         }
     }
 
@@ -616,8 +616,15 @@ impl Interp {
                 }
                 None => fail("ProtocolError", format!("unknown callable id {n}")),
             },
-            // Routes of inner `@import`s arrive in roadmap 1.7; until then no worker has one.
-            Target::Route(n) => fail("ProtocolError", format!("unknown callable id {n}")),
+            Target::Route(n) => {
+                self.xdepth += 1;
+                let r = match usize::try_from(n) {
+                    Ok(n) => self.call_route(n, pos, named, at),
+                    Err(_) => fail("ProtocolError", format!("unknown callable id {n}")),
+                };
+                self.xdepth -= 1;
+                r
+            }
         };
         if let Err(Flow::Exit(code)) = result {
             return Err(Flow::Exit(code));
