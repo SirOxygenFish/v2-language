@@ -1,0 +1,120 @@
+// requires: py
+// R16: foreign frames carry .v2 lines and columns (INTERNALS 2.3, 2.5, 12.6). Lines 10-14 are
+// the block `risky`; its error is raised on line 12.
+func show(e) {
+    print(e.type, e.foreign_type, e.lang, e.line, e.col)
+    print(e.trace)
+}
+
+
+@py risky {
+    def boom(x):
+        raise ValueError(f"bad {x}")
+    @export { boom }
+}
+@import { boom } from risky
+try {
+    boom(1)
+} catch (e) {
+    show(e)
+}
+// At a block's top level, in an unlabeled block: no function name.
+try {
+    @py { raise KeyError("k") }
+} catch (e) {
+    show(e)
+}
+// Columns count characters, not UTF-8 bytes.
+@py wide {
+    def plus(x):
+        y = "üü"; return y + x
+    @export { plus }
+}
+@import { plus } from wide
+try {
+    plus(1)
+} catch (e) {
+    print(e.foreign_type, e.line, e.col)
+}
+// An error inside a library: no frame maps into a block, so it points at the V2 call.
+@import { mean } from py.statistics
+try {
+    mean([])
+} catch (e) {
+    print(e.foreign_type, e.line, e.trace[0].ends_with(", in py)"), e.trace[-1])
+}
+// A chained cause keeps its own frames.
+@py chain {
+    def outer():
+        try:
+            {}["missing"]
+        except KeyError as k:
+            raise ValueError("outer") from k
+    @export { outer }
+}
+@import { outer } from chain
+try {
+    outer()
+} catch (e) {
+    print(e.message, "|", e.cause.foreign_type, e.cause.line, e.cause.trace)
+}
+// A syntax error in a block points at its line.
+try {
+    @py {
+        x = 1
+        y = (2
+    }
+} catch (e) {
+    print(e.foreign_type, e.line)
+}
+// A SyntaxError from the compiler counts columns in characters too.
+try {
+    @py {
+        print("été à côté"); break
+    }
+} catch (e) {
+    print(e.foreign_type, e.line, e.col)
+}
+// A V2 error first raised by Python keeps V2's frames after Python's.
+@py thrower {
+    def t(e):
+        raise e
+    @export { t }
+}
+@import { t } from thrower
+func go() {
+    return t(error("ValueError", "made in v2"))
+}
+try {
+    go()
+} catch (e) {
+    print(e.type, e.line, e.trace)
+}
+// A module's top level keeps Python's name for it, `<module>`.
+try {
+    @import { x } from py.raise_at_import
+} catch (e) {
+    print(e.foreign_type, e.trace[0].starts_with("<module> ("), e.trace[0].ends_with("raise_at_import.py:2, in py)"))
+}
+// A column from the worker past the line is no column, not a crash.
+try {
+    @py { raise SyntaxError("fake", (__file__, 101, 4294967295, "x")) }
+} catch (e) {
+    print(e.foreign_type, e.line, e.col)
+}
+// When one-line blocks of two engines share a line, the error is in the one whose engine raised it.
+try {
+    let a = @js { 1 }; let b = @py(x: 0) { 10 / x }
+} catch (e) {
+    print(e.foreign_type, e.lang, e.col, e.trace[0])
+}
+// An `@@export` escape loses one `@`; the column still points at the .v2 text.
+try {
+    @py {
+        @@export (1)
+        def f():
+            pass
+    }
+} catch (e) {
+    print(e.foreign_type, e.line, e.col)
+}

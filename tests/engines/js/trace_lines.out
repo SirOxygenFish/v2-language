@@ -1,0 +1,9 @@
+ForeignError RangeError js 12 15
+["boom (trace_lines.v2:12, in @js risky)", "trace_lines.v2:18"]
+ForeignError TypeError ts 24 17
+["trace_lines.v2:24, in @ts block at trace_lines.v2:24", "trace_lines.v2:24"]
+30 42
+outer | TypeError 43 ["outer (trace_lines.v2:43, in @js chain)"]
+SyntaxError 60 21
+SyntaxError 67 36
+after the separators: 5 75 15 boom (trace_lines.v2:75, in @js sep)

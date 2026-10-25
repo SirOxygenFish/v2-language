@@ -40,19 +40,23 @@ pub struct UnitLoc {
     pub line_count: u32,
     /// Body lines left undedented (4.4 step 3), sorted.
     pub kept: Rc<[u32]>,
+    /// Body lines that lost one `@` of an `@@export`/`@@import` escape, and the column of the
+    /// processed line where it was (4.4).
+    pub escaped: Rc<[(u32, u32)]>,
 }
 
 impl UnitLoc {
-    /// The `.v2` column of foreign column `fcol` on `body_line` (both 1-based); without a
-    /// column, the caller uses the first non-blank column of the line (2.3).
-    #[allow(dead_code)] // used by foreign error mapping (roadmap 1.8)
-    pub fn col(&self, body_line: u32, fcol: u32) -> u32 {
+    /// The `.v2` column of foreign column `fcol` on `body_line` (both 1-based), or `None` past
+    /// any line; without a column, the caller uses the first non-blank column of the line (2.3).
+    pub fn col(&self, body_line: u32, fcol: u32) -> Option<u32> {
+        let escaped = self.escaped.iter().any(|&(line, at)| line == body_line && fcol >= at);
+        let fcol = fcol.checked_add(escaped as u32)?;
         if body_line == 1 {
-            self.body_col + fcol - 1
+            self.body_col.checked_add(fcol)?.checked_sub(1)
         } else if self.kept.binary_search(&body_line).is_ok() {
-            fcol
+            Some(fcol)
         } else {
-            self.dedent_width + fcol
+            self.dedent_width.checked_add(fcol)
         }
     }
 }

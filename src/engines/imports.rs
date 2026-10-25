@@ -23,6 +23,8 @@ pub struct FileScope {
     pub frame: Env,
     /// The definition blocks, in source order, reached or not (13.3's candidates).
     blocks: Vec<Rc<EngineBlock>>,
+    /// Every block, by body line, for mapping foreign frames (2.3, 12.6).
+    pub bodies: Vec<Rc<EngineBlock>>,
     /// The names declared at the top level, for the `v2` selector (13.7).
     top: HashSet<Rc<str>>,
     /// The top-level `func`s in order, for `@import { * } from v2`.
@@ -33,9 +35,10 @@ pub struct FileScope {
 
 impl FileScope {
     pub fn new(program: &[Stmt], frame: Env) -> FileScope {
-        let mut blocks = Vec::new();
-        stmts(program, &mut blocks);
-        blocks.sort_by_key(|b| b.unit_id.offset);
+        let mut bodies = Vec::new();
+        stmts(program, &mut bodies);
+        bodies.sort_by_key(|b| b.unit_id.offset);
+        let blocks = bodies.iter().filter(|b| b.directives.exports.is_some()).cloned().collect();
         let mut top = HashSet::new();
         let mut funcs = Vec::new();
         let mut star = false;
@@ -47,11 +50,11 @@ impl FileScope {
             }
             top.extend(crate::syntax::check::declarations(s).into_iter().map(|(n, _)| n));
         }
-        FileScope { frame, blocks, top, funcs, star }
+        FileScope { frame, blocks, bodies, top, funcs, star }
     }
 }
 
-// -- collecting a file's definition blocks ----------------------------------------------------------
+// -- collecting a file's blocks ---------------------------------------------------------------------
 
 fn stmts(list: &[Stmt], out: &mut Vec<Rc<EngineBlock>>) {
     list.iter().for_each(|s| stmt(s, out));
@@ -128,9 +131,7 @@ fn func(f: &FuncDecl, out: &mut Vec<Rc<EngineBlock>>) {
 }
 
 fn block(b: &Rc<EngineBlock>, out: &mut Vec<Rc<EngineBlock>>) {
-    if b.directives.exports.is_some() {
-        out.push(b.clone());
-    }
+    out.push(b.clone());
     for (_, e) in &b.args {
         expr(e, out);
     }
@@ -264,7 +265,7 @@ impl Interp {
     }
 
     /// The session key of a tag (`ts` runs on `js`), or `None` for an unknown tag (13.1).
-    fn engine_key(&self, tag: &str) -> Option<Rc<str>> {
+    pub(crate) fn engine_key(&self, tag: &str) -> Option<Rc<str>> {
         self.registry.canonical(tag).map(|s| s.session_of.clone().unwrap_or_else(|| s.id.clone()))
     }
 

@@ -147,13 +147,14 @@ pub struct UnitLoc {               // one per block, recorded by the parser (4.4
     pub dedent_width: u32,         // chars removed from each dedented line (4.4)
     pub line_count: u32,           // lines in the processed body
     pub kept: Rc<[u32]>,           // body lines left undedented (4.4 step 3), sorted
+    pub escaped: Rc<[(u32, u32)]>, // `@@` escape lines (4.4): body line, column where the removed `@` was
 }
-impl UnitLoc { pub fn col(&self, body_line: u32, fcol: Option<u32>) -> u32; }
+impl UnitLoc { pub fn col(&self, body_line: u32, fcol: u32) -> Option<u32>; }  // None: past any line
 ```
 - **Lines.** Adapters compile every unit with the `.v2` path as the file name and `body_first_line - 1` as the line offset (12.3, 12.4, 14.5). A frame inside a block therefore already carries its `.v2` file and line. Directive lines are blanked, never removed (4.4), so line numbers never drift.
 - **Columns** arrive relative to the processed body line, in Unicode scalar values, or as `null` (12.6). Adapters convert V8's UTF-16 units and CPython's UTF-8 byte offsets first.
-  - The host finds the block whose body covers the frame's line. If several one-line blocks share that line, it takes the first.
-  - It maps the column as follows: `body_col + fcol - 1` on body line 1, `fcol` on a `kept` line, `dedent_width + fcol` on any other line.
+  - The host finds the block of the reporting engine whose body covers the frame's line. If several of its one-line blocks share that line, it takes the first.
+  - It maps the column as follows: `body_col + fcol - 1` on body line 1, `fcol` on a `kept` line, `dedent_width + fcol` on any other line; on an escape line, one more from the removed `@` on. A column past any line counts as none.
   - Without a column, the result is the first non-blank column of the `.v2` line.
 - **Everything else.** A frame outside every body (generated text), or in a foreign file, keeps its location as reported.
 ### 2.4 Diagnostics
@@ -1017,7 +1018,7 @@ The `ret` of a `load` or `module` carries `value`, `exports` and `missing`. `exp
 | `v2` | optional: the `error` tag (10.3) of a V2 error that propagated through foreign code |
 
 **How the host converts `err`:**
-- With `v2`, the host restores that error (type, message, data, location) and appends the foreign frames to its trace, so a V2 error thrown in a callback comes back with its original type, whatever its kind (DOCS 10).
+- With `v2`, the host restores that error (type, message, data, location) and puts the foreign frames into its trace, between the frames of the callback and those below the request; an error never raised before (made with `error()` and raised by foreign code) gets V2's frames at the call site after them, as its first raise (5.9). So a V2 error thrown in a callback comes back with its original type, whatever its kind (DOCS 10).
 - Without `v2`, the kind is `type` if it is one of the seven kinds above; any other `type`, a host-only kind such as `EngineNotFound` included, becomes `ForeignError` with `foreign_type = type`, so a worker's own error can't make V2 exit 3. The location is the innermost frame that maps into a `.v2` file, else the V2 call site (2.4, 12.6); `e.lang` follows 12.6. If `trace` is empty, the lines of `text` become the trace.
 - Adapters make every error string well-formed first (10.4).
 
@@ -1544,12 +1545,13 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 ### 12.6 Foreign positions to .v2 positions
 
 - **Adapters** compile with the `.v2` path as filename and the block's line offset (12.3, 12.4), so frames inside blocks
-  already carry the `.v2` file and line. Frames go innermost first, in 9.6's shape; adapter frames and engine
+  already carry the `.v2` file and line. V8 also counts U+2028 and U+2029 as line breaks, even in strings, so the js
+  adapter maps its lines in a body holding them back to `.v2` lines. Frames go innermost first, in 9.6's shape; adapter frames and engine
   internals (`<frozen importlib._bootstrap…>`, `node:internal/…`, `node:vm`) are dropped; library frames stay.
 - **`col`** is 1-based code points relative to the body text line (kept by `remember_source`), sent only for frames in
   `.v2` files, else `null`. Python 3.11+: `FrameSummary.colno` (0-based UTF-8 bytes) converted; 3.10: `null`. JS:
-  parsed from `err.stack` (`at fn (file:line:col)`, UTF-16 units) and converted. Syntax errors: Python `e.offset`; V8's
-  caret line; ts type stripping: the stripper's position, which gives the line too (12.5).
+  parsed from `err.stack` (`at fn (file:line:col)`, UTF-16 units) and converted. Syntax errors: Python `e.offset` (the compiler's, unlike the
+  parser's, is in UTF-8 bytes and converted); V8's caret line; ts type stripping: the stripper's position, which gives the line too (12.5).
 - **Host:** a frame in a known `.v2` file whose line lies in a block body gets body line `line − loc.body_first_line + 1`
   and its column from `UnitLoc::col` (2.3; a `null` col becomes the line's first non-blank column), and prints as 2.5 says
   (`in @py risky`).
@@ -2620,7 +2622,7 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R35 | `custom/run/` (requires js) | with `[engines.nd]` set to `kind = "run"`, `command = ["node", "{file}"]`, `ext = "js"`: statement output is in order; `@nd(t: "x y", n: [1, 2]) { process.stdout.write(process.env.V2_ARG_t + process.env.V2_ARG_n + "\r\n") }` has value `x y[1,2]`; `console.error("bad"); process.exit(3)` raises EngineExitError with `e.data.status == 3` and `bad` in `e.data.stderr`; on Windows, `@nd(p: 1, P: 2) {}` raises ValueError; `@export` inside raises ImportError |
 | R37 | `custom/bridged/` | export, call, `out` and `err` work; the fake adapter's modes (22.3) `garbage`, `vep2`, `nohello`, `crash`, `slow` (with `call_timeout = 1`) and `nocaps` each produce their chapter 21 row; mode `noise` still starts, with the noise on stderr |
 | R38 | `cross/depth.v2` | V2↔py mutual recursion reaching depth 64 succeeds; depth 65 raises RecursionError, which V2 catches |
-| R39 | `host/bom_crlf.v2` | stored with a BOM and CRLF line endings (`.gitattributes`: `-text`); it runs, and a `@py` error in it reports the right line |
+| R39 | `host/bom_crlf.v2`, `engines/py/bom_crlf.v2` | stored with a BOM and CRLF line endings (`.gitattributes`: `-text`); it runs, and a `@py` error in such a file reports the right line |
 | R40 | `engines/py/interrupt/` (run.rs, unix) | SIGINT, and separately SIGTERM, sent to the host during a sleeping `@py` block exits 130 within 2 s; the worker pid is gone and the run dir is removed |
 | R41 | `engines/resolve` unit test | a WindowsApps `python.exe` whose probe exits 9009 is skipped and the next candidate is used; one whose probe prints `Python 3.12.1` is kept |
 | R42 | `engines/ts/strip.v2` | a `@ts t` block exporting `function dbl(x: number): number` gives `dbl(21) == 42`, and a `@js` block imports `dbl` from `t` |

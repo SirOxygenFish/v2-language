@@ -1,0 +1,15 @@
+v2 1
+py print
+py write, no newline: v2 2
+js log
+js write, no newline: v2 3
+py before
+v2 inside py
+py after
+js before
+v2 inside js
+js after
+py first
+js called from py: hi
+py last
+v2 end

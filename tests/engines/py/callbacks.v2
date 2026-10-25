@@ -100,3 +100,30 @@ func progress(done, total) {
 }
 @import { process } from worker
 print(process(["a", "b", "c"]))
+// R14: a V2 error thrown in a callback crosses the Python frame and comes back with its kind;
+// the catching function's locals are intact, and the trace runs through Python (9.6).
+func check(x) {
+    if x < 0 {
+        throw error("ValueError", "negative: " + str(x))
+    }
+    return x
+}
+@py apply {
+    def each(f, xs):
+        out = []
+        for x in xs:
+            out.append(f(x))
+        return out
+    @export { each }
+}
+@import { each } from apply
+func run() {
+    let local = "kept"
+    try {
+        each(check, [1, -2])
+    } catch (e) {
+        print(e.type, e.message, local, e.line)
+        print(e.trace)
+    }
+}
+run()

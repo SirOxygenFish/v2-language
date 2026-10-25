@@ -30,3 +30,33 @@ try {
 } catch (e) {
     print(e.type, e.foreign_type, e.message)
 }
+// A stripping error past the block's first line is at its .v2 line and column (12.5).
+try {
+    @ts {
+        let a: number = 1;
+        enum Color { Red }
+    }
+} catch (e) {
+    print(e.foreign_type, e.line, e.col, len(e.trace))
+}
+try {
+    @ts {
+        let a: number = 1;
+        let b = 2;
+        let c = (a +* 2);
+    }
+} catch (e) {
+    print(e.foreign_type, e.line, e.col, len(e.trace))
+}
+// R42: a ts block's export, also imported into a js block.
+@ts t {
+    function dbl(x: number): number {
+        return x * 2;
+    }
+    @export { dbl }
+}
+@import { dbl } from t
+print(dbl(21) == 42, @js {
+    @import { dbl } from t
+    dbl(5)
+})
