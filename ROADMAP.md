@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1: Python, JavaScript, TypeScript |
-| **Next task** | 1.9 Seed test |
+| **Next task** | 1.10 Phase 1 test sweep |
 | **Last update** | 2026-10-24: docs review (43 changes approved by the owner; the code follows for every built part), the `define_engine` spec (built in Phase 3), then a ROADMAP/INTERNALS/DOCS alignment pass |
 
 ## Rules
@@ -183,12 +183,12 @@ callbacks and errors that cross languages.
 - **Done when:** R16, R39 (`@py` line part), R14 (V2 error part) and R17 (py/js) pass — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.9 Seed test
-- [ ] Port lines 1–111 of `old/v2/testsuite/test_engines.v2` as
+- [x] Port lines 1–111 of `old/v2/testsuite/test_engines.v2` as
       `tests/engines/py/seed_engines.v2`: `var` → `let`, the probe `try`/`catch` → `// requires: py`,
       `caught.contains(x)` → `x in caught`, `str(e)` → `e.message`; the missing-export check
       (`@import { nonexistent } from @py`) asserts `e.type == "ImportError"` and §13.3 step 6's
       message. No other old file is ported
-- **Done when:** the seed passes
+- **Done when:** the seed passes — **passed 2026-10-25** (Windows and Linux)
 
 ### 1.10 Phase 1 test sweep
 - [ ] R01, R02, R03, R11, R29, R30, R31, R33, R42, and every R of 1.4–1.9 again
@@ -346,3 +346,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-25 | 1.6: handles (attributes, items, calls and method calls in one round trip, `len`, `str`, iteration with batching, `to_v2` with the key rule and hooks, JS `new` for constructors, bound methods, named args only with `kwargs`); a review confirmed 23 findings, fixed with tests (depth limits in `to_v2` and iteration replies, natives across JS realms, Map order, i64 keys, batching only for built-in iteration, batches that stop before a bad item, hook cycles, hints) |
 | 2026-10-25 | 1.7: imports, packages and cross-language calls (`engines/imports.rs`: selectors, 13.3 resolution and its messages, `@import` binding with Proxies, module units for `py.x`/`js.x` with `*` and whole-module handles, routes, imports inside blocks with same-engine stubs and constants refused, the `v2` selector; callable handles cross engines as functions); a review confirmed 11 findings, fixed with tests that fail without the fix: names bound by `*` could be declared again, a worker started before its block's import checks, Windows `.\x.js` specifiers shared one unit, JS stubs broke `extends`/`instanceof`, a CommonJS module ran twice on a nested top-level await, a subpath missing from `exports` and a null module gave the wrong errors, a dead session said "cannot import packages", plus tests for `@js`/`@ts` selectors, leak releases reaching V2 and two 13.7 paths. Found while building: the JS idle-turn collection never freed stubs, since V8 keeps `WeakRef` targets until the job ends |
 | 2026-10-25 | 1.8: errors and output across languages (`engines/traces.rs`: a worker error's frames mapped to `.v2` lines and columns and printed as 2.5 says, located at the innermost block frame with that block's tag as `e.lang`; a V2 error crossing foreign code keeps its frames with the foreign ones between; output order checked with stdout captured); a review confirmed 7 findings, fixed with tests that fail without the fix: TS strip errors past a block's first line lost their position on Node 24, JS syntax errors had no column, a V2 error first raised by foreign code lost V2's frames, Python compiler errors counted bytes, `<module>` was dropped for library frames, a huge column from a worker panicked the host, and frames went to the wrong block or line (shared lines across engines, U+2028 in JS, `@@export` lines) |
+| 2026-10-25 | 1.9: the seed test, lines 1-111 of the old `test_engines.v2` ported as `tests/engines/py/seed_engines.v2` (15 checks, the missing-export check asserting 13.3 step 6's message) |
