@@ -1,0 +1,13 @@
+function
+1
+function
+1
+string
+1
+function
+true
+false
+2
+false
+mine 1
+'atob' is not exported by 'own' (did the block @export it?)

@@ -1753,3 +1753,89 @@ fn an_uncaught_foreign_error_prints_like_docs_10() {
         assert_eq!((code, out.as_str(), err.as_str()), (Some(1), "", expected), "{tag}");
     }
 }
+
+#[test]
+fn a_parked_worker_keeps_everything() {
+    // R65: state, handles and stored callbacks all survive a park (INTERNALS 8.8).
+    if !needs("py", "a_parked_worker_keeps_everything") {
+        return;
+    }
+    let src = r#"@py box {
+    import datetime
+    n = 0
+    kept = []
+    def bump():
+        global n
+        n += 1
+        return n
+    def keep(f):
+        kept.append(f)
+    def run():
+        return kept[0]()
+    def when():
+        return datetime.date(2024, 2, 29)
+    @export { bump, keep, run, when }
+}
+@import { bump, keep, run, when } from box
+print(bump())
+keep(func() => "called")
+let d = when()
+sleep(0.4)
+print(bump())
+print(d.year)
+print(run())
+"#;
+    let (code, out, err, _home) = run_with_files_env(&[("main.v2", src), ("v2.toml", "")], &["main.v2"], &[("V2_TEST_PARK_MS", "50")]);
+    assert_eq!((code, out.as_str()), (Some(0), "1\n2\n2024\ncalled\n"), "{err}");
+}
+
+/// A Python block that holds 30 MB and can read its own working set.
+#[cfg(windows)]
+const WORKING_SET: &str = r#"@py box {
+    import ctypes, time
+    class Mem(ctypes.Structure):
+        _fields_ = [("cb", ctypes.c_uint32), ("faults", ctypes.c_uint32)] + [(n, ctypes.c_size_t) for n in "pqrstuvw"]
+    k = ctypes.windll.kernel32
+    k.GetCurrentProcess.restype = ctypes.c_void_p
+    k.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+    blob = bytearray(b"x" * 30000000)
+    def ws():
+        m = Mem()
+        m.cb = ctypes.sizeof(m)
+        k.K32GetProcessMemoryInfo(k.GetCurrentProcess(), ctypes.byref(m), m.cb)
+        return m.q
+    def busy():
+        before = ws()
+        time.sleep(0.4)
+        return ws() > before / 2
+    @export { ws, busy }
+}
+@import { ws, busy } from box
+print(busy())
+let before = ws()
+sleep(0.4)
+print(ws() < before / 2)
+"#;
+
+#[cfg(windows)]
+#[test]
+fn an_idle_worker_gives_back_its_ram() {
+    // R65: idle, its working set goes; during a call it stays (INTERNALS 8.8).
+    if !needs("py", "an_idle_worker_gives_back_its_ram") {
+        return;
+    }
+    let (code, out, err, _home) = run_with_files_env(&[("main.v2", WORKING_SET), ("v2.toml", "")], &["main.v2"], &[("V2_TEST_PARK_MS", "50")]);
+    assert_eq!((code, out.as_str()), (Some(0), "true\ntrue\n"), "{err}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_worker_with_a_call_timeout_keeps_its_ram() {
+    // R65: coming back must never trip the timer (INTERNALS 8.8).
+    if !needs("py", "a_worker_with_a_call_timeout_keeps_its_ram") {
+        return;
+    }
+    let toml = "[engines.py]\ncall_timeout = 30\n";
+    let (code, out, err, _home) = run_with_files_env(&[("main.v2", WORKING_SET), ("v2.toml", toml)], &["main.v2"], &[("V2_TEST_PARK_MS", "50")]);
+    assert_eq!((code, out.as_str()), (Some(0), "true\nfalse\n"), "{err}");
+}

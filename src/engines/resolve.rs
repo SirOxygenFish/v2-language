@@ -206,6 +206,9 @@ impl Judged {
     }
 }
 
+/// The skip reason of the Store's fake `python.exe` (7.6): the one skip the cache remembers (7.7).
+const PLACEHOLDER: &str = "Microsoft Store placeholder";
+
 fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome) -> Judged {
     match outcome {
         ProbeOutcome::SpawnFailed(msg) => Judged::Skipped(msg.clone()),
@@ -214,7 +217,7 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome) -> Judged {
         ProbeOutcome::Exited { code, output } => {
             // The placeholder prints "Python was not found" and exits 9009 (7.6).
             if alias && (*code == Some(9009) || output.contains("Python was not found")) {
-                return Judged::Skipped("Microsoft Store placeholder".into());
+                return Judged::Skipped(PLACEHOLDER.into());
             }
             if *code != Some(0) {
                 return Judged::Skipped(format!("version probe failed ({})", ExitInfo { code: *code, signal: None }.describe()));
@@ -266,23 +269,33 @@ impl ProbeCache {
         ProbeCache::open(None, CacheMode::Off)
     }
 
-    /// A cached usable version. A stale one is caught by `hello`'s version check (8.4).
+    /// A cached usable version, or the Store placeholder. A stale version is caught by `hello`'s
+    /// version check (8.4); a placeholder's key changes with its alias file.
     fn get(&self, key: &str) -> Option<Judged> {
         if self.mode != CacheMode::ReadWrite {
             return None;
         }
         let e = self.entries.get(key)?;
+        if e.get("placeholder").and_then(Json::as_bool) == Some(true) {
+            return Some(Judged::Skipped(PLACEHOLDER.into()));
+        }
         if e.get("ok").and_then(Json::as_bool) != Some(true) {
             return None;
         }
         e.get("version").and_then(Json::as_str).and_then(Version::parse).map(Judged::Usable)
     }
 
-    /// The cache holds usable entries only (7.7): a skipped hit is probed again by every run,
-    /// because a version-manager shim (pyenv, asdf, volta) runs another interpreter in another
-    /// project, and a timeout may have been passing. A skip drops an entry doctor re-probed.
+    /// The cache holds usable entries and the Store placeholder (7.7): any other skipped hit is
+    /// probed again by every run, because a version-manager shim (pyenv, asdf, volta) runs another
+    /// interpreter in another project, and a timeout may have been passing. A skip drops an entry
+    /// doctor re-probed.
     fn put(&mut self, key: String, path: &Path, j: &Judged, output: &str) {
         if self.mode == CacheMode::Off {
+            return;
+        }
+        if matches!(j, Judged::Skipped(reason) if reason == PLACEHOLDER) {
+            self.entries.insert(key, json!({"path": path.to_string_lossy(), "placeholder": true}));
+            self.dirty = true;
             return;
         }
         let Judged::Usable(version) = j else {
@@ -719,6 +732,49 @@ mod tests {
         assert_eq!(e.version, Some(Version(3, 12, 1)));
         assert_eq!(e.origin, Origin::Path);
         assert_eq!(e.skipped, [(alias, "Microsoft Store placeholder".to_string())]);
+    }
+
+    #[test]
+    fn r67_the_placeholder_is_probed_once() {
+        let home = temp("r67home");
+        let root = temp("r67");
+        let (apps, real) = (root.join("WindowsApps"), root.join("Python312"));
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = exe(&apps, "python3");
+        exe(&real, "python");
+        let apps2 = apps.clone();
+        let p = fake(move |prog| {
+            if prog.starts_with(&apps2) {
+                ProbeOutcome::Exited { code: Some(9009), output: "Python was not found".into() }
+            } else {
+                says("Python 3.12.1")
+            }
+        });
+        let l = lookup(&[&apps, &real], Some(&apps));
+        let cfg = Config::default();
+        for _ in 0..2 {
+            let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+            let e = resolve_with(&cfg, &l, &p, &mut c, "py").expect("the real python");
+            assert_eq!(e.skipped, [(alias.clone(), "Microsoft Store placeholder".to_string())]);
+            c.save();
+        }
+        assert_eq!(p.calls.get(), 2, "the placeholder and python, once each, across two runs");
+        // doctor probes afresh.
+        let mut c = ProbeCache::open(Some(&home), CacheMode::Refresh);
+        resolve_with(&cfg, &l, &p, &mut c, "py").expect("the real python");
+        assert_eq!(p.calls.get(), 4);
+        // Other skips are never remembered (7.7).
+        let bin = temp("r67other");
+        let other = exe(&bin, "python");
+        let broken = fake(|_| ProbeOutcome::Exited { code: Some(1), output: String::new() });
+        let l = lookup(&[&bin], None);
+        for _ in 0..2 {
+            let mut c = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+            assert!(resolve_with(&cfg, &l, &broken, &mut c, "py").is_err());
+            c.save();
+        }
+        assert_eq!(broken.calls.get(), 2, "{}", other.display());
     }
 
     #[test]

@@ -930,9 +930,9 @@ Interrupts and panics take 6.5's interrupt and panic paths instead (no `bye`; wo
 A worker with no request in flight for 10 s gives back its RAM. Nothing else about it changes: same process, state, handles and background threads. Its pages leave the working set and fault back in on use.
 
 - **Idle** means no timer for that child on the stack (8.5 pushes one for every request, with or without a limit); each pop restarts the clock. A worker parks once per idle period.
-- **Who:** the watchdog, outside the `Watch` lock, so a trim never delays a timer. On Windows it lists the Job Object's processes (`QueryInformationJobObject`, `JobObjectBasicProcessIdList`), which covers launchers (8.3), and calls `K32EmptyWorkingSet` on each; errors are ignored, because a process may have gone.
+- **Who:** the watchdog decides, and a short thread of its own does the work, because a trim takes about 40 ms per GB and must never delay a timer. On Windows it lists the Job Object's processes (`QueryInformationJobObject`, `JobObjectBasicProcessIdList`), which covers launchers (8.3), and calls `K32EmptyWorkingSet` on each; errors are ignored, because a process may have gone.
 - **Linux and macOS:** nothing. A normal user can't do this to a child (`process_madvise` gives `EPERM`), and the kernel reclaims idle pages under pressure when swap or compression exists. Linux without swap keeps them.
-- **Never** a session with `call_timeout` set, because bringing its memory back would count against the timer.
+- **Never** a session with `call_timeout` set, because bringing its memory back would count against the timer. Every other session registers once its handshake is done (`process::allow_parking`).
 - It releases the working set, not commit: the memory stays charged to the system, and without a page file modified pages stay in RAM.
 
 ---
@@ -1483,7 +1483,7 @@ def do_load(m):
 // NODE_GLOBALS (computed once): own names of globalThis absent from a fresh context, minus 'global', 'console'
 function newContext(file) {                      // one vm context (one realm) per unit: private top-level names
   const sb = {}, module = { exports: {} };
-  for (const k of NODE_GLOBALS) Object.defineProperty(sb, k, Object.getOwnPropertyDescriptor(globalThis, k));
+  for (const k of NODE_GLOBALS) forward(sb, k);                            // an accessor to globalThis[k]; see below
   Object.assign(sb, { console /* the adapter's (9.9); V8's per-context console prints nothing */, module,
     exports: module.exports, require: Module.createRequire(file), __filename: file, __dirname: path.dirname(file) });
   const ctx = vm.createContext(sb);
@@ -1515,9 +1515,11 @@ function doLoad(m) {
 - `import()` in a block goes to Node's own loader (`USE_MAIN_CONTEXT_DEFAULT_LOADER`), which resolves relative to
   the script's filename, the `.v2` file; a callback there would need `--experimental-vm-modules`. The filter of 12.5
   also drops this loader's one `ExperimentalWarning`.
-- Node globals that are accessors (`crypto`, `navigator`) are defined on the context with the main `globalThis` as
-  the getter's receiver, since some check it; args are data properties (`defineData`), whatever the context has
-  under that name.
+- Every Node global is forwarded to the context as an accessor reading the main `globalThis` (the receiver some
+  getters check), keeping its enumerability. Copying descriptors would load lazy globals (`FormData` is all of undici),
+  so nothing loads until a block uses it. Assigning one gives the block its own data property. `@export { * }` counts a
+  global the block replaced, such as its own `function fetch`, as the block's. Args are data properties (`defineData`),
+  whatever the context has under that name.
 - Decoded values (10.7), and values from `require`d modules and Node built-ins (an `fs` error, a package's array),
   belong to the adapter's realm, not the unit's, so `instanceof Array`/`instanceof Error` is false for them: blocks test
   `Array.isArray(x)` and `e.name`/`e.message`.
