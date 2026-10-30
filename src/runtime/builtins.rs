@@ -55,15 +55,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { name: "int", params: &[ParamSpec::req("x")], f: int },
     BuiltinDef { name: "float", params: &[ParamSpec::req("x")], f: float },
     BuiltinDef { name: "bool", params: &[ParamSpec::req("x")], f: |_, a, _| Ok(Value::Bool(a[0].truthy())) },
-    BuiltinDef {
-        name: "range",
-        params: &[
-            ParamSpec::opt("start", || Value::Null),
-            ParamSpec::opt("end", || Value::Null),
-            ParamSpec::opt("step", || Value::Int(1)),
-        ],
-        f: range,
-    },
+    BuiltinDef { name: "range", params: &[ParamSpec::rest("args")], f: range },
     BuiltinDef { name: "json_parse", params: &[ParamSpec::req("text")], f: json_parse },
     BuiltinDef {
         name: "json_stringify",
@@ -257,12 +249,16 @@ fn float(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `range(end)` / `range(start, end, step = 1)`: a list of ints, sized before it is built. One
 /// argument is the end; arguments are positional only (5.10).
 fn range(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
-    let (start, end) = match (&args[0], &args[1]) {
-        (Value::Null, Value::Null) => return fail("ArityError", "range() missing required argument 'end'"),
-        (Value::Null, end) | (end, Value::Null) => (0, int_arg(end, "range", "end")?),
-        (start, end) => (int_arg(start, "range", "start")?, int_arg(end, "range", "end")?),
+    let Value::List(given) = &args[0] else { unreachable!("a rest parameter is a list") };
+    let given = given.borrow();
+    let (start, end, step) = match given.as_slice() {
+        [] => return fail("ArityError", "range() missing required argument 'end'"),
+        [end] => (&Value::Int(0), end, &Value::Int(1)),
+        [start, end] => (start, end, &Value::Int(1)),
+        [start, end, step] => (start, end, step),
+        more => return fail("ArityError", format!("range() takes 3 positional arguments but {} were given", more.len())),
     };
-    let step = int_arg(&args[2], "range", "step")?;
+    let (start, end, step) = (int_arg(start, "range", "start")?, int_arg(end, "range", "end")?, int_arg(step, "range", "step")?);
     if step == 0 {
         return value_error("range() step must not be zero");
     }

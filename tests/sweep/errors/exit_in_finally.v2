@@ -1,0 +1,8 @@
+// exit: 4
+// DOCS 3.11: exit stops the program now; finally blocks don't run.
+try {
+    print("in")
+    exit(4)
+} finally {
+    print("never")
+}

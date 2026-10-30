@@ -1,0 +1,37 @@
+// requires: py js
+// Text survives every crossing, whatever it holds.
+@py {
+    def echo(x):
+        return x
+    def length(x):
+        return len(x)
+    @export { echo, length }
+}
+@js {
+    function jecho(x) { return x }
+    function points(x) { return [...x].length }
+    @export { jecho, points }
+}
+@import { echo, length } from @py
+@import { jecho, points } from @js
+let samples = [
+    "", "a", "é", "日本語", "😀", "👩‍💻", "e\u{0301}", "\u{1F1FA}\u{1F1F8}", "\t\n\r\"\\", "\u{0}", "\u{7F}\u{80}\u{FF}", "\u{FFFD}",
+    "\u{10FFFF}", "\u{2028}\u{2029}", "\u{FEFF}", "مرحبا", "שלום", "${notInterp}", "{\"t\":\"ret\"}", "\u{AD}", "a\u{0}b",
+]
+let ok = 0
+for s in samples {
+    if echo(s) == s && jecho(s) == s && length(s) == len(s) && points(s) == len(s) {
+        ok = ok + 1
+    } else {
+        print("differs:", s)
+    }
+}
+print(ok, len(samples))
+let keys = {}
+for s in samples {
+    keys[s] = len(s)
+}
+let d = echo(keys)
+print(d == keys, jecho(keys) == keys)
+print(@py { print("😀 日本語 \u2028 end") })
+print(@js { console.log("😀 日本語 end") })

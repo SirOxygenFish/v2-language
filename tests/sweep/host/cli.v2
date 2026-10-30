@@ -1,0 +1,6 @@
+// args: a --help b
+// DOCS 3.11: args() and input().
+print(args(), len(args()))
+print(input("name? "))
+print(input())
+print(input())

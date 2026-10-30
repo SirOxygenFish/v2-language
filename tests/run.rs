@@ -454,6 +454,15 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
+fn a_script_named_like_a_command_runs_by_its_path() {
+    // DOCS 15: only the exact first word is a command, and what follows the script is its own.
+    let (code, stdout, stderr, _home) = run_with_files(&[("doctor", "print(args())
+")], &["./doctor", "check", "--help"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "[\"check\", \"--help\"]
+"), "{stderr}");
+}
+
+#[test]
 fn invalid_utf8_is_a_syntax_error_at_its_line() {
     // LF, CRLF and lone-CR line endings all count lines the same way (INTERNALS 3.1).
     for bytes in [
@@ -1625,6 +1634,18 @@ fn generated_input_never_overflows_the_stack() {
         assert_eq!(out.status.code(), Some(1), "{name}: {err}");
         let message = if name == "nested.v2" { "SyntaxError: nested too deeply" } else { "SyntaxError: expression too long" };
         assert!(err.contains(message), "{name}: {err}");
+    }
+}
+
+#[test]
+fn nesting_stops_past_256_levels() {
+    // A body is a level, and so is each expression, a statement's own included (INTERNALS 4.1).
+    let parens = |n: usize| format!("let x = {}1{}\n", "(".repeat(n), ")".repeat(n));
+    let ifs = |n: usize| format!("{}{}", "if true {\n".repeat(n), "}\n".repeat(n));
+    for (src, fits) in [(parens(255), true), (parens(256), false), (ifs(256), true), (ifs(257), false)] {
+        let (code, _, stderr, _home) = run_with_files(&[("deep.v2", &src)], &["deep.v2"]);
+        assert_eq!(code == Some(0), fits, "{stderr}");
+        assert_eq!(stderr.contains("SyntaxError: nested too deeply"), !fits, "{stderr}");
     }
 }
 

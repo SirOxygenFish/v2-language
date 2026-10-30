@@ -315,15 +315,18 @@ impl Interp {
                     return Err(self.raise(flow, at));
                 }
             };
-            if vep::is_noise(&line) {
+            let (noise, frame) = vep::split_noise(&line);
+            if !noise.is_empty() {
                 let _ = self.out.flush();
-                stderrln!("{}", String::from_utf8_lossy(&line));
+                stderrln!("{}", String::from_utf8_lossy(noise));
+            }
+            if frame.is_empty() {
                 continue;
             }
-            match vep::parse_hello(&line) {
+            match vep::parse_hello(frame) {
                 Ok(h) => break h,
                 Err(what) => {
-                    let t = serde_json::from_slice::<Json>(&line).ok().and_then(|j| j.get("t").and_then(Json::as_str).map(str::to_string));
+                    let t = serde_json::from_slice::<Json>(frame).ok().and_then(|j| j.get("t").and_then(Json::as_str).map(str::to_string));
                     let flow = match t {
                         Some(t) if t != "hello" => {
                             self.kill_session(s, DeadReason::Protocol);
@@ -334,7 +337,7 @@ impl Interp {
                             self.kill_session(s, DeadReason::Protocol);
                             error("ProtocolError", format!("engine '{tag}' {what}"))
                         }
-                        _ => self.protocol_violation(s, &what, &line),
+                        _ => self.protocol_violation(s, &what, frame),
                     };
                     return Err(self.raise(flow, at));
                 }

@@ -1,0 +1,34 @@
+// requires: py js
+// DOCS 5: everything in a worker survives until the program ends.
+@py {
+    state = {"n": 0}
+    def bump():
+        state["n"] += 1
+        return state["n"]
+    class Box:
+        def __init__(self):
+            self.v = 0
+        def add(self):
+            self.v += 1
+            return self.v
+    def box():
+        return Box()
+    @export { bump, box }
+}
+@import { bump, box } from @py
+let b = box()
+for i in 0..5 {
+    bump()
+    b.add()
+}
+sleep(0.2)
+print(bump(), b.add(), b.v)
+@js {
+    let saved = null;
+    function keep(f) { saved = f }
+    function call(x) { return saved(x) }
+    @export { keep, call }
+}
+@import { keep, call } from @js
+keep(func(x) => x * 2)
+print(call(21))

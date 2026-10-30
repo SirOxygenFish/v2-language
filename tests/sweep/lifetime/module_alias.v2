@@ -1,0 +1,6 @@
+// requires: py
+// DOCS 5: a whole-module import waits if the file just uses `m.name`.
+@import py.math as m
+print("not started")
+print(m.floor(2.5))
+print(m.pi > 3)

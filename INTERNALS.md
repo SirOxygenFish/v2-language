@@ -380,7 +380,7 @@ entry     = ( NAME | STRING | "[" expr "]" ) ":" expr
   - `-2 ** 2` is `-(2 ** 2)`, and `2 ** -1` is valid.
   - Named args come after all positional and spread args. A named arg is `NAME` then `:` (two-token lookahead), so `f(c ? a : b)` is positional.
   - The block arg `nums` is short for `nums: nums`.
-  - Past 256 levels of nested expressions, bodies and interpolations, the parser stops with `nested too deeply`. Left-associative chains (`a + b + …`, `a && b && …`, `a.b.c…`, `f()()…`) build a tree as deep as the chain is long, so the tree's binary-operator and postfix nodes are counted separately: when a node would sit more than 10,000 such nodes deep, counting the operands already under it (a parenthesized group, a tighter chain) and the expression it is part of (an enclosing chain, an expression in a `func_expr`'s body), the parser stops with `expression too long` (hint: split it into several statements with let). Both limits protect the host stack from generated input; every later pass (4.5, ch. 5) may recurse over the tree.
+  - Past 256 levels of nested expressions, bodies and interpolations, the parser stops with `nested too deeply`. A body is a level and so is each expression inside another, a statement's own expression included: 255 parentheses fit, and 256 nested `if`s. Left-associative chains (`a + b + …`, `a && b && …`, `a.b.c…`, `f()()…`) build a tree as deep as the chain is long, so the tree's binary-operator and postfix nodes are counted separately: when a node would sit more than 10,000 such nodes deep, counting the operands already under it (a parenthesized group, a tighter chain) and the expression it is part of (an enclosing chain, an expression in a `func_expr`'s body), the parser stops with `expression too long` (hint: split it into several statements with let). Both limits protect the host stack from generated input; every later pass (4.5, ch. 5) may recurse over the tree.
 
 ### 4.2 Precedence
 DOCS 3.4's table; 4.1's grammar encodes it.
@@ -946,7 +946,7 @@ VEP/1 (V2 Engine Protocol, version 1) connects the host to every bridged engine:
 - **Channels.** Host→worker frames travel on the worker's stdin, worker→host frames on its stdout. Worker stderr is inherited and never parsed.
 - **Frames.** One UTF-8 JSON object per line, ended by a single `\n` (0x0A) and written in binary mode (no newline translation). Writers use a real JSON encoder (serde_json, `json.dumps`, `JSON.stringify`) with compact separators and put `t` first; the encoder escapes every U+0000–U+001F inside strings, so a frame never contains a raw 0x0A. Raw U+2028/U+2029 inside strings are allowed.
 - **Splitting.** Both sides read raw bytes, split on 0x0A only, then decode each complete line. Nothing splits on `\r`, U+0085 or U+2028: no Python text-mode `readline` or `for line in sys.stdin`, no Node `readline` module. The host drops one `\r` before the `\n`; adapter parsers accept it as JSON whitespace.
-- **Size limit: 64 MiB per frame, both directions.** The host refuses to send a larger frame: `MarshalError: value too large to send to engine 'py' (70 MiB, limit 64 MiB)`, nothing sent. A longer incoming line is fatal: `ProtocolError: frame from engine 'py' exceeds 64 MiB`. An adapter never sends a larger frame: a reply becomes `err` `MarshalError`, a stub call raises `MarshalError` in the foreign code, `out` text is chunked (9.9).
+- **Size limit: 64 MiB per frame, both directions.** The host refuses to send a larger frame: `MarshalError: value too large to send to engine 'py' (70 MiB, limit 64 MiB)`, nothing sent. A longer incoming line is fatal: `ProtocolError: frame from engine 'py' exceeds 64 MiB`. An adapter never sends a larger frame: a reply becomes `err` `MarshalError`, a stub call raises `MarshalError` in the foreign code, `out` text is chunked (9.9). The adapters' encoders keep a running lower bound of the frame's size (2 bytes per list or dict item, the length of each string, the base64 length of bytes) and stop with `MarshalError: value too large to send to V2 (more than 64 MiB)` as soon as it passes the limit, so a huge or heavily shared value costs neither the time nor the memory of encoding it all. What the bound misses is caught when the frame is written, as is JSON text too long for a JS string.
 - **Host I/O.** Reading gives up as soon as a pending line passes the limit; writing: 8.5. A write error (EPIPE, `ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`) is handled like EOF: the worker is gone (8.6).
 - **Adapter I/O.** Stdin EOF or a broken stdout pipe means the host is gone: the adapter exits quietly with status 0. A host line it cannot parse, or a reply it is not waiting for, is reported on stderr and the adapter exits with status 2 (14.2).
 - **Evolution.** Both sides ignore unknown members. The set of `t` values is fixed for VEP/1: an unknown `t` from a worker is fatal (9.11); an adapter answers an unknown `t` that carries an `id` with `err` `ProtocolError` and keeps running.
@@ -988,7 +988,7 @@ Example: a `py` block imports the V2 function `log_line` (route 1) and exports `
 **`hello`** is written by the adapter before any user code runs. Ch. 8.4 owns its deadline (`startup_timeout`), the minimum-version check and the startup error messages.
 - `vep` must be `1`; anything else is fatal (9.11): `ProtocolError: engine '{tag}' speaks VEP/{n}; this V2 speaks VEP/1`. `version` is the interpreter's version (`"3.12.4"`, `"22.13.1"`), which 8.4 checks against 7.2's minimum. `pid` is the interpreter's own pid, not a `py -3` launcher's; crash messages use it (8.6).
 - `caps` is a list of strings. The host gates features on `modules`, `handles`, `kwargs` and `reverse` (what each enables and the error without it: 17.5) and ignores unknown caps. The py adapter sends `["modules","handles","kwargs","reverse"]`; the js adapter sends `["modules","handles","reverse"]` (no `kwargs`: JS functions take positional arguments only, 10.8).
-- **Preload noise.** Code can run before the adapter owns fd 1 (`sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`). Before `hello`, a stdout line that is not a JSON object is copied to the host's stderr and startup continues. The first JSON object must be a valid `hello`; any other frame, an `out` frame included, is fatal: `ProtocolError: engine 'py' sent 'ret' before hello`. From `hello` on, every line must be a frame (9.11). EOF before `hello` is a failed start (8.4).
+- **Preload noise.** Code can run before the adapter owns fd 1 (`sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`). Before `hello`, a stdout line that is not a JSON object is copied to the host's stderr and startup continues. Noise with no newline of its own shares `hello`'s line, so anything in front of `{"t":"hello"` on a line is noise too (`t` is the frame's first member). The first JSON object must be a valid `hello`; any other frame, an `out` frame included, is fatal: `ProtocolError: engine 'py' sent 'ret' before hello`. From `hello` on, every line must be a frame (9.11). EOF before `hello` is a failed start (8.4).
 
 **`init`** is always the first request; the adapter answers `ret` with `value: null` (an `err` kills the worker, 8.4). Its `project_root` is the canonical folder (2.1) holding `v2.toml`, or the entry script's folder. py prepends it to `sys.path` and inserts each `.v2` file's folder before it at that file's first `load`/`module` (14.3), moving an entry that an inherited `PYTHONPATH` already put there, which gives DOCS 7's order. js does not use it: Node's own lookup from each `.v2` file's folder (12.4, 13.5), plus any inherited `NODE_PATH`, finds packages.
 
@@ -996,7 +996,7 @@ Example: a `py` block imports the V2 function `log_line` (route 1) and exports `
 
 `load` members are those of 9.2 (there is no `col`); 12.2 says what each holds and how the adapter runs the unit, and 12.1 when a definition is loaded (once, never retried). The wire rules:
 - **`unit`** is the wire UnitId `"<FileId>:<byte offset of the block's @>"`. Module units are `"<canonical tag>:<name>"` (`py:statistics`, `js:date-fns`; `ts.pkg` is `js:pkg`): one unit per module per session (13.5).
-- **`imports`**: each entry has exactly one of two shapes (when each is used: 13.7): `{"as","unit","name"}` (plus `block`, the target's `block_name` (12.1), when the unit is a block) binds a stub that looks `name` up in that unit of this session at each call, whether or not the unit has loaded yet; `{"as","route"}` binds a stub for that route (13.6).
+- **`imports`**: each entry has exactly one of two shapes (when each is used: 13.7): `{"as","unit","name"}` (plus `route` when the unit is a block) binds a stub that looks `name` up in that unit of this session at each call, whether or not the unit has loaded yet; `{"as","route"}` binds a stub for that route (13.6).
 
 The `ret` of a `load` or `module` carries `value`, `exports` and `missing`. `exports` is a list of `{"name","kind","value"?}`: `kind` is `"func"` or `"value"` (whether a call constructs is decided at call time, 11.3), and `value` (the constant, copied at load) is present only for `"value"`. `missing` lists the requested names the unit does not define; the host raises `ImportError` (12.2, 13.5). An exception while running the block is answered with `err`; a foreign syntax error is `ForeignError` with `foreign_type: "SyntaxError"` at the `.v2` line (12.3, 12.4, 12.6).
 
@@ -1621,7 +1621,7 @@ tags compare by engine, `js` for ts blocks too (13.1).
 
 ### 13.3 Resolving a name from a block selector
 
-A use that can't wait first starts the language of every `Waiting` block `sel` matches (12.7). `cands` = the file's definition blocks that `sel` matches, in source order, reached or not. Blocks are named by
+A use that can't wait first starts the language of every `Waiting` block `sel` matches (12.7), unless what follows already fails for one of its names without a loaded block: nothing starts for an error. `cands` = the file's definition blocks that `sel` matches, in source order, reached or not. Blocks are named by
 `block_name` (12.1). A candidate **provides** `name` when its `@export` list names it, loaded or not, or when it is
 `Loaded` and its `*` exported `name`, so ambiguity between explicit exports does not depend on what has run.
 
@@ -1722,7 +1722,7 @@ the imported name).
 
 | Target | Entry | The adapter binds |
 | --- | --- | --- |
-| an export of a block of **this session** (py→py, js↔ts), loaded or not, or an attribute of a module of this session (imported first with a `module` frame, 13.5) | `{"as","unit","name"}`; for a block also `block`, its `block_name` | a stub that looks `name` up in the unit at every call (12.3's `g[name]`, 12.4's getter, 13.5's lookup) and calls it in the worker (JS: per 11.3; the stub is a `Proxy` whose `new`, `extends`, `instanceof` and property reads also reach the current target): no host hop, exceptions propagate natively, later rebinding is seen |
+| an export of a block of **this session** (py→py, js↔ts), loaded or not, or an attribute of a module of this session (imported first with a `module` frame, 13.5) | `{"as","unit","name"}`; for a block also `route` | a stub that looks `name` up in the unit at every call (12.3's `g[name]`, 12.4's getter, 13.5's lookup) and calls it in the worker (JS: per 11.3; the stub is a `Proxy` whose `new`, `extends`, `instanceof` and property reads also reach the current target): no host hop, exceptions propagate natively, later rebinding is seen |
 | anything else: another session's block or module, a compiled export, `v2` | `{"as","route"}` | a stub that sends `call {"route": r}` (14.2) |
 
 - Errors that no later load can fix are raised at load: a selector matching no block (13.3 step 1); an ambiguous name
@@ -1734,9 +1734,9 @@ the imported name).
   when the target is `Loaded` or a module of this session (imported then), else at the first call.
 - Calling a stub whose block has not loaded → `ImportError: block 'b' has not run yet — 'f' can't be called before it
   loads`, `f` being the imported name. Through a route: 13.6 (still loading or failed: 13.3 step 5). A same-session stub
-  raises it in the worker as a `V2Error` (14.2), built from the entry's `block` and `name`, whenever the unit is not in
-  the adapter's `units` (not reached, still loading, or failed after this block loaded); it raises the constant error
-  the same way when the unit's load reply listed the name as `value`.
+  whose unit is not in the adapter's `units` (not reached, still loading, or failed after this block loaded) calls its
+  entry's `route`, so the answer is the host's, the same as any route's. It raises the constant error itself, as a
+  `V2Error` (14.2), when the unit's load reply listed the name as `value`.
 - A name that only a not yet loaded `*` block could provide (13.3 step 5) gets a route, even in this session.
 - Compiled blocks take no imports in program mode (4.5); their routes: 13.6.
 
@@ -1796,7 +1796,8 @@ send(f)            under the send lock: buffered output as out frames (9.9), que
   and the release queue. Finalizers only append to that queue, because they can run in the middle of `send`.
 - **Errors** (`err.error`, 9.6): `type` is `ForeignError`, or the kind the adapter detected itself (`ImportError`,
   `NameError`, `ValueError`, `MarshalError`, `ProtocolError`, `Error`); `foreign_type` is Python `type(e).__name__`, JS
-  `e.name`, or `typeof` for a thrown non-Error; `trace` per 12.6; `text` the engine's own formatted traceback. A
+  `e.name`, else its constructor's name, or `typeof` for a thrown primitive; `trace` per 12.6, which can be empty (a call that fails before any of
+  the user's code runs); no `text`, whose frames would be the adapter's own. A
   `V2Error` that escapes user code goes back with its `v2` tag, so it round-trips unchanged.
 - **`V2Error`** (Python `class V2Error(Exception)`, a builtin; JS `class V2Error extends Error`, a non-enumerable global) is raised in foreign code when a
   call through `host_call` fails (9.6) or is refused (9.8), and by a same-session stub that refuses a call (13.7). It

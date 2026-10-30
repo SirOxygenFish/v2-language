@@ -1,0 +1,59 @@
+// requires: py js
+// DOCS 10: what foreign code throws, and how each comes out.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.lang)
+    }
+}
+@py {
+    class Custom(Exception):
+        pass
+    def custom():
+        raise Custom("mine")
+    def chained():
+        try:
+            1 / 0
+        except ZeroDivisionError as e:
+            raise ValueError("wrapped") from e
+    def noargs():
+        raise KeyError()
+    def v2error():
+        raise V2Error("ValueError", "made here", {"a": 1})
+    @export { custom, chained, noargs, v2error }
+}
+@import { custom, chained, noargs, v2error } from @py
+show(custom)
+show(chained)
+show(noargs)
+show(v2error)
+try {
+    chained()
+} catch (e) {
+    print(e.cause.foreign_type, e.cause.message)
+}
+@js {
+    class Custom extends Error {
+        constructor(m) {
+            super(m);
+            this.name = "Custom";
+        }
+    }
+    function jcustom() { throw new Custom("mine") }
+    function nul() { throw null }
+    function obj() { throw { a: 1 } }
+    function chained() { throw new Error("outer", { cause: new TypeError("inner") }) }
+    @export { jcustom, nul, obj, chained }
+}
+@import { jcustom, nul, obj } from @js
+@import { chained as jchained } from @js
+show(jcustom)
+show(nul)
+show(obj)
+show(jchained)
+try {
+    jchained()
+} catch (e) {
+    print(e.cause.foreign_type, e.cause.message)
+}

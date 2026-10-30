@@ -198,9 +198,15 @@ fn object(line: &[u8]) -> Result<Map<String, Json>, String> {
     }
 }
 
-/// Before `hello`: a line that is not a JSON object is preload noise for stderr (9.3).
-pub fn is_noise(line: &[u8]) -> bool {
-    object(line).is_err()
+/// Before `hello`, a line's preload noise for stderr and the frame after it (9.3). Noise with no
+/// newline of its own shares `hello`'s line.
+pub fn split_noise(line: &[u8]) -> (&[u8], &[u8]) {
+    const HELLO: &[u8] = br#"{"t":"hello""#;
+    match line.windows(HELLO.len()).position(|w| w == HELLO) {
+        Some(i) => line.split_at(i),
+        None if object(line).is_err() => (line, &[]),
+        None => (&[], line),
+    }
 }
 
 fn member<'a>(m: &'a Map<String, Json>, t: &str, name: &str) -> Result<&'a Json, String> {
@@ -403,9 +409,11 @@ mod tests {
 
     #[test]
     fn hello_and_noise() {
-        assert!(is_noise(b"site customization loaded"));
-        assert!(is_noise(b"[1, 2]"));
-        assert!(!is_noise(br#"{"t":"hello"}"#));
+        assert_eq!(split_noise(b"site customization loaded"), (&b"site customization loaded"[..], &b""[..]));
+        assert_eq!(split_noise(b"[1, 2]"), (&b"[1, 2]"[..], &b""[..]));
+        assert_eq!(split_noise(br#"{"t":"hello"}"#), (&b""[..], &br#"{"t":"hello"}"#[..]));
+        assert_eq!(split_noise(br#"{"t":"ret"}"#), (&b""[..], &br#"{"t":"ret"}"#[..]));
+        assert_eq!(split_noise(br#"x{"t":"hello"}"#), (&b"x"[..], &br#"{"t":"hello"}"#[..]));
         let h = parse_hello(br#"{"t":"hello","vep":1,"version":"3.12.4","pid":4242,"caps":["modules","handles","kwargs","reverse","future"],"extra":1}"#).unwrap();
         assert_eq!((h.version.as_str(), h.pid, h.caps), ("3.12.4", 4242, Caps { modules: true, handles: true, kwargs: true, reverse: true }));
         // `engine` and `impl` are not part of `hello` (9.3): neither is needed, both are ignored.

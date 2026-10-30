@@ -1,0 +1,13 @@
+// requires: js
+// A function with no JS frames of its own fails with only adapter frames, and those stay out of
+// e.trace (12.6, 14.2).
+@js {
+    const parse = JSON.parse
+    @export { parse }
+}
+@import { parse } from @js
+try {
+    parse("{")
+} catch (e) {
+    print(e.foreign_type, "|", e.trace)
+}

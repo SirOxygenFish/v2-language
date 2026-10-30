@@ -1,0 +1,10 @@
+ForeignError | Custom | mine | py
+ForeignError | ValueError | wrapped | py
+ForeignError | KeyError |  | py
+ValueError | null | made here | py
+ZeroDivisionError division by zero
+ForeignError | Custom | mine | js
+ForeignError | object | null | js
+ForeignError | Object | [object Object] | js
+ForeignError | Error | outer | js
+TypeError inner

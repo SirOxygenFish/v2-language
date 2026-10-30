@@ -1,0 +1,11 @@
+// requires: js
+// exit: 1
+// stderr: uncaught_js.v2:7:32: ForeignError: RangeError: nope
+// stderr: at thrower (uncaught_js.v2:7, in @js block at uncaught_js.v2:6)
+// stderr: at uncaught_js.v2:11
+@js {
+    function thrower() { throw new RangeError("nope") }
+    @export { thrower }
+}
+@import { thrower } from @js
+thrower()

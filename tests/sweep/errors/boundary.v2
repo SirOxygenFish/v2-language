@@ -1,0 +1,50 @@
+// requires: py js
+// DOCS 10.
+@py risky {
+    def ratio(a, b):
+        return a / b
+    @export { ratio }
+}
+@import { ratio } from risky
+try {
+    ratio(1, 0)
+} catch (e) {
+    print(e.type)
+    print(e.foreign_type)
+    print(e.message)
+    print(e.lang)
+}
+func thrower(x) {
+    throw error("ValueError", "from callback", {x: x})
+}
+@py {
+    def relay(f):
+        return f(1)
+    @export { relay }
+}
+@js {
+    function jrelay(f) { return f(2) }
+    @export { jrelay }
+}
+@import { relay } from @py
+@import { jrelay } from @js
+try {
+    relay(thrower)
+} catch (e) {
+    print(e.type, e.message, e.data, e.lang)
+}
+try {
+    jrelay(func(x) => relay(thrower))
+} catch (e) {
+    print(e.type, e.message, e.data, e.lang)
+}
+print(engine_available("py"), engine_available("python"), engine_available("js"), engine_available("ts"), engine_available("nope"))
+func err(f) {
+    try {
+        return f()
+    } catch (e) {
+        return [e.type, e.message]
+    }
+}
+print(err(func() => @pyhton { x }))
+print(err(func() => @nosuchthing { x })[0])

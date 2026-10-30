@@ -1,0 +1,47 @@
+// requires: js
+// A value too big for a frame stops while it is encoded, as a MarshalError, whatever it would
+// have run into next: Buffer's own limit, the heap, an array's length (9.1).
+@js {
+    function bytes() { return Buffer.alloc(450000000) }
+    function holes() { return new Array(200000000) }
+    function fewer() { return new Array(100000000) }
+    function shared() {
+        let x = new Array(10).fill("y".repeat(1000000));
+        for (let i = 0; i < 8; i++) x = new Array(10).fill(x);
+        return x;
+    }
+    function keys() { return { a: ["y".repeat(40000000)], b: ["y".repeat(40000000)] } }
+    // Each number is 2 bytes to the count and far more as text: longer than a JS string can be.
+    function floats() { return new Array(30000000).fill(0.1234567890123456) }
+    function calls(f, x) {
+        try {
+            f(x());
+        } catch (e) {
+            return [e instanceof V2Error, e.type, e.message];
+        }
+    }
+    const big = new Map([["a", new Array(200000000)]]);
+    @export { bytes, holes, fewer, shared, keys, floats, calls, big }
+}
+@import { bytes, holes, fewer, shared, keys, floats, calls, big } from @js
+func show(f) {
+    try {
+        f()
+        print("sent")
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(bytes)
+show(holes)
+show(fewer)
+show(shared)
+show(keys)
+try {
+    floats()
+} catch (e) {
+    print(e.type, "|", e.message.starts_with("value too large to send to V2"))
+}
+print(calls(func(x) => 1, bytes))
+print(calls(func(x) => 1, holes))
+show(func() => to_v2(big))

@@ -1,0 +1,23 @@
+// requires: py js
+// DOCS 5: read the name as a value and the @import runs at its own line, starting the language.
+@py a {
+    print("a loaded")
+    VERSION = "1.0"
+    def f():
+        return 1
+    @export { VERSION, f }
+}
+@import { VERSION } from a
+print("after a")
+print(VERSION)
+@js b {
+    console.log("b loaded");
+    function g() { return 2 }
+    @export { g }
+}
+@import { g } from b
+print("after b")
+func call(fn) {
+    return fn()
+}
+print(call(g))

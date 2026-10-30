@@ -1,0 +1,18 @@
+// requires: py
+// DOCS 5: what a waiting block gets wrong appears when its language starts, not at its line.
+@py broken_later {
+    @import { f } from no_such_block
+    def g():
+        pass
+    @export { g }
+}
+print("the block waits, so nothing is wrong yet")
+func run() {
+    @py { print("runs") }
+}
+try {
+    run()
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+run()
