@@ -1,6 +1,6 @@
 //! Values (INTERNALS 5.1) and their canonical text (5.10 `str`).
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::fmt;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -11,7 +11,7 @@ use super::builtins::BuiltinDef;
 use super::env::Env;
 use super::error::ErrorValue;
 use crate::engines::handles::HandleRef;
-use crate::syntax::ast::FuncDecl;
+use crate::syntax::ast::{EngineImport, FuncDecl, UnitId};
 
 /// A V2 value. Cloning is O(1): lists and dicts are shared, everything else is immutable (5.1).
 #[derive(Clone)]
@@ -40,12 +40,16 @@ pub enum Callable {
     Proxy { session: usize, unit: Rc<str>, name: Rc<str> },
     /// An inner `@import`'s route stub passed back before its route resolved (11.8, 13.6).
     Route { route: usize, name: Rc<str> },
+    /// A name bound by an `@import` that waited: `local` in `import`, the blocks reached by that
+    /// statement, and what it turned out to be once its language started (12.7).
+    Waiting { import: Rc<EngineImport>, local: Rc<str>, seen: Rc<[UnitId]>, resolved: OnceCell<Value> },
 }
 
 impl Callable {
     pub fn name(&self) -> &str {
         match self {
             Callable::Closure { name, .. } | Callable::Proxy { name, .. } | Callable::Route { name, .. } => name,
+            Callable::Waiting { local, .. } => local,
             Callable::Builtin(def) => def.name,
         }
     }

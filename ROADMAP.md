@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1 rework: language lifetime and speed (1.11-1.14, go-ahead 2026-10-30); Phase 2 waits for the owner after that |
-| **Next task** | 1.11 Language lifetime |
+| **Next task** | 1.12 Parking and startup |
 | **Last update** | 2026-10-30: the owner paused Phase 2 to redesign language lifetime; the approved design is in DOCS 5 and INTERNALS 5.6, 8.8, 12.7, 13.4 and 15.6 |
 
 ## Rules
@@ -202,13 +202,14 @@ The owner reopened Phase 1 on 2026-10-30, before Phase 2, for how languages live
 fast V2 runs.
 
 ### 1.11 Language lifetime
-- [ ] `Callable::Proxy` names no session; `LazyModule` (§5.1, §13.4)
-- [ ] The waiting line: `UnitState::Waiting`, per-engine lines, first need runs the line,
-      failures, `xdepth` around a flush (§12.7)
-- [ ] Which `@import`s are eligible: the per-file use walk (§13.4, §6.2)
-- [ ] `@import { * }` removed everywhere, `Slot.star` and the adapters' `"*"` paths with it (§4.5,
+- [x] `Callable::Waiting`: a reference that exists before its process does (§5.1, §12.7)
+- [x] The waiting line: `UnitState::Waiting`, one line in program order, first need runs it,
+      failures, `xdepth` around each place (§12.7)
+- [x] Which `@import`s are eligible: the per-file use walk (§13.4, §6.2)
+- [x] `@import { * }` removed everywhere, `Slot.star` and the adapters' `"*"` paths with it (§4.5,
       §5.6, §13.5)
-- **Done when:** R60–R64 and every existing test pass, and DOCS 5's example behaves as written
+- **Done when:** R60–R64 and every existing test pass, and DOCS 5's example behaves as written —
+  **passed 2026-10-30** (Windows and Linux)
 
 ### 1.12 Parking and startup
 - [ ] Parking: idle tracking and `K32EmptyWorkingSet` on the Job's processes (§8.8)
@@ -386,3 +387,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-25 | 1.9: the seed test, lines 1-111 of the old `test_engines.v2` ported as `tests/engines/py/seed_engines.v2` (15 checks, the missing-export check asserting 13.3 step 6's message) |
 | 2026-10-25 | 1.10: the Phase 1 sweep: R01-R03, R11, R29-R31 and R33 got their tests (`tests/engines/{py,js}`), R42 its js part in `ts/strip.v2`; every R of 1.1-1.10 and the ch. 21 rows for bridged engines have tests; an audit confirmed 3 test gaps, all closed (a failing action block reached again, the idle turn after a call reply, the dead state after a startup timeout or exit 9009). Phase 1 complete on Windows and Linux |
 | 2026-10-30 | Owner paused Phase 2 for a redesign of language lifetime, exports and calls. Measured: unused languages cost nothing, a parked worker keeps everything at under 0.1 MB, V2 itself is about 15x slower than Python. Three review rounds (29 findings) moved the design back towards the existing rules: a language starts at first need, its top-level definition blocks and eligible imports wait in line, everything else acts as before. Compiled-only languages rejected. `@import { * }` removed; a cache hit touches no compiler. Spec updated; milestones 1.11-1.14 added |
+| 2026-10-30 | 1.11: a language starts at first need. `Callable::Waiting` exists before its process does; one line in program order across languages holds top-level definition blocks and eligible `@import`s; `@import { * }` is gone. The review confirmed 22 findings with 5 root causes, all fixed: per-language lines ran blocks out of order, a block looked at its imports before the line ran, a failed line stored its error on the wrong block, a waiting `@import` saw blocks below it, and a name no block exported went unnoticed. A failure no longer stops the line. Also fixed, from Phase 1: a language refused at the depth limit could never start. A differential fuzz (each program against a copy that starts both languages first) gave 0 differences in 1,200 programs when blocks call only their own language |

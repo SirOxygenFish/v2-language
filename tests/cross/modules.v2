@@ -12,10 +12,10 @@
 }
 @import { summary } from report
 print(summary([1, 2, 3]))
-// `*` takes just the functions, and imports the module at load even from another engine.
+// Another engine's module is imported when its function is first called.
 @js {
-    @import { * } from py.math
-    console.log(typeof sqrt, sqrt(16), typeof pi);
+    @import { sqrt } from py.math
+    console.log(typeof sqrt, sqrt(16));
 }
 // A constant: refused at load from the block's own engine, at the first call from another.
 try {

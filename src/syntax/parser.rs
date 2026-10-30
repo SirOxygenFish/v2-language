@@ -554,9 +554,10 @@ impl<'a> Parser<'a> {
         let start = self.bump().span;
         if matches!(self.peek(), Tok::LBrace(_)) {
             let open = self.bump().span;
-            let items = if self.at_op(Op::Star) {
-                ImportItems::All(self.bump().span)
-            } else {
+            if self.at_op(Op::Star) {
+                return Err(Diag::new("@import needs a list of names", self.span()).hint("list the names: @import { mean } from …"));
+            }
+            let items = {
                 let mut items = Vec::new();
                 loop {
                     let t = self.bump();
@@ -756,7 +757,6 @@ impl<'a> Parser<'a> {
                     })
                     .collect(),
                 ImportItems::Module(alias) => vec![(alias.text.clone(), alias.span)],
-                ImportItems::All(_) => Vec::new(),
             };
             for (name, at) in bound {
                 if let Some((arg, _)) = args.iter().find(|(n, _)| n.text == name) {
@@ -1351,7 +1351,7 @@ catch (e) {
 import "./util.v2" as util
 @import { mean, "odd-name" as odd } from py.statistics
 @import py.numpy as np
-@import { * } from @py.stats
+@import { mean as m2 } from @py.stats
 extern "m" as m { double cos(double x); }
 "#;
         let prog = parse_str(src).unwrap();

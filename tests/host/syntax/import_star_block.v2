@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: import_star_block.v2:4:15: SyntaxError: @import needs a list of names
+@py {
+    @import { * } from py.statistics
+}

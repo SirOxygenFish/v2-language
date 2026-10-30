@@ -1,0 +1,17 @@
+// requires: py
+// exit: 1
+// stderr: block 'c' has not run yet
+// R62: as above, for a name only a later `*` block has.
+@py a {
+    def x():
+        return 1
+    @export { * }
+}
+@import { f } from @py
+@py c {
+    def f():
+        return 2
+    @export { * }
+}
+print("before")
+print(f())

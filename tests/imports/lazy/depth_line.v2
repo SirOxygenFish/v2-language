@@ -1,0 +1,27 @@
+// requires: py js
+// R64: the depth limit belongs to the caller's chain. A block in the line that crosses languages
+// at its top level loads even when the language starts near the limit (INTERNALS 12.7).
+@py rec {
+    @import { dive } from v2
+    def py_dive(n, f):
+        return dive(n, f)
+    def ping():
+        return "pong"
+    @export { py_dive, ping }
+}
+@js late {
+    @import { ping } from rec
+    const v = ping();
+    function j() { return v }
+    @export { j }
+}
+@import { py_dive } from rec
+@import { j } from late
+func dive(n, f) {
+    if n == 0 {
+        return f()
+    }
+    return py_dive(n - 1, f)
+}
+print(dive(31, func() => j()))
+print(j())

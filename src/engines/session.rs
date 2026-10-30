@@ -159,9 +159,7 @@ impl Interp {
         timeouts: Timeouts,
         at: Span,
     ) -> Exec<SessionId> {
-        if self.xdepth >= MAX_XDEPTH {
-            return Err(self.raise(depth_error(), at));
-        }
+        self.check_depth(at)?;
         let key = engine.spec.session_of.clone().unwrap_or_else(|| engine.spec.id.clone());
         let spawned = ChildProc::spawn(&Spawn { argv, env, stdin: Pipe::Piped, stdout: Pipe::Piped, stderr: Pipe::Inherit });
         let mut child = match spawned {
@@ -178,6 +176,14 @@ impl Interp {
         let s = self.new_session(key, engine, Some(reader), Some(writer), Some(child), timeouts);
         self.handshake(s, at)?;
         Ok(s)
+    }
+
+    /// A worker isn't started at the depth limit, where `init` would be one crossing too many (8.4).
+    pub(crate) fn check_depth(&self, at: Span) -> Exec<()> {
+        if self.xdepth >= MAX_XDEPTH {
+            return Err(self.raise(depth_error(), at));
+        }
+        Ok(())
     }
 
     /// A session over any channel, before its handshake (the tests' scripted workers).

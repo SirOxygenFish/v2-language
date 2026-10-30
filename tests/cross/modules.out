@@ -1,5 +1,5 @@
 mean 2 of xs.txt
-function 4 undefined
+function 4
 ImportError | 'pi' is a constant — pass it in as a block arg
 ["ImportError", "'pi' is a constant — pass it in as a block arg"]
 ImportError | No module named 'v2_no_such_module'

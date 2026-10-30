@@ -1,0 +1,56 @@
+// requires: py js
+// R62: only what can't show the difference waits (INTERNALS 12.7, 13.4). A name read as a value
+// makes its `@import` run at its statement, so constants, printing and passing are unchanged.
+@import { pi } from py.math
+print(pi > 3)
+@import { sqrt } from py.math
+let f = sqrt
+print(f(16))
+@py shown {
+    def hello():
+        return "hi"
+    @export { hello }
+}
+@import { hello } from shown
+print(type(hello), hello == hello)
+print(f"${hello()}")
+@py passed {
+    def inc(x):
+        return x + 1
+    def apply(g, x):
+        return g(x)
+    @export { inc, apply }
+}
+@import { inc, apply } from passed
+print(inc)
+print(apply(inc, 1))
+// A whole module used as anything but `m.y`.
+@import js.path as jpath
+print(type(jpath))
+@import js.os as jos
+print(jos?.EOL != null)
+// `try` around anything nested still catches where it always did.
+let have = false
+try {
+    @import { x } from py.v2_no_such_module
+    have = true
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(have)
+try {
+    @py probe {
+        import v2_no_such_module
+        def g():
+            return 1
+        @export { g }
+    }
+} catch (e) {
+    print(e.type, "|", e.foreign_type)
+}
+// Nested in a function: runs when the function does.
+func local() {
+    @import { floor } from py.math
+    return floor(2.5)
+}
+print(local())

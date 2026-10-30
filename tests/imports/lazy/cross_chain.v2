@@ -1,0 +1,22 @@
+// requires: py js
+// R63: js, then py using it, then js using that, started by a py action block.
+@js helper {
+    function twice(x) { return x * 2 }
+    @export { twice }
+}
+@py middle {
+    @import { twice } from helper
+    base = twice(21)
+    def answer():
+        return base
+    @export { answer }
+}
+@js consumer {
+    @import { answer } from middle
+    var result = answer();
+    function get() { return result }
+    @export { get }
+}
+@import { get } from consumer
+@py { print("py") }
+print(get())

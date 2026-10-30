@@ -1,0 +1,29 @@
+// requires: py js
+// R64: a nested definition block first reached at the depth limit stores nothing.
+func late() {
+    @js late_block {
+        function j() { return "js" }
+        @export { j }
+    }
+    @import { j } from late_block
+    return j()
+}
+func dive(n, f) {
+    if n == 0 {
+        return f()
+    }
+    return py_dive(n - 1, f)
+}
+@py rec {
+    @import { dive } from v2
+    def py_dive(n, f):
+        return dive(n, f)
+    @export { py_dive }
+}
+@import { py_dive } from rec
+try {
+    print(dive(32, late))
+} catch (e) {
+    print(e.message)
+}
+print(late())

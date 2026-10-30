@@ -1,0 +1,6 @@
+// requires: py
+// R63: a module's public names don't wait, because other files can read them as values.
+print("before")
+import "fixtures/public.v2" as pub
+print("after")
+print(pub.p(), type(pub.p))

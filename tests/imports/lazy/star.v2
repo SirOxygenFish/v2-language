@@ -1,0 +1,31 @@
+// requires: py js
+// R62: the line runs before a block looks at what it imports, so a `*` block counts as loaded and
+// a same-language import keeps its direct stub: the same list, the same exception, `new`.
+@py a {
+    data = []
+    def get():
+        return data
+    class Custom(Exception):
+        pass
+    def f():
+        raise Custom("boom")
+    @export { * }
+}
+@py {
+    @import { get, f } from a
+    get().append(1)
+    print(get())
+    try:
+        f()
+    except Exception as e:
+        print(type(e).__name__)
+}
+@js j {
+    function Foo() { this.x = 1 }
+    @export { * }
+}
+@js {
+    @import { Foo } from j
+    const o = new Foo();
+    console.log(o.x, o instanceof Foo);
+}

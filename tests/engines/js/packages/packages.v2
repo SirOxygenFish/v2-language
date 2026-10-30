@@ -23,12 +23,12 @@ print(triple(3), greet("Ada"))
 // A local file, by a quoted path from this file's folder.
 @import { shout } from js."./helpers.js"
 print(shout("hi"))
-// `*`: the public names, functions and constants.
-func star() {
-    @import { * } from js."v2-test-pkg"
+// Functions and constants alike.
+func listed() {
+    @import { twice, VERSION } from js."v2-test-pkg"
     return [twice(2), VERSION]
 }
-print(star())
+print(listed())
 // A missing package is an ImportError with Node's message; a missing dependency of a package
 // that exists is the package's own error.
 show(func() {
@@ -68,11 +68,6 @@ show(func() {
 })
 @import js."./null_export.js" as nul
 print(nul)
-func nothing() {
-    @import { * } from js."./null_export.js"
-    return "no names"
-}
-print(nothing())
 // ts.x is the module js.x: one unit, so the same function.
 @import { twice as t2 } from ts."v2-test-pkg"
 print(t2 == twice)

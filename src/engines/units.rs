@@ -1,6 +1,7 @@
 //! Reaching blocks: definition and action units, their sessions and `load` frames (INTERNALS
 //! 6.2, 6.3, ch. 12).
 
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use crate::runtime::env::Env;
 use crate::runtime::error::{ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
 use crate::runtime::value::Value;
-use crate::syntax::ast::{EngineBlock, UnitId};
+use crate::syntax::ast::{EngineBlock, EngineImport, UnitId};
 use crate::syntax::span::Span;
 
 /// An export of a loaded unit (12.2, 13.2): a Proxy for a function, else the constant copied at
@@ -28,10 +29,45 @@ pub struct Export {
 /// A definition unit's state for the run (12.1); an action run leaves nothing behind but its
 /// routes (13.6).
 pub enum UnitState {
+    /// In its language's line: reached, not run yet (12.7).
+    Waiting,
     Loading,
     /// Its exports, which import resolution reads (13.3).
     Loaded(Rc<[Export]>),
     Failed(Rc<ErrorValue>),
+}
+
+/// What waits for its language: a definition block, or an `@import` with the blocks its statement
+/// saw (12.7).
+pub enum Waiting {
+    Block(Rc<EngineBlock>),
+    Import(Rc<EngineImport>, Rc<[UnitId]>),
+}
+
+/// One place in the line.
+struct Place {
+    seq: u64,
+    key: Rc<str>,
+    item: Waiting,
+}
+
+/// What waits, in program order, across languages (12.7). `running`: the place being run now.
+#[derive(Default)]
+pub struct Line {
+    places: VecDeque<Place>,
+    next: u64,
+    running: Option<u64>,
+}
+
+impl Line {
+    pub fn push(&mut self, key: Rc<str>, item: Waiting) {
+        self.places.push_back(Place { seq: self.next, key, item });
+        self.next += 1;
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        self.places.iter().any(|p| &*p.key == key)
+    }
 }
 
 /// A block's wire unit id: `"<FileId>:<byte offset of @>"` (9.4).
@@ -62,7 +98,7 @@ impl Interp {
         let definition = b.directives.exports.is_some();
         if definition {
             match self.units.get(&b.unit_id) {
-                Some(UnitState::Loaded(_)) => return Ok(Value::Null),
+                Some(UnitState::Loaded(_) | UnitState::Waiting) => return Ok(Value::Null),
                 Some(UnitState::Failed(e)) => return Err(Flow::Error(e.clone())),
                 Some(UnitState::Loading) => {
                     let msg = format!("{} is still loading (reached again during its own load)", self.block_name(b));
@@ -70,6 +106,16 @@ impl Interp {
                 }
                 None => {}
             }
+            if let Some(key) = self.block_waits(b) {
+                self.units.insert(b.unit_id, UnitState::Waiting);
+                self.line.push(key, Waiting::Block(b.clone()));
+                return Ok(Value::Null);
+            }
+        }
+        // Before the unit counts as started, so an error from the line or the depth limit is not
+        // stored as this block's (12.7).
+        self.before_block(b)?;
+        if definition {
             self.units.insert(b.unit_id, UnitState::Loading);
         }
         match self.run_unit(b, env, want_value && !definition) {
@@ -87,6 +133,67 @@ impl Interp {
                 Err(Flow::Error(e))
             }
             Err(other) => Err(other),
+        }
+    }
+
+    /// Whether a session exists for `key`, a dead one included (12.7).
+    pub(crate) fn running(&self, key: &str) -> bool {
+        self.sessions.iter().any(|s| &*s.key == key)
+    }
+
+    /// The line `b` joins instead of running now (12.7).
+    fn block_waits(&self, b: &EngineBlock) -> Option<Rc<str>> {
+        if !self.files[&b.unit_id.file].block_may_wait(b.unit_id) {
+            return None;
+        }
+        self.engine_key(&b.tag.text).filter(|key| !self.running(key))
+    }
+
+    /// A reached block is about to need its language: nothing starts at the depth limit, and what
+    /// waits for the language runs first (12.7).
+    fn before_block(&mut self, b: &EngineBlock) -> Exec<()> {
+        let Some(key) = self.engine_key(&b.tag.text) else { return Ok(()) };
+        if !self.running(&key) {
+            self.check_depth(b.tag.span)?;
+        }
+        if self.line.holds(&key) {
+            self.start_engine(&b.tag.text, b.tag.span)?;
+        }
+        Ok(())
+    }
+
+    /// Run the line (12.7): the first place, in program order, whose language is running, again and
+    /// again. While a place runs, only places before it may go, because what comes after it comes
+    /// after it in the program too. A failed place doesn't stop the rest; the first error is
+    /// returned at the end. The depth limit belongs to the caller's chain, so each place starts
+    /// from zero.
+    fn run_line(&mut self) -> Exec<()> {
+        let mut outcome = Ok(());
+        loop {
+            let limit = self.line.running;
+            let next = self.line.places.iter().position(|p| limit.is_none_or(|l| p.seq < l) && self.running(&p.key));
+            let Some(place) = next.and_then(|i| self.line.places.remove(i)) else { return outcome };
+            let outer = self.line.running.replace(place.seq);
+            let depth = std::mem::replace(&mut self.xdepth, 0);
+            let done = match &place.item {
+                Waiting::Block(b) => {
+                    self.units.remove(&b.unit_id);
+                    let frame = self.files[&b.unit_id.file].frame.clone();
+                    self.exec_block(b, &frame, false).map(|_| ())
+                }
+                Waiting::Import(imp, seen) => self.resolve_import(imp, Some(seen)).map(|_| ()),
+            };
+            self.line.running = outer;
+            self.xdepth = depth;
+            match done {
+                Ok(()) => {}
+                Err(Flow::Error(e)) => {
+                    if outcome.is_ok() {
+                        outcome = Err(Flow::Error(e));
+                    }
+                }
+                Err(other) => return Err(other),
+            }
         }
     }
 
@@ -153,21 +260,37 @@ impl Interp {
     /// again (8.2).
     pub(crate) fn session_for(&mut self, e: &Rc<ResolvedEngine>, at: Span) -> Exec<SessionId> {
         let key = e.spec.session_of.clone().unwrap_or_else(|| e.spec.id.clone());
-        if let Some(s) = self.sessions.iter().position(|s| s.key == key) {
+        let s = match self.sessions.iter().position(|s| s.key == key) {
+            Some(s) => s,
+            None => {
+                // Before the adapter is written: a refused start must leave nothing behind.
+                self.check_depth(at)?;
+                let engine = match &e.spec.session_of {
+                    Some(owner) => self.registry.resolve_tag(owner).map_err(|f| self.raise(f, at))?,
+                    None => e.clone(),
+                };
+                let (file, text) = crate::adapters::for_session(&key).expect("a built-in bridged engine");
+                let adapter = match crate::adapters::materialize(file, text) {
+                    Ok(path) => path,
+                    Err(msg) => return Err(self.raise(error("IOError", msg), at)),
+                };
+                let (argv, env) = worker_command(&engine, &adapter);
+                let timeouts = self.timeouts(&key);
+                self.start_session(engine, &argv, &env, timeouts, at)?
+            }
+        };
+        self.run_line().map_err(|f| self.raise(f, at))?;
+        Ok(s)
+    }
+
+    /// The session of the engine that `tag` runs on, started if needed: its first need (12.7).
+    pub(crate) fn start_engine(&mut self, tag: &str, at: Span) -> Exec<SessionId> {
+        if let Some(s) = self.engine_key(tag).and_then(|key| self.sessions.iter().position(|s| s.key == key)) {
+            self.run_line().map_err(|f| self.raise(f, at))?;
             return Ok(s);
         }
-        let engine = match &e.spec.session_of {
-            Some(owner) => self.registry.resolve_tag(owner).map_err(|f| self.raise(f, at))?,
-            None => e.clone(),
-        };
-        let (file, text) = crate::adapters::for_session(&key).expect("a built-in bridged engine");
-        let adapter = match crate::adapters::materialize(file, text) {
-            Ok(path) => path,
-            Err(msg) => return Err(self.raise(error("IOError", msg), at)),
-        };
-        let (argv, env) = worker_command(&engine, &adapter);
-        let timeouts = self.timeouts(&key);
-        self.start_session(engine, &argv, &env, timeouts, at)
+        let engine = self.registry.resolve_tag(tag).map_err(|f| self.raise(f, at))?;
+        self.session_for(&engine, at)
     }
 
     /// `[engines.<key>] startup_timeout` (default 30 s) and `call_timeout` (default none); 0 is

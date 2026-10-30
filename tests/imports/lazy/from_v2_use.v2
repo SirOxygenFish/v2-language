@@ -1,0 +1,20 @@
+// requires: py
+// 13.4: a name a block's `from v2` import reads doesn't wait, because it is read as a value.
+@import { sqrt } from py.math
+func run() {
+    return sqrt(16)
+}
+@py {
+    @import { sqrt } from v2
+    print(sqrt(25))
+}
+print(run())
+// `from v2` checks what it finds is a function, so a constant has to be there by then.
+@import { pi } from py.math
+@py {
+    @import { pi } from v2
+    try:
+        pi()
+    except Exception as e:
+        print(e.type, "|", e.message)
+}

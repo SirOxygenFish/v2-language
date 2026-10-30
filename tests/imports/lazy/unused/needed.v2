@@ -1,0 +1,11 @@
+// exit: 3
+// stderr: needed.v2:10:7: EngineNotFound
+// R60: the first call is what needs the language, so that is where its error appears.
+@js report {
+    function shout(s) { return s.toUpperCase() }
+    @export { shout }
+}
+@import { shout } from report
+print("not needed yet")
+print(shout("hi"))
+print("never")

@@ -1,7 +1,0 @@
-NameError | 'mean' is already declared in this block | line 13
-NameError | 'median' is already declared in this block | line 18
-NameError | 'mode' is already declared in this block | line 23
-NameError | 'variance' is already declared in this block | line 28
-NameError | 'mean' is already declared in this block | line 33
-shadowed 2
-TypeError | cannot assign to constant 'mean'

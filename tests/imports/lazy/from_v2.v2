@@ -1,0 +1,15 @@
+// requires: py
+// A definition block that imports from `v2` depends on V2 state at its position, so it never
+// waits: its top-level calls happen where it is reached (INTERNALS 12.7).
+let plugins = []
+func register(name) {
+    plugins.push(name)
+}
+@py a {
+    @import { register } from v2
+    register("a")
+    def run():
+        return 1
+    @export { run }
+}
+print(len(plugins))
