@@ -1,0 +1,18 @@
+["NoneType", "bool", "int", "float", "str", "list", "dict", "bytes"]
+["null", "boolean", "number", "number", "string", "array", "object", "buffer"]
+[true, true, true, true, true, true, true, true]
+[true, true, true, true, true, true, true, true]
+1.0 float 1 int 1.5
+bigint true number int
+[1, 2] {"a": [1, {"b": [2, 3]}]}
+2 [1]
+true true
+inf -inf true
+null true null false [1, null] {"a": null}
+100000 100000 99999
+MarshalError: value too large to send to engine 'py' (67 MiB, limit 64 MiB)
+still running
+handle handle func handle handle
+2
+3
+true

@@ -1,0 +1,58 @@
+// DOCS 3.2, 3.4, 3.11; INTERNALS 5.2, 5.3, 5.10.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+print(1_000_000, 0xff, -7, 3.14, 1e-3, 2.0, 0.1 + 0.2 == 0.3)
+print(7 / 2, 6 / 2, -7 % 3, 7 % -3, 2 ** 3 ** 2, 2 ** -1, (-2) ** 3)
+print(-6.0 % 3, 6.0 % -3, -2 ** 2)
+print(1 == 1.0, "1" == 1, true == 1, null == false, [1, [2]] == [1, [2]], {a: 1, b: 2} == {b: 2, a: 1})
+print(9007199254740993 == 9007199254740992.0, 9007199254740992 == 9007199254740992.0)
+let nan = float("nan")
+print(nan == nan, nan != nan, nan < 1, nan > 1, bool(nan), -0.0 == 0.0, bool(-0.0))
+print(1e20, 1e-7, 1e15, 1e16, float("inf"), -float("inf"), nan)
+print(int("42"), int(" -7 "), int("+5"), int(3.9), int(-3.9), int(true), float("2.5"), float(3), float(true), float(" inf "))
+print(str(3.5), str(null), str(true), str([1, "a", 2.0]), str({k: "v"}), str("x"))
+print(bool(0), bool("0"), bool([]), bool({}), bool(null), bool(0.0), bool(b""), bool(print))
+print(round(2.5), round(3.5), round(2.675, 2), round(7), round(7, 3), round(1.25, 1), round(-0.5))
+print(type(round(2.5)), type(round(2.5, 1)), type(7 / 7), type(2 ** 2), type(2 ** -2), type(2.0 ** 2))
+print(abs(-3), abs(-2.5), sum([]), sum([1, 2]), sum([1, 2.5]), div(-7, 2), div(7, 2), div(7, -2))
+print(min(3, 1, 2), max([1, 5, 2]), min("b", "a"), max(1, 2.5), min(1, 1.0), max(1.0, 1), min([7]))
+print(range(3), range(1, 4), range(5, 0, -2), range(0), range(2, 2))
+print(0 || "x", 1 && 2, null ?? 3, 0 ?? 3, false ? 1 : 2, !0, 1 not in [1], 2 in [1, 2])
+print(err(func() => 9223372036854775807 + 1))
+print(err(func() => -9223372036854775807 - 2))
+print(err(func() => 4294967296 * 4294967296))
+print(err(func() => 2 ** 64))
+print(err(func() => 1 / 0))
+print(err(func() => 1.0 / 0.0))
+print(err(func() => 1 % 0))
+print(err(func() => div(1, 0)))
+print(err(func() => 0 ** -1))
+print(err(func() => "a" + 1))
+print(err(func() => 1 + null))
+print(err(func() => -"a"))
+print(err(func() => [1] < [2]))
+print(err(func() => "a" < 1))
+print(err(func() => int("x")))
+print(err(func() => int("99999999999999999999")))
+print(err(func() => int(nan)))
+print(err(func() => int([])))
+print(err(func() => min()))
+print(err(func() => max([])))
+print(err(func() => range(0, 5, 0)))
+print(err(func() => range(start: 1)))
+print(err(func() => range()))
+print(kind(func() => float("x")), kind(func() => min(1, "a")), kind(func() => round(1.5, -1)), kind(func() => round(nan)))
+print(kind(func() => sum(["a"])), kind(func() => abs("a")), kind(func() => abs(-9223372036854775807 - 1)))
+print(kind(func() => div(1.5, 2)), kind(func() => div(-9223372036854775807 - 1, -1)))

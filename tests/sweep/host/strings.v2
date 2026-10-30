@@ -1,0 +1,51 @@
+// DOCS 3.5; INTERNALS 5.4, 5.11.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+let name = "Ada"
+print(f"Hello, ${name}! 2 + 2 = ${2 + 2}")
+print(f"${19.999:.2f}", f"${3:.1f}", f"${float("nan"):.2f}", f"${[1, "a"]}", f"\${x}", f"${{a: 1}.a}")
+print(r"C:\Users\ada\data.csv", 'single "double" inside', "it's")
+let poem = """
+    Roses are red,
+    V2 glues them all.
+    """
+print(poem == "Roses are red,\nV2 glues them all.")
+let who = "you"
+let shaped = f"""
+    ${who}
+      indented
+    """
+print(shaped == "you\n  indented")
+print("a\tb" == "a" + "\x09" + "b", "\u{1F600}" == "😀", "\0" == "\x00", len("\u{1F600}"), "\$" == "$")
+print("héllo"[1], "hello"[-1], "hello"[1:3], len("héllo"), "hello"[:2], "hello"[3:], "hello"[-2:], "hello"[3:1] == "", "hello"[0:99], "日本語"[1:])
+print("Hi".upper(), "Hi".lower(), "  x ".trim(), " a  b ".split(), "a,b,,c".split(","), "a\nb\r\nc\n".lines())
+print("straße".upper(), "aXbX".replace("X", "-"), "abc".starts_with("ab"), "abc".ends_with("bc"), "héllo".index_of("l"), "abc".index_of("z"))
+let b = "hé".encode()
+print(b, len(b), b[0], b[-1], b[0:1], b.decode(), b.hex(), 104 in b, b"h" in b, 300 in b, b + b"!")
+print(b"\x00A\xff", b"\"\\\n", type(b), b == "hé".encode(), b[1:] == b"\xc3\xa9")
+print("ell" in "hello", "z" not in "hello", "ab" * 3, 2 * "ab", "ab" * 0 == "", "ab" * -1 == "")
+for ch in "hé" {
+    print(ch)
+}
+print(err(func() => "hello"[9]))
+print(err(func() => 1 in "abc"))
+print(err(func() => "a" in 5))
+print(err(func() => "abc".split("")))
+print(err(func() => "a".replace("", "x")))
+print(err(func() => b"\xff".decode()))
+print(err(func() => "abc".nope()))
+print(err(func() => "abc".x))
+print(err(func() => f"${"a":.2f}"))
+print(kind(func() => "abc"[1.0]), kind(func() => b"a" < b"b"))

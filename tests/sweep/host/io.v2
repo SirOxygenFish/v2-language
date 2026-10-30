@@ -1,0 +1,50 @@
+// DOCS 3.11: files, JSON, print, env. Every path is under this script's folder.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+let base = f"${script_dir()}/sweep_io_tmp"
+make_dir(f"${base}/a/b")
+make_dir(f"${base}/a/b")
+print(exists(base), exists(f"${base}/nope"))
+let p = f"${base}/f.txt"
+write_file(p, "héllo\n")
+write_file(p, "more", append: true)
+print(read_file(p), len(read_file(p, binary: true)), type(read_file(p, binary: true)))
+write_file(f"${base}/b.bin", b"\x00\xff")
+print(read_file(f"${base}/b.bin", binary: true))
+write_file(f"${base}/new.txt", "x", append: true)
+print(list_dir(base))
+print(kind(func() => read_file(f"${base}/b.bin")), kind(func() => read_file(f"${base}/nope")), kind(func() => remove_file(base)), kind(func() => list_dir(p)), kind(func() => write_file(p, 1)))
+for name in ["f.txt", "b.bin", "new.txt"] {
+    remove_file(f"${base}/${name}")
+}
+print(list_dir(base), kind(func() => remove_file(p)))
+print(json_stringify({a: [1, 2.0, null, "x", true], b: {}}), json_stringify([]), json_stringify("a\"b"), json_stringify(1.5))
+print(json_stringify({a: [1], b: []}, indent: 2))
+let v = json_parse("{\"a\": 1.0, \"b\": [1, null], \"a\": 2}")
+print(v, type(v.a), type(v.b[0]))
+print(err(func() => json_stringify(b"x")))
+print(kind(func() => json_parse("{")), kind(func() => json_parse("123456789012345678901234567890")), kind(func() => json_stringify(float("nan"))), kind(func() => json_stringify(print)))
+let cyc = []
+cyc.push(cyc)
+print(err(func() => json_stringify(cyc)))
+print(1, 2, sep: "-", end: "!\n")
+print()
+print("no newline", end: "")
+print("")
+print(getenv("V2_SURELY_UNSET"), getenv("V2_SURELY_UNSET", "dflt"), type(args()), len(args()), time() > 1000000000.0, type(time()))
+print(kind(func() => getenv("A=B")), kind(func() => sleep(-1)), kind(func() => sleep("1")), sleep(0))
+print(input())
+print(engine_available("nosuch"), to_v2([1]), type(script_dir()))
+print(kind(func() => print(1, sep: 2)), kind(func() => len(1)), kind(func() => exec([])), kind(func() => exec("x")), err(func() => exec(["v2-no-such-program"])))

@@ -1,0 +1,87 @@
+// requires: py js
+// DOCS 4.
+let nums = [4, 8]
+@py(nums, label: "lucky") {
+    nums.append(1)
+    print(label, "->", sum(nums))
+}
+print(nums)
+print(@py(x: 2) { x * 21 })
+print(@js(name: "ada") { name.toUpperCase() })
+print(@py { x = 1 })
+print(@js { undefined })
+print(@js { if (true) { 5 } })
+print(@py {
+    y = 2
+    y + 1
+})
+@py { counter = 1 }
+print(@py { "counter" in dir() })
+@py {
+    import sys
+    sys.shared_mark = 1
+}
+print(@py {
+    import sys
+    sys.shared_mark
+})
+for i in 0..2 {
+    @py(i) { print("run", i) }
+}
+@py { print("}") }
+@py {
+    d = {"a": {"b": 1}}
+    print(f"{d['a']['b']}")  # a comment with } brace
+}
+@js { console.log(`${"}"}`) }
+@js {
+    const s = "{";  // { comment
+    console.log(s);
+}
+@js ```
+    const opener = /\{+/;
+    console.log(String("{{x").replace(opener, "("));
+```
+@py {
+    s = """a
+  b
+    c"""
+    print(s)
+}
+@py {
+    text = """
+    @@export { x }
+    """
+    print(text.strip())
+}
+print("1")
+@py { print("2", end="") }
+print("3")
+@js { process.stdout.write("4\n") }
+@py {
+    import sys
+    sys.stdout.write("5\n")
+}
+try {
+    @py {
+        import sys
+        sys.exit(3)
+    }
+} catch (e) {
+    print(e.type, e.foreign_type)
+}
+try {
+    @js { process.exit(1) }
+} catch (e) {
+    print(e.type)
+}
+try {
+    @py { def( }
+} catch (e) {
+    print(e.type, e.foreign_type, e.line)
+}
+try {
+    @js { let = }
+} catch (e) {
+    print(e.type, e.foreign_type, e.line)
+}

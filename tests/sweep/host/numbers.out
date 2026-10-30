@@ -1,0 +1,42 @@
+1000000 255 -7 3.14 0.001 2.0 false
+3.5 3.0 2 -2 512 0.5 -8
+0.0 -0.0 -4
+true false false false true true
+false true
+false true false false true true false
+1e20 1e-7 1000000000000000.0 1e16 inf -inf nan
+42 -7 5 3 -3 1 2.5 3.0 1.0 inf
+3.5 null true [1, "a", 2.0] {"k": "v"} x
+false true false false false false false true
+2 4 2.67 7 7 1.2 0
+int float float int float float
+3 2.5 0 3 3.5 -4 3 -4
+1 5 a 2.5 1 1.0 7
+[0, 1, 2] [1, 2, 3] [5, 3, 1] [] []
+x 2 3 0 2 true false true
+ValueError: integer overflow in '+'
+ValueError: integer overflow in '-'
+ValueError: integer overflow in '*'
+ValueError: integer overflow in '**'
+ValueError: division by zero
+ValueError: division by zero
+ValueError: division by zero
+ValueError: division by zero
+ValueError: division by zero
+TypeError: unsupported operand types for +: 'str' and 'int' — use f"...${x}" or str(x)
+TypeError: unsupported operand types for +: 'int' and 'null'
+TypeError: bad operand type for unary -: 'str'
+TypeError: cannot compare list and list with '<'
+TypeError: cannot compare str and int with '<'
+ValueError: invalid int: 'x'
+ValueError: int out of range: '99999999999999999999'
+ValueError: cannot convert nan to int
+TypeError: int() can't convert list
+ValueError: min() of an empty list
+ValueError: max() of an empty list
+ValueError: range() step must not be zero
+ArityError: range() takes positional arguments only
+ArityError: range() missing required argument 'end'
+ValueError TypeError ValueError ValueError
+TypeError TypeError ValueError
+TypeError ValueError

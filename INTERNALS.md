@@ -1798,7 +1798,7 @@ send(f)            under the send lock: buffered output as out frames (9.9), que
   `NameError`, `ValueError`, `MarshalError`, `ProtocolError`, `Error`); `foreign_type` is Python `type(e).__name__`, JS
   `e.name`, or `typeof` for a thrown non-Error; `trace` per 12.6; `text` the engine's own formatted traceback. A
   `V2Error` that escapes user code goes back with its `v2` tag, so it round-trips unchanged.
-- **`V2Error`** (Python `class V2Error(Exception)`, JS `class V2Error extends Error`) is raised in foreign code when a
+- **`V2Error`** (Python `class V2Error(Exception)`, a builtin; JS `class V2Error extends Error`, a non-enumerable global) is raised in foreign code when a
   call through `host_call` fails (9.6) or is refused (9.8), and by a same-session stub that refuses a call (13.7). It
   exposes `type`, `message`, `data`, `lang` and `foreign_type` from the `error` tag (10.3).
 - **Output** follows 9.9. Every string sent as text is first made well-formed (10.4).

@@ -1189,7 +1189,9 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   and call it.
 - A foreign function may only call V2 from the thread V2 called it on.
 - When an imported function (another language's, or V2's) throws, the foreign code that called it
-  gets a `V2Error` exception with `type`, `message`, `data`, `lang` and `foreign_type`.
+  gets a `V2Error` exception with `type`, `message`, `data`, `lang` and `foreign_type`. The name is
+  there in Python and JavaScript without importing anything: `except V2Error as e:`,
+  `e instanceof V2Error`.
 
 ---
 

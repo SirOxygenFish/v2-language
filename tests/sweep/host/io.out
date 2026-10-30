@@ -1,0 +1,26 @@
+true false
+héllo
+more 11 bytes
+b"\x00\xff"
+["a", "b.bin", "f.txt", "new.txt"]
+IOError IOError IOError IOError TypeError
+["a"] IOError
+{"a":[1,2.0,null,"x",true],"b":{}} [] "a\"b" 1.5
+{
+  "a": [
+    1
+  ],
+  "b": []
+}
+{"a": 2, "b": [1, null]} int int
+TypeError: cannot convert bytes to JSON
+ValueError ValueError TypeError TypeError
+ValueError: cannot convert a cyclic list to JSON
+1-2!
+
+no newline
+null dflt list 0 true float
+ValueError ValueError TypeError null
+null
+false [1] str
+TypeError TypeError ValueError TypeError IOError: exec: cannot start 'v2-no-such-program': not found on PATH
