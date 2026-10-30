@@ -18,17 +18,19 @@ it is loaded automatically into every session and every subagent.
   Bloat to trim is elsewhere: host-language extras, tooling, config, over-detailed spec text.
 - `old/` = the archived previous implementation. Reference only; never build on it.
 - Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: ROADMAP "Where we are". 0.11 and Phase 1 are done (2026-10-25); Phase 2 needs the
-  owner's go-ahead.
+- Status: ROADMAP "Where we are". Phase 1 was reopened on 2026-10-30 for 1.11-1.14; Phase 2 needs
+  the owner's go-ahead after that.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
-- Plan of 2026-10-24 (0.11 + Phase 1) is done: Phase 1 complete 2026-10-25 on Windows and WSL.
-  Waiting for the owner before Phase 2 (2.1 process helper, then extern, compiled blocks).
+- Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
+  (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
+  test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
+- Now: 1.11.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
-- Scratchpad helpers (session-local): mkout.py writes a test's .out from the binary (set
-  PYTHONIOENCODING=utf-8 for output with U+FFFD); prove17/18.py are swap-out proof templates.
+- Scratchpad helpers (session-local): mem/bench.v2 and mem/measure.py (numbers), mkout.py writes a
+  test's .out from the binary (never for sweep tests: their output comes from DOCS).
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,

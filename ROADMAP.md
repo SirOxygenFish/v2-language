@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Phase 1 complete (Windows and Linux); Phase 2 waits for the owner's go-ahead |
-| **Next task** | 2.1 Process helper |
-| **Last update** | 2026-10-25: 0.11 and all of Phase 1 built, one commit per milestone, each reviewed by finders and refuters and every confirmed finding fixed with a regression test (progress log) |
+| **Current phase** | Phase 1 rework: language lifetime and speed (1.11-1.14, go-ahead 2026-10-30); Phase 2 waits for the owner after that |
+| **Next task** | 1.11 Language lifetime |
+| **Last update** | 2026-10-30: the owner paused Phase 2 to redesign language lifetime; the approved design is in DOCS 5 and INTERNALS 5.6, 8.8, 12.7, 13.4 and 15.6 |
 
 ## Rules
 
@@ -198,6 +198,40 @@ callbacks and errors that cross languages.
 and protocol tests, and every R listed in 1.1–1.10 pass. — **complete 2026-10-25** on Windows and Linux (CI has not run
 yet: nothing is pushed; macOS untested).
 
+The owner reopened Phase 1 on 2026-10-30, before Phase 2, for how languages live in memory and how
+fast V2 runs.
+
+### 1.11 Language lifetime
+- [ ] `Callable::Proxy` names no session; `LazyModule` (§5.1, §13.4)
+- [ ] The waiting line: `UnitState::Waiting`, per-engine lines, first need runs the line,
+      failures, `xdepth` around a flush (§12.7)
+- [ ] Which `@import`s are eligible: the per-file use walk (§13.4, §6.2)
+- [ ] `@import { * }` removed everywhere, `Slot.star` and the adapters' `"*"` paths with it (§4.5,
+      §5.6, §13.5)
+- **Done when:** R60–R64 and every existing test pass, and DOCS 5's example behaves as written
+
+### 1.12 Parking and startup
+- [ ] Parking: idle tracking and `K32EmptyWorkingSet` on the Job's processes (§8.8)
+- [ ] `NtResumeProcess` instead of the Toolhelp snapshot (§8.3)
+- [ ] The Store placeholder remembered in `toolchains.json` (§7.7)
+- [ ] Node's first context: don't force lazy globals; trace the rest of the 33 ms (§14.4)
+- **Done when:** R65 and R67 pass, and first-block times are recorded against 190 ms (Python)
+  and 93 ms (Node)
+
+### 1.13 Variable slots
+- [ ] `syntax/resolve`: layouts and name positions, frame elision (§5.6)
+- [ ] `Frame` by position, by-name fallback for reads and writes (§5.6)
+- [ ] `eval` and `exec` slimmed: cold arms split, int fast path, direct argument binding
+- **Done when:** R66 and every existing test pass unchanged, and `fib(32)` and the 10M loop are
+  recorded against 3.5 s and 3.2 s
+
+### 1.14 The `.v2` test-and-fix loop
+- [ ] `tests/sweep/`, one folder per DOCS area, expected output taken from DOCS (§22.1)
+- [ ] Every mismatch fixed at its root, with a regression test (rules 3 and 4)
+- [ ] Reviewers' hostile programs against a snapshot binary, until two rounds in a row find nothing
+- **Done when:** both rounds are clean on Windows and Linux. Compiled blocks, `extern`, run engines
+  and custom engines aren't built yet, so they aren't covered
+
 ---
 
 ## Phase 2: Compiled blocks and native libraries
@@ -230,8 +264,10 @@ C, C++ and Rust blocks compiled to cached libraries, and `extern` for existing l
       local headers in the cache key, the `.v2` folder in the library's dependency search
       (§15.6–15.8, §18.1)
 - [ ] Program mode (no `@export`): `main` wrapping, run, capture (§15.5)
-- [ ] Build cache in `~/.v2/cache/build`; `v2 cache clean` empties all of `~/.v2/cache` (the
-      build cache and `toolchains.json`) (§15.6, §19.4)
+- [ ] Build cache in `~/.v2/cache/build`, looked up before any toolchain, so a hit touches no
+      compiler (§15.1, §15.6); `v2 cache clean` empties all of `~/.v2/cache` (the build cache and
+      `toolchains.json`) (§19.4)
+- [ ] Definition blocks wait for their first call (§12.7)
 - [ ] Loading and binding: evict-and-rebuild only for a damaged library, FFILoadError for a
       missing dependency (§15.8)
 - **Done when:** R06 (C), R20, R56 and the `cl` cases of the `engines/resolve` unit tests (§22.3) pass
@@ -241,7 +277,7 @@ C, C++ and Rust blocks compiled to cached libraries, and `extern` for existing l
 - **Done when:** R22 passes
 
 ### 2.5 Rust blocks
-- [ ] Rust toolchain: `rustc -vV`, rustup sysroot pin, target check (§7.6, §15.7);
+- [ ] Rust toolchain, on a cache miss only: `rustc -vV`, rustup sysroot pin, target check (§7.6, §15.7);
       `[engines.rust] command/flags/call_timeout` (§18.2); its spec row and `v2 doctor` row
 - [ ] Signature parser on tokens (lifetimes ignored), `catch_unwind` shims with the Rust `v2`
       module's prelude, `String` returns (§15.3, §15.4); program blocks may define helpers
@@ -349,3 +385,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-25 | 1.8: errors and output across languages (`engines/traces.rs`: a worker error's frames mapped to `.v2` lines and columns and printed as 2.5 says, located at the innermost block frame with that block's tag as `e.lang`; a V2 error crossing foreign code keeps its frames with the foreign ones between; output order checked with stdout captured); a review confirmed 7 findings, fixed with tests that fail without the fix: TS strip errors past a block's first line lost their position on Node 24, JS syntax errors had no column, a V2 error first raised by foreign code lost V2's frames, Python compiler errors counted bytes, `<module>` was dropped for library frames, a huge column from a worker panicked the host, and frames went to the wrong block or line (shared lines across engines, U+2028 in JS, `@@export` lines) |
 | 2026-10-25 | 1.9: the seed test, lines 1-111 of the old `test_engines.v2` ported as `tests/engines/py/seed_engines.v2` (15 checks, the missing-export check asserting 13.3 step 6's message) |
 | 2026-10-25 | 1.10: the Phase 1 sweep: R01-R03, R11, R29-R31 and R33 got their tests (`tests/engines/{py,js}`), R42 its js part in `ts/strip.v2`; every R of 1.1-1.10 and the ch. 21 rows for bridged engines have tests; an audit confirmed 3 test gaps, all closed (a failing action block reached again, the idle turn after a call reply, the dead state after a startup timeout or exit 9009). Phase 1 complete on Windows and Linux |
+| 2026-10-30 | Owner paused Phase 2 for a redesign of language lifetime, exports and calls. Measured: unused languages cost nothing, a parked worker keeps everything at under 0.1 MB, V2 itself is about 15x slower than Python. Three review rounds (29 findings) moved the design back towards the existing rules: a language starts at first need, its top-level definition blocks and eligible imports wait in line, everything else acts as before. Compiled-only languages rejected. `@import { * }` removed; a cache hit touches no compiler. Spec updated; milestones 1.11-1.14 added |
