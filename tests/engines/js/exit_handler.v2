@@ -1,0 +1,8 @@
+// requires: js
+// stderr: uncaught error in a process 'exit' handler: Error: my handler failed
+// A `process.on('exit')` handler that throws is reported as the user's own error (9.10).
+@js {
+    process.on("exit", () => { throw new Error("my handler failed") });
+    console.log("armed");
+}
+print("done")

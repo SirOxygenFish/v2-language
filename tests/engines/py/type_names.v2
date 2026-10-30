@@ -1,0 +1,23 @@
+// requires: py
+// A class with an odd `__module__` is still just a handle (10.6).
+@py {
+    class Odd:
+        pass
+    Odd.__module__ = 12
+    class Hook:
+        def to_dict(self):
+            return Hook()
+    def odd():
+        return Odd()
+    def hook():
+        return Hook()
+    @export { odd, hook }
+}
+@import { odd, hook } from @py
+print(type(odd()))
+// A chain of hooks ends (11.5).
+try {
+    to_v2(hook())
+} catch (e) {
+    print(e.type, "|", e.message)
+}

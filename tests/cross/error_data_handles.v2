@@ -1,0 +1,55 @@
+// requires: py js
+// A V2 error passing through foreign code keeps its data, even a handle of another engine, and
+// that handle is back when the error comes home (9.6, 11.7).
+@py a {
+    import datetime
+    def mk():
+        return datetime.date(2000, 1, 1)
+    def pcall(cb):
+        return cb()
+    def pcatch(cb):
+        try:
+            cb()
+        except V2Error as e:
+            return [type(e.data).__name__, callable(e.data["h"]) if "h" in e.data else None]
+    @export { mk, pcall, pcatch }
+}
+@js b {
+    function jcall(cb) { return cb() }
+    function jcatch(cb) {
+        try {
+            cb();
+        } catch (e) {
+            return [e.type, e.message, typeof e.data.h];
+        }
+    }
+    function mkm() { return new Map([[1, 2]]) }
+    @export { jcall, jcatch, mkm }
+}
+@import { mk, pcall, pcatch } from a
+@import { jcall, jcatch, mkm } from b
+let h = mk()
+let m = mkm()
+func fails(x) {
+    return func() {
+        throw error("K", "m", {h: x, n: [1, x]})
+    }
+}
+try {
+    jcall(fails(h))
+} catch (e) {
+    print(e.data.h.year, e.data.n[1].year, e.data.h == h)
+}
+try {
+    pcall(fails(m))
+} catch (e) {
+    print(e.data.h.size, e.data.h == m)
+}
+print(jcatch(fails(h)))
+print(pcatch(fails(m)))
+// The same value as an argument is still refused.
+try {
+    jcall(error("K", "m", {h: h}))
+} catch (e) {
+    print(e.type)
+}

@@ -72,6 +72,16 @@ function gone() {
   rawExit(0);
 }
 
+function leave() {
+  // Exits; a `process.on('exit')` handler that throws is the user's error, not the adapter's.
+  try {
+    rawExit(0);
+  } catch (e) {
+    rawWriteSync(2, `uncaught error in a process 'exit' handler: ${e && e.stack ? e.stack : e}\n`);
+    rawExit(0);
+  }
+}
+
 function fatal(what) {
   // A line the adapter can't parse, or a reply it isn't waiting for (9.1).
   try {
@@ -161,6 +171,7 @@ class Walk extends Set {
   // The containers open on the way down, and the least the frame can come to: a value too big
   // stops here, before the time and memory of encoding all of it (9.1).
   cost = 0;
+  hooks = 0; // to_v2 hooks open on the way down (11.5)
 
   spend(n) {
     this.cost += n;
@@ -596,7 +607,7 @@ function encode(x, depth = 0, open = new Walk()) {
     return { $v2: 'fn', id: stubCells.get(x).id };
   }
   if (t === 'function' && routeStubs.has(x)) return { $v2: 'fn', route: routeStubs.get(x) };
-  if (t !== 'object') return handleTag(x);
+  if (t !== 'object' || util.types.isProxy(x)) return handleTag(x);
   if (x instanceof V2Error) return errorTag(x, depth, open);
   if (util.types.isUint8Array(x)) {
     open.spend(Math.ceil(x.byteLength / 3) * 4);
@@ -1364,10 +1375,13 @@ function toV2(x, depth = 0, open = new Walk()) {
     if (typeof f === 'function') {
       // The object stays on the path, so a hook that returns it (or holds it) is a cycle.
       if (open.has(x)) throw new Fail('MarshalError', `to_v2(): can't convert a ${typeName(x)} that contains itself`);
+      if (open.hooks >= MAX_DEPTH) throw new Fail('MarshalError', `to_v2(): value nested deeper than ${MAX_DEPTH} levels`);
       open.add(x);
+      open.hooks += 1;
       try {
         return toV2(Reflect.apply(f, x, []), depth, open);
       } finally {
+        open.hooks -= 1;
         open.delete(x);
       }
     }
@@ -1408,7 +1422,9 @@ function doOp(m) {
       return { value: null };
     }
     case 'len': {
-      const n = typeof obj.length === 'number' ? obj.length : typeof obj.size === 'number' ? obj.size : null;
+      const length = obj.length;
+      const size = typeof length === 'number' ? null : obj.size;
+      const n = typeof length === 'number' ? length : typeof size === 'number' ? size : null;
       if (n === null) throw new TypeError('object has no length');
       if (!Number.isSafeInteger(n) || n < 0) throw new TypeError(`object has an invalid length (${n})`);
       return { value: n };
@@ -1518,7 +1534,8 @@ async function handle(m) {
     let result = HANDLERS[m.t](m);
     if (isThenable(result)) {
       const dry = new Promise((_, reject) => {
-        onDry = () => reject(new Fail('Error', "the block's value is a Promise that can never settle: nothing is left for it to wait on"));
+        const what = m.t === 'load' ? "the block's value" : 'the result';
+        onDry = () => reject(new Fail('Error', `${what} is a Promise that can never settle: nothing is left for it to wait on`));
         process.once('beforeExit', onDry);
       });
       result = await Promise.race([result, dry]);
@@ -1550,7 +1567,7 @@ function bye() {
   try {
     drainOut(true);
   } catch {}
-  rawExit(0);
+  leave();
 }
 
 function dispatchOther(m) {
