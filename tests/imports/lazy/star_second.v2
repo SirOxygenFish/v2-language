@@ -1,0 +1,18 @@
+// requires: py
+// 13.3: every `*` block counts, not just the first one a name might be in.
+@py a {
+    def one():
+        return 1
+    @export { * }
+}
+@py b {
+    def two():
+        return 2
+    @export { * }
+}
+try {
+    @import { two } from @py
+    print(two())
+} catch (e) {
+    print(e.message)
+}

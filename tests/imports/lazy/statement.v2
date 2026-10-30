@@ -1,0 +1,15 @@
+// requires: py
+// R62: a waiting `@import` finds what its statement would have found. `*` block `b` comes after
+// it, so it neither makes the import ambiguous nor supplies a name.
+@py a {
+    def mean():
+        return 1
+    @export { mean }
+}
+@import { mean } from @py
+@py b {
+    def mean():
+        return 2
+    @export { * }
+}
+print(mean())

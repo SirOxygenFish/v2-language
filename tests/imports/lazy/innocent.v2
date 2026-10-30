@@ -1,0 +1,25 @@
+// requires: py
+// R64: a nested block that started the language isn't stored with another block's error.
+@py bad {
+    raise ValueError("boom")
+    def f():
+        return 1
+    @export { f }
+}
+func load() {
+    @py good {
+        print("good runs")
+        def g():
+            return "g"
+        @export { g }
+    }
+    @import { g } from good
+    return g()
+}
+for i in 0..2 {
+    try {
+        print(load())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}

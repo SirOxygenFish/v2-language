@@ -944,9 +944,6 @@ if __name__ == "__main__":
         names = m.get("names")
         if names is None:
             return {"value": handle_tag(mod), "exports": [], "missing": []}
-        if names == "*":
-            public = getattr(mod, "__all__", None)
-            names = list(public) if public is not None else [k for k in list(vars(mod)) if not k.startswith("_")]
         exports, missing, seen = [], [], set()
         for n in names:
             if not isinstance(n, str) or n != well_formed(n) or n in seen:

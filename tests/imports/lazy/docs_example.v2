@@ -1,0 +1,12 @@
+// requires: py
+// DOCS 5's example, as written.
+// Python has not started, so this block waits, and so does the @import.
+@py stats {
+    def spread(xs):
+        return max(xs) - min(xs)
+    @export { spread }
+}
+@import { spread } from stats
+
+print("hello")                   // still no Python
+print(spread([1, 2]))            // Python starts, the line runs, then the call

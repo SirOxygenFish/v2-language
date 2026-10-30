@@ -24,7 +24,7 @@ use crate::engines::imports::{FileScope, Route};
 use crate::engines::process::stop_if_interrupted;
 use crate::engines::registry::Registry;
 use crate::engines::session::Session;
-use crate::engines::units::UnitState;
+use crate::engines::units::{Line, UnitState};
 use crate::syntax::ast::*;
 use crate::syntax::span::{FileId, SourceMap, Span};
 
@@ -62,6 +62,8 @@ pub struct Interp {
     pub xdepth: u32,
     /// Definition units by block (12.1).
     pub units: HashMap<UnitId, UnitState>,
+    /// What waits for its language to start (12.7).
+    pub line: Line,
     /// Each file whose top level has started (6.2).
     pub files: HashMap<FileId, FileScope>,
     /// The inner `@import` routes (13.6), and each one's (importing unit, directive, name).
@@ -104,6 +106,7 @@ impl Interp {
             sessions: Vec::new(),
             xdepth: 0,
             units: HashMap::new(),
+            line: Line::default(),
             files: HashMap::new(),
             routes: Vec::new(),
             route_keys: HashMap::new(),
@@ -126,14 +129,14 @@ impl Interp {
         let path = self.sm.file(file).path.clone();
         self.modules.insert(path.clone(), ModuleState::Running);
         self.import_stack.push(path);
-        self.run_top_level(file, program).map(|_| ())
+        self.run_top_level(file, program, true).map(|_| ())
     }
 
     /// A file's top level in a new module frame whose parent is the builtins frame; its
     /// `FileScope` is kept for the run (6.2).
-    fn run_top_level(&mut self, file: FileId, program: &[Stmt]) -> Exec<Env> {
+    fn run_top_level(&mut self, file: FileId, program: &[Stmt], entry: bool) -> Exec<Env> {
         let module = new_frame(Some(&self.builtins));
-        self.files.insert(file, FileScope::new(program, module.clone()));
+        self.files.insert(file, FileScope::new(program, module.clone(), entry));
         self.hoist(program.iter(), &module);
         for s in program {
             self.exec(s, &module)?;
@@ -206,7 +209,7 @@ impl Interp {
         self.modules.insert(path.clone(), ModuleState::Running);
         self.import_stack.push(path.clone());
         self.calls.push(CallRecord { name: None, call_site: at });
-        let r = self.run_top_level(file, &program);
+        let r = self.run_top_level(file, &program, false);
         self.calls.pop();
         self.import_stack.pop();
         match r {
@@ -340,12 +343,10 @@ impl Interp {
                     Some(e) => self.eval(e, env)?,
                     None => Value::Null,
                 };
-                self.not_star_bound(env, name)?;
                 declare(env, name.text.clone(), v, false);
             }
             StmtKind::Const(name, e) => {
                 let v = self.eval(e, env)?;
-                self.not_star_bound(env, name)?;
                 declare(env, name.text.clone(), v, true);
             }
             StmtKind::Expr(e) => {
@@ -386,7 +387,6 @@ impl Interp {
             StmtKind::Func(_) => {} // hoisted on entry to its body
             StmtKind::Import { path, alias } => {
                 let ns = self.import(path, s.span)?;
-                self.not_star_bound(env, alias)?;
                 declare(env, alias.text.clone(), ns, false);
             }
             StmtKind::EngineImport(imp) => self.exec_import(imp, env)?,
@@ -394,14 +394,6 @@ impl Interp {
             StmtKind::Block(b) => {
                 self.exec_block(b, env, false)?;
             }
-        }
-        Ok(())
-    }
-
-    /// A name `@import { * }` bound in this body can't be declared again (5.6, 13.4).
-    pub(crate) fn not_star_bound(&self, env: &Env, name: &Name) -> Exec<()> {
-        if env::star_bound(env, &name.text) {
-            return self.fail_at("NameError", format!("'{}' is already declared in this block", name.text), name.span);
         }
         Ok(())
     }
@@ -727,6 +719,7 @@ impl Interp {
                 if *optional && matches!(o, Value::Null) {
                     return Ok(None);
                 }
+                let o = self.settled(o, name.span)?;
                 let r = self.member(&o, name);
                 Ok(Some(self.at(r, name.span)?))
             }
@@ -756,6 +749,7 @@ impl Interp {
                     if *optional && matches!(o, Value::Null) {
                         return Ok(None);
                     }
+                    let o = self.settled(o, name.span)?;
                     let target = self.method_target(&o, name)?;
                     let (pos, named) = self.args(args, env)?;
                     return Ok(Some(self.call_method(&o, name, target, pos, named)?));
@@ -849,6 +843,10 @@ impl Interp {
                 self.foreign_call(*session, target, pos, named, &format!("a call to '{name}'"), call_site)
             }
             Callable::Route { route, .. } => self.call_route(*route, pos, named, call_site),
+            Callable::Waiting { .. } => {
+                let target = self.settle(c, call_site)?;
+                self.call_value(&target, pos, named, call_site)
+            }
             Callable::Closure { decl, env, name } => {
                 let params: Vec<Param> = decl
                     .params
@@ -1188,7 +1186,7 @@ impl Interp {
             Callable::Closure { name, .. } => out.push_str(&format!("<func {name}>")),
             Callable::Builtin(def) => out.push_str(&format!("<builtin {}>", def.name)),
             Callable::Proxy { session, name, .. } => out.push_str(&format!("<func {name} ({})>", self.sessions[*session].key)),
-            Callable::Route { name, .. } => out.push_str(&format!("<func {name}>")),
+            Callable::Route { name, .. } | Callable::Waiting { local: name, .. } => out.push_str(&format!("<func {name}>")),
         },
         Value::Error(e) => out.push_str(&format!("{}: {}", super::error::kind_text(e), e.message)),
     }

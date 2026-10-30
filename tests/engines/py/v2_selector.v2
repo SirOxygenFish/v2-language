@@ -9,7 +9,7 @@ func log_line(msg) {
     @import { log_line } from v2
     log_line("hello from Python")
 }
-// `*` takes the top-level funcs not starting with `_`.
+// Only what is listed comes in.
 func _hidden() {
     return "hidden"
 }
@@ -17,7 +17,7 @@ func shout(s) {
     return s.upper()
 }
 print(@py {
-    @import { * } from v2
+    @import { shout } from v2
     [shout("hi"), "_hidden" in dir()]
 })
 // A name declared later is found once it is set; until then it is a NameError, and a value that

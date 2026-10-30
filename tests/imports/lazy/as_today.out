@@ -1,0 +1,12 @@
+true
+4.0
+func true
+hi
+<func inc (py)>
+2
+handle
+true
+ImportError | No module named 'v2_no_such_module'
+false
+ForeignError | ModuleNotFoundError
+2

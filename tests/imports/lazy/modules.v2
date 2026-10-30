@@ -1,0 +1,11 @@
+// requires: py js
+// A waiting whole-module import settles at its first member use, read or call (12.7, 13.4).
+@import py.math as m
+@import js.path as p
+print("nothing started")
+print(m.pi > 3)
+print(m.sqrt(16))
+print(p.basename("a/b.txt"))
+print(p.sep != null)
+// Settled once: the same object each time.
+print(m.floor(2.5), m.ceil(2.5))

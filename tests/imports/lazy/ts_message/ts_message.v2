@@ -1,0 +1,9 @@
+// exit: 3
+// stderr: engine 'ts' (TypeScript) not found
+// A waiting reference into a ts block starts its engine by that tag, for its messages (7.6).
+@ts t {
+    function dbl(x: number): number { return x * 2 }
+    @export { dbl }
+}
+@import { dbl } from t
+print(dbl(2))

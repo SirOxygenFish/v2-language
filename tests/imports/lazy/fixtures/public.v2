@@ -1,0 +1,7 @@
+@py b {
+    print("public block")
+    def p():
+        return 1
+    @export { p }
+}
+@import { p } from b

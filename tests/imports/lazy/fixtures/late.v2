@@ -1,0 +1,8 @@
+print("late file runs")
+@py late {
+    print("late block")
+    def l():
+        return "l"
+    @export { l }
+}
+@import { l } from late

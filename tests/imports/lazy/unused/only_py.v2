@@ -1,0 +1,22 @@
+// requires: py
+// R60: a language nothing needs never starts. Node can't start here (see v2.toml), yet its blocks
+// and imports are all fine, because nothing calls them (DOCS 5, INTERNALS 12.7).
+@js report {
+    function shout(s) { return s.toUpperCase() }
+    @export { shout }
+}
+@ts typed {
+    function twice(x: number): number { return x * 2 }
+    @export { twice }
+}
+@import { shout } from report
+@import { twice } from typed
+@import { join } from js.path
+@import js.path as jpath
+@py calc {
+    def square(x):
+        return x * x
+    @export { square }
+}
+@import { square } from calc
+print(square(4))

@@ -1,0 +1,12 @@
+// requires: py
+// exit: 1
+// stderr: 'nope' is not exported by 'a'
+// R62: an unknown name raises when the language starts, even if nothing calls it.
+@py a {
+    def f():
+        return 1
+    @export { * }
+}
+@import { nope } from a
+print("waiting")
+@py { print("never") }

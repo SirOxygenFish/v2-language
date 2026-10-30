@@ -1,0 +1,15 @@
+// R60: no language is needed, so nothing starts, whatever the file declares (DOCS 5).
+@py stats {
+    def spread(xs):
+        return max(xs) - min(xs)
+    @export { spread }
+}
+@js report {
+    function shout(s) { return s.toUpperCase() }
+    @export { shout }
+}
+@import { spread } from stats
+@import { shout } from report
+@import { mean } from py.statistics
+@import py.numpy as np
+print("no language started")

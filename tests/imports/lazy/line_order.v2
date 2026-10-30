@@ -1,0 +1,38 @@
+// requires: py
+// R61: while Python isn't running its definition blocks wait; the action block that starts it
+// runs after them, in order, and sees what they did (INTERNALS 12.7).
+print("start")
+@py seeder {
+    import random
+    print("seeder runs")
+    random.seed(1)
+    def roll():
+        return random.random()
+    @export { roll }
+}
+@py second {
+    print("second runs")
+    def nothing():
+        return 1
+    @export { nothing }
+}
+print("before the first need")
+let a = @py {
+    import random
+    print("action runs")
+    random.random()
+}
+print(a == (@py {
+    import random
+    random.seed(1)
+    random.random()
+}))
+// Once running, a definition block runs where it is reached.
+print("running now")
+@py third {
+    print("third runs")
+    def t():
+        return 3
+    @export { t }
+}
+print("after third")

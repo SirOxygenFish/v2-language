@@ -1,0 +1,2 @@
+[engines.js]
+command = ["v2-no-such-node"]

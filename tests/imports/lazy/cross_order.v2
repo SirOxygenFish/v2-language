@@ -1,0 +1,32 @@
+// requires: py js
+// R63: a block in the line that starts another language runs what came before it there. What came
+// after waits for it, as it does in the program.
+@js J0 {
+    function a() { return 1 }
+    @export { a }
+}
+@py P1 {
+    state = {"n": 0}
+    def get():
+        return state["n"]
+    def bump():
+        state["n"] += 1
+    @export { get, bump }
+}
+@py P2 {
+    @import { a } from J0
+    @import { bump } from P1
+    a()
+    bump()
+    def p2():
+        return 1
+    @export { p2 }
+}
+@js J1 {
+    @import { get } from P1
+    console.log("J1 sees n =", get());
+    function j1() { return 2 }
+    @export { j1 }
+}
+@py { print("go") }
+@js { console.log("js action") }

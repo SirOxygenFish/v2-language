@@ -793,12 +793,13 @@ in line. When the language starts, the line runs first, in order, and from then 
 in program order as usual.
 
 ```v2
-@py stats {                      // waits: Python has not started
+// Python has not started, so this block waits, and so does the @import.
+@py stats {
     def spread(xs):
         return max(xs) - min(xs)
     @export { spread }
 }
-@import { spread } from stats    // waits too
+@import { spread } from stats
 
 print("hello")                   // still no Python
 print(spread([1, 2]))            // Python starts, the line runs, then the call
@@ -817,7 +818,7 @@ What this means for you:
   language isn't needed: its output, files it writes, anything other code would see. Do that work in
   an action block, which always runs when reached.
 - An error from something that waited (a missing package, a failing block) appears when the
-  language starts or at the first call, not at its own line.
+  language starts or at the first call, not at its own line. The rest of the line still runs first.
 
 A worker that has been idle for 10 seconds gives its memory back: on Windows at once, on Linux and
 macOS when the system needs it (Linux without swap keeps it in RAM). Nothing in it is lost.
