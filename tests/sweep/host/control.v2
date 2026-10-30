@@ -1,0 +1,157 @@
+// DOCS 3.3, 3.7, 3.8, 3.9.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+for i in 0..3 {
+    print(i)
+}
+for i, name in ["ada", "grace"] {
+    print(i, name)
+}
+for key, value in {a: 1, b: 2} {
+    print(key, value)
+}
+let l = [1, 2]
+for x in l {
+    l.push(x)
+}
+print(l)
+let d = {a: 1}
+for k in d {
+    d[k + k] = 1
+}
+print(d)
+let i = 0
+while true {
+    i += 1
+    if i == 2 {
+        continue
+    }
+    if i > 3 {
+        break
+    }
+    print("i", i)
+}
+for x in [1, 2, 3] {
+    if x == 2 {
+        break
+    }
+    print("x", x)
+}
+if (i > 0) {
+    print("parens")
+}
+let grade = 80
+if grade >= 90 {
+    print("A")
+} elif grade >= 75 {
+    print("B")
+}
+else {
+    print("C")
+}
+func order() {
+    try {
+        print("try")
+        return "from try"
+    } finally {
+        print("finally")
+    }
+}
+print(order())
+func replaced() {
+    try {
+        return "from try"
+    } finally {
+        return "from finally"
+    }
+}
+print(replaced())
+func swallowed() {
+    for i in 0..3 {
+        try {
+            throw "x"
+        } catch {
+            continue
+        } finally {
+            print("f", i)
+        }
+    }
+    return "end"
+}
+print(swallowed())
+try {
+    throw "text"
+} catch (e) {
+    print(e.type, e.message, e.data, e.lang, e.foreign_type, e.cause, e.line, e.file, e.col > 0, len(e.trace) > 0)
+}
+try {
+    throw error("Custom", "m", {x: 1})
+} catch (e) {
+    print(e.type, e.message, e.data, type(e), str(e))
+}
+func thrower() {
+    throw error("ValueError", "deep")
+}
+func rethrower() {
+    try {
+        thrower()
+    } catch (e) {
+        throw e
+    }
+}
+try {
+    rethrower()
+} catch (e) {
+    print(e.line, e.trace)
+}
+let fs = []
+for i in 0..3 {
+    fs.push(func() => i)
+}
+print(fs.map(func(f) => f()))
+let count = 0
+func bump() {
+    count += 1
+    return count
+}
+bump()
+print(bump(), count)
+func defaults(a, b = a * 2, c = []) {
+    c.push(a)
+    return [a, b, c]
+}
+print(defaults(1), defaults(2), defaults(1, c: [9]), defaults(b: 1, a: 3))
+func rest(a, ...more) {
+    return [a, more]
+}
+print(rest(1), rest(1, 2, 3), rest(...[1, 2]), rest(...[], 1))
+print((func(x) => x + 1)(1), (func() {
+    return "block"
+})())
+print(hoisted(), type(hoisted), str(hoisted), str(print), str(func(x) => x) != "")
+func hoisted() {
+}
+func deep(n) {
+    return deep(n + 1)
+}
+print(err(func() => deep(0)))
+print(err(func() => hoisted(1)))
+print(err(func() => rest()))
+print(err(func() => defaults(1, z: 2)))
+print(err(func() => hoisted(...1)))
+print(err(func() => undefined_name))
+print(err(func() => 5()))
+print(err(func() => error("", "x")))
+print(kind(func() => error(1, "x")), kind(func() => assert(false)), err(func() => assert(0, "boom")), err(func() => assert(1)))

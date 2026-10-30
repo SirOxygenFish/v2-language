@@ -1,0 +1,65 @@
+// requires: py js
+// DOCS 9.1.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+@py pv {
+    def echo(x):
+        return x
+    def kind(x):
+        return type(x).__name__
+    def grow(xs):
+        xs.append(1)
+        return len(xs)
+    def pair():
+        return (1, 2)
+    def nested():
+        return {"a": [1, {"b": (2, 3)}]}
+    @export { echo, kind, grow, pair, nested }
+}
+@js jv {
+    function echo(x) { return x; }
+    function kind(x) {
+        if (x === null) return "null";
+        if (Array.isArray(x)) return "array";
+        if (Buffer.isBuffer(x)) return "buffer";
+        return typeof x;
+    }
+    @export { echo, kind }
+}
+@import { echo as pe, kind as pk, grow, pair, nested } from pv
+@import { echo as je, kind as jk } from jv
+let samples = [null, true, 1, 1.5, "sé", [1, [2]], {a: {b: 1}}, b"\x01\xff"]
+print(samples.map(pk))
+print(samples.map(jk))
+print(samples.map(func(v) => pe(v) == v))
+print(samples.map(func(v) => je(v) == v))
+print(pe(1.0), type(pe(1.0)), je(1.0), type(je(1.0)), je(1.5))
+print(jk(2 ** 60), je(2 ** 60) == 2 ** 60, jk(2 ** 53 - 1), pk(2 ** 62))
+print(pair(), nested())
+let xs = [1]
+print(grow(xs), xs)
+print(pe("a\nb\r\nc\u{2028}d😀") == "a\nb\r\nc\u{2028}d😀", je("a\nb\r\nc\u{2028}d😀") == "a\nb\r\nc\u{2028}d😀")
+print(pe(float("inf")), je(-float("inf")), pe(float("nan")) != pe(float("nan")))
+print(@py { None }, @py { True }, @js { null }, @js { false }, @js { [1, undefined] }, @js { ({a: undefined}) })
+let big = range(100000)
+print(len(pe(big)), len(je(big)), pe(big)[99999])
+print(err(func() => pe("x" * 70000000)))
+print(pe("still running"))
+print(type(@py { print }), type(@js { () => 1 }), type(pe), type(@py { {1, 2} }), type(@py { 2 ** 70 }))
+let inc = @js { (x) => x + 1 }
+print(inc(1))
+let total = @py { sum }
+print(total([1, 2]))
+print(pe(func(x) => x)(5) == 5)

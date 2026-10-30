@@ -51,6 +51,9 @@ class V2Error extends Error {
   }
 }
 
+// A global, so `e instanceof V2Error` works in blocks and in what they require (DOCS 8.4).
+Object.defineProperty(globalThis, 'V2Error', { value: V2Error, writable: true, configurable: true, enumerable: false });
+
 class Fail extends Error {
   // A failure the adapter detects itself, sent with its own kind (9.6).
   constructor(kind, message) {

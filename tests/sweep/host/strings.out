@@ -1,0 +1,24 @@
+Hello, Ada! 2 + 2 = 4
+20.00 3.0 nan [1, "a"] ${x} 1
+C:\Users\ada\data.csv single "double" inside it's
+true
+true
+true true true 1 true
+é o el 5 he lo lo true hello 本語
+HI hi x ["a", "b"] ["a", "b", "", "c"] ["a", "b", "c"]
+STRASSE a-b- true true 2 -1
+b"h\xc3\xa9" 3 104 169 b"h" hé 68c3a9 true true false b"h\xc3\xa9!"
+b"\x00A\xff" b"\"\\\n" bytes true true
+true true ababab abab true true
+h
+é
+IndexError: string index 9 out of range (length 5)
+TypeError: 'in' on a str needs a str, got int
+TypeError: 'in' needs a list, dict, str or bytes on the right, got int
+ValueError: str.split() separator must not be empty
+ValueError: str.replace() argument 'old' must not be empty
+ValueError: invalid UTF-8 at byte offset 0
+TypeError: str has no method 'nope'
+TypeError: str has no field 'x'
+TypeError: the :.2f format needs a number, got str
+TypeError TypeError

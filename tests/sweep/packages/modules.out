@@ -1,0 +1,9 @@
+2.5 2 b.txt {"a": 1}
+true
+ImportError: No module named 'v2_no_such_module'
+ImportError: 'nope' is not exported by 'py.statistics'
+ImportError
+ImportError: 'os; print(1)' is not a valid Python module name
+true 2 handle handle
+ForeignError: module 'math' has no attribute 'nope'
+true

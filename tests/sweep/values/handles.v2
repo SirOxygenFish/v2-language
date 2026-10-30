@@ -1,0 +1,87 @@
+// requires: py js
+// DOCS 9.2.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+let d = @py {
+    import datetime
+    datetime.date(2024, 2, 29)
+}
+print(type(d), d.year, str(d), d.isoformat(), d == d, bool(d))
+print(err(func() => d + 1))
+print(err(func() => d < d))
+print(kind(func() => 1 in d), kind(func() => d[0:1]), kind(func() => -d), kind(func() => {[d]: 1}))
+print(kind(func() => len(d)), kind(func() => d.replace(year: 2025)), kind(func() => d.nope))
+let cls = @py {
+    class C:
+        def __init__(self):
+            self.items = [1, 2]
+            self.name = "c"
+        def __len__(self):
+            return len(self.items)
+        def __getitem__(self, i):
+            return self.items[i]
+        def __setitem__(self, i, v):
+            self.items[i] = v
+        def __iter__(self):
+            return iter(self.items)
+        def __call__(self, x):
+            return x * 2
+        def __str__(self):
+            return "<C>"
+        def to_dict(self):
+            return {"name": self.name}
+    C()
+}
+print(len(cls), cls[0], cls.name, str(cls), cls(4), to_v2(cls))
+cls[1] = 9
+cls.name = "z"
+print(cls[1], cls.name, to_v2(cls))
+for x in cls {
+    print(x)
+}
+for i, x in cls {
+    print(i, x)
+}
+let m = @py { {1: "a"} }
+print(type(m), m[1], to_v2(m))
+for k in m {
+    print(k)
+}
+for k, v in m {
+    print(k, v)
+}
+let jm = @js { new Map([["a", 1]]) }
+let js = @js { new Set([7]) }
+print(to_v2(jm), to_v2(js), len(jm), type(jm))
+for k, v in jm {
+    print(k, v)
+}
+print(err(func() => to_v2(d)))
+print(to_v2(1), to_v2("s"), to_v2([1]))
+@py take {
+    def f(x):
+        return 1
+    @export { f }
+}
+@js hold {
+    function ident(x) { return x; }
+    function call(f, v) { return f(v); }
+    @export { ident, call }
+}
+@import { ident, call } from hold
+print(err(func() => ident(d)))
+print(call(cls, 3))
+print(call(func(v) => v + 1, 1))
+print(@py(d) { d.year }, @py(h: d) { type(h).__name__ })

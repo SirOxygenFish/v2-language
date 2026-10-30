@@ -1,0 +1,87 @@
+// requires: py js
+// DOCS 6.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+@py geometry {
+    import math
+    VERSION = "1.2"
+    LIMITS = [1, 2]
+    def area(r):
+        return round(math.pi * r * r, 2)
+    def circumference(r):
+        return round(2 * math.pi * r, 2)
+    class Box:
+        def __init__(self, v):
+            self.v = v
+        def double(self):
+            return self.v * 2
+    @export { area, circumference, VERSION, LIMITS, Box }
+}
+@import { area, circumference as circ, VERSION, LIMITS, Box } from geometry
+print(area(2), circ(2), VERSION, LIMITS, type(area), type(Box), type(VERSION))
+let box = Box(21)
+print(type(box), box.v, box.double())
+@js j {
+    function $x() { return "dollar"; }
+    const arrow = () => "arrow";
+    class Pt { constructor(x) { this.x = x; } get() { return this.x; } }
+    function from_kw() { return "kw"; }
+    @export { "$x", arrow, Pt, from_kw }
+}
+@import { "$x" as dollar, arrow, Pt } from j
+print(dollar(), arrow(), Pt(5).get())
+@py star {
+    def one():
+        return 1
+    def _two():
+        return 2
+    VALUE = 3
+    @export { * }
+}
+@import { one } from star
+print(one())
+print(err(func() {
+    @import { _two } from star
+    return _two
+}))
+print(err(func() {
+    @import { x } from geometry
+    return x
+}))
+print(err(func() {
+    @import { x } from nothing_here
+    return x
+}))
+try {
+    @py broken {
+        def f():
+            return 1
+        @export { f, g }
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(err(func() {
+    @import { f } from broken
+    return f
+}))
+@py twice {
+    def t():
+        return "t"
+    @export { t }
+}
+@import { t as t1 } from twice
+@import { t as t2 } from @py.twice
+print(t1 == t2, t1(), t2())

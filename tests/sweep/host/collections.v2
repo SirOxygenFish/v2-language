@@ -1,0 +1,91 @@
+// DOCS 3.6, 3.7; INTERNALS 5.5, 5.11.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+let xs = [5, 3, 8]
+xs.push(1)
+print(xs, xs.pop())
+xs.sort()
+print(xs, xs[0], xs[-1], xs[0:2], xs[:1], xs[-1:])
+xs.push()
+xs.push(7, 9)
+xs.push(...[1, 2])
+print(xs)
+print(xs.pop(0), xs.pop(-2), xs)
+xs.insert(1, 0)
+xs.insert(-1, 6)
+xs.insert(100, 4)
+xs.insert(-100, 2)
+print(xs)
+xs.reverse()
+print(xs[0], xs[-1], len(xs))
+let ps = [{n: "a", v: 2}, {n: "b", v: 1}, {n: "c", v: 2}]
+ps.sort(key: func(p) => p.v)
+print(ps.map(func(p) => p.n))
+ps.sort(key: func(p) => p.v, reverse: true)
+print(ps.map(func(p) => p.n))
+let mixed = [3, float("nan"), 1.5, 2]
+mixed.sort()
+print(mixed)
+let words = ["b", "C", "a"]
+words.sort(reverse: true)
+print(words)
+print([1, 2, 3].map(func(x) => x * 2), [1, 2, 3].filter(func(x) => x % 2 == 1), [1, "a", 2.5, null].join("-"), [1, [2]].index_of([2]), [1].index_of(9), [1].get(5), [1].get(5, "d"), [1, 2].get(-1))
+let a = [[1]]
+let b = a.copy()
+b[0].push(2)
+b.push(3)
+print(a, b)
+let c = [1]
+let d = c
+c += [2]
+print(c, d)
+let l = [1, 2]
+l[-1] = 9
+l[0] += 1
+print(l, [1] + [2], [0] * 3, 2 * [1], [1] * 0)
+const fixed = [1]
+fixed.push(2)
+print(fixed)
+let u = {name: "Ada", "favorite number": 7, ["com" + "puted"]: 1}
+print(u)
+u.email = "x"
+u["name"] = "B"
+print(u.keys(), u.values())
+print(u.get("phone", "none"), u.get("phone"), u.remove("computed"), len(u), "email" in u, 1 in u, u.name, u["favorite number"])
+let o = {keys: func() => "mine", n: 1}
+print(o.keys(), {values: 3}.values(), {}.keys())
+let cyc = []
+cyc.push(cyc)
+print(cyc)
+let dcyc = {}
+dcyc.self = dcyc
+print(dcyc)
+let n = null
+print(n?.a.b.c, n?.a(), {a: null}.a?.b, n?.a ?? "fallback")
+print(err(func() => [].pop()))
+print(err(func() => [1].pop(9)))
+print(err(func() => [1][5]))
+print(err(func() => [1][1.0]))
+print(err(func() => [1].x))
+print(err(func() => {}.x))
+print(err(func() => {}["x"]))
+print(err(func() => {}[1]))
+print(err(func() => [1, "a"].sort()))
+print(err(func() => [[1]].sort()))
+print(err(func() => null.x))
+print(err(func() => null[0]))
+print(err(func() => 5[0]))
+print(err(func() => {a: null}.a.b))
+print(kind(func() => [1].append(2)), kind(func() => {a: 1}.remove("b")), kind(func() => [1, 2].join(1)))
