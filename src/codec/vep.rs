@@ -58,6 +58,9 @@ struct Encoder<'w, 'a> {
     open: Vec<usize>,
     /// Callable ids added by this encode, rolled back if it fails (10.1).
     added: Vec<u64>,
+    /// An error on its way back through foreign code: any other session's handle in it goes as a
+    /// function, which is what keeps its place until the error comes home (11.7).
+    passing: bool,
 }
 
 impl Encoder<'_, '_> {
@@ -126,7 +129,7 @@ impl Encoder<'_, '_> {
             Value::Func(f) => self.callable(v, f.name())?,
             Value::Handle(h) => {
                 // Another session's callable handle goes as a function its own session calls (11.6).
-                if h.session != self.wire.session && h.callable {
+                if h.session != self.wire.session && (h.callable || self.passing) {
                     return self.callable(v, &h.text());
                 }
                 if h.session != self.wire.session {
@@ -172,7 +175,16 @@ impl Wire<'_> {
     /// `value` for this session (10.1). A failure is a `MarshalError` naming `root` (`args[0]`)
     /// and the path inside it; the callable counts it added are rolled back.
     pub fn encode(&mut self, value: &Value, root: &str) -> Exec<Json> {
-        let mut enc = Encoder { wire: self, root, path: Vec::new(), open: Vec::new(), added: Vec::new() };
+        self.encode_as(value, root, false)
+    }
+
+    /// `encode` for the error answering a worker's `call` (9.6).
+    pub fn encode_passing(&mut self, value: &Value, root: &str) -> Exec<Json> {
+        self.encode_as(value, root, true)
+    }
+
+    fn encode_as(&mut self, value: &Value, root: &str, passing: bool) -> Exec<Json> {
+        let mut enc = Encoder { wire: self, root, path: Vec::new(), open: Vec::new(), added: Vec::new(), passing };
         let result = enc.value(value);
         let added = std::mem::take(&mut enc.added);
         if result.is_err() {

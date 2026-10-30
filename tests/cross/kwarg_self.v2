@@ -1,0 +1,20 @@
+// requires: py
+// `self` is a name like any other for a V2 parameter (11.8).
+@py a {
+    def kw(f, **k):
+        return f(**k)
+    @export { kw }
+}
+@import { kw } from a
+func vself(self) {
+    return self
+}
+print(kw(vself, self: 5))
+@py b {
+    @import { vself } from v2
+    def viaroute():
+        return vself(self=6)
+    @export { viaroute }
+}
+@import { viaroute } from b
+print(viaroute())

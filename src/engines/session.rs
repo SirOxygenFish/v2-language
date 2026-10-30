@@ -553,6 +553,10 @@ impl Interp {
                         Ok(Reply { value, exports, missing })
                     });
                     return match reply {
+                        Ok(_) if self.out.failed.is_some() => {
+                            let e = self.out.failed.take().expect("just checked");
+                            Err(self.raise(Flow::Error(e), at))
+                        }
                         Ok(reply) => Ok(reply),
                         Err(what) => {
                             let flow = self.protocol_violation(s, &what, &line);
@@ -578,13 +582,11 @@ impl Interp {
         }
     }
 
-    /// An `out` frame: stdout through `Out`, stderr after `Out` is flushed (9.9). It is no V2
-    /// expression's error; a failed write shows at the end of the run (6.5).
+    /// An `out` frame: stdout through `Out`, stderr after `Out` is flushed (9.9). A failed write
+    /// is raised when the request ends, or shows at the end of the run (6.5).
     fn forward(&mut self, stream: Stream, text: &str) {
         match stream {
-            Stream::Stdout => {
-                let _ = self.out.write_str(text);
-            }
+            Stream::Stdout => self.out.write_foreign(text),
             Stream::Stderr => {
                 let _ = self.out.flush();
                 stderr!("{text}");
@@ -697,7 +699,7 @@ impl Interp {
     /// The `error` of an `err` answering a V2 error: its kind and message, and the error itself
     /// as a tag so that it comes back unchanged (9.6).
     fn error_payload(&mut self, s: SessionId, e: &Rc<ErrorValue>) -> Json {
-        let tag = match self.wire(s).encode(&Value::Error(e.clone()), "the error") {
+        let tag = match self.wire(s).encode_passing(&Value::Error(e.clone()), "the error") {
             Ok(tag) => tag,
             // Data or a cause that can't cross is left out; type, message, location and trace
             // still go back.

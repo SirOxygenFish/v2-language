@@ -153,6 +153,7 @@ if __name__ == "__main__":
         big stops here, before the time and memory of encoding all of it (9.1)."""
 
         cost = 0
+        hooks = 0  # to_v2 hooks open on the way down (11.5)
 
         def spend(self, n):
             self.cost += n
@@ -362,7 +363,8 @@ if __name__ == "__main__":
 
     def type_name(obj):
         t = type(obj)
-        mod = getattr(t, "__module__", None) or ""
+        mod = getattr(t, "__module__", None)
+        mod = mod if isinstance(mod, str) else ""
         qual = getattr(t, "__qualname__", t.__name__)
         return qual if mod == "builtins" or not mod else mod + "." + qual
 
@@ -409,7 +411,7 @@ if __name__ == "__main__":
             self.__name__ = name
             self.__qualname__ = name
 
-        def __call__(self, *args, **kwargs):
+        def __call__(self, /, *args, **kwargs):
             return host_call({"fn": self._cell.id}, args, kwargs, self.__name__)
 
         def __repr__(self):
@@ -423,7 +425,7 @@ if __name__ == "__main__":
             self.__name__ = name
             self.__qualname__ = name
 
-        def __call__(self, *args, **kwargs):
+        def __call__(self, /, *args, **kwargs):
             return host_call({"route": self._route}, args, kwargs, self.__name__)
 
         def __repr__(self):
@@ -1059,10 +1061,14 @@ if __name__ == "__main__":
                 # The object stays on the path, so a hook that returns it (or holds it) is a cycle.
                 if id(x) in path:
                     raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
+                if path.hooks >= MAX_DEPTH:
+                    raise Fail("MarshalError", "to_v2(): value nested deeper than %d levels" % MAX_DEPTH)
                 path.add(id(x))
+                path.hooks += 1
                 try:
                     return to_v2(f(), depth, path)
                 finally:
+                    path.hooks -= 1
                     path.discard(id(x))
         raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data" % type_name(x))
 

@@ -124,7 +124,7 @@ it is loaded automatically into every session and every subagent.
   real child (`V2_WORKER`; `worker_main` writes a newline first because libtest's "test ... "
   line has none). `Reply` has typed `exports`/`missing`; `wire()` is pub(crate); `foreign_error`
   returns a V2 error from a `v2` tag as it was and reads `cause` (8 levels); foreign frames and
-  `text` are mapped by `engines/traces.rs` (1.8). `engines/vep.rs` builds `load` (no module/call/op builders yet). Errors
+  `text` (custom engines only) are mapped by `engines/traces.rs` (1.8). `engines/vep.rs` builds `load` (no module/call/op builders yet). Errors
   render as `Kind: foreign_type: msg` plus `caused by:` (error.rs `kind_text`).
 - `engines/units.rs`: `exec_block` (12.1: definition units Waiting/Loading/Loaded/Failed in
   `Interp.units`; action blocks every reach), `Line` (12.7: one queue in program order across
@@ -146,7 +146,7 @@ it is loaded automatically into every session and every subagent.
   `candidates`/`provides`/`provider` (13.3 steps; `Seen` = blocks a waiting `@import`'s statement
   saw), `exec_import` (V2 level: `import_waits`, `wait_import`, or `resolve_import`), `settle`,
   `module_unit` (ids, py name check) + `import_module` (one `module` frame), `inner_imports`
-  (13.7 entries: same-session `{as,unit,name,block}` or routes), `call_route`/`resolve_route`,
+  (13.7 entries: same-session `{as,unit,name,route}` or routes), `call_route`/`resolve_route`,
   `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.
   Adapters: py `do_module`/`module_attr`/`unit_stub`/`RouteFunction`; js `doModule` (resolve
   first; TLA via import() only for the module itself)/`moduleAttr`/`unitStub` (a Proxy)/`routeStub`.

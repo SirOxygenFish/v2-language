@@ -1,0 +1,49 @@
+// requires: js
+// A Proxy is a handle, so its traps go on working (10.7). len(h) reads `length` once (11.3).
+@js {
+    function proxy() { return new Proxy({}, { get(t, k) { return "p:" + String(k) } }) }
+    function overList() { return new Proxy([1, 2], {}) }
+    function revoked() {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+    }
+    let reads = 0;
+    class Counted {
+        get length() { return ++reads; }
+    }
+    class Sized {
+        get size() { return ++reads; }
+    }
+    function counted() { return new Counted() }
+    function sized() { return new Sized() }
+    function count() { return reads }
+    function hook() { return { tolist() { return hook() } } }
+    class Chain {
+        tolist() { return new Chain() }
+    }
+    function chain() { return new Chain() }
+    @export { proxy, overList, revoked, counted, sized, count, chain }
+}
+@import { proxy, overList, revoked, counted, sized, count, chain } from @js
+print(type(proxy()), proxy().hello)
+print(type(overList()), to_v2(overList()))
+print(type(revoked()))
+print(len(counted()), count())
+print(len(sized()), count())
+try {
+    to_v2(chain())
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+// A function's Promise that can't settle isn't a block's value.
+@js {
+    function hang() { return new Promise(() => {}) }
+    @export { hang }
+}
+@import { hang } from @js
+try {
+    hang()
+} catch (e) {
+    print(e.type, "|", e.message)
+}
