@@ -10,6 +10,26 @@ use crate::ffi::types::Sig;
 pub struct Name {
     pub text: Rc<str>,
     pub span: Span,
+    /// Where a declaration of this name goes in its frame (`syntax/resolve`, 5.6).
+    pub slot: u32,
+}
+
+impl Name {
+    pub fn new(text: Rc<str>, span: Span) -> Name {
+        Name { text, span, slot: 0 }
+    }
+}
+
+/// A scope's names, in the order its frame holds them (5.6).
+pub type Layout = Rc<[Rc<str>]>;
+
+/// Where a use of a name looks first (`syntax/resolve`, 5.6).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Loc {
+    /// Declared nowhere in the file: by name, for its error.
+    Unresolved,
+    Slot { hops: u32, index: u32 },
+    Builtin(u32),
 }
 
 #[derive(Debug)]
@@ -50,7 +70,7 @@ pub enum ForIter {
 
 #[derive(Debug)]
 pub enum Target {
-    Name(Name),
+    Name(Name, Loc),
     Member(Box<Expr>, Name),
     /// The span is the `[`.
     Index(Box<Expr>, Box<Expr>, Span),
@@ -62,6 +82,8 @@ pub struct Body {
     /// Indices of the `func` statements directly in this body, hoisted on entry (5.6).
     #[allow(dead_code)]
     pub funcs: Vec<usize>,
+    /// Its frame's names; `None` if it needs no frame (5.6). A function's body uses `FuncDecl.layout`.
+    pub layout: Option<Layout>,
     #[allow(dead_code)]
     pub span: Span,
 }
@@ -74,6 +96,8 @@ pub struct FuncDecl {
     pub params: Vec<(Name, Option<Expr>)>,
     pub rest: Option<Name>,
     pub body: FuncBody,
+    /// The call frame's names (5.6).
+    pub layout: Layout,
     pub span: Span,
 }
 
@@ -99,7 +123,7 @@ pub enum ExprKind {
     Float(f64),
     Str(Rc<str>),
     Bytes(Rc<[u8]>),
-    Name(Rc<str>),
+    Name(Rc<str>, Loc),
     FStr(Vec<FPart>),
     List(Vec<Expr>),
     Dict(Vec<(DictKey, Expr)>),

@@ -1,0 +1,25 @@
+["outer", "inner"]
+5 1
+10 2
+outer!
+1
+2
+[1, 2]
+[0, 0] [2, 20]
+2
+[1, 2, "outer later", 9]
+hoisted
+late
+mine 1
+nested
+6
+1
+integer overflow in '+'
+integer overflow in '-'
+integer overflow in '*'
+true true false true false true
+TypeError | cannot assign to constant 'LIMIT'
+TypeError | cannot assign to builtin 'print' — shadow it with let
+NameError | 'nothing_here' is not declared — declare it with let
+'alpha_valu' is not declared
+1

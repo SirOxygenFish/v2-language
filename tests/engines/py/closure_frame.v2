@@ -1,0 +1,21 @@
+// requires: py
+// 5.6: a body that directly makes a closure keeps its own frame, so the closure's cycle goes by
+// that frame. Here `f`'s frame has no closure of its own, so nothing trims it and `h` stays.
+@py tools {
+    class Held:
+        def __del__(self):
+            print("freed")
+    @export { Held }
+}
+@import { Held } from tools
+func f() {
+    let h = Held()
+    let g = null
+    if true {
+        g = func() => 1
+    }
+}
+f()
+// Releases go out with the next request, so this would run `__del__` if `h` had gone.
+@py { pass }
+print("after")

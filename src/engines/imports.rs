@@ -10,7 +10,7 @@ use serde_json::{json, Value as Json};
 
 use super::session::SessionId;
 use super::units::{wire_unit, Export, UnitState, Waiting};
-use crate::runtime::env::{declare, Env};
+use crate::runtime::env::{declare, own_value, Env};
 use crate::runtime::error::{fail, ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
 use crate::runtime::value::{Callable, Func, Value};
@@ -120,7 +120,7 @@ fn stmt(s: &Stmt, out: &mut Walk) {
         | StmtKind::Extern(_) => {}
         StmtKind::Assign { target, value, .. } => {
             match target {
-                Target::Name(n) => out.other_use(&n.text),
+                Target::Name(n, _) => out.other_use(&n.text),
                 Target::Member(o, _) => expr(o, out),
                 Target::Index(o, i, _) => {
                     expr(o, out);
@@ -194,7 +194,7 @@ fn block(b: &Rc<EngineBlock>, out: &mut Walk) {
 fn expr(e: &Expr, out: &mut Walk) {
     match &e.kind {
         ExprKind::Null | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bytes(_) => {}
-        ExprKind::Name(n) => out.other_use(n),
+        ExprKind::Name(n, _) => out.other_use(n),
         ExprKind::FStr(parts) => {
             for p in parts {
                 if let FPart::Expr { expr: x, .. } = p {
@@ -213,7 +213,7 @@ fn expr(e: &Expr, out: &mut Walk) {
         }
         ExprKind::Unary(_, _, x) | ExprKind::OptChain(x) => expr(x, out),
         ExprKind::Member { obj, optional, .. } => match &obj.kind {
-            ExprKind::Name(n) if !optional => {
+            ExprKind::Name(n, _) if !optional => {
                 out.not_called.insert(n.clone());
             }
             _ => expr(obj, out),
@@ -229,7 +229,7 @@ fn expr(e: &Expr, out: &mut Walk) {
         }
         ExprKind::Call { callee, args, .. } => {
             match &callee.kind {
-                ExprKind::Name(n) => {
+                ExprKind::Name(n, _) => {
                     out.not_member.insert(n.clone());
                 }
                 _ => expr(callee, out),
@@ -725,7 +725,7 @@ impl Interp {
             Some(Route::Target(f)) => f.clone(),
             Some(Route::V2 { file, name }) => {
                 let (file, name) = (*file, name.clone());
-                let found = self.files[&file].frame.borrow().vars.get(&name).map(|slot| slot.value.clone());
+                let found = own_value(&self.files[&file].frame, &name);
                 match found {
                     Some(f @ Value::Func(_)) => f,
                     Some(Value::Handle(h)) if h.callable => Value::Handle(h),

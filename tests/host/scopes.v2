@@ -1,0 +1,159 @@
+// R66: names go by position, and that must never show (INTERNALS 5.6).
+let x = "outer"
+func read_before() {
+    let seen = x
+    let x = "inner"
+    return [seen, x]
+}
+print(read_before())
+
+// A read, a write and a compound write before a local `let` all mean the outer name.
+let n = 0
+func write_before() {
+    n = 1
+    let n = 5
+    return n
+}
+print(write_before(), n)
+let m = 1
+func compound_before() {
+    m += 1
+    let m = 10
+    return m
+}
+print(compound_before(), m)
+
+// `let x = x` reads the outer one.
+func shadow() {
+    let x = x + "!"
+    return x
+}
+print(shadow())
+
+// The iterable and a condition are in the enclosing scope.
+let items = [1, 2]
+for items in items {
+    print(items)
+}
+print(items)
+
+// Each iteration has its own variables, closures keep theirs.
+let fs = []
+for i in 0..3 {
+    let j = i * 10
+    fs.push(func() => [i, j])
+}
+print(fs[0](), fs[2]())
+
+// A body with no declarations of its own still gives a closure the right frame.
+func counter() {
+    let c = 0
+    let get = null
+    if true {
+        get = func() {
+            c += 1
+            return c
+        }
+    }
+    return get
+}
+let next = counter()
+next()
+print(next())
+
+// Defaults see earlier parameters; a later one isn't declared yet.
+let later = "outer later"
+func defaults(a, b = a + 1, c = later, later = 9) {
+    return [a, b, c, later]
+}
+print(defaults(1))
+
+// Functions are hoisted, and a function can use a `let` declared after it, once that has run.
+print(hoisted())
+func hoisted() {
+    return "hoisted"
+}
+func uses_late() {
+    return late
+}
+let late = "late"
+print(uses_late())
+
+// Shadowing a builtin, in a nested body and at function level.
+func own_len() {
+    let len = func(v) => "mine"
+    return len([1])
+}
+print(own_len(), len([1]))
+if true {
+    let print2 = print
+    print2("nested")
+}
+
+// Recursion, with a closure over each level.
+func nest(k) {
+    let here = k
+    if k == 0 {
+        return func() => here
+    }
+    let inner = nest(k - 1)
+    return func() => here + inner()
+}
+print(nest(3)())
+
+// A `return` under way keeps its value while `finally` calls functions.
+func two() {
+    return 2
+}
+func keeps() {
+    try {
+        return 1
+    } finally {
+        two()
+    }
+}
+print(keeps())
+
+// Integers overflow the same way through the fast path.
+func over(a, op) {
+    try {
+        return op(a)
+    } catch (e) {
+        return e.message
+    }
+}
+print(over(9223372036854775807, func(a) => a + 1))
+print(over(-9223372036854775807, func(a) => a - 2))
+print(over(9223372036854775807, func(a) => a * 2))
+print(9223372036854775807 > 1, 1 == 1, 1 != 1, 2 <= 2, 3 >= 4, 1 < 2.5)
+
+// A constant, a builtin and an undeclared name.
+const LIMIT = 1
+func set_limit() {
+    LIMIT = 2
+}
+func set_print() {
+    print = 1
+}
+func set_nothing() {
+    nothing_here = 1
+}
+for f in [set_limit, set_print, set_nothing] {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+
+// Did-you-mean offers what is declared by now, not what comes later in the body.
+func misspelled() {
+    try {
+        return alpha_valu
+    } catch (e) {
+        print(e.message)
+    }
+    let alpha_value = 1
+    return alpha_value
+}
+print(misspelled())

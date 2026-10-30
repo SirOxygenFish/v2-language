@@ -105,7 +105,7 @@ impl Checker {
             }
             StmtKind::Assign { target, value, .. } => {
                 match target {
-                    Target::Name(_) => {}
+                    Target::Name(..) => {}
                     Target::Member(obj, _) => self.expr(obj, ctx),
                     Target::Index(obj, index, _) => {
                         self.expr(obj, ctx);
@@ -220,7 +220,7 @@ impl Checker {
             | ExprKind::Float(_)
             | ExprKind::Str(_)
             | ExprKind::Bytes(_)
-            | ExprKind::Name(_) => {}
+            | ExprKind::Name(..) => {}
             ExprKind::FStr(parts) => {
                 for p in parts {
                     if let FPart::Expr { expr, .. } = p {

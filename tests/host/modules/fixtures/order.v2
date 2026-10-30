@@ -1,0 +1,6 @@
+let a = 1
+func b() {
+    return 2
+}
+const c = 3
+let _hidden = 4

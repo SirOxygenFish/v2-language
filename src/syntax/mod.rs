@@ -5,6 +5,7 @@ pub mod check;
 pub mod directives;
 pub mod lexer;
 pub mod parser;
+pub mod resolve;
 pub mod scan;
 pub mod span;
 pub mod token;
