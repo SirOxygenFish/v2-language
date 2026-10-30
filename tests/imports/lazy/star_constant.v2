@@ -1,0 +1,12 @@
+// requires: py
+// exit: 1
+// stderr: 'VERSION' is a constant
+// R62: refused at load, as when the block has already run.
+@py a {
+    VERSION = 3
+    @export { VERSION }
+}
+@py {
+    @import { VERSION } from a
+    print("never")
+}

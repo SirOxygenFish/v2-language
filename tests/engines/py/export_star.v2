@@ -16,7 +16,7 @@
     VALUE = 3
     @export { * }
 }
-@import { * } from tools
+@import { double, cached, Box } from tools
 print(double(2), cached(1), type(Box()))
 func show(name, f) {
     try {

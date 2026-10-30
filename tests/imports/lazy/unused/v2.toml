@@ -1,0 +1,3 @@
+# Any attempt to start Node fails: R60's test depends on it never trying.
+[engines.js]
+command = ["v2-no-such-node"]

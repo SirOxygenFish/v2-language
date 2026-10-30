@@ -1,6 +1,6 @@
 // requires: py
-// R26: a name two blocks export is ambiguous from @py, by name or by `*`; naming the block
-// resolves it (DOCS 6.3, INTERNALS 13.3).
+// R26: a name two blocks export is ambiguous from @py; naming the block resolves it (DOCS 6.3,
+// INTERNALS 13.3).
 func show(f) {
     try {
         print(f())
@@ -20,10 +20,6 @@ func show(f) {
 }
 show(func() {
     @import { mean } from @py
-    return mean
-})
-show(func() {
-    @import { * } from @py
     return mean
 })
 @import { mean } from @py.stats

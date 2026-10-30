@@ -227,7 +227,6 @@ pub struct EngineImport {
 
 #[derive(Debug)]
 pub enum ImportItems {
-    All(Span),
     Names(Vec<ImportItem>),
     /// `SELECTOR as name`: the whole module as a handle.
     Module(Name),

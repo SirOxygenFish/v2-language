@@ -409,10 +409,10 @@ impl<'a> DirParser<'a> {
     fn import(&mut self, start: Span, tag: &str) -> Result<EngineImport, Diag> {
         if *self.peek() == DK::LBrace {
             let open = self.bump().span;
-            let items = if *self.peek() == DK::Star {
-                let s = self.bump().span;
-                ImportItems::All(s)
-            } else {
+            if *self.peek() == DK::Star {
+                return Err(Diag::new("@import needs a list of names", self.span()).hint("list the names: @import { mean } from …"));
+            }
+            let items = {
                 let mut items = Vec::new();
                 loop {
                     let t = self.bump();
@@ -643,9 +643,6 @@ fn compiled_directives(d: &Directives, tag: &str) -> Result<(), Diag> {
                 .hint("export a function from this block, or call the other language from V2 code"));
         }
         match &import.items {
-            ImportItems::All(star) => {
-                return Err(Diag::new("compiled blocks import names, not *", *star).hint("list the names: @import { mean } from …"))
-            }
             ImportItems::Names(items) => {
                 for item in items {
                     let (local, span) = item.alias.as_ref().map_or((&item.name, item.span), |a| (&a.text, a.span));
@@ -796,13 +793,12 @@ mod tests {
 
     #[test]
     fn imports_inside_blocks() {
-        let src = "@js {\n  @import { square, \"odd-name\" as odd } from @py.calc\n  @import { * } from py.statistics\n  @import { log } from v2\n  @import { format } from js.\"date-fns\"\n}";
+        let src = "@js {\n  @import { square, \"odd-name\" as odd } from @py.calc\n  @import { mean } from py.statistics\n  @import { log } from v2\n  @import { format } from js.\"date-fns\"\n}";
         let (p, _) = run(src).unwrap();
         let imps = &p.directives.imports;
         assert_eq!(imps.len(), 4);
         assert!(matches!(&imps[0].selector, Selector::Exact { tag, label } if &*tag.text == "py" && &*label.text == "calc"));
         assert!(matches!(&imps[0].items, ImportItems::Names(v) if v.len() == 2 && v[1].alias.as_ref().unwrap().text.as_ref() == "odd"));
-        assert!(matches!(&imps[1].items, ImportItems::All(_)));
         assert!(matches!(&imps[1].selector, Selector::Module { lang, path } if &*lang.text == "py" && path.len() == 1));
         assert!(matches!(&imps[2].selector, Selector::V2 { .. }));
         assert!(matches!(&imps[3].selector, Selector::Module { path, .. } if &*path[0].text == "date-fns"), "quoted package segments stay");
@@ -913,7 +909,7 @@ mod tests {
         let err = |src: &str| run(src).err().unwrap_or_default();
         assert_eq!(err("@c {\n    @import { mean } from py.statistics\n    int main(void) { return 0; }\n}"),
             "a compiled block without @export runs as a program and can't @import");
-        assert_eq!(err("@rust {\n    @import { * } from stats\n    fn f() {}\n    @export { f }\n}"), "compiled blocks import names, not *");
+        assert_eq!(err("@rust {\n    @import { * } from stats\n    fn f() {}\n    @export { f }\n}"), "@import needs a list of names");
         assert_eq!(err("@cpp {\n    @import { delete } from stats\n    void f() {}\n    @export { f }\n}"),
             "'delete' is not a valid C++ identifier — rename it with 'as'");
         assert_eq!(err("@rust {\n    @import { mean as fn } from stats\n    fn f() {}\n    @export { f }\n}"),
@@ -924,7 +920,7 @@ mod tests {
         // Fine: an alias fixes the name; delete is no keyword in C; py blocks take any name.
         assert!(run("@cpp {\n    @import { delete as remove } from stats\n    void f() {}\n    @export { f }\n}").is_ok());
         assert!(run("@c {\n    @import { delete } from stats\n    void f(void) {}\n    @export { f }\n}").is_ok());
-        assert!(run("@py {\n    @import { * } from stats\n}").is_ok());
+        assert_eq!(err("@py {\n    @import { * } from stats\n}"), "@import needs a list of names");
     }
 
     #[test]

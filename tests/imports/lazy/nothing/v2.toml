@@ -1,0 +1,6 @@
+# Neither language can start here: R60 depends on nothing trying.
+[engines.py]
+command = ["v2-no-such-python"]
+
+[engines.js]
+command = ["v2-no-such-node"]

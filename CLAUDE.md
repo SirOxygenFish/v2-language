@@ -25,7 +25,8 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.11.
+- Now: 1.12. Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
+  (mem/fuzz_line.py) found the same family for almost nothing.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
@@ -78,9 +79,10 @@ it is loaded automatically into every session and every subagent.
   (static checks, 4.5, incl. "this expression's value is not used"), `ast`.
 - `runtime/`: `interp` (exec/eval take `&Env`; stacks: `calls` and `import_stack`; `guard()` at
   7/8 of the stack; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
-  `call_value(f, pos, named, at)` calls any V2 value from Rust), `value` (`Callable` = Closure |
-  Builtin | Proxy {session, unit, name} | Route {route, name}),
-  `env` (`Slot.star`: bound by `@import { * }`, `star_bound`), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  `call_value(f, pos, named, at)` calls any V2 value from Rust; `line`: 12.7), `value` (`Callable` = Closure |
+  Builtin | Proxy {session, unit, name} | Route {route, name} | Waiting {import, local, seen,
+  resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`),
+  `env`, `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
@@ -119,9 +121,11 @@ it is loaded automatically into every session and every subagent.
   returns a V2 error from a `v2` tag as it was and reads `cause` (8 levels); foreign frames and
   `text` are mapped by `engines/traces.rs` (1.8). `engines/vep.rs` builds `load` (no module/call/op builders yet). Errors
   render as `Kind: foreign_type: msg` plus `caused by:` (error.rs `kind_text`).
-- `engines/units.rs`: `exec_block` (12.1: definition units Loading/Loaded/Failed in
-  `Interp.units`; action blocks every reach), `block_name`, `session_for` (one session per key,
-  adapter written by `adapters::materialize`), timeouts from config. `adapters/py.py` (embedded
+- `engines/units.rs`: `exec_block` (12.1: definition units Waiting/Loading/Loaded/Failed in
+  `Interp.units`; action blocks every reach), `Line` (12.7: one queue in program order across
+  languages), `before_block`, `run_line`, `block_name`, `session_for` (one session per key, adapter
+  written by `adapters::materialize`, then the line), `start_engine` (by tag), timeouts from
+  config. `adapters/py.py` (embedded
   via `adapters/mod.rs`, `for_session(key)`): the whole Python worker; its internals are module
   globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
   HANDLERS). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
@@ -133,7 +137,9 @@ it is loaded automatically into every session and every subagent.
   interp.rs routes members, indexing, calls (`MethodTarget::Handle`), `for` and `str()` to them;
   `str_of(v, at)` and `index(o, k, at)` take a span for that.
 - `engines/imports.rs` (ch. 13): `FileScope` (frame, definition blocks collected from the AST,
-  top-level names), `candidates`/`provides`/`provider` (13.3 steps), `exec_import` (V2 level),
+  top-level names, what may wait: the `Walk` over the tree records each name's uses),
+  `candidates`/`provides`/`provider` (13.3 steps; `Seen` = blocks a waiting `@import`'s statement
+  saw), `exec_import` (V2 level: `import_waits`, `wait_import`, or `resolve_import`), `settle`,
   `module_unit` (ids, py name check) + `import_module` (one `module` frame), `inner_imports`
   (13.7 entries: same-session `{as,unit,name,block}` or routes), `call_route`/`resolve_route`,
   `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.

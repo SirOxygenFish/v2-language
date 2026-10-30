@@ -1,0 +1,11 @@
+// exit: 1
+// stderr: not_reached.v2:5:11: ImportError: block 'below' has not run yet — move this @import below it
+// R62: `@import` still comes after its block, whether or not it could wait.
+print("first")
+@import { f } from below
+print(f())
+@py below {
+    def f():
+        return 1
+    @export { f }
+}

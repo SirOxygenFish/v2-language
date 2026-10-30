@@ -1,0 +1,10 @@
+@py early {
+    print("early block")
+    def e():
+        return "e"
+    @export { e }
+}
+@import { e as _e } from early
+func run() {
+    return _e()
+}

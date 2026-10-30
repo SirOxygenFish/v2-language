@@ -1,0 +1,2 @@
+Import of 'f' from '@py' is ambiguous (exported by blocks 'a' and 'b') — use @py.a or @py.b
+Import of 'f' from '@py' is ambiguous (exported by blocks 'a' and 'b') — use @py.a or @py.b

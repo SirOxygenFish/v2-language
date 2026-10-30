@@ -1,0 +1,26 @@
+// requires: py js
+// R62: two `*` blocks are ambiguous once they have run, however the use reaches them (DOCS 6.3).
+@py a {
+    def f():
+        return 1
+    @export { * }
+}
+@py b {
+    def f():
+        return 2
+    @export { * }
+}
+try {
+    @import { f } from @py
+    print(type(f))
+} catch (e) {
+    print(e.message)
+}
+try {
+    @js {
+        @import { f } from @py
+        console.log(f());
+    }
+} catch (e) {
+    print(e.message)
+}

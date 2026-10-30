@@ -1,0 +1,18 @@
+// requires: py
+// exit: 1
+// stderr: EngineCrashed: engine 'py' is not running
+// R64: "running" includes dead: a block reached after a crash raises, it doesn't wait.
+try {
+    @py {
+        import os
+        os._exit(3)
+    }
+} catch (e) {
+    print(e.type)
+}
+@py after {
+    def a():
+        return 1
+    @export { a }
+}
+print("not reached")

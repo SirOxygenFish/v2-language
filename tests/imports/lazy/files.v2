@@ -1,0 +1,17 @@
+// requires: py
+// R63: definition blocks of a V2 module wait like any others, in the order their files reached
+// them; once Python runs, a file imported later runs its blocks as it reaches them.
+print("one")
+import "fixtures/early.v2" as early
+print("two")
+@py here {
+    print("here block")
+    def h():
+        return "h"
+    @export { h }
+}
+@import { h } from here
+print("three")
+print(h())
+import "fixtures/late.v2" as late
+print(early.run(), late.l())

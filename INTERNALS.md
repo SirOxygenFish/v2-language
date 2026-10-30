@@ -474,8 +474,8 @@ pub enum Value {
 pub enum Callable {
     Closure { decl: Rc<FuncDecl>, env: Env, name: Rc<str> },         // name: `greet` or `func@main.v2:12` (5.7)
     Builtin(&'static BuiltinDef),                                    // 5.10
-    Proxy { key: Rc<str>, unit: Rc<str>, name: Rc<str>, pending: Cell<bool> },  // bridged export; key = engine, unit = wire unit id; pending: 12.7
-    LazyModule { key: Rc<str>, unit: Rc<str>, from: FileId, handle: OnceCell<Value> },  // a waiting `@import X as n` (12.7)
+    Proxy { session: SessionId, unit: Rc<str>, name: Rc<str> },      // bridged export; unit = wire unit id (13.4)
+    Waiting { import: Rc<EngineImport>, local: Rc<str>, seen: Rc<[UnitId]>, resolved: OnceCell<Value> },  // a name an `@import` bound without running (12.7)
     Route { route: usize, name: Rc<str> },                           // a route stub passed back unresolved (11.8)
     Native { lib: LibId, sym: Rc<str>, sig: Rc<Sig> },               // compiled export (15.8) or extern (16.1)
     HandleMethod { handle: Rc<HandleRef>, method: Rc<str> },         // built only as the callee of h.m(...) (11.3)
@@ -504,7 +504,7 @@ pub struct ErrorValue {
 | `Str`, `Bytes` | byte equality |
 | `List`, `Dict` | `Rc::ptr_eq`, else pairwise `eq` (list) or the same key set with `eq` values (dict, order ignored) |
 | `Handle` | same session and id (11.6); native pointers: same address (16.6) |
-| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same engine, unit, name; `Route`: same route; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
+| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same session, unit, name; `Route`: same route; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
 | `Error` | `Rc::ptr_eq` |
 | different types (`Int` vs `Bool` too) | `false`, never an error |
 
@@ -694,7 +694,7 @@ Blocks inside larger expressions keep left-to-right order: in `f(@py { 1 }, g())
 3. **Success:** the namespace is a new `Dict` (type `"dict"`) of the module frame's bindings in layout order, minus names starting with `_`: values, `func`s, `@import`ed proxies and module handles, `extern` functions and `extern … as` dicts, imported module dicts. It is stored as `Done(ns)` and shared by every importer. It is a snapshot: rebinding a module-level `let` later is not visible through it. `util.slug(…)` works by dict-key dispatch (5.5).
 4. **Failure:** `Failed(err)`; the error propagates unchanged with the import site in its trace.
 
-Re-exported Proxies keep their `key` and `unit` and work from any file. Modules share the entry file's project root and config (18.1).
+Re-exported Proxies keep their `session` and `unit` and work from any file. Modules share the entry file's project root and config (18.1).
 
 ### 6.5 Ending the run: exit codes and shutdown
 
@@ -1576,15 +1576,16 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 
 ### 12.7 The waiting line
 
-A language has no process and costs nothing until something needs it. `Interp.lines: HashMap<key, VecDeque<Waiting>>` holds, per engine key (ts is js), what would have run in it by now.
+A language has no process and costs nothing until something needs it. `Interp.line` holds what would have run in a language by now: one line for all languages, in program order, each place with its engine key (ts is js).
 
 - **Running** means a session exists, `Dead` included, so a dead engine's blocks raise as 8.2 says and never wait.
 - **What waits** while its language isn't running: a definition block that is a direct statement of its file, with no args and no inner `@import … from v2`, and an eligible `@import` (13.4). Everything else runs when reached: action blocks, and blocks and imports nested in `if`, `try`, loops or functions, so `try` around them works as it always did.
 - **At reach**, 12.1's step 3 runs first, on the spec from `registry.canonical`, with no probe: an unknown tag raises `EngineUnknown`, a run engine with `@export` raises its `ImportError`. Then the unit becomes `Waiting` and joins the line.
-- **First need:** an action block reached, a Proxy or lazy module used, a route resolved, or an `@import` or block that can't wait. `session_for` starts the session, then runs the line in order (12.1 for blocks, 13.5 for imports) before returning to what needed it. `xdepth` is saved, zeroed and restored around the line, because the depth limit (9.7) belongs to the caller's chain and must not fail a block forever. At the limit itself no session starts and nothing is stored (8.4).
+- **First need:** a block reached that can't wait, a waiting reference used, a route resolved, or an `@import` that can't wait. Before a block counts as started (`Loading`), the depth limit is checked if its language isn't running, and whatever waits for that language runs, so neither failure is stored as that block's. `session_for` starts the session and runs the line before returning to what needed it.
+- **Running the line.** Again and again, the first place in program order whose language is running. While a place runs, only places before it may go: a language started by that place runs what came earlier, and what comes after the place comes after it in the program too, so it runs once the place is done. `xdepth` is saved, zeroed and restored around each place, because the depth limit (9.7) belongs to the caller's chain and must not fail a block forever.
 - **Once running**, every statement acts as if the line had never existed.
-- **Failures.** A block that fails is `Failed` as at any load, its error goes to what triggered the line, and the flush stops there. A failed module import is raised the same way and dropped from the line; its references stay pending and retry at their next use. While a line is non-empty, every reach in that engine runs the rest of it first.
-- **References.** An eligible `@import` binds `Proxy { pending: true }` or `LazyModule`. The first use starts the language, then finds the name as 13.3 or 13.5 would, raising what the `@import` would have raised; success clears `pending`. `LazyModule` is handled only in the member and call steps of a chain (5.5), which resolve it, cache the result and re-dispatch on what came back, since a module can be `null`. 13.4's rule guarantees nothing else meets either one.
+- **Failures.** A block that fails is `Failed` as at any load, and a failed `@import` leaves its references waiting, so they retry at their next use. Neither stops the line: the rest still runs, and the first error then goes to what needed the language. `exit()` ends the line at once. A use after a failure raises 13.3's `failed to load`.
+- **References.** A waiting `@import` joins the line and binds each local name to a `Callable::Waiting`, which names no process, so it can exist before one does. The blocks reached by its statement are kept with it: it finds what it would have found there, so a block further down can't make it ambiguous or supply a name. A call, or the member and method steps of a chain (5.5), settle it: start the language at that use, then run the `@import` as 13.3 and 13.5 say, raising what it would have raised, and go on with what came back, which can be a Proxy, a constant, a handle or `null`. A failure leaves it waiting. Once a Proxy exists its session does too, and sessions are never replaced (8.1), so no reference can dangle. 13.4's rule guarantees nothing else meets a `Waiting`, so `==`, the encoders and printing never do.
 - **Compiled blocks** have no process and no line: a definition block is `Waiting` until the first call into it (15.1).
 - **The visible difference** (DOCS 5): a block in the line runs when its language starts, so its top-level effects come later than its position, or never, and it sees V2 state from then. Its errors surface at that later point.
 
@@ -1611,20 +1612,20 @@ selectors as written.
 ### 13.2 ExportRegistry
 
 The registry is `Interp.units`: when a definition unit becomes `Loaded`, it keeps the unit's exports in reply order,
-each once, as `Proxy{key, unit, name}` for a bridged function, a `Native` callable for a compiled one (15.8), or the
+each once, as `Proxy{session, unit, name}` for a bridged function, a `Native` callable for a compiled one (15.8), or the
 copy of a `value` export. Entries are never removed. The file's definition blocks (`FileScope.blocks`, collected from
 the AST: labels, tags, declared names, `*`) are the static side that 13.3 takes its candidates from; a selector's
 tags compare by engine, `js` for ts blocks too (13.1).
 
 ### 13.3 Resolving a name from a block selector
 
-`cands` = the file's definition blocks that `sel` matches, in source order, reached or not. Blocks are named by
+A use that can't wait first starts the language of every `Waiting` block `sel` matches (12.7). `cands` = the file's definition blocks that `sel` matches, in source order, reached or not. Blocks are named by
 `block_name` (12.1). A candidate **provides** `name` when its `@export` list names it, loaded or not, or when it is
 `Loaded` and its `*` exported `name`, so ambiguity between explicit exports does not depend on what has run.
 
 1. `cands` empty → `ImportError: No engine exports found for selector 'stats'`.
 2. `hits` = the candidates that provide `name`.
-3. One hit, `Waiting`, and this use can't wait (13.4) → its language starts first (12.7). Then, one hit, `Loaded` → its entry's `value`.
+3. One hit, `Loaded` → its entry's `value`.
 4. More → `ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats' and 'calc') — use @py.stats
    or @py.calc` (DOCS 6.3). Three or more read `'a', 'b' and 'c'` / `@py.a, @py.b or @py.c`; an unlabeled block is listed
    as `@py block at main.v2:12`, and the advice becomes `— label the blocks to choose one`.
@@ -1647,7 +1648,7 @@ local name is a direct call `n(…)`, or for `sel as n` a plain member read or m
 with `_` (V2 modules export the others, 6.4). So a waiting reference can only be called or have a member read: constants,
 printing, comparing and passing see exactly what they would if the `@import` had run at its statement.
 
-Imported functions are `func`s: a foreign function becomes `Callable::Proxy { key, unit, name, pending }` (5.1; `unit` is the wire unit id, 9.4),
+Imported functions are `func`s: a foreign function becomes `Callable::Proxy { session, unit, name }` (5.1; `unit` is the wire unit id, 9.4),
 and calling it sends `call` with target `{"unit","name"}` plus `args`/`kwargs` (9.5, 10.8). Proxies are ordinary
 values: stored, passed, re-exported by V2 modules (6.4), sent to other engines as `fn` tags (11.8). `sel as NAME` binds
 a module handle (13.5).
@@ -2532,7 +2533,7 @@ Out of scope: sandboxing, permission prompts, signature checks, defending agains
 | Exception while a block runs, foreign syntax errors included | ForeignError (`foreign_type` e.g. `SyntaxError`) or the reported kind | 9.6, 12.1 | definition block: unit `Failed`, later reaches re-raise the stored error; action block: nothing kept, the next reach runs it again |
 | `@export` lists a name the block doesn't define (compiled: as a function, so a constant counts too) | ImportError | 12.2, 15.2 | unit `Failed` |
 | Module selector on a compiled or run engine; adapter without `modules` | ImportError | 13.5, 17.5 | nothing sent |
-| A waiting block or `@import` fails when its language starts | the block's error, or ImportError | 12.7 | raised to what started it; flush stops, the rest runs at the next need; a block is `Failed`, a module import retries at its next use |
+| A waiting block or `@import` fails when its language starts | the block's error, or ImportError | 12.7 | the rest of the line still runs, then the first error goes to what needed the language; a block is `Failed`, an `@import` retries at its next use |
 | Inner `@import` called before its target block loads | ImportError, raised in the calling language as a `V2Error`; compiled: NULL and `v2_last_error()` | 13.6, 13.7, 15.9 | a later call looks the target up again |
 | **Calls and values** | | | |
 | Foreign exception, including Python `sys.exit()` (`foreign_type` `SystemExit`) and JS `process.exit()` (which throws an `Error`) | ForeignError | 9.6, 9.7 | session fine; the worker keeps running |
@@ -2672,11 +2673,11 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R57 | `compiled/{c,cpp,rust}/signatures.v2` | exports are found behind attributes and calling conventions: C `__declspec(noinline) int __cdecl twice(int x)` (Windows) or `__attribute__((noinline)) int twice(int x)`, C++ `[[nodiscard]] int thrice(int x)`; Rust `fn chars(s: &'static str) -> usize` gives `chars("héllo") == 5`; a Rust export taking `&mut str` raises BuildError naming `&mut str` |
 | R58 | `custom/builtin/{bash,pwsh,cmd}.v2` (each `requires:` its tag), `custom/builtin/cmd_unix.v2` (`// platform: unix`), run.rs (doctor) | with no `v2.toml`: `@sh { echo hi }` prints `hi` and `let b = @bash { printf ok }` gives `"ok"`, through Git Bash on Windows (never `System32\bash.exe`); `@pwsh { Write-Output 5 }` gives `"5"`; on Windows `@cmd(x: 1) { echo %V2_ARG_x% }` gives `"1"`; in `cmd_unix.v2`, `@cmd { }` raises EngineNotFound `cmd is Windows only`; `v2 doctor` has a row for each built-in run engine (run.rs `doctor_rows`; 7.2, 19.2) |
 | R59 | `custom/define_engine/` (requires js) | with no `v2.toml`, `define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")` then `@nd { console.log(1 + 2) }` prints `3`; a block `@nq` reached before its `define_engine` raises EngineUnknown ending `or with define_engine`; declaring `nd` again, or `py`, raises ValueError (17.2); `command: ["node"]` raises `ValueError: define_engine: command must contain {file}`; in `sub/lib.v2`, imported from `main.v2`, a command `["node", "./runner.js", "{file}"]` runs `sub/runner.js` (the caller's folder, 18.1) |
-| R60 | `imports/lazy/` (run.rs) | a program with py and js definition blocks and imports that calls only the py function starts no Node process; one that calls neither starts no worker at all (the fake engine paths stay unused) |
+| R60 | `imports/lazy/unused/`, `imports/lazy/nothing/` | with a missing Node configured, a program with js and ts blocks and imports that calls only a py function works, and calling the js one raises EngineNotFound at that call; with Python missing too, a program that calls neither runs |
 | R61 | `imports/lazy/line_order.v2` (requires py) | `random.seed(1)` in a waiting definition block, and in a module a waiting `@import` names, is in effect for a later action block; definition blocks print in source order, before the action block's output |
-| R62 | `imports/lazy/as_today.v2` (requires py js) | a constant, a printed name and a passed function behave as if the `@import` ran at its statement; `try` around a nested definition block or `@import` catches its error; an `@import` from a block further down raises `block 'b' has not run yet — move this @import below it` |
-| R63 | `imports/lazy/files/` (requires py) | definition blocks in a V2 module imported before, and another imported after, the language starts run in the same relative order as statements; a public imported name of a module works from the importer |
-| R64 | `imports/lazy/failures.v2` (requires py) | with a line `[bad, seed]`, the first use raises `bad`'s error; a later top-level block runs only after `seed`; `bad` re-raises the stored error on every use; a block after `EngineCrashed` raises `EngineCrashed` at reach; a first use at depth 65 raises RecursionError and a shallow use afterwards works |
+| R62 | `imports/lazy/{as_today,not_reached,statement,star}.v2` | a constant, a printed name and a passed function behave as if the `@import` ran at its statement; `try` around a nested definition block or `@import` catches its error; an `@import` from a block further down raises `block 'b' has not run yet — move this @import below it`; a waiting `@import` isn't changed by a block further down; a block of the running language sees a `*` block as loaded; two `*` blocks are ambiguous; an unknown name raises when the language starts |
+| R63 | `imports/lazy/{files,public}.v2`, `imports/lazy/cross_order.v2` | definition blocks in a V2 module imported before, and another imported after, the language starts run in the same relative order as statements; a public imported name of a module doesn't wait; a language started by a block in the line runs what came before that block, and what came after waits for it |
+| R64 | `imports/lazy/{failures,dead_at_reach,depth,depth_line}.v2` | with a line `[bad, seed]`, `seed` runs and then the first use raises `bad`'s error; calling `bad`'s function raises `block 'bad' failed to load: …` every time; a nested block that triggered the line isn't stored as failed; a block reached after `EngineCrashed` raises `EngineCrashed`; a first use at the depth limit raises RecursionError for a function and for a nested block, and a shallow use afterwards works; a line block that crosses languages at its top level loads even when started near the limit |
 | R65 | `engines/py/parking.v2` with `V2_TEST_PARK_MS`, `engines/process` unit test (Windows) | after a park, a counter, a handle and a stored callback all still work; the working set drops; a session with `call_timeout` is not parked |
 | R66 | `host/scopes.v2` | a read and a write before a local `let` act on the outer name; `x += 1` before `let x` likewise; `for x in x` reads the outer `x`; closures keep their own iteration; a module's namespace order is unchanged; did-you-mean skips names not declared yet |
 | R67 | `engines/resolve` unit test | a Store placeholder is probed once across two runs sharing a cache file; a `doctor` refresh probes it again; a real alias is never cached as a placeholder |

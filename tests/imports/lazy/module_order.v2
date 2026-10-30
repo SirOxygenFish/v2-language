@@ -1,0 +1,15 @@
+// requires: py
+// R61: a waiting `@import` of a module joins the line too, so what importing it does is in effect
+// for the block that starts Python, as it would be if the import ran at its statement.
+@import { f } from py.lazy_seeds
+print("no python yet")
+let a = @py {
+    import random
+    random.random()
+}
+print(a == (@py {
+    import random
+    random.seed(2)
+    random.random()
+}))
+print(f())

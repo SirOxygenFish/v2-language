@@ -1112,15 +1112,6 @@ function doInit() {
 function moduleReply(mod, names) {
   const nothing = mod === null || mod === undefined;
   if (names === null || names === undefined) return { value: nothing ? null : handleTag(mod), exports: [], missing: [] };
-  if (names === '*') {
-    const keys = new Set();
-    const d = nothing ? null : mod.default;
-    for (const o of [nothing ? null : mod, d !== null && typeof d === 'object' && d !== mod ? d : null]) {
-      if (o === null || (typeof o !== 'object' && typeof o !== 'function')) continue;
-      for (const k of Object.keys(o)) if (k !== 'default' && k !== '__esModule' && !k.startsWith('_')) keys.add(k);
-    }
-    names = [...keys];
-  }
   const exports = [];
   const missing = [];
   const seen = new Set();

@@ -287,7 +287,6 @@ pub(crate) fn declarations(s: &Stmt) -> Vec<(Rc<str>, Span)> {
                 })
                 .collect(),
             ImportItems::Module(alias) => vec![(alias.text.clone(), alias.span)],
-            ImportItems::All(_) => Vec::new(),
         },
         StmtKind::Extern(x) => match &x.alias {
             Some(a) => vec![(a.text.clone(), a.span)],

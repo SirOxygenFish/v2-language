@@ -1,0 +1,7 @@
+// requires: js
+// exit: 1
+// stderr: cannot read 'x' of null
+// 12.7: what a waiting module settles to may be null, and the member step goes on with that.
+@import js."./null_module.js" as n
+print("waiting")
+print(n.x)

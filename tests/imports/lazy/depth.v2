@@ -1,0 +1,30 @@
+// requires: py js
+// R64: the first use of a language at the depth limit starts nothing and stores nothing
+// (INTERNALS 12.7). 32 levels here are 64 crossings (R38), so `j()` would be the 65th.
+@js late {
+    function j() { return "js" }
+    @export { j }
+}
+@import { j } from late
+func dive(n, f) {
+    if n == 0 {
+        return f()
+    }
+    return py_dive(n - 1, f)
+}
+@py rec {
+    @import { dive } from v2
+    def py_dive(n, f):
+        return dive(n, f)
+    @export { py_dive }
+}
+@import { py_dive } from rec
+func at_depth(n) {
+    try {
+        return dive(n, func() => j())
+    } catch (e) {
+        return e.message
+    }
+}
+print(at_depth(32))
+print(j())
