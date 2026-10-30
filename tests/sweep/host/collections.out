@@ -1,0 +1,37 @@
+[5, 3, 8] 1
+[3, 5, 8] 3 8 [3, 5] [3] [8]
+[3, 5, 8, 7, 9, 1, 2]
+3 1 [5, 8, 7, 9, 2]
+[2, 5, 0, 8, 7, 9, 6, 2, 4]
+4 2 9
+["b", "a", "c"]
+["a", "c", "b"]
+[1.5, 2, 3, nan]
+["b", "a", "C"]
+[2, 4, 6] [1, 3] 1-a-2.5-null 1 -1 null d 2
+[[1, 2]] [[1, 2], 3]
+[1, 2] [1]
+[2, 9] [1, 2] [0, 0, 0] [1, 1] []
+[1, 2]
+{"name": "Ada", "favorite number": 7, "computed": 1}
+["name", "favorite number", "computed", "email"] ["B", 7, 1, "x"]
+none null 1 3 true false B 7
+mine [3] []
+[[...]]
+{"self": {...}}
+null null null fallback
+IndexError: pop from empty list
+IndexError: list index 9 out of range (length 1)
+IndexError: list index 5 out of range (length 1)
+TypeError: list index must be an int, got float
+TypeError: list has no field 'x'
+KeyError: key 'x' not found
+KeyError: key 'x' not found
+TypeError: dict keys must be str, got int
+TypeError: cannot sort a list mixing int and str
+TypeError: cannot sort a list containing list (only numbers or strings)
+TypeError: cannot read 'x' of null (use ?.)
+TypeError: cannot index null
+TypeError: cannot index int
+TypeError: cannot read 'b' of null (use ?.)
+TypeError KeyError TypeError

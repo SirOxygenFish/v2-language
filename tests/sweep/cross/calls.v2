@@ -1,0 +1,139 @@
+// requires: py js
+// DOCS 8, 10.
+func err(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return f"${e.type}: ${e.message}"
+    }
+}
+func kind(f) {
+    try {
+        return str(f())
+    } catch (e) {
+        return e.type
+    }
+}
+func log_line(msg) {
+    print(f"[log] ${msg}")
+    return msg.upper()
+}
+@py {
+    @import { log_line } from v2
+    print(log_line("from python"))
+}
+@js {
+    @import { log_line } from v2
+    console.log(log_line("from js"));
+}
+@py sorter {
+    def sort_by(items, key):
+        return sorted(items, key=key)
+    def call_all(fs):
+        return [f(1) for f in fs]
+    kept = []
+    def keep(f):
+        kept.append(f)
+    def use():
+        return kept[0](41)
+    @export { sort_by, call_all, keep, use }
+}
+@import { sort_by, call_all, keep, use } from sorter
+let people = [{name: "Ada", age: 36}, {name: "Linus", age: 21}]
+print(sort_by(people, func(p) => p.age).map(func(p) => p.name))
+print(call_all([func(x) => x + 1, func(x) => x * 5]))
+keep(func(x) => x + 1)
+print(use(), use())
+// A V2 error crosses foreign code with its own type.
+func boom(x) {
+    throw error("ValueError", "from v2", {x: x})
+}
+try {
+    sort_by([1, 2], boom)
+} catch (e) {
+    print(e.type, e.message, e.data, e.lang)
+}
+// Foreign code can catch it, with its fields.
+@py catcher {
+    def safe(f):
+        try:
+            return f(1)
+        except V2Error as e:
+            return [e.type, e.message, e.data]
+    @export { safe }
+}
+@import { safe } from catcher
+print(safe(boom))
+@js jcatch {
+    function jsafe(f) {
+        try {
+            return f(1);
+        } catch (e) {
+            return [e instanceof V2Error, e.type, e.message];
+        }
+    }
+    @export { jsafe }
+}
+@import { jsafe } from jcatch
+print(jsafe(boom))
+print(@js { Object.keys(globalThis).includes("V2Error") })
+// Python, V2 and JS in one chain.
+@js chain {
+    @import { square } from calc
+    function run(xs) { return xs.map((x) => square(x)); }
+    @export { run }
+}
+@py calc {
+    def square(x):
+        return x * x
+    @export { square }
+}
+@import { run } from chain
+print(run([1, 2, 3]))
+// Foreign errors.
+@py risky {
+    def ratio(a, b):
+        return a / b
+    def chained():
+        try:
+            1 / 0
+        except ZeroDivisionError as z:
+            raise ValueError("outer") from z
+    @export { ratio, chained }
+}
+@import { ratio, chained } from risky
+try {
+    ratio(1, 0)
+} catch (e) {
+    print(e.type, e.foreign_type, e.message, e.lang, e.line)
+}
+try {
+    chained()
+} catch (e) {
+    print(e.foreign_type, e.message, e.cause.foreign_type, e.cause.message, e.cause.cause)
+}
+@js jerr {
+    function bad() { throw new RangeError("nope"); }
+    function custom() { throw "plain string"; }
+    async function later() { return 42; }
+    async function rejects() { throw new Error("rejected"); }
+    function nested() { return outer(); }
+    @export { bad, custom, later, rejects }
+}
+@import { bad, custom, later, rejects } from jerr
+print(kind(bad), err(bad))
+print(err(custom))
+print(later(), err(rejects))
+@py aio {
+    async def co():
+        return "awaited"
+    @export { co }
+}
+@import { co } from aio
+print(co())
+print(@js { Promise.resolve(7) })
+print(@py {
+    async def inner():
+        return 8
+    inner()
+})

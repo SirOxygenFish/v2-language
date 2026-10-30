@@ -1,0 +1,10 @@
+12.57 12.57 1.2 [1, 2] func func str
+handle 21 42
+dollar arrow 5
+1
+ImportError: '_two' is not exported by 'star' (did the block @export it?)
+ImportError: 'x' is not exported by 'geometry' (did the block @export it?)
+ImportError: No engine exports found for selector 'nothing_here'
+ImportError | @export lists 'g' but block 'broken' does not define it
+ImportError: block 'broken' failed to load: @export lists 'g' but block 'broken' does not define it
+true t t

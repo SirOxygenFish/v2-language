@@ -65,6 +65,9 @@ if __name__ == "__main__":
             self.foreign_type = foreign_type
             self._v2 = None  # the `error` tag it came as, sent back unchanged (9.6)
 
+    # A builtin, so `except V2Error` works in blocks and in the modules they use (DOCS 8.4).
+    builtins.V2Error = V2Error
+
     class Fail(Exception):
         """A failure the adapter detects itself, sent with its own kind (9.6)."""
 

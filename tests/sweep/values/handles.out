@@ -1,0 +1,22 @@
+handle 2024 2024-02-29 2024-02-29 true true
+TypeError: unsupported operand types for +: 'handle' and 'int' — do it inside a block, or convert it with to_v2(h) first
+TypeError: cannot compare handle and handle with '<' — do it inside a block, or convert it with to_v2(h) first
+TypeError TypeError TypeError TypeError
+ForeignError ForeignError ForeignError
+2 1 c <C> 8 {"name": "c"}
+9 z {"name": "z"}
+1
+9
+0 1
+1 9
+handle a {"1": "a"}
+1
+1 a
+{"a": 1} [7] 1 handle
+a 1
+MarshalError: to_v2(): can't convert datetime.date to V2 data
+1 s [1]
+MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — convert it with to_v2(h) first (at args[0])
+6
+2
+2024 date
