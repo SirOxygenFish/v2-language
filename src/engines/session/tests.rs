@@ -1029,6 +1029,7 @@ fn host_main() {
     let (mut it, _) = interp();
     let (s, t) = scripted(&mut it, |mut w| {
         w.raw(b"preload noise 7b1e\n");
+        w.raw(b"no newline 7b1e");
         w.start();
         w.recv_t("bye");
     });
@@ -1046,7 +1047,8 @@ fn noise_before_hello_reaches_stderr() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("preload noise 7b1e\n"), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("preload noise 7b1e\n") && err.contains("no newline 7b1e\n"), "{err}");
 }
 
 #[test]

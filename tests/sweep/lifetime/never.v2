@@ -1,0 +1,15 @@
+// DOCS 5: a definition block's effects can come later than its position, or never.
+@py unused {
+    print("never printed")
+    def f():
+        return 1
+    @export { f }
+}
+@js too {
+    console.log("never printed");
+    function g() { return 1 }
+    @export { g }
+}
+@import { f } from unused
+@import { g } from too
+print("done")

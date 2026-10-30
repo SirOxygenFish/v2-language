@@ -148,6 +148,19 @@ if __name__ == "__main__":
     def too_big_message(n):
         return "value too large to send to V2 (%d MiB, limit %d MiB)" % ((n + (1 << 20) - 1) >> 20, LIMIT >> 20)
 
+    class Walk(set):
+        """The containers open on the way down, and the least the frame can come to: a value too
+        big stops here, before the time and memory of encoding all of it (9.1)."""
+
+        cost = 0
+
+        def spend(self, n):
+            self.cost += n
+            if self.cost > LIMIT:
+                f = Fail("MarshalError", "value too large to send to V2 (more than %d MiB)" % (LIMIT >> 20))
+                f.located = True
+                raise f
+
     # ----------------------------------------------------------------------------------------
     # The request stack (14.2) and output (9.9)
 
@@ -466,13 +479,17 @@ if __name__ == "__main__":
             return x if I64_MIN <= x <= I64_MAX else handle_tag(x)
         if t is float:
             return float_json(x)
+        if path is None:
+            path = Walk()
         if t is str:
+            path.spend(len(x))
             return surrogate_check(x)
         if t is list or t is tuple:
             return encode_list(x, depth, path)
         if t is dict:
             return encode_dict(x, depth, path)
         if t is bytes:
+            path.spend((len(x) + 2) // 3 * 4)
             return {"$v2": "bytes", "b64": base64.b64encode(x).decode("ascii")}
         if isinstance(x, bool) or is_numpy(x, "bool_", "bool"):
             return bool(x)
@@ -482,6 +499,7 @@ if __name__ == "__main__":
         if isinstance(x, float) or (is_numpy(x) and isinstance(x, numbers.Real)):
             return float_json(float(x))
         if isinstance(x, str):
+            path.spend(str.__len__(x))
             return surrogate_check(str.__str__(x))  # the content, not a subclass's __str__
         if isinstance(x, V2Function):
             _pinned.append(x)
@@ -504,11 +522,9 @@ if __name__ == "__main__":
             raise
 
     def encode_list(x, depth, path):
-        if depth >= MAX_DEPTH:
+        if depth >= MAX_DEPTH or id(x) in path:
             return handle_tag(x)
-        path = path if path is not None else set()
-        if id(x) in path:
-            return handle_tag(x)
+        path.spend(2 * len(x))
         path.add(id(x))
         out = []
         try:
@@ -523,11 +539,9 @@ if __name__ == "__main__":
         return out
 
     def encode_dict(x, depth, path):
-        if depth >= MAX_DEPTH or not all(type(k) is str for k in x):
+        if depth >= MAX_DEPTH or not all(type(k) is str for k in x) or id(x) in path:
             return handle_tag(x)
-        path = path if path is not None else set()
-        if id(x) in path:
-            return handle_tag(x)
+        path.spend(2 * len(x))
         path.add(id(x))
         out = {}
         try:
@@ -545,7 +559,7 @@ if __name__ == "__main__":
         """A V2Error as an `error` tag (10.3). One that came from V2 keeps its members (location,
         trace), but its data and cause are encoded again, so their handles and stubs belong to
         this frame (11.1, 11.8). An error tag is not a nesting level (10.5)."""
-        path = path if path is not None else set()
+        path = path if path is not None else Walk()
         if id(e) in path:  # an error inside its own data
             return handle_tag(e)
         text = lambda v: well_formed(v) if isinstance(v, str) else None
@@ -660,11 +674,6 @@ if __name__ == "__main__":
                "trace": trace}
         if e.__cause__ is not None and depth < MAX_CAUSES:
             out["cause"] = serialize(e.__cause__, depth + 1)
-        if depth == 0:
-            try:
-                out["text"] = well_formed("".join(traceback.format_exception(type(e), e, e.__traceback__)))
-            except Exception:
-                pass
         return out
 
     # ----------------------------------------------------------------------------------------
@@ -787,13 +796,13 @@ if __name__ == "__main__":
             raise Fail("NameError", "'%s' is no longer defined" % name)
         return g[name]
 
-    def unit_stub(unit, name, block, alias):
+    def unit_stub(unit, name, route, alias):
         """An inner @import from this session: calls it here, looked up at every call (13.7)."""
 
         def stub(*args, **kwargs):
             u = units.get(unit)
             if u is None:
-                raise V2Error("ImportError", "%s has not run yet — '%s' can't be called before it loads" % (block, name))
+                return host_call({"route": route}, args, kwargs, alias)  # V2 says why it isn't here (13.6)
             if u[1] is not None and u[1].get(name) == "value":
                 raise V2Error("ImportError", "'%s' is a constant — pass it in as a block arg" % name)
             try:
@@ -808,10 +817,10 @@ if __name__ == "__main__":
     def bind_imports(g, imports):
         for e in imports:
             alias = check_name(e["as"], "@import name")
-            if "route" in e:
-                g[alias] = RouteFunction(e["route"], alias)
+            if "unit" in e:
+                g[alias] = unit_stub(e["unit"], e["name"], e.get("route"), alias)
             else:
-                g[alias] = unit_stub(e["unit"], e["name"], e.get("block"), alias)
+                g[alias] = RouteFunction(e["route"], alias)
 
     def unique_name(base):
         name, n = base, 1
@@ -1005,7 +1014,7 @@ if __name__ == "__main__":
     def to_v2(x, depth=0, path=None):
         """`op value`: the object as plain data, converted here (11.5). `depth` is the level the
         value would sit at, so a container at 256 or deeper is too deep, as for the host (10.5)."""
-        path = path if path is not None else set()
+        path = path if path is not None else Walk()
         t = type(x)
         if x is None or t is bool:
             return x
@@ -1019,9 +1028,9 @@ if __name__ == "__main__":
         if isinstance(x, float) or (is_numpy(x) and isinstance(x, numbers.Real)):
             return float_json(float(x))
         if isinstance(x, str):
-            return surrogate_check(str.__str__(x))
+            return encode(str.__str__(x), depth, path)
         if t is bytes:
-            return {"$v2": "bytes", "b64": base64.b64encode(x).decode("ascii")}
+            return encode(x, depth, path)
         if isinstance(x, (V2Function, RouteFunction, V2Error)):
             return encode(x, depth, path)  # V2's own values go back as they came (10.6)
         if depth >= MAX_DEPTH:
@@ -1030,6 +1039,7 @@ if __name__ == "__main__":
         if mapping or isinstance(x, (list, tuple, set, frozenset)):
             if id(x) in path:
                 raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
+            path.spend(2 * len(x))
             path.add(id(x))
             try:
                 if not mapping:

@@ -1,0 +1,5 @@
+import "./sibling.v2" as sib
+func where() {
+    return script_dir().ends_with("sub")
+}
+let name = sib.name

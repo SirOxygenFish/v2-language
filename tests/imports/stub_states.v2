@@ -1,0 +1,87 @@
+// requires: py js
+// A stub for a block of its own session asks V2 why that block isn't there, so it gets the same
+// words as everything else: not run yet, failed, still loading (DOCS 6, INTERNALS 13.7).
+@py caller {
+    @import { failed } from boom
+    @import { partial } from part
+    @import { busy } from loading
+    def ask(f):
+        try:
+            return f()
+        except V2Error as e:
+            return [e.type, e.message]
+    def asks():
+        return [ask(failed), ask(partial), ask(busy)]
+    @export { asks }
+}
+@import { asks } from caller
+print(asks())
+try {
+    @py boom {
+        def failed():
+            pass
+        @export { failed }
+        raise ValueError("no")
+    }
+} catch (e) {
+    print(e.foreign_type, e.message)
+}
+try {
+    @py part {
+        @export { partial }
+    }
+} catch (e) {
+    print(e.message)
+}
+@py loading {
+    @import { asks } from caller
+    def busy():
+        return "done"
+    @export { busy }
+    print(asks())
+}
+print(asks())
+
+@js jcaller {
+    @import { failed } from jboom
+    @import { partial } from jpart
+    @import { busy } from jloading
+    function ask(f) {
+        try {
+            return f();
+        } catch (e) {
+            return [e.type, e.message];
+        }
+    }
+    function asks() {
+        return [ask(failed), ask(partial), ask(busy), ask(() => busy.length)];
+    }
+    @export { asks }
+}
+@import { asks as jasks } from jcaller
+print(jasks())
+try {
+    @js jboom {
+        function failed() {}
+        @export { failed }
+        throw new RangeError("no");
+    }
+} catch (e) {
+    print(e.foreign_type, e.message)
+}
+try {
+    @js jpart {
+        @export { partial }
+    }
+} catch (e) {
+    print(e.message)
+}
+@js jloading {
+    @import { asks } from jcaller
+    function busy() {
+        return "done";
+    }
+    @export { busy }
+    console.log(JSON.stringify(asks()));
+}
+print(jasks())

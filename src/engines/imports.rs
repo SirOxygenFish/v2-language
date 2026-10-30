@@ -544,6 +544,10 @@ impl Interp {
                 }
             }
             (sel, ImportItems::Names(list)) => {
+                // A name nothing can provide needs no language to find that out.
+                for (name, _, span) in named_items(list) {
+                    self.provider(file, sel, &name, seen).map_err(|f| self.raise(f, span))?;
+                }
                 for (name, alias, span) in named_items(list) {
                     let v = self.resolve_name(file, sel, &name, seen, span).map_err(|f| self.raise(f, span))?;
                     bound.push((alias, v));
@@ -705,8 +709,8 @@ impl Interp {
                         // A name only a not yet loaded `*` block might provide gets a route (13.7).
                         let known = self.loaded(&hit).is_some() || self.provides(&hit, &name, None);
                         if known && self.engine_key(&hit.tag.text).as_deref() == Some(key) {
-                            let unit = wire_unit(hit.unit_id);
-                            entries.push(json!({"as": &*alias, "unit": unit, "name": &*name, "block": self.block_name(&hit)}));
+                            let r = self.route(b.unit_id, i, &name, pending(&name));
+                            entries.push(json!({"as": &*alias, "unit": wire_unit(hit.unit_id), "name": &*name, "route": r}));
                         } else {
                             let r = self.route(b.unit_id, i, &name, pending(&name));
                             entries.push(json!({"as": &*alias, "route": r}));

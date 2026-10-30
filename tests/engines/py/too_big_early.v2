@@ -1,0 +1,47 @@
+// requires: py
+// A value too big for a frame stops while it is encoded, so a huge list or a value that shares
+// its parts a billion times over takes no time at all (9.1).
+@py {
+    def huge():
+        return [0] * 200000000
+    def shared():
+        x = ["y" * 1000000] * 10
+        for i in range(8):
+            x = [x] * 10
+        return x
+    def tuple_of_bytes():
+        return (b"x" * 40000000, b"x" * 40000000)
+    def as_data():
+        return [["y" * 40000000], ["y" * 40000000]]
+    def huge_dict():
+        return {"a": ["y" * 40000000], "b": ["y" * 40000000]}
+    def calls(f):
+        try:
+            f([0] * 200000000)
+        except V2Error as e:
+            return [e.type, e.message]
+    class Big:
+        def tolist(self):
+            return [0] * 200000000
+    big = Big()
+    def fits():
+        return len([0] * 1000000)
+    @export { huge, shared, tuple_of_bytes, as_data, huge_dict, calls, big, fits }
+}
+@import { huge, shared, tuple_of_bytes, as_data, huge_dict, calls, big, fits } from @py
+func show(f) {
+    try {
+        f()
+        print("sent")
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(huge)
+show(shared)
+show(tuple_of_bytes)
+show(as_data)
+show(huge_dict)
+print(calls(func(x) => 1))
+show(func() => to_v2(big))
+print(fits())

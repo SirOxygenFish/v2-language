@@ -1,0 +1,36 @@
+// requires: py js
+// timeout: 120
+// Big values within the limit, both ways, and a little past it.
+@py {
+    def echo(x):
+        return x
+    def length(x):
+        return len(x)
+    @export { echo, length }
+}
+@js {
+    function jecho(x) { return x }
+    function jlength(x) { return x.length }
+    @export { jecho, jlength }
+}
+@import { echo, length } from @py
+@import { jecho, jlength } from @js
+let s = "é" * 5000000
+print(len(s), length(s), jlength(s))
+print(echo(s) == s, jecho(s) == s)
+let xs = range(1000000)
+print(len(echo(xs)), sum(jecho(xs)) == sum(xs))
+let d = {}
+for i in 0..100000 {
+    d[str(i)] = i
+}
+print(len(echo(d)), len(jecho(d)))
+let b = @py { b"\x00\xff" * 10000000 }
+print(len(echo(b)), echo(b) == b, jlength(b))
+let over = "x" * 70000000
+try {
+    echo(over)
+} catch (e) {
+    print(e.type, e.message)
+}
+print(echo("still works"))

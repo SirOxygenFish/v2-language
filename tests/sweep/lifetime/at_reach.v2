@@ -1,0 +1,35 @@
+// requires: py
+// DOCS 5: these run when reached: a definition block with args, one that imports from `v2`,
+// and blocks and imports inside `if`, `try`, loops or functions.
+print("start")
+@py first(x: 1) {
+    print("with args", x)
+    def f():
+        return x
+    @export { f }
+}
+print("after args")
+func hello() {
+    return "hi"
+}
+@py second {
+    @import { hello } from v2
+    print("imports from v2")
+    def g():
+        return hello()
+    @export { g }
+}
+print("after v2")
+if true {
+    @py third {
+        print("inside if")
+        def h():
+            return 3
+        @export { h }
+    }
+}
+print("after if")
+@import { f } from first
+@import { g } from second
+@import { h } from third
+print(f(), g(), h())

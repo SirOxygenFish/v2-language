@@ -1,0 +1,37 @@
+// requires: py js
+// timeout: 120
+// Tens of thousands of crossings, handles and callbacks.
+@py {
+    def inc(x):
+        return x + 1
+    class Thing:
+        def __init__(self, n):
+            self.n = n
+    def thing(n):
+        return Thing(n)
+    def live():
+        import gc
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if isinstance(o, Thing))
+    def each(f, n):
+        return sum(f(i) for i in range(n))
+    @export { inc, thing, live, each }
+}
+@js {
+    function jinc(x) { return x + 1 }
+    @export { jinc }
+}
+@import { inc, thing, live, each } from @py
+@import { jinc } from @js
+let n = 0
+for i in 0..20000 {
+    n = inc(n)
+    n = jinc(n)
+}
+print(n)
+for i in 0..20000 {
+    let t = thing(i)
+    n = t.n
+}
+print(n, live() < 100)
+print(each(func(i) => i * 2, 10000))

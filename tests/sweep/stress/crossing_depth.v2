@@ -1,0 +1,29 @@
+// requires: py js
+// DOCS 8.4: calls may nest up to 64 levels deep.
+@py {
+    def down(f, n):
+        return f(n)
+    @export { down }
+}
+@js {
+    function jdown(f, n) { return f(n) }
+    @export { jdown }
+}
+@import { down } from @py
+@import { jdown } from @js
+func bounce(n) {
+    if n == 0 {
+        return "bottom"
+    }
+    if n % 2 == 0 {
+        return down(bounce, n - 1)
+    }
+    return jdown(bounce, n - 1)
+}
+print(bounce(20))
+try {
+    print(bounce(100))
+} catch (e) {
+    print(e.type)
+}
+print(bounce(20))

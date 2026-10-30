@@ -12,6 +12,7 @@ const path = require('path');
 const Module = require('module');
 const stream = require('stream');
 const { StringDecoder } = require('string_decoder');
+const { MAX_STRING_LENGTH } = require('buffer').constants;
 const url = require('url');
 const util = require('util');
 const child_process = require('child_process');
@@ -134,7 +135,13 @@ function stringify(v) {
 }
 
 function writeFrame(obj) {
-  const text = orderedPending ? stringify(obj) : JSON.stringify(obj);
+  let text;
+  try {
+    text = orderedPending ? stringify(obj) : JSON.stringify(obj);
+  } catch (e) {
+    if (e instanceof RangeError) throw new TooBig(String(MAX_STRING_LENGTH)); // longer than a JS string
+    throw e;
+  }
   const data = Buffer.from(text + '\n', 'utf8');
   if (data.length > LIMIT) throw new TooBig(String(data.length));
   let off = 0;
@@ -149,6 +156,21 @@ function writeFrame(obj) {
 }
 
 const tooBigMessage = (n) => `value too large to send to V2 (${Math.ceil(n / (1 << 20))} MiB, limit ${LIMIT >> 20} MiB)`;
+
+class Walk extends Set {
+  // The containers open on the way down, and the least the frame can come to: a value too big
+  // stops here, before the time and memory of encoding all of it (9.1).
+  cost = 0;
+
+  spend(n) {
+    this.cost += n;
+    if (this.cost > LIMIT) {
+      const f = new Fail('MarshalError', `value too large to send to V2 (more than ${LIMIT >> 20} MiB)`);
+      f.located = true;
+      throw f;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The request stack (14.2) and output (9.9)
@@ -552,7 +574,7 @@ function isPlainObject(x) {
   }
 }
 
-function encode(x, depth = 0, open = new Set()) {
+function encode(x, depth = 0, open = new Walk()) {
   // A JS value for V2 (10.7): plain data copied, anything else a handle.
   if (x === undefined || x === null) return null;
   const t = typeof x;
@@ -565,7 +587,10 @@ function encode(x, depth = 0, open = new Set()) {
     return x;
   }
   if (t === 'bigint') return x >= I64_MIN && x <= I64_MAX ? { $v2: 'int', v: x.toString() } : handleTag(x);
-  if (t === 'string') return surrogateCheck(x);
+  if (t === 'string') {
+    open.spend(x.length);
+    return surrogateCheck(x);
+  }
   if (t === 'function' && stubCells.has(x)) {
     pinned.push(x);
     return { $v2: 'fn', id: stubCells.get(x).id };
@@ -573,9 +598,13 @@ function encode(x, depth = 0, open = new Set()) {
   if (t === 'function' && routeStubs.has(x)) return { $v2: 'fn', route: routeStubs.get(x) };
   if (t !== 'object') return handleTag(x);
   if (x instanceof V2Error) return errorTag(x, depth, open);
-  if (util.types.isUint8Array(x)) return { $v2: 'bytes', b64: Buffer.from(x.buffer, x.byteOffset, x.byteLength).toString('base64') };
+  if (util.types.isUint8Array(x)) {
+    open.spend(Math.ceil(x.byteLength / 3) * 4);
+    return { $v2: 'bytes', b64: Buffer.from(x.buffer, x.byteOffset, x.byteLength).toString('base64') };
+  }
   if (Array.isArray(x)) {
     if (depth >= MAX_DEPTH || open.has(x)) return handleTag(x);
+    open.spend(2 * x.length);
     open.add(x);
     try {
       const out = new Array(x.length);
@@ -594,11 +623,13 @@ function encode(x, depth = 0, open = new Set()) {
   }
   if (isPlainObject(x)) {
     if (depth >= MAX_DEPTH || open.has(x)) return handleTag(x);
+    const keys = Object.keys(x);
+    open.spend(2 * keys.length);
     open.add(x);
     try {
       const out = {};
       let tagged = false;
-      for (const k of Object.keys(x)) {
+      for (const k of keys) {
         surrogateCheck(k);
         if (k === '$v2') tagged = true;
         let v;
@@ -634,7 +665,7 @@ function encodeValue(x, root, depth = 0) {
 
 const textOrNull = (v) => (typeof v === 'string' ? wellFormed(v) : null);
 
-function errorTag(e, depth = 0, open = new Set(), causes = 0) {
+function errorTag(e, depth = 0, open = new Walk(), causes = 0) {
   // A V2Error as an `error` tag (10.3). One that came from V2 keeps its members (location,
   // trace), but its data and cause are encoded again, so their handles and stubs belong to this
   // frame (11.1, 11.8). An error tag is not a nesting level (10.5), but one inside its own data
@@ -804,7 +835,6 @@ function serialize(e, depth = 0) {
   }
   const out = { type: 'ForeignError', message: wellFormed(errorMessage(e)), foreign_type: wellFormed(errorName(e)), trace };
   if (e !== null && typeof e === 'object' && e.cause !== undefined && depth < MAX_CAUSES) out.cause = serialize(e.cause, depth + 1);
-  if (depth === 0 && e && typeof e.stack === 'string') out.text = wellFormed(e.stack);
   return out;
 }
 
@@ -978,12 +1008,12 @@ function unitAttr(u, name) {
   }
 }
 
-function unitStub(unit, name, block, alias) {
+function unitStub(unit, name, route, alias) {
   // An inner @import from this session, looked up at every use (13.7). A Proxy, so calls, `new`,
   // `instanceof`, `class X extends` and static members all reach the current target (11.3).
   const current = () => {
     const u = units.get(unit);
-    if (!u) throw new V2Error('ImportError', `${block} has not run yet \u2014 '${name}' can't be called before it loads`);
+    if (!u) hostCall({ route }, [], alias); // V2 says why it isn't here (13.6)
     if (u.kinds && u.kinds.get(name) === 'value') throw new V2Error('ImportError', `'${name}' is a constant \u2014 pass it in as a block arg`);
     try {
       return unitAttr(u, name);
@@ -1014,7 +1044,7 @@ function unitStub(unit, name, block, alias) {
 function bindImports(ctx, imports) {
   for (const e of imports) {
     const alias = checkName(e.as, '@import name');
-    defineData(ctx, alias, 'route' in e ? routeStub(e.route, alias) : unitStub(e.unit, e.name, e.block, alias));
+    defineData(ctx, alias, 'unit' in e ? unitStub(e.unit, e.name, e.route, alias) : routeStub(e.route, alias));
   }
 }
 
@@ -1293,27 +1323,29 @@ function keyText(k, mapping) {
   throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(mapping)} to V2 data (key of type ${typeName(k)})`);
 }
 
-function toV2(x, depth = 0, open = new Set()) {
+function toV2(x, depth = 0, open = new Walk()) {
   // `op value`: the object as plain data, converted here (11.5). `depth` is the level the value
   // would sit at, so a container at 256 or deeper is too deep, as for the host (10.5).
-  if (x === undefined || x === null || typeof x === 'boolean' || typeof x === 'number' || typeof x === 'string') return encode(x);
+  if (x === undefined || x === null || typeof x === 'boolean' || typeof x === 'number' || typeof x === 'string') return encode(x, depth, open);
   if (typeof x === 'bigint') {
     if (x < I64_MIN || x > I64_MAX) throw new Fail('MarshalError', "to_v2(): can't convert bigint to V2 data (it needs more than 64 bits)");
     return encode(x);
   }
-  if (util.types.isUint8Array(x)) return encode(x);
+  if (util.types.isUint8Array(x)) return encode(x, depth, open);
   if (isV2Function(x) || x instanceof V2Error) return encode(x, depth, open); // V2's own values (10.7)
   if (depth >= MAX_DEPTH) throw new Fail('MarshalError', `to_v2(): value nested deeper than ${MAX_DEPTH} levels`);
   const isMap = util.types.isMap(x);
   const list = Array.isArray(x) || util.types.isSet(x);
   if (isMap || list || (typeof x === 'object' && isPlainObject(x))) {
     if (open.has(x)) throw new Fail('MarshalError', `to_v2(): can't convert a ${typeName(x)} that contains itself`);
+    const keys = isMap || list ? null : Object.keys(x);
+    open.spend(2 * (keys ? keys.length : isMap || !Array.isArray(x) ? x.size : x.length));
     open.add(x);
     try {
       if (list) return Array.from(x, (v) => toV2(v, depth + 1, open));
       const pairs = [];
       const seen = new Set();
-      const entries = isMap ? x.entries() : Object.keys(x).map((k) => [k, x[k]]);
+      const entries = isMap ? x.entries() : keys.map((k) => [k, x[k]]);
       for (const [k, v] of entries) {
         const key = keyText(k, x);
         if (seen.has(key)) throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data (two keys become "${key}")`);

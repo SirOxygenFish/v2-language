@@ -1,0 +1,32 @@
+// requires: py js
+// DOCS 4.6: everything arrives in program order, in one stream.
+print("a")
+@py { print("b") }
+print("c")
+@js { console.log("d") }
+print("e", end: "")
+@py {
+    import sys
+    sys.stdout.write("f")
+    print("g", end="", flush=True)
+}
+@js { process.stdout.write("h") }
+print("i")
+@py {
+    import sys
+    sys.stdout.buffer.write(b"raw\n")
+    sys.stdout.flush()
+}
+@js {
+    console.log("%s-%d", "x", 1);
+    console.info("info");
+}
+for i in 0..3 {
+    print(i, end: " ")
+    @py(i) { print(i * 10, end=" ") }
+    @js(i) { process.stdout.write(`${i * 100} `) }
+}
+print()
+@py { print("py to stderr", file=__import__("sys").stderr) }
+@js { console.error("js to stderr") }
+print("end")

@@ -1,0 +1,9 @@
+@py {
+    def double(x):
+        return x * 2
+    @export { double }
+}
+@import { double } from @py
+func twice_double(x) {
+    return double(double(x))
+}

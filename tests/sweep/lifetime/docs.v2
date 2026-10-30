@@ -1,0 +1,12 @@
+// requires: py
+// DOCS 5, When a language starts.
+@py stats {
+    print("stats loaded")
+    def spread(xs):
+        return max(xs) - min(xs)
+    @export { spread }
+}
+@import { spread } from stats
+print("hello")
+print(spread([1, 2]))
+print(spread([1, 5]))

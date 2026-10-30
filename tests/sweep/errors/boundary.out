@@ -1,0 +1,9 @@
+ForeignError
+ZeroDivisionError
+division by zero
+py
+ValueError from callback {"x": 1} null
+ValueError from callback {"x": 1} null
+true true true true false
+["EngineUnknown", "unknown engine '@pyhton' (did you mean '@py'?)"]
+EngineUnknown

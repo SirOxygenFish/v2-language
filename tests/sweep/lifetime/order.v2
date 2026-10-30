@@ -1,0 +1,25 @@
+// requires: py js
+// DOCS 5: when a language starts, the line runs first, in order, across languages.
+@py a {
+    print("py 1")
+    def f():
+        return "f"
+    @export { f }
+}
+@js b {
+    console.log("js 1");
+    function g() { return "g" }
+    @export { g }
+}
+@py c {
+    print("py 2")
+    def h():
+        return "h"
+    @export { h }
+}
+@import { f } from a
+@import { g } from b
+@import { h } from c
+print(g())
+print(f())
+print(h())

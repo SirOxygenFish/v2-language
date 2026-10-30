@@ -1,0 +1,36 @@
+// DOCS 3.8: deep recursion and deep values end in an error, never a crash.
+func depth(n) {
+    if n == 0 {
+        return 0
+    }
+    return 1 + depth(n - 1)
+}
+print(depth(9000))
+func forever(n) {
+    return forever(n + 1) + 1
+}
+try {
+    forever(0)
+} catch (e) {
+    print(e.type, e.message)
+}
+print(depth(100))
+let v = []
+for i in 0..1000000 {
+    v = [v]
+}
+try {
+    print(len(str(v)))
+} catch (e) {
+    print(e.type, e.message)
+}
+let w = v
+v = null
+w = null
+print("freed")
+let d = {}
+for i in 0..100000 {
+    d = {k: d}
+}
+d = null
+print("freed")

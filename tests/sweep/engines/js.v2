@@ -1,0 +1,75 @@
+// requires: js
+// DOCS 5, JavaScript and TypeScript.
+@js {
+    class Point {
+        constructor(x) { this.x = x }
+        twice() { return this.x * 2 }
+    }
+    function Old(x) { this.x = x }
+    Old.prototype.get = function () { return this.x };
+    function plain() { return this === undefined || this === globalThis }
+    function sum(a, b) { return a + b }
+    async function wait(x) {
+        await new Promise((r) => setTimeout(r, 5));
+        return x + 1;
+    }
+    function leave() { process.exit(3) }
+    function isList(x) { return Array.isArray(x) }
+    const EventEmitter = require("events");
+    const base = require("path").posix.basename;
+    @export { Point, Old, plain, sum, wait, leave, isList, EventEmitter, base }
+}
+@import { Point, Old, plain, sum, wait, leave, isList, EventEmitter, base } from @js
+print(Point(3).twice(), Old(4).get(), plain(), sum(1, 2), wait(1), isList([1]))
+try {
+    sum(1, b: 2)
+} catch (e) {
+    print(e.type)
+}
+try {
+    leave()
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+let em = EventEmitter()
+print(em.listenerCount("x"), type(em), base("/a/b.txt"))
+print(@js(name: "ada") { name.toUpperCase() }, @js { undefined }, @js { let a = 1; a + 1 })
+func err(f) {
+    try {
+        return f()
+    } catch (e) {
+        return [e.type, e.foreign_type, e.message]
+    }
+}
+print(err(func() => @js { import x from "y" }))
+print(err(func() => @js { export const a = 1 }))
+print(err(func() => @js { await 1 }))
+@ts typed {
+    interface P { x: number }
+    function add(a: number, b: number): number { return a + b }
+    const p: P = { x: 1 };
+    const wrong: string = 5 as any;
+    @export { add, p, wrong }
+}
+@js {
+    @import { add } from typed
+    function viaJs(x) { return add(x, 1) }
+    @export { viaJs }
+}
+@ts {
+    @import { viaJs } from @js
+    function viaTs(x: number): number { return viaJs(x) * 2 }
+    @export { viaTs }
+}
+@import { add, p, wrong } from typed
+@import { viaJs } from @js
+@import { viaTs } from @ts
+print(add(1, 2), p, wrong, viaJs(2), viaTs(2))
+try {
+    @ts {
+        enum E { A }
+    }
+} catch (e) {
+    print(e.type, e.foreign_type == "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX" || e.message.index_of("ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") >= 0)
+}
+print(@ts { const x: number = 2; x * 2 })
