@@ -845,6 +845,9 @@ const NODE_GLOBALS = (() => {
   return Object.getOwnPropertyNames(globalThis).filter((k) => !fresh.has(k) && k !== 'global' && k !== 'console');
 })();
 
+const NODE_NAMES = new Set(NODE_GLOBALS);
+const NODE_ENUMERABLE = new Set(NODE_GLOBALS.filter((k) => Object.prototype.propertyIsEnumerable.call(globalThis, k)));
+
 const IDENT = /^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u;
 const RESERVED = new Set(('break case catch class const continue debugger default delete do else enum export extends false finally ' +
   'for function if import in instanceof new null return super switch this throw true try typeof var void while with ' +
@@ -866,17 +869,15 @@ function newContext(file) {
   // One vm context (one realm) per unit: private top-level names (12.4).
   const sb = {};
   const module = { exports: {} };
+  // Forwarded, not copied: reading a descriptor loads a lazy global (`FormData` is all of undici),
+  // so nothing loads until a block uses it.
   for (const k of NODE_GLOBALS) {
-    const d = Object.getOwnPropertyDescriptor(globalThis, k);
-    if (d.get || d.set) {
-      Object.defineProperty(sb, k, {
-        configurable: true, enumerable: d.enumerable,
-        get: () => (d.get ? d.get.call(globalThis) : undefined),
-        set(v) { Object.defineProperty(this, k, { value: v, writable: true, configurable: true, enumerable: true }); },
-      });
-    } else {
-      Object.defineProperty(sb, k, d);
-    }
+    const enumerable = NODE_ENUMERABLE.has(k);
+    Object.defineProperty(sb, k, {
+      configurable: true, enumerable,
+      get: () => globalThis[k],
+      set(v) { Object.defineProperty(this, k, { value: v, writable: true, configurable: true, enumerable }); },
+    });
   }
   Object.assign(sb, { console, module, exports: module.exports, require: Module.createRequire(file), __filename: file, __dirname: path.dirname(file) });
   const ctx = vm.createContext(sb);
@@ -1032,6 +1033,11 @@ function exportLookup(unit, name) {
   return get();
 }
 
+// The block replaced this global with its own (a `function fetch`): no longer the forwarding accessor.
+function replacedGlobal(ctx, k) {
+  return NODE_NAMES.has(k) && Object.getOwnPropertyDescriptor(ctx, k).get === undefined;
+}
+
 function exportReply(unit, before, requested) {
   const exports = [];
   const missing = [];
@@ -1056,7 +1062,7 @@ function exportReply(unit, before, requested) {
   }
   if (requested.includes('*')) {
     for (const k of Object.getOwnPropertyNames(unit.ctx)) {
-      if (before.has(k) || seen.has(k) || k.startsWith('_') || !k.isWellFormed()) continue;
+      if ((before.has(k) && !replacedGlobal(unit.ctx, k)) || seen.has(k) || k.startsWith('_') || !k.isWellFormed()) continue;
       let v;
       try {
         v = unit.ctx[k];

@@ -24,6 +24,9 @@ const TICK: Duration = Duration::from_millis(100);
 /// How often the watchdog checks whether the top timer's child has exited (8.5).
 const EXIT_CHECK: Duration = Duration::from_millis(250);
 
+/// How long a worker stays idle before it gives back its RAM (8.8).
+const PARK_AFTER: Duration = Duration::from_secs(10);
+
 /// The exit code of an interrupted run (6.5).
 pub const EXIT_INTERRUPTED: i32 = 130;
 
@@ -196,8 +199,41 @@ struct Watch {
     fired: HashSet<u64>,
     /// Every running child, killed on the interrupt path (6.5).
     children: Vec<(u64, KillHandle)>,
+    /// The workers that may park (8.8).
+    parkable: Vec<Parkable>,
     run_dir: Option<PathBuf>,
     stop: bool,
+}
+
+/// A worker that gives back its RAM when idle (8.8).
+struct Parkable {
+    kill: KillHandle,
+    idle_since: Instant,
+    parked: bool,
+}
+
+impl Watch {
+    /// The workers idle for `after` that haven't parked since their last request (8.8).
+    fn due_to_park(&mut self, now: Instant, after: Duration) -> Vec<KillHandle> {
+        let kills = &self.kills;
+        let busy = |p: &Parkable| kills.values().any(|k| std::sync::Arc::ptr_eq(&k.0, &p.kill.0));
+        let mut due = Vec::new();
+        for p in &mut self.parkable {
+            if !p.parked && now.duration_since(p.idle_since) >= after && !busy(p) {
+                p.parked = true;
+                due.push(p.kill.clone());
+            }
+        }
+        due
+    }
+
+    /// A request to `kill`'s child ended: its idle clock starts again.
+    fn request_done(&mut self, kill: &KillHandle, now: Instant) {
+        for p in self.parkable.iter_mut().filter(|p| std::sync::Arc::ptr_eq(&p.kill.0, &kill.0)) {
+            p.idle_since = now;
+            p.parked = false;
+        }
+    }
 }
 
 struct Shared {
@@ -231,10 +267,21 @@ fn ensure_thread() -> bool {
     })
 }
 
+/// How long a worker stays idle before it parks. Debug builds take `V2_TEST_PARK_MS` from the
+/// tests, like `V2_TEST_PANIC` (22.2).
+fn park_after() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("V2_TEST_PARK_MS").ok().and_then(|v| v.parse().ok()) {
+        return Duration::from_millis(ms);
+    }
+    PARK_AFTER
+}
+
 fn watch() {
     let s = shared();
     let mut w = lock();
     let mut last_exit_check = Instant::now();
+    let park = park_after();
     loop {
         if w.stop {
             return;
@@ -258,6 +305,11 @@ fn watch() {
                     kill.kill_tree();
                 }
             }
+        }
+        // On a thread of its own: a trim takes about 40 ms per GB, and a timer can't wait (8.8).
+        let due = w.due_to_park(now, park);
+        if !due.is_empty() {
+            let _ = std::thread::Builder::new().name("v2-park".into()).spawn(move || due.iter().for_each(KillHandle::release_memory));
         }
         let mut wait = w.timers.time_left(now).map_or(TICK, |left| left.min(TICK));
         if w.timers.top_id().is_some() {
@@ -338,12 +390,21 @@ impl Drop for TimerGuard {
     fn drop(&mut self) {
         {
             let mut w = lock();
-            w.timers.pop(self.id, Instant::now());
-            w.kills.remove(&self.id);
+            let now = Instant::now();
+            w.timers.pop(self.id, now);
+            if let Some(kill) = w.kills.remove(&self.id) {
+                w.request_done(&kill, now);
+            }
             w.fired.remove(&self.id);
         }
         wake();
     }
+}
+
+/// Let `kill`'s child park when idle (8.8). It counts as idle from now.
+pub fn allow_parking(kill: KillHandle) {
+    ensure_thread();
+    lock().parkable.push(Parkable { kill, idle_since: Instant::now(), parked: false });
 }
 
 /// The private run directory, removed on the interrupt path too (20.3).
@@ -357,6 +418,7 @@ pub fn set_run_dir(dir: PathBuf) {
 fn unregister(id: u64, kill: &KillHandle) {
     let mut w = lock();
     w.children.retain(|(c, _)| *c != id);
+    w.parkable.retain(|p| !std::sync::Arc::ptr_eq(&p.kill.0, &kill.0));
     let timers: Vec<u64> = w.kills.iter().filter(|(_, k)| std::sync::Arc::ptr_eq(&k.0, &kill.0)).map(|(t, _)| *t).collect();
     for t in timers {
         w.kills.remove(&t);
@@ -594,6 +656,43 @@ impl KillHandle {
     fn has_exited(&self) -> bool {
         self.exit_info(false).is_some()
     }
+
+    /// Move the pages of every process in the job out of RAM; they fault back in on use (8.8). A
+    /// process may have gone, so errors are ignored.
+    #[cfg(windows)]
+    fn release_memory(&self) {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_MORE_DATA};
+        use windows_sys::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+        use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA};
+        // Room for far more processes than a worker has. A longer list comes back cut off, with
+        // ERROR_MORE_DATA, which is fine: the worker itself is at its start.
+        let mut buf = [0usize; 256];
+        let size = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: the job handle is open; `buf` is usize-aligned and sized for this information class.
+        let ok = unsafe { QueryInformationJobObject(self.0.job, JobObjectBasicProcessIdList, buf.as_mut_ptr().cast(), size, std::ptr::null_mut()) };
+        // SAFETY: a plain query.
+        if ok == 0 && unsafe { GetLastError() } != ERROR_MORE_DATA {
+            return;
+        }
+        // SAFETY: the kernel filled `buf` as this struct: two u32 counts, then the ids.
+        let list = unsafe { &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
+        let start = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / std::mem::size_of::<usize>();
+        for &pid in buf[start..].iter().take(list.NumberOfProcessIdsInList as usize) {
+            // SAFETY: a plain open of a process id; the handle is closed below.
+            unsafe {
+                let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION, 0, pid as u32);
+                if !process.is_null() {
+                    K32EmptyWorkingSet(process);
+                    CloseHandle(process);
+                }
+            }
+        }
+    }
+
+    /// Nothing to do: a normal user can't trim a child, and the kernel reclaims idle pages (8.8).
+    #[cfg(not(windows))]
+    fn release_memory(&self) {}
 
     /// The child's exit, waiting for it when `block`; never reaps it.
     fn exit_info(&self, block: bool) -> Option<ExitInfo> {
@@ -862,52 +961,18 @@ fn platform_spawn(cmd: &mut Command) -> std::io::Result<(std::process::Child, Ki
         return Err(fail(&mut child, e));
     }
     let kill = KillHandle(std::sync::Arc::new(KillInner { job, process }));
-    if let Err(e) = resume_main_thread(child.id()) {
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtResumeProcess(process: HANDLE) -> i32;
+    }
+    // SAFETY: the child's own handle, still open.
+    let status = unsafe { NtResumeProcess(child.as_raw_handle() as HANDLE) };
+    if status < 0 {
+        let e = std::io::Error::other(format!("NtResumeProcess failed (0x{status:08X})"));
         kill.kill_tree();
         return Err(fail(&mut child, e));
     }
     Ok((child, kill))
-}
-
-/// The suspended child's only thread, found with a Toolhelp snapshot, resumed (8.3, 17.3).
-#[cfg(windows)]
-fn resume_main_thread(pid: u32) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
-    };
-    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
-    // SAFETY: a snapshot we own and close; the entry struct is sized before use.
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if snap == INVALID_HANDLE_VALUE {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut entry: THREADENTRY32 = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
-        let mut result = Err(std::io::Error::other("its thread was not found"));
-        let mut more = Thread32First(snap, &mut entry) != 0;
-        while more {
-            if entry.th32OwnerProcessID == pid {
-                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
-                result = if thread.is_null() {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    let r = ResumeThread(thread);
-                    CloseHandle(thread);
-                    if r == u32::MAX {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                };
-                break;
-            }
-            more = Thread32Next(snap, &mut entry) != 0;
-        }
-        CloseHandle(snap);
-        result
-    }
 }
 
 /// A child's output after it ended: version probes (7.7), `exec` (5.10).
@@ -1048,6 +1113,30 @@ pub(crate) mod tests {
             seen.extend_from_slice(&buf[..n]);
         }
         String::from_utf8_lossy(&seen).into_owned()
+    }
+
+    #[test]
+    fn a_worker_parks_once_per_idle_period() {
+        // 8.8, on the bookkeeping alone: a real `Watch` is global and its clock is real.
+        let (argv, env) = helper("sleep:20000");
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null }).unwrap();
+        let kill = child.kill_handle();
+        let after = Duration::from_secs(10);
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut w = Watch::default();
+        w.parkable.push(Parkable { kill: kill.clone(), idle_since: t0, parked: false });
+        assert!(w.due_to_park(at(9), after).is_empty(), "not idle long enough");
+        assert_eq!(w.due_to_park(at(10), after).len(), 1);
+        assert!(w.due_to_park(at(30), after).is_empty(), "once per idle period");
+        w.request_done(&kill, at(31));
+        assert!(w.due_to_park(at(40), after).is_empty(), "a request restarts the clock");
+        assert_eq!(w.due_to_park(at(41), after).len(), 1);
+        w.request_done(&kill, at(41));
+        w.kills.insert(1, kill.clone());
+        assert!(w.due_to_park(at(60), after).is_empty(), "a request in flight is not idle");
+        child.kill_tree();
+        child.reap();
     }
 
     /// The file a `late` helper writes as soon as it starts.

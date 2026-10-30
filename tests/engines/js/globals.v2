@@ -1,0 +1,38 @@
+// requires: js
+// Node's globals reach every block, loaded only when used (INTERNALS 12.4, 14.4). A block can
+// replace one in its own realm.
+print(@js { typeof FormData })
+print(@js { new URL("http://a/b?c=1").searchParams.get("c") })
+print(@js { typeof fetch })
+print(@js { structuredClone({ a: 1 }).a })
+print(@js { typeof process.version })
+@js {
+    URL = 1;
+    console.log(URL);
+}
+print(@js { typeof URL })
+print(@js { Object.keys(globalThis).includes("setTimeout") })
+print(@js { Object.keys(globalThis).includes("FormData") })
+print(@js {
+    FormData = 2;
+    FormData;
+})
+// A replaced global keeps its enumerability.
+print(@js {
+    URL = 1;
+    Object.keys(globalThis).includes("URL");
+})
+// @export { * } takes a block's own function, even if a Node global has that name.
+@js own {
+    function fetch() { return "mine"; }
+    function helper() { return 1; }
+    @export { * }
+}
+@import { fetch, helper } from own
+print(fetch(), helper())
+try {
+    @import { atob } from own
+    print(atob)
+} catch (e) {
+    print(e.message)
+}

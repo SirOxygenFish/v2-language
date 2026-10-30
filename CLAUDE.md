@@ -25,7 +25,7 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.12. Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
+- Now: 1.13. Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
   (mem/fuzz_line.py) found the same family for almost nothing.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
@@ -96,11 +96,12 @@ it is loaded automatically into every session and every subagent.
 - `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
   prints `check X: N files, M errors`) and `doctor::doctor` (the table).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
-  `KillHandle`, `run_captured(argv, env, limit, input)` (stdin null or fed by an unjoined thread;
+  `KillHandle` (`release_memory`: 8.8), `run_captured(argv, env, limit, input)` (stdin null or fed by an unjoined thread;
   `SpawnError { message, reason }`; batch paths with `%` refused), the watchdog (only the top timer
   runs, not while paused; exit check every 250 ms; SIGCHLD reset),
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
-  the run dir). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
+  the run dir), parking (`allow_parking`, `Watch::due_to_park`; a thread per trim; debug builds
+  take `V2_TEST_PARK_MS`). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
   timers must hold `engines::process::tests::serial()`** (the watchdog is global).
 - `engines/spec.rs` (py/js/ts table, `Version`, `too_old`: Python 3.10+, one Node rule for js
   and ts: 22.13+, not 23.0/23.1), `engines/resolve.rs` (`Lookup`, `find_program`,

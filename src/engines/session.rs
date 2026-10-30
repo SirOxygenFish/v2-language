@@ -173,8 +173,13 @@ impl Interp {
         };
         let reader: Box<dyn Read + Send> = Box::new(child.take_stdout().expect("piped stdout"));
         let writer: Box<dyn Write> = Box::new(child.take_stdin().expect("piped stdin"));
+        let parkable = timeouts.call.is_none().then(|| child.kill_handle());
         let s = self.new_session(key, engine, Some(reader), Some(writer), Some(child), timeouts);
         self.handshake(s, at)?;
+        // Not with a call_timeout: bringing the memory back would count against it (8.8).
+        if let Some(kill) = parkable {
+            process::allow_parking(kill);
+        }
         Ok(s)
     }
 
