@@ -1,0 +1,2 @@
+import "./cycle_b.v2" as b
+let a = 1

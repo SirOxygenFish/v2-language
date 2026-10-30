@@ -1,0 +1,29 @@
+// requires: py
+// DOCS 5: an error from something that waited appears at the first call, and the rest of the
+// line still runs first. DOCS 4.3: a failed block stays failed.
+@py bad {
+    print("bad runs")
+    def f():
+        return 1
+    @export { f }
+    raise ValueError("no")
+}
+@py good {
+    print("good runs")
+    def g():
+        return 2
+    @export { g }
+}
+@import { f } from bad
+@import { g } from good
+print("no language yet")
+func show(fn) {
+    try {
+        print(fn())
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(func() => f())
+show(func() => f())
+show(func() => g())

@@ -1,0 +1,8 @@
+start
+with args 1
+after args
+imports from v2
+after v2
+inside if
+after if
+1 hi 3

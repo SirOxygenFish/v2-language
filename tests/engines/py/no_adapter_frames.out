@@ -1,0 +1,2 @@
+TypeError | f() takes 1 positional argument but 2 were given | ["no_adapter_frames.v2:11"]
+TypeError | f() got an unexpected keyword argument 'zz' | ["no_adapter_frames.v2:16"]

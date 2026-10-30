@@ -1,0 +1,18 @@
+// requires: py
+// DOCS 14: past call_timeout the engine stops, and later uses raise EngineCrashed.
+@py {
+    import time
+    def nap():
+        time.sleep(30)
+    @export { nap }
+}
+@import { nap } from @py
+func kind(f) {
+    try {
+        return f()
+    } catch (e) {
+        return e.type
+    }
+}
+print(kind(nap))
+print(kind(nap))

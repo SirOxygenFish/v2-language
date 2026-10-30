@@ -1,0 +1,35 @@
+// requires: py
+// DOCS 3.10.
+import "./fixtures/util.v2" as util
+import "./fixtures/util.v2" as again
+print(util.slug("Hello World"))
+print(type(util), "_cache" in util, "slug" in util, util.LIMIT)
+print(util.counter, util.current())
+util.set(5)
+print(util.counter, util.current(), again.counter)
+import "./fixtures/sub/deep.v2" as deep
+print(deep.name, deep.where())
+func kind(f) {
+    try {
+        return f()
+    } catch (e) {
+        return [e.type, e.message]
+    }
+}
+try {
+    import "./fixtures/nope.v2" as nope
+} catch (e) {
+    print(e.type)
+}
+try {
+    import "./fixtures/cycle_a.v2" as a
+} catch (e) {
+    print(e.type, e.message.index_of("cycle_a.v2") >= 0, e.message.index_of("cycle_b.v2") >= 0)
+}
+try {
+    import "./fixtures/boom.v2" as boom
+} catch (e) {
+    print(e.type, e.message)
+}
+import "./fixtures/wrap.v2" as wrap
+print(wrap.double(4), wrap.twice_double(1))

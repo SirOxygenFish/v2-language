@@ -13,7 +13,7 @@ func kind(f) {
         return e.type
     }
 }
-let base = f"${script_dir()}/sweep_io_tmp"
+let base = f"${getenv("TEMP", getenv("TMPDIR", "/tmp"))}/v2_sweep_io_tmp"
 make_dir(f"${base}/a/b")
 make_dir(f"${base}/a/b")
 print(exists(base), exists(f"${base}/nope"))

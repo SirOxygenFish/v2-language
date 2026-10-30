@@ -1,0 +1,2 @@
+print("boom runs")
+throw error("ValueError", "module failed")

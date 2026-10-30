@@ -1,0 +1,9 @@
+// exit: 1
+// stderr: bad_name.v2:8:18: ImportError: 'nope' is not exported by 'report'
+// One name of the statement can't be found, so nothing starts (13.3, 12.7).
+@js report {
+    function shout(s) { return s.toUpperCase() }
+    @export { shout }
+}
+@import { shout, nope } from report
+print("never")

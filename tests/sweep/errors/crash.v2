@@ -1,0 +1,22 @@
+// requires: py
+// DOCS 10: every later use of a crashed engine fails too.
+@py {
+    import os
+    def die():
+        os._exit(7)
+    def alive():
+        return "alive"
+    @export { die, alive }
+}
+@import { die, alive } from @py
+func kind(f) {
+    try {
+        return f()
+    } catch (e) {
+        return e.type
+    }
+}
+print(alive())
+print(kind(die))
+print(kind(alive))
+print(kind(func() => @py { 1 }))

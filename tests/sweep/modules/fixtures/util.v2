@@ -1,0 +1,14 @@
+// DOCS 3.10.
+print("util runs")
+func slug(text) {
+    return text.lower().replace(" ", "-")
+}
+let _cache = {}
+let counter = 1
+func current() {
+    return counter
+}
+func set(n) {
+    counter = n
+}
+const LIMIT = 10

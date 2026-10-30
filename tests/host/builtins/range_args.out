@@ -1,0 +1,11 @@
+TypeError | range() argument 'end' must be an int, got null
+TypeError | range() argument 'end' must be an int, got null
+TypeError | range() argument 'start' must be an int, got null
+TypeError | range() argument 'end' must be an int, got null
+TypeError | range() argument 'step' must be an int, got null
+ArityError | range() missing required argument 'end'
+ArityError | range() takes 3 positional arguments but 4 were given
+ArityError | range() takes positional arguments only
+[0, 1, 2]
+[1, 2]
+[10, 7, 4, 1]
