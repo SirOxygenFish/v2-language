@@ -41,7 +41,7 @@ pub fn parse_file(sm: &mut SourceMap, path: &Path) -> Result<Parsed, LoadError> 
         }
         Err(e) => return Err(e),
     };
-    let program = match lexer::lex(sm, file).and_then(|toks| parser::parse_program(sm, toks)) {
+    let mut program = match lexer::lex(sm, file).and_then(|toks| parser::parse_program(sm, toks)) {
         Ok(p) => p,
         Err(d) => return Ok(Parsed::Failed(vec![module_diag(sm, &d)])),
     };
@@ -49,6 +49,7 @@ pub fn parse_file(sm: &mut SourceMap, path: &Path) -> Result<Parsed, LoadError> 
     if !diags.is_empty() {
         return Ok(Parsed::Failed(diags.iter().map(|d| module_diag(sm, d)).collect()));
     }
+    crate::syntax::resolve::resolve(&mut program);
     Ok(Parsed::Ok { file, program: Rc::new(program) })
 }
 
@@ -129,7 +130,7 @@ fn stmt_imports(s: &Stmt, out: &mut Vec<(Rc<str>, Span)>) {
         StmtKind::Return(e) => e.iter().for_each(|e| expr_imports(e, out)),
         StmtKind::Assign { target, value, .. } => {
             match target {
-                Target::Name(_) => {}
+                Target::Name(..) => {}
                 Target::Member(o, _) => expr_imports(o, out),
                 Target::Index(o, i, _) => {
                     expr_imports(o, out);
@@ -235,7 +236,7 @@ fn expr_imports(e: &Expr, out: &mut Vec<(Rc<str>, Span)>) {
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bytes(_)
-        | ExprKind::Name(_) => {}
+        | ExprKind::Name(..) => {}
     }
 }
 

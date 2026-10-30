@@ -496,7 +496,7 @@ impl<'a> DirParser<'a> {
         let span = t.span;
         match t.kind.clone() {
             DK::At(tag) => {
-                let tag = Name { text: tag, span };
+                let tag = Name::new(tag, span);
                 if *self.peek() == DK::Dot {
                     self.bump();
                     if let DK::Str(_) = self.peek() {
@@ -510,7 +510,7 @@ impl<'a> DirParser<'a> {
             }
             DK::Name(n) => {
                 if *self.peek() == DK::Dot {
-                    let lang = Name { text: n, span };
+                    let lang = Name::new(n, span);
                     let mut path = Vec::new();
                     while *self.peek() == DK::Dot {
                         self.bump();
@@ -520,7 +520,7 @@ impl<'a> DirParser<'a> {
                 } else if &*n == "v2" {
                     Ok(Selector::V2 { span })
                 } else {
-                    Ok(Selector::Label { label: Name { text: n, span } })
+                    Ok(Selector::Label { label: Name::new(n, span) })
                 }
             }
             DK::Str(_) => Err(Diag::new("a block label can't be a string", span).hint(LABEL_HINT)),
@@ -531,7 +531,7 @@ impl<'a> DirParser<'a> {
     fn segment(&mut self) -> Result<Name, Diag> {
         let t = self.bump();
         match t.kind.clone() {
-            DK::Name(n) | DK::Str(n) => Ok(Name { text: n, span: t.span }),
+            DK::Name(n) | DK::Str(n) => Ok(Name::new(n, t.span)),
             other => Err(Diag::new(format!("expected a name after `.`, found {}", describe(&other)), t.span)),
         }
     }
@@ -539,7 +539,7 @@ impl<'a> DirParser<'a> {
     fn name(&mut self, what: &str) -> Result<Name, Diag> {
         let t = self.bump();
         match t.kind.clone() {
-            DK::Name(n) => Ok(Name { text: n, span: t.span }),
+            DK::Name(n) => Ok(Name::new(n, t.span)),
             other => Err(Diag::new(format!("expected {what}, found {}", describe(&other)), t.span)),
         }
     }

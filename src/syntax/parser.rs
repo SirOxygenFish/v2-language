@@ -58,7 +58,7 @@ struct ChainMark {
 
 fn name_of(t: &Token) -> Option<Name> {
     match &t.tok {
-        Tok::Ident(n) => Some(Name { text: n.clone(), span: t.span }),
+        Tok::Ident(n) => Some(Name::new(n.clone(), t.span)),
         _ => None,
     }
 }
@@ -296,7 +296,7 @@ impl<'a> Parser<'a> {
         let close = self.bump().span;
         self.depth -= 1;
         let funcs = stmts.iter().enumerate().filter(|(_, s)| matches!(s.kind, StmtKind::Func(_))).map(|(i, _)| i).collect();
-        Ok(Body { stmts, funcs, span: open.to(close) })
+        Ok(Body { stmts, funcs, layout: None, span: open.to(close) })
     }
 
     fn statement(&mut self) -> Result<Stmt, Diag> {
@@ -473,7 +473,7 @@ impl<'a> Parser<'a> {
         } else {
             FuncBody::Block(self.body("func")?)
         };
-        Ok(FuncDecl { name, params, rest, body, span: start.to(self.prev_span()) })
+        Ok(FuncDecl { name, params, rest, body, layout: Layout::from([]), span: start.to(self.prev_span()) })
     }
 
     /// Parameters through the closing `)` (4.1, 4.5).
@@ -537,7 +537,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let span = target.span;
         let target = match target.kind {
-            ExprKind::Name(n) => Target::Name(Name { text: n, span }),
+            ExprKind::Name(n, _) => Target::Name(Name::new(n, span), Loc::Unresolved),
             ExprKind::Member { obj, name, optional: false } => Target::Member(obj, name),
             ExprKind::Index { obj, index, bracket } => Target::Index(obj, index, bracket),
             ExprKind::OptChain(_) => return Err(Diag::new("cannot assign through ?.", span)),
@@ -621,7 +621,7 @@ impl<'a> Parser<'a> {
         let t = self.bump();
         match t.tok {
             Tok::AtTag(tag) => {
-                let tag = Name { text: tag, span: t.span };
+                let tag = Name::new(tag, t.span);
                 if self.at_op(Op::Dot) {
                     self.bump();
                     if let Tok::Str(_) = self.peek() {
@@ -635,7 +635,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Ident(n) => {
                 if self.at_op(Op::Dot) {
-                    let lang = Name { text: n, span: t.span };
+                    let lang = Name::new(n, t.span);
                     let mut path = Vec::new();
                     while self.at_op(Op::Dot) {
                         self.bump();
@@ -645,7 +645,7 @@ impl<'a> Parser<'a> {
                 } else if &*n == "v2" {
                     Ok(Selector::V2 { span: t.span })
                 } else {
-                    Ok(Selector::Label { label: Name { text: n, span: t.span } })
+                    Ok(Selector::Label { label: Name::new(n, t.span) })
                 }
             }
             Tok::Str(_) => Err(Diag::new("a block label can't be a string", t.span).hint(LABEL_HINT)),
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
     fn segment(&mut self) -> Result<Name, Diag> {
         let t = self.bump();
         match t.tok {
-            Tok::Ident(n) | Tok::Str(n) => Ok(Name { text: n, span: t.span }),
+            Tok::Ident(n) | Tok::Str(n) => Ok(Name::new(n, t.span)),
             other => Err(Diag::new(format!("expected a name after `.`, found {other}"), t.span)),
         }
     }
@@ -666,7 +666,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let t = self.bump();
         let Tok::Str(lib) = t.tok else { unreachable!("the lexer checked the library string") };
-        let lib = Name { text: lib, span: t.span };
+        let lib = Name::new(lib, t.span);
         let alias = if self.at_kw(Kw::As) {
             self.bump();
             Some(self.expect_name("a name after `as`")?)
@@ -705,8 +705,8 @@ impl<'a> Parser<'a> {
         let head = self.bump();
         let Tok::BlockHead { tag, label } = head.tok else { unreachable!("called at a block head") };
         let at = head.span;
-        let tag_name = Name { text: tag.clone(), span: Span { hi: at.lo + 1 + tag.len() as u32, ..at } };
-        let label = label.map(|(text, span)| Name { text, span });
+        let tag_name = Name::new(tag.clone(), Span { hi: at.lo + 1 + tag.len() as u32, ..at });
+        let label = label.map(|(text, span)| Name::new(text, span));
         let mut args: Vec<(Name, Expr)> = Vec::new();
         if self.at_op(Op::LParen) {
             let open = self.bump().span;
@@ -724,7 +724,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                     self.expr()?
                 } else {
-                    Expr { kind: ExprKind::Name(name.text.clone()), span: name.span }
+                    Expr { kind: ExprKind::Name(name.text.clone(), Loc::Unresolved), span: name.span }
                 };
                 if let Some((prev, _)) = args.iter().find(|(n, _)| n.text == name.text) {
                     return Err(Diag::new(format!("block arg '{}' is given twice", name.text), name.span)
@@ -1124,7 +1124,7 @@ impl<'a> Parser<'a> {
             Tok::Ident(n) if &*n == "lambda" && self.lambda_follows() => {
                 return Err(Diag::new("V2 has no lambda keyword", t.span).hint("anonymous functions are written func(x) => …"));
             }
-            Tok::Ident(n) => ExprKind::Name(n),
+            Tok::Ident(n) => ExprKind::Name(n, Loc::Unresolved),
             Tok::Kw(Kw::True) => ExprKind::Bool(true),
             Tok::Kw(Kw::False) => ExprKind::Bool(false),
             Tok::Kw(Kw::Null) => ExprKind::Null,
@@ -1236,7 +1236,9 @@ pub fn parse_str(src: &str) -> Result<Vec<Stmt>, String> {
     let mut sm = SourceMap::new();
     let id = sm.add(std::path::PathBuf::from("t.v2"), "t.v2".into(), src);
     let toks = super::lexer::lex(&sm, id).map_err(|d| d.message)?;
-    parse_program(&sm, toks).map_err(|d| d.message)
+    let mut program = parse_program(&sm, toks).map_err(|d| d.message)?;
+    super::resolve::resolve(&mut program);
+    Ok(program)
 }
 
 #[cfg(test)]
@@ -1259,7 +1261,7 @@ mod tests {
     fn show(e: &Expr) -> String {
         match &e.kind {
             ExprKind::Int(n) => n.to_string(),
-            ExprKind::Name(n) => n.to_string(),
+            ExprKind::Name(n, _) => n.to_string(),
             ExprKind::Str(s) => format!("{s:?}"),
             ExprKind::Null => "null".into(),
             ExprKind::Bool(b) => b.to_string(),
@@ -1407,7 +1409,7 @@ extern "m" as m { double cos(double x); }
         let StmtKind::Expr(Expr { kind: ExprKind::Call { args, .. }, .. }) = &prog[1].kind else { panic!() };
         let Arg::Pos(Expr { kind: ExprKind::Block(v), .. }) = &args[0] else { panic!("block value") };
         assert_eq!(v.args.len(), 2);
-        assert!(matches!(&v.args[0].1.kind, ExprKind::Name(n) if &**n == "n"));
+        assert!(matches!(&v.args[0].1.kind, ExprKind::Name(n, _) if &**n == "n"));
     }
 
     #[test]

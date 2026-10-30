@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 
 use super::builtins::{Out, BUILTINS, POSITIONAL_ONLY};
 use super::call::{bind, bind_spec, Named, Param};
-use super::env::{self, declare, lookup, new_frame, AssignError, Env};
+use super::env::{self, declare_at, lookup, new_frame, AssignError, Env, WriteError};
 use super::error::{fail, type_error, with_suggestion, ErrorValue, Exec, Flow};
 use super::methods::{self, index_error, key_error, normalize};
 use super::module::{self, Parsed};
@@ -96,9 +96,10 @@ impl Interp {
     /// `parsed` holds the files the entry file's imports name (6.1 step 2); `stack_size` is the
     /// size of the thread this runs on, and the guard trips at 7/8 of it.
     pub fn new(sm: SourceMap, parsed: HashMap<PathBuf, Parsed>, stack_size: usize, registry: Registry) -> Interp {
-        let builtins = new_frame(None);
-        for def in BUILTINS {
-            declare(&builtins, def.name.into(), Value::func(Callable::Builtin(def)), false);
+        let names: Layout = BUILTINS.iter().map(|def| Rc::from(def.name)).collect();
+        let builtins = new_frame(&names, None);
+        for (i, def) in BUILTINS.iter().enumerate() {
+            declare_at(&builtins, i as u32, Value::func(Callable::Builtin(def)), false);
         }
         Interp {
             sm,
@@ -135,7 +136,7 @@ impl Interp {
     /// A file's top level in a new module frame whose parent is the builtins frame; its
     /// `FileScope` is kept for the run (6.2).
     fn run_top_level(&mut self, file: FileId, program: &[Stmt], entry: bool) -> Exec<Env> {
-        let module = new_frame(Some(&self.builtins));
+        let module = new_frame(&crate::syntax::resolve::module_layout(program), Some(&self.builtins));
         self.files.insert(file, FileScope::new(program, module.clone(), entry));
         self.hoist(program.iter(), &module);
         for s in program {
@@ -215,13 +216,7 @@ impl Interp {
         match r {
             Ok(frame) => {
                 // The namespace: a snapshot of the module's bindings, without `_` names (6.4 step 3).
-                let ns: IndexMap<Rc<str>, Value> = frame
-                    .borrow()
-                    .vars
-                    .iter()
-                    .filter(|(k, _)| !k.starts_with('_'))
-                    .map(|(k, slot)| (k.clone(), slot.value.clone()))
-                    .collect();
+                let ns: IndexMap<Rc<str>, Value> = env::bindings(&frame).into_iter().filter(|(k, _)| !k.starts_with('_')).collect();
                 let ns = Value::dict(ns);
                 self.modules.insert(path, ModuleState::Done(ns.clone()));
                 env::leave(frame);
@@ -302,9 +297,9 @@ impl Interp {
     fn hoist<'s>(&mut self, stmts: impl Iterator<Item = &'s Stmt>, env: &Env) {
         for s in stmts {
             if let StmtKind::Func(decl) = &s.kind {
-                let name = decl.name.as_ref().expect("a func statement has a name").text.clone();
+                let slot = decl.name.as_ref().expect("a func statement has a name").slot;
                 let f = self.closure(decl, env);
-                declare(env, name, f, false);
+                declare_at(env, slot, f, false);
             }
         }
     }
@@ -314,14 +309,29 @@ impl Interp {
             Some(n) => n.text.clone(),
             None => format!("func@{}:{}", self.sm.file(decl.span.file).display, decl.span.line).into(),
         };
-        env.borrow_mut().closures += 1;
+        env.closures.set(env.closures.get() + 1);
         Value::func(Callable::Closure { decl: decl.clone(), env: env.clone(), name })
     }
 
-    /// A body in a new frame whose parent is `parent`.
+    /// Whether `cond` holds. A bool is by far the usual case.
+    #[inline]
+    fn condition(&mut self, cond: &Expr, env: &Env) -> Exec<bool> {
+        Ok(match self.eval(cond, env)? {
+            Value::Bool(b) => b,
+            other => other.truthy(),
+        })
+    }
+
+    /// A body in a new frame whose parent is `parent`. Nothing here needs the stack guard: the
+    /// parser bounds nesting (4.1), and recursion goes through a call, which checks it.
     fn exec_body(&mut self, body: &Body, parent: &Env) -> Exec<()> {
-        self.guard(body.span)?;
-        let frame = new_frame(Some(parent));
+        let Some(layout) = &body.layout else {
+            for s in &body.stmts {
+                self.exec(s, parent)?;
+            }
+            return Ok(());
+        };
+        let frame = new_frame(layout, Some(parent));
         let r = self.exec_in(body, &frame);
         env::leave(frame);
         r
@@ -336,45 +346,56 @@ impl Interp {
         Ok(())
     }
 
+    /// The common statements. Everything else is in `exec_other`, so this stays small: it runs
+    /// for every statement, and a big frame here costs every one of them.
+    #[inline]
     fn exec(&mut self, s: &Stmt, env: &Env) -> Exec<()> {
+        match &s.kind {
+            StmtKind::Expr(e) => self.eval(e, env).map(|_| ()),
+            StmtKind::Assign { target: Target::Name(n, Loc::Slot { hops, index }), op: None, value } => {
+                let v = self.eval(value, env)?;
+                match env::write(env, *hops, *index, v) {
+                    Ok(()) => Ok(()),
+                    Err(e) => self.write_failed(n, e, env),
+                }
+            }
+            StmtKind::Assign { target, op, value } => self.assign(target, *op, value, env),
+            StmtKind::If { arms, else_ } => {
+                for (cond, body) in arms {
+                    if self.condition(cond, env)? {
+                        return self.exec_body(body, env);
+                    }
+                }
+                match else_ {
+                    Some(body) => self.exec_body(body, env),
+                    None => Ok(()),
+                }
+            }
+            StmtKind::Return(Some(e)) => Err(Flow::Return(self.eval(e, env)?)),
+            _ => self.exec_other(s, env),
+        }
+    }
+
+    #[inline(never)]
+    fn exec_other(&mut self, s: &Stmt, env: &Env) -> Exec<()> {
         match &s.kind {
             StmtKind::Let(name, value) => {
                 let v = match value {
                     Some(e) => self.eval(e, env)?,
                     None => Value::Null,
                 };
-                declare(env, name.text.clone(), v, false);
+                declare_at(env, name.slot, v, false);
             }
             StmtKind::Const(name, e) => {
                 let v = self.eval(e, env)?;
-                declare(env, name.text.clone(), v, true);
-            }
-            StmtKind::Expr(e) => {
-                self.eval(e, env)?;
+                declare_at(env, name.slot, v, true);
             }
             StmtKind::Break => return Err(Flow::Break),
             StmtKind::Continue => return Err(Flow::Continue),
-            StmtKind::Return(e) => {
-                let v = match e {
-                    Some(e) => self.eval(e, env)?,
-                    None => Value::Null,
-                };
-                return Err(Flow::Return(v));
-            }
+            StmtKind::Return(_) => return Err(Flow::Return(Value::Null)),
             StmtKind::Throw(e) => return Err(self.throw(e, s.span, env)),
-            StmtKind::Assign { target, op, value } => self.assign(target, *op, value, env)?,
-            StmtKind::If { arms, else_ } => {
-                for (cond, body) in arms {
-                    if self.eval(cond, env)?.truthy() {
-                        return self.exec_body(body, env);
-                    }
-                }
-                if let Some(body) = else_ {
-                    return self.exec_body(body, env);
-                }
-            }
             StmtKind::While { cond, body } => {
-                while self.eval(cond, env)?.truthy() {
+                while self.condition(cond, env)? {
                     match self.exec_body(body, env) {
                         Ok(()) | Err(Flow::Continue) => {}
                         Err(Flow::Break) => break,
@@ -387,15 +408,27 @@ impl Interp {
             StmtKind::Func(_) => {} // hoisted on entry to its body
             StmtKind::Import { path, alias } => {
                 let ns = self.import(path, s.span)?;
-                declare(env, alias.text.clone(), ns, false);
+                declare_at(env, alias.slot, ns, false);
             }
             StmtKind::EngineImport(imp) => self.exec_import(imp, env)?,
             StmtKind::Extern(_) => return Err(self.not_yet("extern (roadmap phase 2)", Span { hi: s.span.lo + 6, ..s.span })),
             StmtKind::Block(b) => {
                 self.exec_block(b, env, false)?;
             }
+            StmtKind::Expr(_) | StmtKind::Assign { .. } | StmtKind::If { .. } => unreachable!("handled by exec"),
         }
         Ok(())
+    }
+
+    /// A name's value: by position, or by name when the slot is empty, because `let` hasn't run
+    /// yet and the name still means an outer one (5.6).
+    #[inline]
+    fn read(&self, name: &str, loc: Loc, env: &Env) -> Option<Value> {
+        match loc {
+            Loc::Slot { hops, index } => env::read(env, hops, index).or_else(|| lookup(env, name)),
+            Loc::Builtin(index) => env::read(&self.builtins, 0, index),
+            Loc::Unresolved => lookup(env, name),
+        }
     }
 
     /// `throw v`: an error as is, a str as `error("Error", v)`; located at the keyword unless
@@ -429,26 +462,46 @@ impl Interp {
         self.fail_at("NameError", msg, span)
     }
 
+    /// A write by position that didn't happen: the name's slot is a constant, or empty, so the
+    /// name still means an outer one (5.6).
+    #[cold]
+    fn write_failed(&mut self, n: &Name, e: WriteError, env: &Env) -> Exec<()> {
+        match e {
+            WriteError::Const => self.fail_at("TypeError", format!("cannot assign to constant '{}'", n.text), n.span),
+            WriteError::Empty(value) => self.assign_by_name(n, value, env),
+        }
+    }
+
+    fn assign_by_name(&mut self, n: &Name, value: Value, env: &Env) -> Exec<()> {
+        match env::assign(env, &n.text, value) {
+            Ok(()) => Ok(()),
+            Err(AssignError::NotDeclared) => self.not_declared(&n.text, n.span, env, true),
+            Err(AssignError::Const) => self.fail_at("TypeError", format!("cannot assign to constant '{}'", n.text), n.span),
+            Err(AssignError::Builtin) => {
+                self.fail_at("TypeError", format!("cannot assign to builtin '{}' — shadow it with let", n.text), n.span)
+            }
+        }
+    }
+
     /// `target = value` / `target op= value`: the target's container and key are evaluated once,
     /// before the value (5.3).
     fn assign(&mut self, target: &Target, op: Option<(BinOp, Span)>, value: &Expr, env: &Env) -> Exec<()> {
         match target {
-            Target::Name(n) => {
+            Target::Name(n, loc) => {
                 let new = match op {
                     None => self.eval(value, env)?,
                     Some((op, op_span)) => {
-                        let Some(old) = lookup(env, &n.text) else { return self.not_declared(&n.text, n.span, env, true) };
+                        let Some(old) = self.read(&n.text, *loc, env) else { return self.not_declared(&n.text, n.span, env, true) };
                         let rhs = self.eval(value, env)?;
                         self.at(ops::binop(op, &old, &rhs), op_span)?
                     }
                 };
-                match env::assign(env, &n.text, new) {
-                    Ok(()) => Ok(()),
-                    Err(AssignError::NotDeclared) => self.not_declared(&n.text, n.span, env, true),
-                    Err(AssignError::Const) => self.fail_at("TypeError", format!("cannot assign to constant '{}'", n.text), n.span),
-                    Err(AssignError::Builtin) => {
-                        self.fail_at("TypeError", format!("cannot assign to builtin '{}' — shadow it with let", n.text), n.span)
-                    }
+                match *loc {
+                    Loc::Slot { hops, index } => match env::write(env, hops, index, new) {
+                        Ok(()) => Ok(()),
+                        Err(e) => self.write_failed(n, e, env),
+                    },
+                    _ => self.assign_by_name(n, new, env),
                 }
             }
             Target::Member(obj, name) => {
@@ -486,9 +539,9 @@ impl Interp {
     /// One loop iteration in a fresh frame holding the loop variables (5.6). `Ok(false)` ends
     /// the loop.
     fn iteration(&mut self, body: &Body, env: &Env, vars: &[(&Name, Value)]) -> Exec<bool> {
-        let frame = new_frame(Some(env));
+        let frame = new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env));
         for (n, v) in vars {
-            declare(&frame, n.text.clone(), v.clone(), false);
+            declare_at(&frame, n.slot, v.clone(), false);
         }
         let r = self.exec_in(body, &frame);
         env::leave(frame);
@@ -616,9 +669,9 @@ impl Interp {
         stop_if_interrupted();
         if let (Err(Flow::Error(e)), Some((name, cbody))) = (&outcome, catch) {
             let e = e.clone();
-            let frame = new_frame(Some(env));
+            let frame = new_frame(cbody.layout.as_ref().expect("a catch body has a frame"), Some(env));
             if let Some(n) = name {
-                declare(&frame, n.text.clone(), Value::Error(e), false);
+                declare_at(&frame, n.slot, Value::Error(e), false);
             }
             outcome = self.exec_in(cbody, &frame);
             env::leave(frame);
@@ -634,7 +687,61 @@ impl Interp {
 
     // -- expressions ------------------------------------------------------------------------------
 
+    /// The common expressions. Everything else is in `eval_other`, for the reason `exec` gives.
+    #[inline]
     pub fn eval(&mut self, e: &Expr, env: &Env) -> Exec<Value> {
+        match &e.kind {
+            ExprKind::Int(n) => Ok(Value::Int(*n)),
+            ExprKind::Name(_, Loc::Slot { hops, index }) => match env::read(env, *hops, *index) {
+                Some(v) => Ok(v),
+                None => self.eval_other(e, env),
+            },
+            ExprKind::Binary(op, span, a, b) => self.binary(*op, *span, a, b, env),
+            ExprKind::Call { callee, args, .. } if matches!(callee.kind, ExprKind::Name(..)) => self.call_name(callee, args, env),
+            _ => self.eval_other(e, env),
+        }
+    }
+
+    /// `f(args)`: the usual call, without the postfix chain's machinery. The stack guard is in
+    /// the call itself.
+    fn call_name(&mut self, callee: &Expr, args: &[Arg], env: &Env) -> Exec<Value> {
+        let f = self.eval(callee, env)?;
+        if let Some(v) = self.direct_call(&f, args, env, callee.span)? {
+            return Ok(v);
+        }
+        let (pos, named) = self.args(args, env)?;
+        self.call_value(&f, pos, named, callee.span)
+    }
+
+    /// `a op b`, with the int cases `ops::binop` would reach anyway done here. Overflow goes on to
+    /// `binop`, which raises it. The parser bounds an expression's height (4.1), so no guard.
+    fn binary(&mut self, op: BinOp, span: Span, a: &Expr, b: &Expr, env: &Env) -> Exec<Value> {
+        let x = self.eval(a, env)?;
+        let y = self.eval(b, env)?;
+        if let (&Value::Int(p), &Value::Int(q)) = (&x, &y) {
+            let fast = match op {
+                BinOp::Add => p.checked_add(q).map(Value::Int),
+                BinOp::Sub => p.checked_sub(q).map(Value::Int),
+                BinOp::Mul => p.checked_mul(q).map(Value::Int),
+                BinOp::Eq => Some(Value::Bool(p == q)),
+                BinOp::Ne => Some(Value::Bool(p != q)),
+                BinOp::Lt => Some(Value::Bool(p < q)),
+                BinOp::Gt => Some(Value::Bool(p > q)),
+                BinOp::Le => Some(Value::Bool(p <= q)),
+                BinOp::Ge => Some(Value::Bool(p >= q)),
+                _ => None,
+            };
+            if let Some(v) = fast {
+                // Two ints need no dropping, and this is the hottest path there is.
+                std::mem::forget((x, y));
+                return Ok(v);
+            }
+        }
+        self.at(ops::binop(op, &x, &y), span)
+    }
+
+    #[inline(never)]
+    fn eval_other(&mut self, e: &Expr, env: &Env) -> Exec<Value> {
         self.guard(e.span)?;
         Ok(match &e.kind {
             ExprKind::Null => Value::Null,
@@ -643,7 +750,7 @@ impl Interp {
             ExprKind::Float(x) => Value::Float(*x),
             ExprKind::Str(s) => Value::Str(s.clone()),
             ExprKind::Bytes(b) => Value::Bytes(b.clone()),
-            ExprKind::Name(n) => match lookup(env, n) {
+            ExprKind::Name(n, loc) => match self.read(n, *loc, env) {
                 Some(v) => v,
                 None => return self.not_declared(n, e.span, env, false),
             },
@@ -677,11 +784,7 @@ impl Interp {
                     UnOp::Neg => self.at(ops::neg(&v), *span)?,
                 }
             }
-            ExprKind::Binary(op, span, a, b) => {
-                let x = self.eval(a, env)?;
-                let y = self.eval(b, env)?;
-                self.at(ops::binop(*op, &x, &y), *span)?
-            }
+            ExprKind::Binary(op, span, a, b) => self.binary(*op, *span, a, b, env)?,
             ExprKind::And(a, b) => {
                 let x = self.eval(a, env)?;
                 if x.truthy() { self.eval(b, env)? } else { x }
@@ -755,13 +858,48 @@ impl Interp {
                     return Ok(Some(self.call_method(&o, name, target, pos, named)?));
                 }
                 let Some(f) = self.chain(callee, env)? else { return Ok(None) };
-                let (pos, named) = self.args(args, env)?;
                 // The caret goes at the callee's name, else at the `(` (2.2).
-                let at = if matches!(callee.kind, ExprKind::Name(_)) { callee.span } else { *paren };
+                let at = if matches!(callee.kind, ExprKind::Name(..)) { callee.span } else { *paren };
+                if let Some(v) = self.direct_call(&f, args, env, at)? {
+                    return Ok(Some(v));
+                }
+                let (pos, named) = self.args(args, env)?;
                 Ok(Some(self.call_value(&f, pos, named, at)?))
             }
             _ => Ok(Some(self.eval(e, env)?)),
         }
+    }
+
+    /// The usual call: a V2 function given exactly its positional parameters. They go straight
+    /// into its frame, with nothing for the binder to do. `None`: not such a call.
+    fn direct_call(&mut self, f: &Value, args: &[Arg], env: &Env, at: Span) -> Exec<Option<Value>> {
+        let Value::Func(c) = f else { return Ok(None) };
+        let Callable::Closure { decl, env: captured, name } = &**c else { return Ok(None) };
+        if decl.rest.is_some() || args.len() != decl.params.len() || !args.iter().all(|a| matches!(a, Arg::Pos(_))) {
+            return Ok(None);
+        }
+        let frame = new_frame(&decl.layout, Some(captured));
+        for (i, a) in args.iter().enumerate() {
+            let Arg::Pos(x) = a else { unreachable!("checked above") };
+            let v = self.eval(x, env)?;
+            declare_at(&frame, i as u32, v, false);
+        }
+        self.enter(name, at)?;
+        let r = self.run_body(decl, &frame);
+        self.calls.pop();
+        env::leave(frame);
+        r.map(Some)
+    }
+
+    /// One more active call, or `RecursionError` (5.9).
+    #[inline]
+    fn enter(&mut self, name: &Rc<str>, call_site: Span) -> Exec<()> {
+        if self.calls.len() >= MAX_CALLS {
+            return self.fail_at("RecursionError", format!("maximum call depth ({MAX_CALLS}) exceeded"), call_site);
+        }
+        self.guard(call_site)?;
+        self.calls.push(CallRecord { name: Some(name.clone()), call_site });
+        Ok(())
     }
 
     /// Arguments left to right; `...xs` must be a list and expands in place (5.7).
@@ -855,11 +993,7 @@ impl Interp {
                     .chain(decl.rest.iter().map(|r| Param { name: &r.text, has_default: false, rest: true }))
                     .collect();
                 let bound = self.at(bind(name, &params, pos, named), call_site)?;
-                if self.calls.len() >= MAX_CALLS {
-                    return self.fail_at("RecursionError", format!("maximum call depth ({MAX_CALLS}) exceeded"), call_site);
-                }
-                self.guard(call_site)?;
-                self.calls.push(CallRecord { name: Some(name.clone()), call_site });
+                self.enter(name, call_site)?;
                 let r = self.run_closure(decl, env, bound);
                 self.calls.pop();
                 r
@@ -869,7 +1003,7 @@ impl Interp {
 
     /// 5.7 step 4-5: the call frame, parameters (defaults evaluated in it), then the body.
     fn run_closure(&mut self, decl: &FuncDecl, env: &Env, bound: Vec<Option<Value>>) -> Exec<Value> {
-        let frame = new_frame(Some(env));
+        let frame = new_frame(&decl.layout, Some(env));
         let r = self.run_closure_in(decl, &frame, bound);
         env::leave(frame);
         r
@@ -882,12 +1016,16 @@ impl Interp {
                 (None, Some(d)) => self.eval(d, frame)?,
                 (None, None) => unreachable!("the binder checked required parameters"),
             };
-            declare(frame, pname.text.clone(), v, false);
+            declare_at(frame, pname.slot, v, false);
         }
         if let Some(r) = &decl.rest {
             let v = bound.last_mut().and_then(Option::take).unwrap_or_else(|| Value::list(Vec::new()));
-            declare(frame, r.text.clone(), v, false);
+            declare_at(frame, r.slot, v, false);
         }
+        self.run_body(decl, frame)
+    }
+
+    fn run_body(&mut self, decl: &FuncDecl, frame: &Env) -> Exec<Value> {
         match &decl.body {
             FuncBody::Expr(e) => self.eval(e, frame),
             FuncBody::Block(b) => match self.exec_in(b, frame) {

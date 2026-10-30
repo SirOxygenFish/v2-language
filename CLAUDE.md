@@ -25,8 +25,9 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.13. Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
-  (mem/fuzz_line.py) found the same family for almost nothing.
+- Now: 1.14, the loop. Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
+  (mem/fuzz_line.py) found the same family for almost nothing. mem/fuzz_scope.py compares two
+  binaries on random V2 programs.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
@@ -74,15 +75,18 @@ it is loaded automatically into every session and every subagent.
   errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
   raw until Phase 3 (17.1).
 - `syntax/`: `span` (SourceMap, FileId, display_path), `lexer`, `scan` (block bodies, profiles,
-  `canonical_tag`), `directives` (@export/@import, dedent), `parser` (MAX_DEPTH 256, expression
+  `canonical_tag`), `directives` (@export/@import, dedent), `resolve` (layouts, `Loc`, after
+  `check`, in `parse_file`, the entry path and `parse_str`), `parser` (MAX_DEPTH 256, expression
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
   (static checks, 4.5, incl. "this expression's value is not used"), `ast`.
-- `runtime/`: `interp` (exec/eval take `&Env`; stacks: `calls` and `import_stack`; `guard()` at
-  7/8 of the stack; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
+- `runtime/`: `interp` (exec/eval take `&Env` and keep only the common cases, the rest in
+  `exec_other`/`eval_other`; `binary` has an int fast path, `direct_call` puts args straight in the
+  frame; stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
   `call_value(f, pos, named, at)` calls any V2 value from Rust; `line`: 12.7), `value` (`Callable` = Closure |
   Builtin | Proxy {session, unit, name} | Route {route, name} | Waiting {import, local, seen,
   resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`),
-  `env`, `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  `env` (`Frame` = layout + slots, by position; an empty slot means not declared yet, so reads
+  and writes fall back by name; a spare-array pool), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
