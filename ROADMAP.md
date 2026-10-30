@@ -9,7 +9,7 @@ says *in what order* and *what's done*.
 | | |
 | --- | --- |
 | **Current phase** | Phase 1 rework: language lifetime and speed (1.11-1.14, go-ahead 2026-10-30); Phase 2 waits for the owner after that |
-| **Next task** | 1.12 Parking and startup |
+| **Next task** | 1.13 Variable slots |
 | **Last update** | 2026-10-30: the owner paused Phase 2 to redesign language lifetime; the approved design is in DOCS 5 and INTERNALS 5.6, 8.8, 12.7, 13.4 and 15.6 |
 
 ## Rules
@@ -212,12 +212,13 @@ fast V2 runs.
   **passed 2026-10-30** (Windows and Linux)
 
 ### 1.12 Parking and startup
-- [ ] Parking: idle tracking and `K32EmptyWorkingSet` on the Job's processes (§8.8)
-- [ ] `NtResumeProcess` instead of the Toolhelp snapshot (§8.3)
-- [ ] The Store placeholder remembered in `toolchains.json` (§7.7)
-- [ ] Node's first context: don't force lazy globals; trace the rest of the 33 ms (§14.4)
+- [x] Parking: idle tracking and `K32EmptyWorkingSet` on the Job's processes (§8.8)
+- [x] `NtResumeProcess` instead of the Toolhelp snapshot (§8.3)
+- [x] The Store placeholder remembered in `toolchains.json` (§7.7)
+- [x] Node's first context: lazy globals forwarded, not copied (§12.4)
 - **Done when:** R65 and R67 pass, and first-block times are recorded against 190 ms (Python)
-  and 93 ms (Node)
+  and 93 ms (Node) — **passed 2026-10-30**: 79 ms and 42 ms (Windows and Linux; parking is Windows
+  only)
 
 ### 1.13 Variable slots
 - [ ] `syntax/resolve`: layouts and name positions, frame elision (§5.6)
@@ -388,3 +389,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-25 | 1.10: the Phase 1 sweep: R01-R03, R11, R29-R31 and R33 got their tests (`tests/engines/{py,js}`), R42 its js part in `ts/strip.v2`; every R of 1.1-1.10 and the ch. 21 rows for bridged engines have tests; an audit confirmed 3 test gaps, all closed (a failing action block reached again, the idle turn after a call reply, the dead state after a startup timeout or exit 9009). Phase 1 complete on Windows and Linux |
 | 2026-10-30 | Owner paused Phase 2 for a redesign of language lifetime, exports and calls. Measured: unused languages cost nothing, a parked worker keeps everything at under 0.1 MB, V2 itself is about 15x slower than Python. Three review rounds (29 findings) moved the design back towards the existing rules: a language starts at first need, its top-level definition blocks and eligible imports wait in line, everything else acts as before. Compiled-only languages rejected. `@import { * }` removed; a cache hit touches no compiler. Spec updated; milestones 1.11-1.14 added |
 | 2026-10-30 | 1.11: a language starts at first need. `Callable::Waiting` exists before its process does; one line in program order across languages holds top-level definition blocks and eligible `@import`s; `@import { * }` is gone. The review confirmed 22 findings with 5 root causes, all fixed: per-language lines ran blocks out of order, a block looked at its imports before the line ran, a failed line stored its error on the wrong block, a waiting `@import` saw blocks below it, and a name no block exported went unnoticed. A failure no longer stops the line. Also fixed, from Phase 1: a language refused at the depth limit could never start. A differential fuzz (each program against a copy that starts both languages first) gave 0 differences in 1,200 programs when blocks call only their own language |
+| 2026-10-30 | 1.12: an idle worker gives back its RAM, and starting languages takes half the time. First Python block 181 ms to 79 ms, first Node block 92 ms to 42 ms: child start no longer snapshots every thread on the machine, the Store placeholder is remembered, and Node loads no lazy global until a block uses it. The review found 3 problems, all fixed: a trim stalled the watchdog, a worker with over 255 processes was never trimmed, and a replaced global became enumerable. Also fixed, older: `@export { * }` skipped a function named like a Node global |
