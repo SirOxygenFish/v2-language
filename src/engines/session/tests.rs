@@ -1078,7 +1078,7 @@ fn a_dict_key_holding_a_handle_wins_over_the_dict_methods() {
         w.recv_t("bye");
     });
     it.handshake(s, at()).unwrap();
-    let env = crate::runtime::env::new_frame(None);
+    let env = crate::runtime::env::new_frame(&crate::syntax::ast::Layout::from([]), None);
     let releases = it.sessions[s].releases.clone();
     let h = Value::Handle(Rc::new(crate::engines::handles::HandleRef::new(s, "py".into(), 1, "function".into(), releases)));
     let d = Value::dict([("keys".into(), h)].into_iter().collect());

@@ -141,10 +141,7 @@ impl Drop for Func {
         if Rc::strong_count(&self.0) == 1 {
             if let Callable::Closure { env, .. } = &*self.0 {
                 if Rc::strong_count(env) == 1 {
-                    if let Ok(mut frame) = env.try_borrow_mut() {
-                        let vars = std::mem::take(&mut frame.vars);
-                        release(vars.into_values().map(|slot| slot.value).collect());
-                    }
+                    release(super::env::take_values(env));
                 }
             }
         }

@@ -36,7 +36,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
             return 1;
         }
     };
-    let program = match lexer::lex(&sm, file).and_then(|toks| parser::parse_program(&sm, toks)) {
+    let mut program = match lexer::lex(&sm, file).and_then(|toks| parser::parse_program(&sm, toks)) {
         Ok(p) => p,
         Err(d) => {
             stderr!("{}", render_diag(&sm, &d));
@@ -51,6 +51,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
         }
         return 1;
     }
+    crate::syntax::resolve::resolve(&mut program);
     // Every file the import literals name, depth-first; their diagnostics wait for the
     // import that reaches them (6.1 step 2).
     let mut parsed = HashMap::new();
