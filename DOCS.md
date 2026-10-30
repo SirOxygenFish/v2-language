@@ -644,7 +644,7 @@ There are two kinds of block, decided by whether the block contains `@export`:
 | Kind                 | Contains `@export`? | Runs                                  | Keeps its state? |
 | -------------------- | ------------------- | ------------------------------------- | ---------------- |
 | **Action block**     | no                  | every time the program reaches it     | no — fresh each run |
-| **Definition block** | yes                 | once, the first time it is reached    | yes — functions and globals live on |
+| **Definition block** | yes                 | once ([when it runs](#when-a-language-starts)) | yes — functions and globals live on |
 
 ```v2
 for i in 0..3 {
@@ -664,10 +664,12 @@ bump()
 print(bump())    // 2 — the definition block's state persists
 ```
 
-Blocks run **in program order**, like any other statement. In V2 code, an `@import` must come
-after the block it imports from has run; otherwise V2 reports which block still needs to load.
-(`@import` *inside* a block looks the function up when it is called, so blocks can import from
-each other in any order — see chapter 8.)
+Blocks run **in program order**, like any other statement, with one exception: a language nothing
+needs yet doesn't start just because V2 passed one of its definition blocks (see
+[When a language starts](#when-a-language-starts)). In V2 code, an `@import` must come after the
+block it imports from; otherwise V2 reports which block is missing. (`@import` *inside* a block
+looks the function up when it is called, so blocks can import from each other in any order — see
+chapter 8.)
 
 If a definition block fails while loading (say, a Python exception in its top-level code), it
 stays failed: reaching it again raises the same error instead of running its code a second time.
@@ -775,9 +777,53 @@ An **engine** is what runs one language. V2 ships six built-in engines that shar
 | `cpp` (`cxx`)          | C++        | MSVC `cl` on Windows; g++ or clang++   | compiled    |
 | `rust` (`rs`)          | Rust       | rustc (stable)                         | compiled    |
 
-Interpreted engines run in a **worker process** that starts the first time you use that language
-and stays alive until your program ends. Compiled engines build a native library the first time a
-block is seen, cache it, and call it directly inside the V2 process.
+Interpreted engines run in a **worker process** that starts the first time your program needs
+that language and stays until your program ends, so everything in it survives. Compiled engines
+build a native library the first time a block is needed, cache it, and call it directly inside the
+V2 process.
+
+### When a language starts
+
+A language costs nothing until your program needs it: when an action block runs, or when a function
+imported from it is called. A script with Python, JavaScript and Rust blocks that only calls the
+Python ones never starts Node or a compiler.
+
+While a language isn't running, its definition blocks and `@import`s at the top level of a file wait
+in line. When the language starts, the line runs first, in order, and from then on everything runs
+in program order as usual.
+
+```v2
+@py stats {                      // waits: Python has not started
+    def spread(xs):
+        return max(xs) - min(xs)
+    @export { spread }
+}
+@import { spread } from stats    // waits too
+
+print("hello")                   // still no Python
+print(spread([1, 2]))            // Python starts, the line runs, then the call
+```
+
+Only what can't show the difference waits. These run when reached, as usual: a definition block
+with args, one that imports from `v2`, and blocks and imports inside `if`, `try`, loops or functions.
+An `@import` waits only if the file just calls the name (for a whole-module import, just uses
+`m.name`). Read the name as a value (a constant, `print(x)`, passing it to a function) and the
+`@import` runs at its own line, starting the language. In a V2 module, public names don't wait
+either, because other files can use them.
+
+What this means for you:
+
+- **A definition block's top-level effects can come later than its position, or never**, if its
+  language isn't needed: its output, files it writes, anything other code would see. Do that work in
+  an action block, which always runs when reached.
+- An error from something that waited (a missing package, a failing block) appears when the
+  language starts or at the first call, not at its own line.
+
+A worker that has been idle for 10 seconds gives its memory back: on Windows at once, on Linux and
+macOS when the system needs it (Linux without swap keeps it in RAM). Nothing in it is lost.
+Variables, loaded libraries and handles are all still there, and the next call brings it back,
+usually in about a millisecond, longer if its memory has to return from disk. A worker with a
+`call_timeout` keeps its memory, so coming back can never trip the timeout.
 
 ### Python — `@py`
 
@@ -920,7 +966,6 @@ Inside a block, on its own line:
 
 ```text
 @import { name [as alias], ... } from SELECTOR
-@import { * } from SELECTOR
 @import MODULE_SELECTOR as alias
 ```
 
@@ -942,12 +987,11 @@ like `py.numpy`, and only in V2 code. Inside a block it is a `SyntaxError`: use 
 import there (`import numpy as np` in a `@py` block).
 
 An imported name is an ordinary V2 function in the scope where the `@import` appears. Call it,
-pass it around, store it, or re-export it from a V2 module.
+pass it around, store it, or re-export it from a V2 module. List every name you import: there is
+no `@import { * }`.
 
 Inside a block, `@import` brings in functions only: naming a constant that a block or package
-exports is an `ImportError` (`'VERSION' is a constant — pass it in as a block arg`), and
-`@import { * }` takes just the functions. It expands when the importing block loads, so the
-blocks it names must have run by then.
+exports is an `ImportError` (`'VERSION' is a constant — pass it in as a block arg`).
 
 ### 6.3 Ambiguity rules
 
@@ -962,7 +1006,6 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 - It doesn't matter which blocks have run: a block counts as soon as its `@export` list names the
   name, and a block with `@export { * }` counts once it has run.
 - Naming a specific block (`stats` or `@py.stats`) always resolves the ambiguity.
-- `@import { * } from @py` fails the same way if two blocks export the same name.
 - A block exported with `@export { * }` can still be imported selectively.
 
 ### Errors
@@ -997,8 +1040,6 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
   unusual characters are quoted: `@import { format } from js."date-fns"`,
   `@import { z } from js."@scope/pkg"`. A local JavaScript file is a quoted relative path, from
   the `.v2` file's folder: `@import { render } from js."./helpers.js"`.
-- `@import { * } from py.module` imports the module's public names (Python's `__all__` when
-  present, otherwise names not starting with `_`).
 - A JavaScript default export is imported by name: `@import { "default" as dayjs } from js.dayjs`.
 - **Whole module as a handle:** `@import py.numpy as np` gives you the module itself. If a
   JavaScript package *is* a function (`module.exports = function …`), the handle can be called
@@ -1040,7 +1081,8 @@ different folders collide — the first one imported wins. Likewise a JavaScript
 bare name is loaded once per run, from the folder of the first `.v2` file that imports it.
 
 A module that doesn't exist is an `ImportError` carrying the foreign message
-(`No module named 'pandas'`).
+(`No module named 'pandas'`), raised at the `@import`, or when the language starts or at the first
+call if the `@import` [waited](#when-a-language-starts).
 
 ---
 
@@ -1072,7 +1114,7 @@ Inside a block, imported names are ordinary functions of that language. Calls ar
 the JavaScript above simply gets the Python result back. (Note `xs.map(x => square(x))` rather
 than `xs.map(square)`: JavaScript's `map` passes three arguments, and the Python function only
 takes one.) An imported function is looked up when it is called, so the block it comes from only
-has to have run by then (`@import { * }` excepted, 6.2).
+has to have run by then.
 
 ### 8.1 Calling V2 from a block
 
@@ -1306,7 +1348,7 @@ if engine_available("rust") {
 
 ## 11. Compiled blocks: C, C++, Rust
 
-A compiled block is built into a native library the first time it is seen, cached, loaded into
+A compiled block is built into a native library the first time it is needed, cached, loaded into
 the V2 process and called directly — no worker process, no per-call overhead beyond converting
 arguments.
 
@@ -1417,10 +1459,12 @@ last part of the error output is in `e.data.stderr`.
 ### 11.5 The build cache
 
 The first run of a compiled block compiles it (Rust takes a second or two); later runs load the
-cached library instantly. The cache key covers the source and the local headers it includes
+cached library instantly without touching the compiler, so a cached block keeps working even if
+the compiler is gone. The cache key covers the source and the local headers it includes
 (`#include "x.h"` found beside the including file or the `.v2` file, not through `-I` flags), the
-compiler and its version, and the flags, so changing any of them
-rebuilds. A cached library that is damaged is rebuilt automatically. The cache lives in your user
+flags and any configured `command`, so changing any of them rebuilds. Updating a compiler rebuilds
+nothing: run `v2 cache clean` to rebuild with the new one. A cached library that is damaged is
+rebuilt automatically. The cache lives in your user
 folder (`~/.v2/cache/build`), never inside the project, and keeps every version it built until
 `v2 cache clean` empties it (along with the toolchain probe cache).
 
@@ -1438,8 +1482,8 @@ arguments as a **JSON array** and returns the result as **JSON text**:
 
 See the example in [8.3](#83-compiled-code-calling-other-languages).
 
-Inside compiled blocks only the `@import { names } from SELECTOR` form works (no `*`), and only in
-blocks that `@export` something — a program-style block runs as a separate process and can't call
+Inside compiled blocks `@import { names } from SELECTOR` works only in blocks that `@export`
+something — a program-style block runs as a separate process and can't call
 back into V2. Each imported name (its alias, if it has one) must be a valid identifier of the
 block's language; rename it with `as` otherwise. Breaking these rules is a `SyntaxError`.
 
@@ -1859,7 +1903,7 @@ try         = "try" body [ "catch" [ "(" NAME ")" ] body ] [ "finally" body ]
 import      = "import" STRING "as" NAME
 engine_import = "@import" ( "{" items "}" "from" selector | selector "as" NAME )
               (the "as" form takes a package selector and is not allowed inside blocks)
-items       = "*" | item { "," item } [ "," ]     item = ( NAME | STRING ) [ "as" NAME ]
+items       = item { "," item } [ "," ]           item = ( NAME | STRING ) [ "as" NAME ]
 selector    = "@" TAG [ "." NAME ] | NAME | package | "v2"
 package     = LANG "." segment { "." segment }     segment = NAME | STRING
 extern      = "extern" STRING [ "as" NAME ] "{" C-declarations "}"

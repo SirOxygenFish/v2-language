@@ -56,7 +56,7 @@
    interpreter thread   syntax -> runtime::interp -> engines::units -> engines::session + vep (bridged engines)
                           | engines::runonly (run engines, compiled programs) | build + ffi (in process, never unloaded)
    watchdog thread      deadlines (8.5) and interrupts (6.5); never touches values, never writes frames
- workers, one per bridged engine: python py.py (@py, py.<module>) | node js.js (@js, @ts, js.<pkg>) | custom adapter
+ workers, one per bridged engine, started at first need (12.7): python py.py (@py, py.<module>) | node js.js (@js, @ts, js.<pkg>) | custom adapter
    stdin: host->worker frames; stdout: worker->host frames; stderr inherited
  per-use children (stdin null, or exec's input): run engines, compiled programs, exec (5.10), cl/gcc/clang/rustc, probes
 ```
@@ -68,7 +68,7 @@ The run's steps are 6.1 (startup, syntax, run) and 6.5 (its end). Sessions and w
 | `main.rs` | Starts the threads (1.3), owns the run-dir guard and the exit paths (6.5), and maps outcomes to exit codes (19.1). |
 | `cli/` | Hand-written argv parsing (19.1): `v2 FILE [args]`, `check FILE`, `doctor`, `cache clean`, `--version`, `--help`. |
 | `config/` | Project root discovery, layered config (ch. 18), and the paths of `~/.v2` and the run dir. |
-| `syntax/` | `span`: FileId, SourceMap, Span, UnitLoc (ch. 2). `token` and `lexer` (ch. 3). `scan`: raw bodies, profiles, fences, line states (3.7, 3.8). `directives`: body lines, `@export`/`@import`, dedent (4.4). `parser`: recursive descent (4.1); it and `check` run the static checks (4.5). `ast` (4.3). |
+| `syntax/` | `span`: FileId, SourceMap, Span, UnitLoc (ch. 2). `token` and `lexer` (ch. 3). `scan`: raw bodies, profiles, fences, line states (3.7, 3.8). `directives`: body lines, `@export`/`@import`, dedent (4.4). `parser`: recursive descent (4.1); it and `check` run the static checks (4.5). `resolve`: scope layouts and name positions (5.6). `ast` (4.3). |
 | `runtime/` | `value`, `env`, `interp`, `call`, `ops`, `methods`, `strings`, `builtins` (including the `Out` writer), `error` (ErrorValue, error kinds, traces, rendering per 2.4), and `module` (`import "…"`, the run-once cache, cycles). See ch. 5 and 6. |
 | `codec/` | The single codec (ch. 10), one serde_json value model in two modes: `json`, the plain mode of the JSON builtins (10.1); `vep`, the VEP mode with the `$v2` tags, handles, callables and base64 (10.1-10.5). |
 | `engines/` | `process`: the child rules (8.3: own session or process group and Job Object, `kill_tree`, exit observed before reaping, piped streams), the watchdog thread with its timers and registered children, and the interrupt path (1.3, 6.5, 8.5); every process V2 starts goes through it. `spec` (EngineSpec and the built-in table), `registry` and `resolve` (discovery, probes, `toolchains.json`): ch. 7. `session` and `vep`: ch. 8, 9. `units`: ch. 12. `imports`: ch. 13. `handles`: ch. 11. `runonly`: 17.3, 15.5. |
@@ -349,7 +349,7 @@ param     = NAME [ "=" expr ] | "..." NAME     return = "return" [ expr ]  (* ba
 try       = "try" body [ "catch" [ "(" NAME ")" ] body ] [ "finally" body ]
 import    = "import" STRING "as" NAME          extern = "extern" STRING [ "as" NAME ] RAW
 engine_import = "@import" ( "{" items "}" "from" selector | selector "as" NAME )
-items     = "*" | item { "," item } [ "," ]    item = ( NAME | STRING ) [ "as" NAME ]
+items     = item { "," item } [ "," ]          item = ( NAME | STRING ) [ "as" NAME ]
 selector  = AT_TAG [ "." label ] | label | NAME "." segment { "." segment } | "v2"
 label     = NAME                               segment = NAME | STRING
 block     = BLOCK_HEAD [ "(" [ block_arg { "," block_arg } [ "," ] ] ")" ] RAW
@@ -439,7 +439,7 @@ line 14  }
 | `@export {}`, a name exported twice, text after the list, an unterminated list (4.4) | the specific reason |
 | a quoted `@export` item in a `c`, `cpp`, `cxx`, `rust` or `rs` block (4.4) | `compiled blocks export functions by name` (hint: export a wrapper function with a plain signature) |
 | an `@import` in a compiled block without `@export` (program mode, 15.5) | `a compiled block without @export runs as a program and can't @import` (hint: `export a function from this block, or call the other language from V2 code`) |
-| `@import { * } from …` in a compiled block | `compiled blocks import names, not *` (hint: `list the names: @import { mean } from …`) |
+| `@import { * } from …`, at V2 level or in any block | `@import needs a list of names` (hint: `list the names: @import { mean } from …`) |
 | in a compiled block, an `@import`'s local name (the alias, else the name) or an exported name that is not a valid, non-keyword identifier of the block's language (C, C++ or Rust, by tag) | import: `'x' is not a valid C identifier — rename it with 'as'`; export: `'x' is not a valid C identifier` (hint: `rename the function, or export a wrapper with a plain name`) |
 | a V2-level `@import sel as x` where sel is not a package selector `lang.module` | `only a package selector (py.name, js.name) can be imported as a whole module` |
 | `@import sel as x` inside a block (4.4) | `the whole-module form of @import is only valid in V2 code`, with a hint naming the block language's own import when the selector is a `py.` module in a py block (`use import numpy as np inside @py blocks`) or a `js.`/`ts.` module in a js/ts block (`use const dfns = require("date-fns") inside @js blocks`); otherwise the hint is `import names instead: @import { … } from …` |
@@ -455,7 +455,7 @@ line 14  }
 | an invalid assignment target; a target through `?.` (4.1) | `cannot assign to this expression` / `cannot assign through ?.` |
 | an `extern` declaration V2 cannot read (3.9) | the messages of 16.3 |
 
-Checked at run time instead: unknown tags (`EngineUnknown`, 7.3), clashes of names bound by `@import { * }` (13.4), and the directives that `run`-engine blocks accept (12.1 step 3).
+Checked at run time instead: unknown tags (`EngineUnknown`, 7.3) and the directives that `run`-engine blocks accept (12.1 step 3).
 
 ---
 
@@ -474,7 +474,8 @@ pub enum Value {
 pub enum Callable {
     Closure { decl: Rc<FuncDecl>, env: Env, name: Rc<str> },         // name: `greet` or `func@main.v2:12` (5.7)
     Builtin(&'static BuiltinDef),                                    // 5.10
-    Proxy { session: SessionId, unit: Rc<str>, name: Rc<str> },      // bridged export; unit = wire unit id (13.4)
+    Proxy { key: Rc<str>, unit: Rc<str>, name: Rc<str>, pending: Cell<bool> },  // bridged export; key = engine, unit = wire unit id; pending: 12.7
+    LazyModule { key: Rc<str>, unit: Rc<str>, from: FileId, handle: OnceCell<Value> },  // a waiting `@import X as n` (12.7)
     Route { route: usize, name: Rc<str> },                           // a route stub passed back unresolved (11.8)
     Native { lib: LibId, sym: Rc<str>, sig: Rc<Sig> },               // compiled export (15.8) or extern (16.1)
     HandleMethod { handle: Rc<HandleRef>, method: Rc<str> },         // built only as the callee of h.m(...) (11.3)
@@ -503,7 +504,7 @@ pub struct ErrorValue {
 | `Str`, `Bytes` | byte equality |
 | `List`, `Dict` | `Rc::ptr_eq`, else pairwise `eq` (list) or the same key set with `eq` values (dict, order ignored) |
 | `Handle` | same session and id (11.6); native pointers: same address (16.6) |
-| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same session, unit, name; `Route`: same route; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
+| `Func` | `Closure`/`Builtin`: `Rc::ptr_eq`; `Proxy`: same engine, unit, name; `Route`: same route; `Native`: same library and symbol; `HandleMethod`: equal handles, same method |
 | `Error` | `Rc::ptr_eq` |
 | different types (`Int` vs `Bool` too) | `false`, never an error |
 
@@ -553,12 +554,14 @@ A `Str` is always valid UTF-8 (lone surrogates never enter, 10.4); user-visible 
 
 ### 5.6 Environments and declarations
 
-`Env = Rc<RefCell<Frame>>`; `Frame { vars: IndexMap<Rc<str>, Slot { value, is_const: bool }>, parent: Option<Env>, closures: u32 }`.
+`Env = Rc<RefCell<Frame>>`; `Frame { layout: Rc<[Rc<str>]>, slots: Vec<Option<Slot>>, parent: Option<Env>, closures: u32 }`; `Slot { value, is_const: bool }`.
 
-- **Frames:** builtins frame (shared, read-only: assigning to a builtin's name is `TypeError: cannot assign to builtin 'print' — shadow it with let`) ← one module frame per file ← call frames ← block frames. Each `if`/`elif`/`else` arm and `try`/`catch`/`finally` body gets a new frame; loops get **one fresh frame per iteration**, holding a `for`'s variables, in which the body runs directly; a call frame holds the parameters and is the body's top-level frame; a catch body's frame holds the catch name. Parameters, loop variables and the catch name are therefore declared in the body they introduce (4.5); inner blocks may shadow. Lookup walks `parent`; a `RefCell` borrow is held only while one slot is read or written.
-- **Declarations:** `let x = e` evaluates `e`, then declares `x` (`let x = x + 1` in an inner block reads the outer `x`); `let x` binds `null`. `const`, `@import` names (13.4) and `extern` names (16.1) are const slots: assigning → `TypeError: cannot assign to constant 'LIMIT'` (shallow: a const list can still `push`). A name declared twice in one body is a static SyntaxError (4.5). Only `@import { * }` declares names the parser cannot see, so its slots are marked: binding an existing name, or declaring one of its names again later in that body (`let`, `const`, `import`, an `@import` item), raises `NameError: 'x' is already declared in this block`. An undeclared name → `NameError: 'x' is not declared` + did-you-mean (an assignment adds `— declare it with let`).
+Every name V2 can declare is known statically, so `syntax/resolve` (run by `parse_file`, also for files parsed late, 6.4) gives each scope a **layout**, its names in insertion order (parameters, rest, loop variables, the catch name, hoisted `func`s, then the statements in order), and each `Name` and name assignment a position: how many frames up, and which index. An empty slot means that name is not declared yet. A condition, a `for` iterable and block args resolve in the enclosing scope. A name no scope declares resolves in the builtins frame or raises 5.6's `NameError`.
+
+- **Frames:** builtins frame (shared, read-only: assigning to a builtin's name is `TypeError: cannot assign to builtin 'print' — shadow it with let`) ← one module frame per file ← call frames ← block frames. Each `if`/`elif`/`else` arm and `try`/`catch`/`finally` body gets a new frame; loops get **one fresh frame per iteration**, holding a `for`'s variables, in which the body runs directly; a call frame holds the parameters and is the body's top-level frame; a catch body's frame holds the catch name. Parameters, loop variables and the catch name are therefore declared in the body they introduce (4.5); inner blocks may shadow. A body that declares nothing and directly creates no function gets no frame (a frame there would only change when a closure's cycle is trimmed, below); module frames always exist. Reads and writes go by position; on an empty slot, either one falls back to walking `parent` by name through the layouts, skipping empty slots, so `x = 1` or `print(x)` before a local `let x` acts on the outer `x`, or raises. A `RefCell` borrow is held only while one slot is read or written.
+- **Declarations:** `let x = e` evaluates `e`, then declares `x` (`let x = x + 1` in an inner block reads the outer `x`); `let x` binds `null`. `const`, `@import` names (13.4) and `extern` names (16.1) are const slots: assigning → `TypeError: cannot assign to constant 'LIMIT'` (shallow: a const list can still `push`). A name declared twice in one body is a static SyntaxError (4.5). An undeclared name → `NameError: 'x' is not declared` + did-you-mean (an assignment adds `— declare it with let`).
 - **Hoisting:** entering a body turns each `func` declaration directly inside it into a `Closure` over that frame before the first statement runs; reaching the statement later does nothing. **Closures** capture the `Env`, so `func() => i` made in a loop keeps its iteration's `i`.
-- **Cycle trimming:** a closure stored in the frame it captures (every local `func` declaration, `let f = func(…) …`) is an `Rc` cycle, counted in `Frame.closures`. When such a frame goes out of scope, let `k` = its slots holding a `Closure` over it with `Rc::strong_count == 1`; if `Rc::strong_count(&frame) == 1 + k`, nothing else reaches it and its `vars` are cleared (releasing held handles). Cycles through containers are not trimmed.
+- **Cycle trimming:** a closure stored in the frame it captures (every local `func` declaration, `let f = func(…) …`) is an `Rc` cycle, counted in `Frame.closures`. When such a frame goes out of scope, let `k` = its slots holding a `Closure` over it with `Rc::strong_count == 1`; if `Rc::strong_count(&frame) == 1 + k`, nothing else reaches it and its slots are cleared (releasing held handles). Cycles through containers are not trimmed.
 
 ### 5.7 Calls
 
@@ -655,13 +658,14 @@ Arguments bind as for builtins, and messages name the method with its type: `Ari
 pub struct FileScope {                        // Interp.files, by FileId
     frame: Env,                               // module frame; parent: the builtins frame
     blocks: Vec<Rc<EngineBlock>>,             // the definition blocks, in source order (13.2, 13.3)
-    top: HashSet<Rc<str>>, funcs: Vec<Rc<str>>, star: bool,  // top-level names, for `v2` (13.7)
+    top: HashSet<Rc<str>>,                    // top-level names, for `v2` (13.7)
+    waiting: HashSet<UnitId>, eligible: HashSet<u32>,  // what may wait: 12.7, 13.4 (`@import`s by span start)
 }
 ```
 
 A file's `FileScope` is built when its top level starts and kept for the run (5.1, 13.6). Reaching a block runs `exec_block`: 12.1 defines what "reached" means and the lifecycle of definition and action blocks.
 
-- A V2-level `@import` runs when reached and can bind only blocks that have run by then (13.3, 13.4); an `@import` inside a block resolves when called (13.6, 13.7), so blocks may import functions from each other in any order (`{ * }` excepted, 13.7).
+- A V2-level `@import` runs when reached, or waits (12.7), and can bind only blocks reached by then (13.3, 13.4); an `@import` inside a block resolves when called (13.6, 13.7), so blocks may import functions from each other in any order.
 - Blocks, labels and selectors belong to one `FileScope`: a block in `util.v2` never makes `@import … from @py` in `main.v2` ambiguous, and `from v2` inside `util.v2` means `util.v2`.
 
 ### 6.3 Blocks as statements and expressions
@@ -687,10 +691,10 @@ Blocks inside larger expressions keep left-to-right order: in `f(@py { 1 }, g())
    - `Running` → `ImportError: circular import: a.v2 -> b.v2 -> a.v2` (the chain from the path's first entry in `import_stack`).
    - Absent, with stored diagnostics (6.1) → `Failed` with `ImportError: cannot import './util.v2': util.v2:3:9: SyntaxError: <message>` (the first diagnostic) at the `import`, `data` = all of them as `{file, line, col, message}`.
    - Absent otherwise → check the call depth and the stack guard as for a call (5.9), push onto `import_stack`, mark `Running`, push a nameless `CallRecord` for the import site, build a new `FileScope` whose module frame's parent is the builtins frame, hoist and run it.
-3. **Success:** the namespace is a new `Dict` (type `"dict"`) of the module frame's bindings in declaration order, minus names starting with `_`: values, `func`s, `@import`ed proxies and module handles, `extern` functions and `extern … as` dicts, imported module dicts. It is stored as `Done(ns)` and shared by every importer. It is a snapshot: rebinding a module-level `let` later is not visible through it. `util.slug(…)` works by dict-key dispatch (5.5).
+3. **Success:** the namespace is a new `Dict` (type `"dict"`) of the module frame's bindings in layout order, minus names starting with `_`: values, `func`s, `@import`ed proxies and module handles, `extern` functions and `extern … as` dicts, imported module dicts. It is stored as `Done(ns)` and shared by every importer. It is a snapshot: rebinding a module-level `let` later is not visible through it. `util.slug(…)` works by dict-key dispatch (5.5).
 4. **Failure:** `Failed(err)`; the error propagates unchanged with the import site in its trace.
 
-Re-exported proxies keep their `session` and `unit` and work from any file. Modules share the entry file's project root and config (18.1).
+Re-exported Proxies keep their `key` and `unit` and work from any file. Modules share the entry file's project root and config (18.1).
 
 ### 6.5 Ending the run: exit codes and shutdown
 
@@ -802,7 +806,7 @@ A Windows drive-relative name (`C:tool`, relative to that drive's own current fo
   Any other configured command on Windows (file stem not `cl`, compared case-insensitively: gcc, clang, clang-cl, …) is not usable and is not probed: `EngineNotFound: engine 'c' command 'C:\msys64\ucrt64\bin\gcc.exe' (set by C:\proj\v2.toml) is not usable: C and C++ on Windows use MSVC cl` (exit 3 if uncaught).
 
   Target: the folder holding `cl.exe` (`x64`, `x86`, `arm64`), normalized (`amd64` and `x64` → `x86_64`, `arm64` → `aarch64`), must equal `std::env::consts::ARCH`. Else an auto-detected hit is skipped (`targets x86 but V2 is x86_64`) and a configured one is not usable: `EngineNotFound: engine 'c' command 'C:\BuildTools\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x86\cl.exe' (set by C:\proj\v2.toml) is not usable: targets x86 but V2 is x86_64` (exit 3 if uncaught).
-- **rust.** `rustc -vV`: `release: (\d+)\.(\d+)\.(\d+)`, `host: (\S+)`; the host triple must be v2's own target triple, else the hit is skipped (`targets i686-pc-windows-msvc but V2 is x86_64-pc-windows-msvc`) or the configured command is not usable, as above. The `rustc` on `PATH` is usually the rustup proxy, which picks a toolchain from `RUSTUP_TOOLCHAIN` or a `rust-toolchain.toml` in the cwd while its own file never changes; so a run that uses Rust runs `<proxy> --print sysroot` once (cwd = the user's) and sets `argv[0] = <sysroot>/bin/rustc[.exe]`, which keys the probe cache and is what ch. 15 compiles with. `shown()` stays the proxy (DOCS 2). rustc finds MSVC `link.exe` itself, so `@rust` on Windows needs the same Build Tools as `@c` (7.8).
+- **rust.** `rustc -vV`: `release: (\d+)\.(\d+)\.(\d+)`, `host: (\S+)`; the host triple must be v2's own target triple, else the hit is skipped (`targets i686-pc-windows-msvc but V2 is x86_64-pc-windows-msvc`) or the configured command is not usable, as above. The `rustc` on `PATH` is usually the rustup proxy, which picks a toolchain from `RUSTUP_TOOLCHAIN` or a `rust-toolchain.toml` in the cwd while its own file never changes; so a run that builds Rust (never a cache hit, 15.1) runs `<proxy> --print sysroot` once (cwd = the user's) and sets `argv[0] = <sysroot>/bin/rustc[.exe]`, which keys the probe cache and is what ch. 15 compiles with. `shown()` stays the proxy (DOCS 2). rustc finds MSVC `link.exe` itself, so `@rust` on Windows needs the same Build Tools as `@c` (7.8).
 - **Run engines** (7.2's Run rows). A configured `command` replaces candidate and fixed args together; its `command[0]` is what is found and probed, and `V2_ENGINE_<TAG>` replaces only that (18.4). The resolved command goes to 17.3.
   - **bash** on Windows is Git Bash only, never a `PATH` hit for `bash` (`System32\bash.exe` is the WSL launcher, which can't open the Windows temp path): `bin\bash.exe` in the parent of the folder holding `git` (found per 7.5; `C:\Program Files\Git\cmd\git.exe` gives `C:\Program Files\Git\bin\bash.exe`), then `%ProgramFiles%\Git\bin\bash.exe`. Either hit has origin `Git` (doctor FROM `git`).
   - **pwsh** on Windows falls back to `powershell` (Windows PowerShell). Both get 7.2's Windows template (`-ExecutionPolicy Bypass`: Windows PowerShell's default policy blocks scripts), so `V2_ENGINE_PWSH`, which replaces only the program, always gets matching args. Windows PowerShell has no `--version`, so `powershell` (and a configured `command[0]` whose file stem is `powershell`) is probed with `-NoProfile -Command $PSVersionTable.PSVersion.ToString()`.
@@ -813,8 +817,8 @@ Ch. 15 receives the compiled engines' `argv`, `version`, `target` (cl's folder n
 ### 7.7 Version probes and the probe cache
 
 - **Running:** `argv + probe args`, stdin null, stdout and stderr are read concurrently (8.3) and joined stdout first (lossy UTF-8), cwd the user's, host env plus `spec.env`, 8.3's child rules; a 10 s timer (60 s for vcvarsall, 8.5), then `kill_tree`. **Parsing:** 7.2's patterns; cc, gcc, clang and their C++ names: the first `(\d+)\.(\d+)(?:\.(\d+))?` of the first `--version` line, held to clang's minimum when the output contains `clang`, else to gcc's; cl, run without arguments: the first `\d+\.\d+\.\d+` of its localized banner; run engines: the first `(\d+)\.(\d+)(?:\.(\d+))?` (`go version go1.22.1 linux/amd64` is 1.22.1), except java: `^\S+ (\d+)(?:\.(\d+))?(?:\.(\d+))?` on the first line (`openjdk 21 2023-09-19` is 21.0.0). A missing part is 0.
-- **Cache** `~/.v2/cache/toolchains.json` = `{"format": 1, "entries": {…}, "vcvars": {…}}`. Entry key: sha256(argv, i.e. the path and any prefix arguments such as `py`'s `-3`, canonical path if `canonicalize` succeeds, size, mtime ns, spec hash), spec hash = sha256(engine id, probe args, pattern, V2 version); an alias is stat'ed as the link itself. Value: `{"path", "ok": true, "version", "output"}`, plus `"target"` for cl and rustc. Only usable hits are stored; an entry without `"ok": true` is ignored, and a probe that finds a hit no longer usable removes its entry. `vcvars.<arch>` = `{"install", "vcvarsall_size", "vcvarsall_mtime_ns", "cl", "include", "lib", "libpath", "path_prefix"}`, valid while `vcvarsall.bat` keeps its size and mtime and `cl` and every `include` folder exist (a VS update deletes the old toolset).
-- **Access:** runs read entries and write the usable hits they probe. A skipped or too-old hit is never stored, so every run probes it again: a version-manager shim (pyenv, asdf, volta) runs another interpreter in another project or environment, and a timeout may have been passing (a stale usable entry is caught by `hello`'s version check, 8.4). `v2 doctor` probes afresh and rewrites the entries of the hits it probes, dropping those no longer usable. Writes go to `toolchains.json.<pid>.tmp`, then rename (a failed rename is ignored); an unreadable file or unknown `format` counts as empty.
+- **Cache** `~/.v2/cache/toolchains.json` = `{"format": 1, "entries": {…}, "vcvars": {…}}`. Entry key: sha256(argv, i.e. the path and any prefix arguments such as `py`'s `-3`, canonical path if `canonicalize` succeeds, size, mtime ns, spec hash), spec hash = sha256(engine id, probe args, pattern, V2 version); an alias is stat'ed as the link itself. Value: `{"path", "ok": true, "version", "output"}`, plus `"target"` for cl and rustc. Only usable hits are stored, and the Store placeholder (7.6), as `{"path", "placeholder": true}`: it is no version manager's shim, and its verdict can change only with the alias file. An entry with neither is ignored, and a probe that finds a hit no longer usable removes its entry. `vcvars.<arch>` = `{"install", "vcvarsall_size", "vcvarsall_mtime_ns", "cl", "include", "lib", "libpath", "path_prefix"}`, valid while `vcvarsall.bat` keeps its size and mtime and `cl` and every `include` folder exist (a VS update deletes the old toolset).
+- **Access:** runs read entries and write the usable hits they probe. A skipped or too-old hit, the placeholder excepted, is never stored, so every run probes it again: a version-manager shim (pyenv, asdf, volta) runs another interpreter in another project or environment, and a timeout may have been passing (a stale usable entry is caught by `hello`'s version check, 8.4). `v2 doctor` probes afresh and rewrites the entries of the hits it probes, dropping those no longer usable. Writes go to `toolchains.json.<pid>.tmp`, then rename (a failed rename is ignored); an unreadable file or unknown `format` counts as empty.
 
 ### 7.8 EngineNotFound messages
 
@@ -841,7 +845,7 @@ Run engines' messages have no `install:` line.
 
 ## 8. Sessions and worker lifecycle
 
-`engines/session.rs`, on the child rules and watchdog of `engines/process.rs` (8.3, 8.5). A session is the one worker process of a bridged engine for the whole run: `py`, `js` (which also runs every ts unit) and one per custom bridged tag. Frames: ch. 9; adapters: ch. 14.
+`engines/session.rs`, on the child rules and watchdog of `engines/process.rs` (8.3, 8.5). A session is the one worker process of a bridged engine, from its language's first need (12.7) to the end of the run: `py`, `js` (which also runs every ts unit) and one per custom bridged tag. Frames: ch. 9; adapters: ch. 14.
 
 ### 8.1 Session
 
@@ -864,7 +868,7 @@ pub enum DeadReason { SpawnFailed(Rc<ErrorValue>), StartupTimeout(Duration), Cal
 
 | From | Event | To |
 |---|---|---|
-| (no session) | first use (block reached, module import; never `engine_available`): spawn ok / spawn error | Handshaking / Dead(SpawnFailed): `EngineNotFound` |
+| (no session) | first need (12.7; never `engine_available`): spawn ok / spawn error | Handshaking / Dead(SpawnFailed): `EngineNotFound` |
 | Handshaking | `hello`, then `ret` for `init` / deadline / EOF or `err` for `init` / bad frame / `hello` version too old | Ready / Dead: `EngineTimeout` / `EngineCrashed` / `ProtocolError` / `EngineNotFound` (8.4) |
 | Ready, Busy(n) | host sends a request (load, module, call, op), also nested ones while serving the worker's `call` | Busy(n+1) |
 | Busy(n) | `ret` or `err` for the innermost request | Busy(n−1), Ready at 0 |
@@ -880,7 +884,7 @@ Once Dead, every use (loads, its Proxies, handle operations (11.7), imports from
 
 **Child rules**, for every process V2 starts (workers, probes, compilers, run engines, compiled programs, `exec`, 5.10):
 - **Own session or group:** Unix: `pre_exec` calls `setsid()` (not `process_group(0)`), so the child leads a new session and process group and has no controlling terminal: terminal SIGINT and SIGHUP never reach it, and a `/dev/tty` prompt (git credentials, ssh, sudo, `getpass`) fails at once with `ENXIO` instead of stopping the child on SIGTTIN/SIGTTOU (DOCS 4.6). Windows: `CREATE_NEW_PROCESS_GROUP` (+ `CREATE_NO_WINDOW` when the host has no console, `GetConsoleCP() == 0`, so console children share one hidden console instead of opening a window each), which blocks Ctrl+C only; Ctrl+Break and console close reach every process on the console. Children stay attached to the host's console (never `DETACHED_PROCESS`, whose descendants would open new console windows) and only stdin is replaced (null or a pipe), so a program that reads the console directly (`CONIN$`: an ssh password prompt, Python `getpass`) waits for keyboard input (DOCS 4.6). Adapters ignore SIGINT and SIGBREAK (14.3, 14.4), so a keyboard interrupt never makes a worker die mid-frame or print a `KeyboardInterrupt` trace; the host's console control handler sets `INTERRUPTED` as its first action, so failures of other children caused by the same event are never reported (6.5). stdin: a pipe for workers and for `exec` with `input`, null for the rest (DOCS 4.6).
-- **Windows:** put in its own Job Object (`KILL_ON_JOB_CLOSE | BREAKAWAY_OK`) before it runs, so every descendant is in the job unless created with `CREATE_BREAKAWAY_FROM_JOB`. **Linux:** after `setsid()`, `pre_exec` runs `prctl(PR_SET_PDEATHSIG, SIGKILL)` and `_exit(1)` if `getppid()` is no longer the host; PDEATHSIG fires when the spawning *thread* exits, so spawns and shutdown run on the interpreter thread (1.3). **All:** adapters exit on stdin EOF (macOS has only this, so a busy worker outlives a SIGKILLed host until its next read). These three also cover a host that dies with no exit path (6.5).
+- **Windows:** created suspended, put in its own Job Object (`KILL_ON_JOB_CLOSE | BREAKAWAY_OK`) and resumed with `NtResumeProcess` on its process handle, so every descendant is in the job unless created with `CREATE_BREAKAWAY_FROM_JOB`. **Linux:** after `setsid()`, `pre_exec` runs `prctl(PR_SET_PDEATHSIG, SIGKILL)` and `_exit(1)` if `getppid()` is no longer the host; PDEATHSIG fires when the spawning *thread* exits, so spawns and shutdown run on the interpreter thread (1.3). **All:** adapters exit on stdin EOF (macOS has only this, so a busy worker outlives a SIGKILLed host until its next read). These three also cover a host that dies with no exit path (6.5).
 - **`kill_tree`** is every kill V2 performs: Windows `TerminateJobObject(job, 1)`, Unix `kill(-pid, SIGKILL)` (the session leader's pid is its pgid; `kill(pid)` on `ESRCH`). Launchers (`py -3`, a Windows venv `python.exe`, `.cmd` shims, `bash`) run the real work in a descendant that also holds the pipes.
 - **Lifetime:** workers are killed as a tree at shutdown (8.7); a run-engine, compiled-program or `exec` child is killed as a tree, with everything it started, when its block or `exec` call finishes, times out or V2 exits; probes when they exit or time out.
 - **Pipes** (every child but workers, whose stdin and stdout carry frames, 8.5): every piped stream is serviced at the same time as the others. Each piped output (expression-position stdout, the stderr tail, probe, compiler and `exec` output) gets its own helper thread that collects into memory or forwards, and `exec`'s `input` is written by another, which then closes the pipe. The interpreter thread waits only for the exit (or the timer's kill), then runs `kill_tree`, then joins the output helpers, which reach EOF because the tree is dead, then reaps (below). The input writer is not joined: its writes fail once the tree is dead, and a process that escaped the tree could keep it blocked.
@@ -920,6 +924,16 @@ EOF on stdout, a pipe error (`EPIPE`, `ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`; Rust
 3. Survivors are `kill_tree`d and every worker is reaped (8.3), state Closed; 6.5 then kills the remaining children and removes `<run>`.
 
 Interrupts and panics take 6.5's interrupt and panic paths instead (no `bye`; workers are killed as trees).
+
+### 8.8 Parking
+
+A worker with no request in flight for 10 s gives back its RAM. Nothing else about it changes: same process, state, handles and background threads. Its pages leave the working set and fault back in on use.
+
+- **Idle** means no timer for that child on the stack (8.5 pushes one for every request, with or without a limit); each pop restarts the clock. A worker parks once per idle period.
+- **Who:** the watchdog, outside the `Watch` lock, so a trim never delays a timer. On Windows it lists the Job Object's processes (`QueryInformationJobObject`, `JobObjectBasicProcessIdList`), which covers launchers (8.3), and calls `K32EmptyWorkingSet` on each; errors are ignored, because a process may have gone.
+- **Linux and macOS:** nothing. A normal user can't do this to a child (`process_madvise` gives `EPERM`), and the kernel reclaims idle pages under pressure when swap or compression exists. Linux without swap keeps them.
+- **Never** a session with `call_timeout` set, because bringing its memory back would count against the timer.
+- It releases the working set, not commit: the memory stays charged to the system, and without a page file modified pages stay in RAM.
 
 ---
 
@@ -1359,13 +1373,13 @@ units; compiled blocks continue in ch. 15, run engines in 17.3.
 ### 12.1 Reaching a block
 
 A block is an `EngineBlock` (4.3) whose `body` and `loc` come from 4.4 and 2.3; each execution of it is a **unit**, named
-by its `UnitId`. Only definition blocks keep a state, in `Interp.units`: `Loading`, `Loaded` or `Failed(err)`; an
+by its `UnitId`. Only definition blocks keep a state, in `Interp.units`: `Waiting` (12.7), `Loading`, `Loaded` or `Failed(err)`; an
 action run leaves nothing on the host except its routes (13.6). Messages name a block with `block_name(b)`:
 `block 'stats'`, or `@py block at main.v2:12` when it has no label; tags always print canonical.
 
 A block is **reached** each time control executes its statement: a block inside a function is first reached by the first
 call that runs it, one in a loop on the first iteration, and one in an `if` arm never taken is never reached. A
-definition block (with `@export`) loads on its first reach; later reaches do nothing, or re-raise its stored load error
+definition block (with `@export`) loads on its first reach, unless it waits (12.7); later reaches do nothing, or re-raise its stored load error
 (step 1). An action block (no `@export`) goes through steps 2–8 on every reach, args included, each time in a fresh
 namespace (bridged: a new unit, dropped after its reply; compiled: the program, built or reused, 15.5; run: 17.3). Inside `try` a load error is
 catchable, so `try { @py probe { … @export { … } } } catch (e) { … }` is a probe; reaching it again re-raises the stored
@@ -1373,14 +1387,14 @@ error.
 
 `exec_block(b, want_value)`:
 
-1. **State** (definition blocks): `Loaded` → return `null`, evaluating nothing, not even the args. `Failed(e)` →
+1. **State** (definition blocks): `Loaded` or `Waiting` → return `null`, evaluating nothing, not even the args; a block that may wait and whose language isn't running goes to `Waiting` instead (12.7). `Failed(e)` →
    throw the stored `e` unchanged: no retry, no repeated side effects (an `@import` from it gets 13.3's `failed to
    load`). `Loading` → `ImportError: block 'stats' is still loading (reached again during its own load)`. Otherwise set
    `Loading`.
 2. **Engine:** `registry.resolve(tag)`, else `EngineUnknown` / `EngineNotFound` (ch. 7).
 3. **Directive check:** a **run-engine** block (built-in or custom) with `@export` or an inner `@import` →
    `ImportError: @{tag} blocks cannot @export or @import — '{tag}' is a run engine`, and the block does not run (17.3).
-   It runs after the tag is resolved and before args and inner imports, so `*` is never expanded.
+   It runs after the tag is resolved and before args and inner imports.
 4. **Args:** evaluated left to right in the current scope.
 5. **Inner imports** → `load` entries, `{"as","unit","name"}` or `{"as","route"}` (13.7).
 6. **Dispatch:** bridged → `load` (12.2) to the engine's session, spawned lazily (ch. 8; ts uses js's); compiled →
@@ -1560,6 +1574,20 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 
 ---
 
+### 12.7 The waiting line
+
+A language has no process and costs nothing until something needs it. `Interp.lines: HashMap<key, VecDeque<Waiting>>` holds, per engine key (ts is js), what would have run in it by now.
+
+- **Running** means a session exists, `Dead` included, so a dead engine's blocks raise as 8.2 says and never wait.
+- **What waits** while its language isn't running: a definition block that is a direct statement of its file, with no args and no inner `@import … from v2`, and an eligible `@import` (13.4). Everything else runs when reached: action blocks, and blocks and imports nested in `if`, `try`, loops or functions, so `try` around them works as it always did.
+- **At reach**, 12.1's step 3 runs first, on the spec from `registry.canonical`, with no probe: an unknown tag raises `EngineUnknown`, a run engine with `@export` raises its `ImportError`. Then the unit becomes `Waiting` and joins the line.
+- **First need:** an action block reached, a Proxy or lazy module used, a route resolved, or an `@import` or block that can't wait. `session_for` starts the session, then runs the line in order (12.1 for blocks, 13.5 for imports) before returning to what needed it. `xdepth` is saved, zeroed and restored around the line, because the depth limit (9.7) belongs to the caller's chain and must not fail a block forever. At the limit itself no session starts and nothing is stored (8.4).
+- **Once running**, every statement acts as if the line had never existed.
+- **Failures.** A block that fails is `Failed` as at any load, its error goes to what triggered the line, and the flush stops there. A failed module import is raised the same way and dropped from the line; its references stay pending and retry at their next use. While a line is non-empty, every reach in that engine runs the rest of it first.
+- **References.** An eligible `@import` binds `Proxy { pending: true }` or `LazyModule`. The first use starts the language, then finds the name as 13.3 or 13.5 would, raising what the `@import` would have raised; success clears `pending`. `LazyModule` is handled only in the member and call steps of a chain (5.5), which resolve it, cache the result and re-dispatch on what came back, since a module can be `null`. 13.4's rule guarantees nothing else meets either one.
+- **Compiled blocks** have no process and no line: a definition block is `Waiting` until the first call into it (15.1).
+- **The visible difference** (DOCS 5): a block in the line runs when its language starts, so its top-level effects come later than its position, or never, and it sees V2 state from then. Its errors surface at that later point.
+
 ## 13. Import resolution and routing
 
 `engines/imports` resolves selectors against the file's export registry; `runtime/interp` binds the results.
@@ -1583,7 +1611,7 @@ selectors as written.
 ### 13.2 ExportRegistry
 
 The registry is `Interp.units`: when a definition unit becomes `Loaded`, it keeps the unit's exports in reply order,
-each once, as `Proxy{session, unit, name}` for a bridged function, a `Native` callable for a compiled one (15.8), or the
+each once, as `Proxy{key, unit, name}` for a bridged function, a `Native` callable for a compiled one (15.8), or the
 copy of a `value` export. Entries are never removed. The file's definition blocks (`FileScope.blocks`, collected from
 the AST: labels, tags, declared names, `*`) are the static side that 13.3 takes its candidates from; a selector's
 tags compare by engine, `js` for ts blocks too (13.1).
@@ -1596,7 +1624,7 @@ tags compare by engine, `js` for ts blocks too (13.1).
 
 1. `cands` empty → `ImportError: No engine exports found for selector 'stats'`.
 2. `hits` = the candidates that provide `name`.
-3. One hit, `Loaded` → its entry's `value`.
+3. One hit, `Waiting`, and this use can't wait (13.4) → its language starts first (12.7). Then, one hit, `Loaded` → its entry's `value`.
 4. More → `ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats' and 'calc') — use @py.stats
    or @py.calc` (DOCS 6.3). Three or more read `'a', 'b' and 'c'` / `@py.a, @py.b or @py.c`; an unlabeled block is listed
    as `@py block at main.v2:12`, and the advice becomes `— label the blocks to choose one`.
@@ -1607,15 +1635,19 @@ tags compare by engine, `js` for ts blocks too (13.1).
 6. Otherwise → `ImportError: 'x' is not exported by 'stats' (did the block @export it?)`, or, when a candidate is a
    `Loaded` compiled block with `*`, 15.2's message saying why it was left out.
 
-`@import { * } from sel`: step 1; with no `Loaded` candidate, step 5 on the first; otherwise the union of the loaded
-candidates' entries, where a name two candidates provide fails as in step 4, used or not (DOCS 6.3).
-
 ### 13.4 Binding into the V2 scope
 
 `@import` declares each alias in the current scope like `const` (assigning it is an error; a name already declared there
-is 4.5's redeclaration `SyntaxError`, or 5.6's `NameError` for names bound by `*`) and re-resolves each time it runs. `*`
-binds only names that are V2 identifiers and not keywords; import others quoted, with `as`. Imported functions are
-`func`s: a foreign function becomes `Callable::Proxy { session, unit, name }` (5.1; `unit` is the wire unit id, 9.4),
+is 4.5's redeclaration `SyntaxError`) and re-resolves each time it runs, unless it waits (12.7).
+
+**Eligible to wait**, computed once per file for `FileScope`: the `@import` is a direct statement of its file; by name
+text across the file (so ignoring shadowing, which only errs towards running at the statement), every use of each
+local name is a direct call `n(…)`, or for `sel as n` a plain member read or method call `n.y`, `n.y(…)` (not `?.`, not
+`n.y = 1`, not `n(…)`); no block's inner `@import … from v2` names it; and outside the entry file its local name starts
+with `_` (V2 modules export the others, 6.4). So a waiting reference can only be called or have a member read: constants,
+printing, comparing and passing see exactly what they would if the `@import` had run at its statement.
+
+Imported functions are `func`s: a foreign function becomes `Callable::Proxy { key, unit, name, pending }` (5.1; `unit` is the wire unit id, 9.4),
 and calling it sends `call` with target `{"unit","name"}` plus `args`/`kwargs` (9.5, 10.8). Proxies are ordinary
 values: stored, passed, re-exported by V2 modules (6.4), sent to other engines as `fn` tags (11.8). `sel as NAME` binds
 a module handle (13.5).
@@ -1636,7 +1668,7 @@ resolves from the folder of the first `.v2` file that imports it):
 ```
 
 `name` is the module name as joined (13.1) or the JS specifier as written. `from` is the absolute path of the importing
-`.v2` file; the adapters use it for `sys.path` and `createRequire`. `names` is a list, `"*"`, or `null` for the whole
+`.v2` file; the adapters use it for `sys.path` and `createRequire`. `names` is a list, or `null` for the whole
 module as a handle (`@import py.numpy as np`). Reply: `ret {"value": <module handle or null>, "exports":[{name, kind,
 value?}], "missing":[...]}`.
 
@@ -1645,7 +1677,6 @@ value?}], "missing":[...]}`.
 | load | `importlib.import_module(name)`, the folder of `from` on `sys.path` (9.3) | `createRequire(from)(name)`, which loads ES modules too (require(esm)); only a module with top-level await in itself or its ES module graph (`ERR_REQUIRE_ASYNC_MODULE` whose `From` line, when Node prints one, names the importing `.v2` file; a CommonJS module that requires one has already run) goes through `import(entryUrl(name, from))` (14.4), awaited as 9.8 allows |
 | failure | the module (or a parent package) not found → `err ImportError` with the foreign message (`No module named 'pandas'`); any other exception, a missing dependency of the module included → `ForeignError` (9.4) | `require.resolve(name)` runs first, so not found is decided for the module itself: `MODULE_NOT_FOUND`, `ERR_PACKAGE_PATH_NOT_EXPORTED` or `ERR_UNKNOWN_BUILTIN_MODULE` there → `ImportError` with the first line of Node's message (`Cannot find module 'pandas'`); errors while loading → `ForeignError` |
 | name `n` | `getattr(mod, n)`, else the submodule `import_module(name + "." + n)` | `mod[n]` unless inherited from `Object.prototype`/`Function.prototype`; `"default"` → `mod.default ?? mod`; else `mod.default[n]` |
-| `*` | `__all__` if present (absent entries go to `missing`), else the names in `vars(mod)` not starting with `_`, in dict order | own enumerable keys of `mod` (and of an object `mod.default`), minus `default`, `__esModule` and `_` names |
 | kind | callable (classes too) → `func`, else `value` (copied; non-plain values arrive as handles) | function (classes too; constructed or called per 11.3) → `func`, else `value` |
 
 - `@import js.pkg as x` binds the module object as a handle; for a CommonJS package that exports a function it is a
@@ -1704,9 +1735,7 @@ the imported name).
   the adapter's `units` (not reached, still loading, or failed after this block loaded); it raises the constant error
   the same way when the unit's load reply listed the name as `value`.
 - A name that only a not yet loaded `*` block could provide (13.3 step 5) gets a route, even in this session.
-- `*` expands at load into one entry per `func` export of its targets, so they must be loaded (a module is imported
-  then); `*` from `v2` means the file's top-level `func` declarations not starting with `_`.
-- Compiled blocks take no `*` and no imports in program mode (4.5); their routes: 13.6.
+- Compiled blocks take no imports in program mode (4.5); their routes: 13.6.
 
 ---
 
@@ -1858,8 +1887,8 @@ A compiled block (`@c`, `@cpp`, `@rust` and their aliases; kind Compiled, 7.2) n
 This is 12.1's step 6: 12.1 has already checked the unit state, resolved the tag and routed the inner imports, and afterwards registers the exports and produces the value. Compiled blocks take no block args, and their directive mistakes (15.2) are static `SyntaxError`s (4.5).
 1. **Body** (4.4): the dedented text with directive lines blanked, its `UnitLoc` (2.3), the export items and the inner imports.
 2. **Signatures** (15.2, 15.3): text analysis only, no toolchain.
-3. **Toolchain** (7.6, including the target check). None usable: `EngineNotFound`.
-4. **Generation** (15.4, 15.5), then the **cache** (15.6): look the build up, build on a miss (15.7).
+3. **Generation** (15.4, 15.5), then the **cache** (15.6). A hit goes straight to step 5 and touches no compiler, so a cached block works with none installed.
+4. On a miss, the **toolchain** (7.6, including the target check; none usable: `EngineNotFound`), then the **build** (15.7).
 5. Library mode: **load and bind** (15.8). Program mode: **run** (15.5).
 
 Steps 1–4 are memoized for the run in `Memo: HashMap<UnitId, Result<Rc<Artifact>, Rc<ErrorValue>>>`, failures included: a program block in a loop builds once and runs on every reach, and a failed build is re-raised on later reaches without rebuilding (a definition block is already in 12.1's `Failed` state).
@@ -1971,16 +2000,14 @@ The executable runs from the cache entry through the run-engine process helper (
 The key is `k = hex(sha256(serde_json::to_string(&key)))` over a struct, so the field order is fixed and there is no whitespace:
 
 ```json
-{"v2abi":1,"engine":"rust","mode":"lib",
- "compiler":{"path":"C:/Users/me/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin/rustc.exe",
-             "version":"rustc 1.91.1 (ed61e7d7e 2025-11-07)","target":"x86_64-pc-windows-msvc"},
+{"v2abi":1,"engine":"rust","mode":"lib","target":"x86_64-pc-windows-msvc","command":null,
  "flags":["--crate-type","cdylib","--edition","2021","-C","opt-level=2","-C","target-feature=+crt-static",
           "--crate-name","v2block","--error-format=json","{src}","-C","opt-level=3","-o","{out}"],
  "prelude":"<sha256 of all generated text except the body>","source":"<dedented body>",
  "ordinal":0,"headers":[]}
 ```
 
-`path` is 7.6's resolved `argv[0]` (for Rust the sysroot's `rustc`, not the rustup proxy); `version` is the first line of its version output; `target` is 7.6's (rustc's host triple, cl's architecture folder, `null` for the Unix C and C++ compilers). `flags` is the exact argv including user flags, with the input and output paths replaced by `{src}`/`{out}`. `prelude` covers the shims and wrappers, so a changed export or import list, or a generator change, rebuilds; exports are re-derived from the source on every run. `ordinal` counts the units loaded earlier in this run, from any file, whose key would otherwise be equal, so two identical blocks never share a library: each gets its own entry, `static`s (DOCS 11.3) and host-API token. `headers` (C/C++; `[]` for Rust) is the sha256 of each local header's contents, in first-include order, each once: every quoted `#include "x"` that resolves against the including file's folder (for the body, the `.v2` folder), then the `.v2` folder, followed recursively; other includes are the compiler's business. The entry directory `~/.v2/cache/build/<k>/` holds only:
+`target` is V2's own target triple, and `command` the engine's configured `command` as written, or `null`. No compiler path or version is in the key, so a lookup runs nothing, and updating a compiler rebuilds nothing until `v2 cache clean` (19.4). `flags` is the exact argv including user flags, with the input and output paths replaced by `{src}`/`{out}`. `prelude` covers the shims and wrappers, so a changed export or import list, or a generator change, rebuilds; exports are re-derived from the source on every run. `ordinal` counts the units loaded earlier in this run, from any file, whose key would otherwise be equal, so two identical blocks never share a library: each gets its own entry, `static`s (DOCS 11.3) and host-API token. `headers` (C/C++; `[]` for Rust) is the sha256 of each local header's contents, in first-include order, each once: every quoted `#include "x"` that resolves against the including file's folder (for the body, the `.v2` folder), then the `.v2` folder, followed recursively; other includes are the compiler's business. The entry directory `~/.v2/cache/build/<k>/` holds only:
 - the artifact: `v2_<k[0..16]>.dll|.so|.dylib`, or `prog[.exe]`;
 - `build.log`: the argv, the full compiler output and any warnings.
 
@@ -2505,6 +2532,7 @@ Out of scope: sandboxing, permission prompts, signature checks, defending agains
 | Exception while a block runs, foreign syntax errors included | ForeignError (`foreign_type` e.g. `SyntaxError`) or the reported kind | 9.6, 12.1 | definition block: unit `Failed`, later reaches re-raise the stored error; action block: nothing kept, the next reach runs it again |
 | `@export` lists a name the block doesn't define (compiled: as a function, so a constant counts too) | ImportError | 12.2, 15.2 | unit `Failed` |
 | Module selector on a compiled or run engine; adapter without `modules` | ImportError | 13.5, 17.5 | nothing sent |
+| A waiting block or `@import` fails when its language starts | the block's error, or ImportError | 12.7 | raised to what started it; flush stops, the rest runs at the next need; a block is `Failed`, a module import retries at its next use |
 | Inner `@import` called before its target block loads | ImportError, raised in the calling language as a `V2Error`; compiled: NULL and `v2_last_error()` | 13.6, 13.7, 15.9 | a later call looks the target up again |
 | **Calls and values** | | | |
 | Foreign exception, including Python `sys.exit()` (`foreign_type` `SystemExit`) and JS `process.exit()` (which throws an `Error`) | ForeignError | 9.6, 9.7 | session fine; the worker keeps running |
@@ -2546,7 +2574,8 @@ tests/
   v2.toml                 comments only; stops the upward config search inside the repo
   host/                   host language, modules, builtins; host/syntax/ for diagnostics
   engines/py/ js/ ts/     bridged engines, each with fixtures/
-  cross/  imports/        multi-engine programs; selectors, ambiguity, aliases
+  cross/  imports/        multi-engine programs; selectors, ambiguity, aliases, the waiting line
+  sweep/                  one folder per DOCS area: expected output taken from DOCS, not the binary (roadmap 1.14)
   compiled/c/ cpp/ rust/
   ffi/
   custom/                 run and bridged custom engines; custom/builtin/ for the built-in run engines
@@ -2604,13 +2633,13 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R17 | `cross/order/` | with stdout captured, program order holds for all of: V2 `print`, `@py` `print`, `@py` `sys.stdout.write("x")` with no newline, `@js` `console.log`, a `@c` action block, an exported `@c` function that calls `printf`, and a run-engine block |
 | R18 | `engines/py/crash.v2` | a call running `os._exit(3)` raises EngineCrashed naming status 3; the next call raises EngineCrashed `is not running`; the script continues |
 | R19 | `engines/py/timeout/` | with `call_timeout = 1`, `time.sleep(30)` raises EngineTimeout in under 5 s; the next call raises EngineCrashed |
-| R20 | `compiled/c/cache/` (run.rs: two runs with one HOME) | DOCS 11.1 `hypot3(1, 2, 2)` prints `3.0`; the second run leaves every file under `~/.v2/cache/build` unchanged (paths, sizes, mtimes); with the cached library overwritten by 4096 zero bytes (a damaged image, 15.8), the next run evicts the entry, rebuilds and still prints `3.0` |
+| R20 | `compiled/c/cache/` (run.rs: two runs with one HOME) | DOCS 11.1 `hypot3(1, 2, 2)` prints `3.0`; the second run leaves every file under `~/.v2/cache/build` unchanged (paths, sizes, mtimes), and a run with no compiler on `PATH` still prints `3.0`; with the cached library overwritten by 4096 zero bytes (a damaged image, 15.8), the next run evicts the entry, rebuilds and still prints `3.0` |
 | R21 | `compiled/rust/panic.v2` | `count_primes(100000) == 9592`; an export that panics with `boom` raises ForeignError with `lang == "rust"`, `foreign_type == "panic"` and `boom` in the message; the next call works |
 | R22 | `compiled/cpp/exception.v2` | `reversed("stressed") == "desserts"`; `reversed(null)` raises MarshalError; `throw std::runtime_error("bad")` raises ForeignError with message `bad` and a `foreign_type` containing `runtime_error`; `throw 42` gives `foreign_type == "unknown"` |
 | R23 | `ffi/libc_libm.v2` | through `extern "m"`, `cos(0) == 1.0` and `pow(2, 10) == 1024.0`; through `extern "c"`, `strlen("héllo") == 6` |
 | R24 | `ffi/range.v2` | through `extern "c"`, `abs(2147483648)` raises MarshalError naming argument 1, `int` and `-2147483648..2147483647`; a `@c` `unsigned char id8(unsigned char x)` called with 300 raises MarshalError; `strlen("a\0b")` raises the NUL MarshalError; a `@c` export returning `UINT64_MAX` as `uint64_t` raises MarshalError `return value 18446744073709551615 of '…' does not fit in a V2 int` |
 | R25 | `ffi/not_found.v2` | `extern "v2_no_such_lib"` raises FFILoadError listing exactly this platform's 16.2 search order (the `.v2` file's folder, then the system search); on Windows (run.rs), a DLL present only in the cwd, with the script elsewhere, is not found |
-| R26 | `imports/ambiguity.v2` | with two `@py` blocks exporting `mean`, a named import and a `*` import from `@py` both raise the DOCS 6.3 message; `@py.stats` resolves; an `@export { * }` block can be imported selectively |
+| R26 | `imports/ambiguity.v2` | with two `@py` blocks exporting `mean`, a named import raises the DOCS 6.3 message; `@py.stats` resolves; an `@export { * }` block can be imported selectively |
 | R27 | `imports/aliases.v2` | `@python stats` is reachable as `stats`, `@py.stats` and `@python.stats`; `python.statistics` is `py.statistics`; a `@python` block and a `@py` block share one process (a `sys` attribute set in one is visible in the other) |
 | R28 | `host/syntax/dup_label.v2` | `@py stats` followed by `@js stats` is a SyntaxError at the second block, with a note at the first |
 | R29 | `engines/js/bigint.v2` | `echo(2**60) == 2**60` through JS; `@js(x: 2**60) { typeof x }` is `"bigint"`; `@js(x: 2**53 - 1) { typeof x }` is `"number"`; `@js { 1e20 }` follows chapter 10 without overflow |
@@ -2643,6 +2672,14 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | R57 | `compiled/{c,cpp,rust}/signatures.v2` | exports are found behind attributes and calling conventions: C `__declspec(noinline) int __cdecl twice(int x)` (Windows) or `__attribute__((noinline)) int twice(int x)`, C++ `[[nodiscard]] int thrice(int x)`; Rust `fn chars(s: &'static str) -> usize` gives `chars("héllo") == 5`; a Rust export taking `&mut str` raises BuildError naming `&mut str` |
 | R58 | `custom/builtin/{bash,pwsh,cmd}.v2` (each `requires:` its tag), `custom/builtin/cmd_unix.v2` (`// platform: unix`), run.rs (doctor) | with no `v2.toml`: `@sh { echo hi }` prints `hi` and `let b = @bash { printf ok }` gives `"ok"`, through Git Bash on Windows (never `System32\bash.exe`); `@pwsh { Write-Output 5 }` gives `"5"`; on Windows `@cmd(x: 1) { echo %V2_ARG_x% }` gives `"1"`; in `cmd_unix.v2`, `@cmd { }` raises EngineNotFound `cmd is Windows only`; `v2 doctor` has a row for each built-in run engine (run.rs `doctor_rows`; 7.2, 19.2) |
 | R59 | `custom/define_engine/` (requires js) | with no `v2.toml`, `define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")` then `@nd { console.log(1 + 2) }` prints `3`; a block `@nq` reached before its `define_engine` raises EngineUnknown ending `or with define_engine`; declaring `nd` again, or `py`, raises ValueError (17.2); `command: ["node"]` raises `ValueError: define_engine: command must contain {file}`; in `sub/lib.v2`, imported from `main.v2`, a command `["node", "./runner.js", "{file}"]` runs `sub/runner.js` (the caller's folder, 18.1) |
+| R60 | `imports/lazy/` (run.rs) | a program with py and js definition blocks and imports that calls only the py function starts no Node process; one that calls neither starts no worker at all (the fake engine paths stay unused) |
+| R61 | `imports/lazy/line_order.v2` (requires py) | `random.seed(1)` in a waiting definition block, and in a module a waiting `@import` names, is in effect for a later action block; definition blocks print in source order, before the action block's output |
+| R62 | `imports/lazy/as_today.v2` (requires py js) | a constant, a printed name and a passed function behave as if the `@import` ran at its statement; `try` around a nested definition block or `@import` catches its error; an `@import` from a block further down raises `block 'b' has not run yet — move this @import below it` |
+| R63 | `imports/lazy/files/` (requires py) | definition blocks in a V2 module imported before, and another imported after, the language starts run in the same relative order as statements; a public imported name of a module works from the importer |
+| R64 | `imports/lazy/failures.v2` (requires py) | with a line `[bad, seed]`, the first use raises `bad`'s error; a later top-level block runs only after `seed`; `bad` re-raises the stored error on every use; a block after `EngineCrashed` raises `EngineCrashed` at reach; a first use at depth 65 raises RecursionError and a shallow use afterwards works |
+| R65 | `engines/py/parking.v2` with `V2_TEST_PARK_MS`, `engines/process` unit test (Windows) | after a park, a counter, a handle and a stored callback all still work; the working set drops; a session with `call_timeout` is not parked |
+| R66 | `host/scopes.v2` | a read and a write before a local `let` act on the outer name; `x += 1` before `let x` likewise; `for x in x` reads the outer `x`; closures keep their own iteration; a module's namespace order is unchanged; did-you-mean skips names not declared yet |
+| R67 | `engines/resolve` unit test | a Store placeholder is probed once across two runs sharing a cache file; a `doctor` refresh probes it again; a real alias is never cached as a placeholder |
 
 ### 22.5 CI matrix
 
