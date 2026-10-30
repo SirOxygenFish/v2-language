@@ -288,7 +288,7 @@ let s2 = 'single quotes'
 let path = r"C:\Users\ada\data.csv"      // raw: backslashes are kept as-is
 let name = "Ada"
 let hello = f"Hello, ${name}! 2 + 2 = ${2 + 2}"
-let price = f"${19.999:.2f}"              // "20.00" — `:.Nf` rounds a number to N decimals
+let price = f"${19.999:.2f}"              // "20.00" — `:.Nf` rounds a number to N decimals (up to 99)
 
 let poem = """
     Roses are red,

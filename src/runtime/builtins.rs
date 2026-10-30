@@ -107,6 +107,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
 pub struct Out {
     w: BufWriter<Box<dyn Write>>,
     tty: bool,
+    /// A worker's output that couldn't be written, until its request ends (9.9).
+    pub failed: Option<Rc<ErrorValue>>,
 }
 
 impl Out {
@@ -114,7 +116,7 @@ impl Out {
         let stdout = std::io::stdout();
         let tty = stdout.is_terminal();
         let lock: StdoutLock<'static> = stdout.lock();
-        Out { w: BufWriter::with_capacity(64 * 1024, Box::new(lock)), tty }
+        Out { w: BufWriter::with_capacity(64 * 1024, Box::new(lock)), tty, failed: None }
     }
 
     /// An `Out` that collects into a shared buffer (tests).
@@ -131,7 +133,7 @@ impl Out {
             }
         }
         let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        (Out { w: BufWriter::new(Box::new(Shared(buf.clone()))), tty: true }, buf)
+        (Out { w: BufWriter::new(Box::new(Shared(buf.clone()))), tty: true, failed: None }, buf)
     }
 
     pub fn write_str(&mut self, s: &str) -> Exec<()> {
@@ -139,6 +141,13 @@ impl Out {
         match r {
             Ok(()) => Ok(()),
             Err(e) => fail("IOError", format!("cannot write to stdout: {}", os_message(&e))),
+        }
+    }
+
+    /// Text from a worker, which no V2 expression is waiting on yet.
+    pub fn write_foreign(&mut self, s: &str) {
+        if let Err(Flow::Error(e)) = self.write_str(s) {
+            self.failed.get_or_insert(e);
         }
     }
 

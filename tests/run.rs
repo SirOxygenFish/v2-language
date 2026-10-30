@@ -854,6 +854,44 @@ fn writing_to_a_closed_stdout_is_an_io_error() {
     assert!(err.contains("spam.v2:1:14"), "the caret is at the print: {err}");
 }
 
+#[test]
+fn a_worker_writing_to_a_closed_stdout_is_an_io_error() {
+    // INTERNALS 9.9: the write fails with no V2 expression waiting, so the IOError comes when the
+    // block returns, catchable, and the worker is still there.
+    if !needs("py", "a_worker_writing_to_a_closed_stdout_is_an_io_error") {
+        return;
+    }
+    let src = "\
+func flood() {
+    @py {
+        for i in range(2000):
+            print(\"x\" * 1000)
+    }
+}
+try {
+    flood()
+    print(\"not reached: nothing failed\", stderr: true)
+} catch (e) {
+    print(\"caught\", e.type, e.message.index_of(\"cannot write to stdout\") >= 0, stderr: true)
+}
+print(@py { 1 + 1 }, stderr: true)
+";
+    let home = TempHome::new();
+    std::fs::write(home.0.join("flood.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("flood.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    drop(child.stdout.take()); // close the read end
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("caught IOError true\n2\n"), "{err}");
+}
+
 /// Windows: put the child in its own process group, so Ctrl+Break can be sent to it alone. The
 /// event travels through a console this process shares with the child; a CI runner may start
 /// the tests without one, so allocate one then, keeping this process's own std handles.
