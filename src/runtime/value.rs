@@ -141,7 +141,8 @@ impl Drop for Func {
             // values here, not through the frame's own drop.
             if Rc::strong_count(&self.0) == 1 && Rc::strong_count(env) == 1 {
                 release(super::env::take_values(env));
-            } else {
+            } else if Rc::strong_count(&self.0) <= 2 {
+                // One holder will be left, which can be the frame's own: not a call's copy going.
                 super::env::closure_dropped(env);
             }
         }

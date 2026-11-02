@@ -27,6 +27,13 @@ pub struct CharCache {
 
 impl CharCache {
     fn index(&mut self, s: &Rc<str>) -> &CharIndex {
+        // A `Weak` keeps the whole allocation, so an entry for a string no one holds any more
+        // goes now, and its memory with it.
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|ix| ix.s.strong_count() == 0) {
+                *slot = None;
+            }
+        }
         let ptr = Rc::as_ptr(s) as *const u8;
         if let Some(i) = self.slots.iter().position(|slot| matches!(slot, Some(ix) if Weak::as_ptr(&ix.s) as *const u8 == ptr)) {
             return self.slots[i].as_ref().expect("found above");
@@ -92,6 +99,19 @@ impl CharCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dropped_string_doesnt_stay_in_the_cache() {
+        let mut cache = CharCache::default();
+        let big: Rc<str> = "x".repeat(1000).into();
+        assert_eq!(cache.len(&big), 1000);
+        drop(big);
+        let other: Rc<str> = "y".repeat(1000).into();
+        cache.len(&other);
+        // Each entry left points at a live string; the dropped one's allocation went with its entry.
+        assert!(cache.slots.iter().flatten().all(|ix| ix.s.strong_count() > 0));
+        assert_eq!(cache.slots.iter().flatten().count(), 1);
+    }
 
     #[test]
     fn positions_match_a_plain_char_walk() {
