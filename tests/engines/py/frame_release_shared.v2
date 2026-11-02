@@ -1,0 +1,52 @@
+// requires: py
+// A frame with a closure is freed even when one of its values is shared with the rest of the
+// program: a function passed in, a module-level dict, a big list (INTERNALS 5.1).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def make():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { make, n }
+}
+@import { make, n } from pk
+func inc(x) {
+    return x + 1
+}
+let config = {x: 1}
+func apply(g, i) {
+    let t = make()
+    let h = func(x) => g(x)
+    return h(i)
+}
+func shared(i) {
+    let t = make()
+    let c = config
+    let g = func() => c.x + i
+    return g()
+}
+func big(i) {
+    let t = make()
+    let rows = range(0, 3000)
+    let out = []
+    func add2(x) {
+        out.push(x * 2)
+    }
+    for r in rows {
+        add2(r)
+    }
+    return len(out)
+}
+func released(f, arg) {
+    n()
+    let before = n()
+    for i in 0..30 {
+        f(arg, i)
+    }
+    n()
+    return n() - before
+}
+print(released(func(a, i) => apply(inc, i), null), released(func(a, i) => shared(i), null), released(func(a, i) => big(i), null))

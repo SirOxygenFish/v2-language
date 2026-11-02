@@ -100,25 +100,46 @@ enum Frame {
 /// it can't end an operand, which is JS's own rule (3.8).
 fn regex_may_start(before: &str) -> bool {
     let mut before = before.trim_end();
-    // A block comment is no token: look before it.
-    while let Some(open) = before.strip_suffix("*/").and_then(|b| b.rfind("/*")) {
-        before = before[..open].trim_end();
+    // Comments are no tokens: look before them.
+    loop {
+        if let Some(open) = before.strip_suffix("*/").and_then(|b| b.rfind("/*")) {
+            before = before[..open].trim_end();
+            continue;
+        }
+        let line = before.rfind('\n').map_or(0, |n| n + 1);
+        match before[line..].find("//") {
+            Some(c) => before = before[..line + c].trim_end(),
+            None => break,
+        }
     }
     let Some(last) = before.chars().last() else { return true };
-    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    if word(last) {
-        let start = before.trim_end_matches(word).len();
-        // A keyword read as a property (`o.in`) is a name, which ends an operand.
-        let property = before[..start].trim_end().ends_with('.');
-        return !property
-            && matches!(&before[start..], "return" | "typeof" | "instanceof" | "in" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await");
+    if before.ends_with("++") || before.ends_with("--") {
+        return false; // postfix: an operand ends there
     }
-    // Postfix `++`, `--` and TypeScript's `x!` end an operand too.
-    let ends_operand = |s: &str| s.chars().last().is_some_and(|c| word(c) || c == ')' || c == ']');
-    if before.ends_with("++") || before.ends_with("--") || (last == '!' && ends_operand(&before[..before.len() - 1])) {
-        return false;
+    match last {
+        // TypeScript's `x!` ends an operand; `return!` is an operator after a keyword.
+        '!' => !ends_operand(&before[..before.len() - 1]),
+        c if is_word(c) => !ends_operand(before),
+        c => !matches!(c, ')' | ']' | '.' | '"' | '\'' | '`'),
     }
-    !matches!(last, ')' | ']' | '.' | '"' | '\'' | '`')
+}
+
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Whether `s` ends with a name, a literal, `)` or `]`: not with a keyword that takes an operand
+/// next, unless it is read as a property (`o.in`).
+fn ends_operand(s: &str) -> bool {
+    match s.chars().last() {
+        Some(c) if is_word(c) => {
+            let start = s.trim_end_matches(is_word).len();
+            s[..start].trim_end().ends_with('.')
+                || !matches!(&s[start..], "return" | "typeof" | "instanceof" | "in" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await")
+        }
+        Some(c) => c == ')' || c == ']',
+        None => false,
+    }
 }
 
 /// Just past the closing `/` of a regex literal at `i`, or `None` if its line ends first.
@@ -516,6 +537,9 @@ mod tests {
             assert_eq!(body(src, js).unwrap(), &src[..src.len() - 3], "{src}");
         }
         assert_eq!(body(" if (!/}/.test(s)) x() } t", js).unwrap(), " if (!/}/.test(s)) x() ");
+        // A regex after a line comment, or after `return!`.
+        assert_eq!(body(" const t = [\n // a brace.\n /^[{]/,\n] } t", js).unwrap(), " const t = [\n // a brace.\n /^[{]/,\n] ");
+        assert_eq!(body(" return!/}/.test(s) } t", js).unwrap(), " return!/}/.test(s) ");
         // A regex can't span lines, so a lone `/` there is a division after all.
         assert_eq!(body(" x = (1\n/ 2) } d", js).unwrap(), " x = (1\n/ 2) ");
     }

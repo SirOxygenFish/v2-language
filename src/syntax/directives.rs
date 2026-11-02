@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use super::ast::{Directives, EngineImport, ExportItem, Exports, ImportItem, ImportItems, Name, Selector};
 use super::lexer::LABEL_HINT;
-use super::scan::canonical_tag;
+use super::scan::{canonical_tag, profile_for, Profile};
 use super::span::{FileId, SourceMap, Span, UnitLoc};
 use super::token::{Delim, Kw, RawBody};
 use super::Diag;
@@ -128,9 +128,19 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         }
     }
 
-    // Step 3: dedent the code lines.
+    // Step 3: dedent the code lines. A line that is only a comment doesn't set the indentation:
+    // the language doesn't care where it starts.
+    let profile = profile_for(tag);
+    let comment = |t: &str| {
+        let t = t.trim_start_matches([' ', '\t']);
+        match profile {
+            Profile::Python => t.starts_with('#'),
+            Profile::CLike(_) => t.starts_with("//") || t.starts_with("/*"),
+            Profile::Plain => false,
+        }
+    };
     let code: Vec<usize> = (0..lines.len())
-        .filter(|&k| !lines[k].header_line && lines[k].in_code && !blank(&lines[k].text))
+        .filter(|&k| !lines[k].header_line && lines[k].in_code && !blank(&lines[k].text) && !comment(&lines[k].text))
         .collect();
     for line in lines.iter_mut() {
         if !line.header_line && line.in_code && blank(&line.text) {

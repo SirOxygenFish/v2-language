@@ -1,0 +1,12 @@
+// requires: py
+// A `let` that holds no function yet may get one before the first call (13.6).
+let on_event = null
+@py hooks {
+    @import { on_event } from v2
+    def fire(x):
+        return on_event(x)
+    @export { fire }
+}
+on_event = func(x) => x + 100
+@import { fire } from hooks
+print(fire(1))
