@@ -95,9 +95,10 @@ fn main() {
         .spawn(move || run(command));
     let code = match interpreter {
         Ok(handle) => handle.join().unwrap_or(EXIT_PANIC),
+        // The system's limit, not a bug in V2.
         Err(e) => {
-            stderrln!("v2: internal error: cannot start the interpreter thread: {e}");
-            EXIT_PANIC
+            stderrln!("v2: cannot start the interpreter thread: {e}");
+            1
         }
     };
     watchdog.stop();

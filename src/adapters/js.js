@@ -1030,11 +1030,15 @@ function unitAttr(u, name) {
   }
 }
 
+const withThis = new WeakMap(); // a module's function -> the one object that stands for it
+
 function realTarget(unit, name) {
-  // The function or class itself; one read from a module object keeps that `this`, as a call
-  // through V2 does (13.5).
+  // The function or class itself. One read from a module object keeps that `this`, as a call
+  // through V2 does (13.5): only a plain call differs, everything else is the function's own.
   const [f, self] = unitAttr(units.get(unit), name);
-  return typeof f === 'function' && self !== undefined && !isConstructor(f) ? f.bind(self) : f;
+  if (typeof f !== 'function' || self === undefined || isConstructor(f)) return f;
+  if (!withThis.has(f)) withThis.set(f, new Proxy(f, { apply: (t, that, args) => Reflect.apply(t, that === undefined ? self : that, args) }));
+  return withThis.get(f);
 }
 
 function unitStub(unit, name, route, alias) {

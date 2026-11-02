@@ -173,7 +173,7 @@ impl Interp {
         };
         let pipe = child.take_stdout().expect("piped stdout");
         #[cfg(unix)]
-        let pipe = crate::engines::process::UntilExit { pipe, kill: child.kill_handle() };
+        let pipe = crate::engines::process::UntilExit::new(pipe, child.kill_handle());
         let reader: Box<dyn Read + Send> = Box::new(pipe);
         let writer: Box<dyn Write> = Box::new(child.take_stdin().expect("piped stdin"));
         let parkable = timeouts.call.is_none().then(|| child.kill_handle());
