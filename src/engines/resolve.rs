@@ -109,11 +109,20 @@ pub fn is_drive_relative(p: &Path) -> bool {
 /// With a separator, `name` is joined to `l.cwd`; otherwise each absolute `PATH` entry is
 /// tried (never the cwd).
 pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
+    search(name, l, usize::MAX)
+}
+
+/// The first of `find_program`'s hits, with no walk past it: a long `PATH` can be slow to stat.
+pub fn first_program(name: &str, l: &Lookup) -> Option<PathBuf> {
+    search(name, l, 1).pop()
+}
+
+fn search(name: &str, l: &Lookup, wanted: usize) -> Vec<PathBuf> {
     let mut hits: Vec<PathBuf> = Vec::new();
     // `X_OK` only on the PATH walk: a named file that can't run fails its probe with the OS
     // message instead of looking missing (7.5).
-    let mut consider = |p: PathBuf, walk: bool| {
-        if is_regular_file(&p) && (!walk || executable(&p)) && !hits.contains(&p) {
+    let consider = |hits: &mut Vec<PathBuf>, p: PathBuf, walk: bool| {
+        if hits.len() < wanted && is_regular_file(&p) && (!walk || executable(&p)) && !hits.contains(&p) {
             hits.push(p);
         }
     };
@@ -125,27 +134,30 @@ pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
         let p = l.cwd.join(as_path);
         if cfg!(windows) && !has_accepted_extension(as_path) {
             for ext in ACCEPTED {
-                consider(with_extension_appended(&p, ext), false);
+                consider(&mut hits, with_extension_appended(&p, ext), false);
             }
         } else {
-            consider(p, false);
+            consider(&mut hits, p, false);
         }
         return hits;
     }
     let path = l.path.clone().unwrap_or_default();
     for dir in std::env::split_paths(&path) {
+        if hits.len() >= wanted {
+            break;
+        }
         if dir.as_os_str().is_empty() || dir.is_relative() {
             continue;
         }
         if cfg!(windows) {
             if has_accepted_extension(as_path) {
-                consider(dir.join(name), true);
+                consider(&mut hits, dir.join(name), true);
             }
             for ext in l.extensions() {
-                consider(with_extension_appended(&dir.join(name), &ext), true);
+                consider(&mut hits, with_extension_appended(&dir.join(name), &ext), true);
             }
         } else {
-            consider(dir.join(name), true);
+            consider(&mut hits, dir.join(name), true);
         }
     }
     hits
@@ -547,7 +559,7 @@ impl Resolver<'_> {
 
     fn configured(&mut self, spec: &Rc<EngineSpec>, command: &[String], from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let name = &command[0];
-        let Some(path) = find_program(name, self.lookup).into_iter().next() else {
+        let Some(path) = first_program(name, self.lookup) else {
             return Err(NotFound::broken(
                 format!("engine '{}' command '{name}' not found (set by {})", spec.id, set_by(from)),
                 command.join(" "),
@@ -802,6 +814,17 @@ mod tests {
         let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new() };
         assert_eq!(find_program("node", &l), [good]);
         let _ = std::fs::remove_dir_all(&rel);
+    }
+
+    #[test]
+    fn the_first_program_stops_the_walk() {
+        let (a, b) = (temp("first-a"), temp("first-b"));
+        let (first, second) = (exe(&a, "tool"), exe(&b, "tool"));
+        let path = std::env::join_paths([a, b]).unwrap();
+        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new() };
+        assert_eq!(find_program("tool", &l), [first.clone(), second]);
+        assert_eq!(first_program("tool", &l), Some(first));
+        assert_eq!(first_program("no-such-tool", &l), None);
     }
 
     #[cfg(windows)]

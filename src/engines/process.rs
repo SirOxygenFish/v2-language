@@ -983,6 +983,32 @@ pub struct Captured {
     pub timed_out: bool,
 }
 
+/// A child's stdout that ends when the child does. A descendant that called `setsid` is out of
+/// reach of the group kill and can hold the pipe open for as long as it lives (8.5).
+#[cfg(unix)]
+pub struct UntilExit {
+    pub pipe: ChildStdout,
+    pub kill: KillHandle,
+}
+
+#[cfg(unix)]
+impl Read for UntilExit {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut fd = libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(&self.pipe), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one pollfd, alive for the call.
+        let mut poll = |ms| unsafe { libc::poll(&mut fd, 1, ms) };
+        loop {
+            match poll(EXIT_CHECK.as_millis() as i32) {
+                // What it wrote before it went is in the pipe by now.
+                0 if self.kill.has_exited() && poll(0) == 0 => return Ok(0),
+                0 => {}
+                -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                _ => return self.pipe.read(buf),
+            }
+        }
+    }
+}
+
 fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut out = Vec::new();
@@ -1030,7 +1056,7 @@ pub fn run_captured(
 // ---------------------------------------------------------------------------------------------
 // The interrupt handlers (6.5)
 
-/// Unix: SIGINT, SIGTERM and SIGHUP set `INTERRUPTED`, an async-signal-safe store. A signal
+/// Unix: SIGINT, SIGTERM, SIGHUP and SIGQUIT set `INTERRUPTED`, an async-signal-safe store. A signal
 /// ignored when v2 starts (`nohup`, background jobs of a shell without job control) stays
 /// ignored (6.5).
 #[cfg(unix)]
@@ -1043,7 +1069,7 @@ fn install_interrupt_handler() {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
         libc::sigemptyset(&mut action.sa_mask);
-        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
             let mut old: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(sig, std::ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_IGN {
                 continue;

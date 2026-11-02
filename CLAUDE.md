@@ -103,7 +103,7 @@ it is loaded automatically into every session and every subagent.
 - `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
   prints `check X: N files, M errors`) and `doctor::doctor` (the table).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
-  `KillHandle` (`release_memory`: 8.8), `run_captured(argv, env, limit, input)` (stdin null or fed by an unjoined thread;
+  `KillHandle` (`release_memory`: 8.8), `UntilExit` (a worker's stdout on Unix: ends with the child), `run_captured(argv, env, limit, input)` (stdin null or fed by an unjoined thread;
   `SpawnError { message, reason }`; batch paths with `%` refused), the watchdog (only the top timer
   runs, not while paused; exit check every 250 ms; SIGCHLD reset),
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
