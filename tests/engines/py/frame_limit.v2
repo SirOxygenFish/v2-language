@@ -1,0 +1,17 @@
+// requires: py
+// timeout: 60
+// A frame of exactly 64 MiB goes; the newline isn't part of it (9.1).
+@py {
+    def mk(n):
+        return "a" * n
+    @export { mk }
+}
+@import { mk } from @py
+let frame = len("{\"t\":\"ret\",\"id\":3,\"value\":\"\"}")
+print(len(mk(64 * 1024 * 1024 - frame)))
+try {
+    mk(64 * 1024 * 1024 - frame + 1)
+} catch (e) {
+    print(e.type)
+}
+print(mk(3))

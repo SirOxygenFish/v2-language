@@ -107,6 +107,9 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         if is_directive(t, "@@export") || is_directive(t, "@@import") {
             lines[i].text.remove(lead); // the escape loses one `@`
             escapes.push((i, lead));
+        } else if let Some((at, word)) = stray_directive(t).filter(|_| lines[i].in_code) {
+            let lo = (lines[i].offset + lead + at) as u32;
+            return Err(Diag::new(format!("{word} goes on a line of its own"), sm.span(file, lo, lo + word.len() as u32)));
         }
         i += 1;
     }
@@ -171,6 +174,19 @@ fn finish(
         loc: UnitLoc { file, body_first_line: first_line, body_col, dedent_width, line_count, kept: kept.into(), escaped: escaped.into() },
         directives,
     }
+}
+
+/// `@export {` or `@import {` after code on a line, where it would reach the other language as
+/// code. Past a quote or a comment marker the text may not be code, so it is left alone (DOCS 6.1).
+fn stray_directive(t: &str) -> Option<(usize, &'static str)> {
+    let end = t.find(['"', '\'', '`', '#']).unwrap_or(t.len());
+    let code = &t[..t[..end].find("//").unwrap_or(end)];
+    ["@export", "@import"].into_iter().find_map(|word| {
+        let (at, _) = code.match_indices(word).find(|&(i, _)| {
+            i > 0 && code.as_bytes()[i - 1] != b'@' && code[i + word.len()..].trim_start().starts_with('{')
+        })?;
+        Some((at, word))
+    })
 }
 
 /// `@export` (or `@import`, `@@export`, …) as an exact token: followed by a space, a tab, `{`

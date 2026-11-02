@@ -1,0 +1,3 @@
+// exit: 1
+// stderr: stray_export.v2:3:36: SyntaxError: @export goes on a line of its own
+@js { function jsq(x) { return x } @export { jsq } }

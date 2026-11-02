@@ -515,6 +515,7 @@ impl Interp {
     }
 
     fn await_reply(&mut self, s: SessionId, id: u64, at: Span) -> Exec<Reply> {
+        let mut unwritten = None; // this request's output that couldn't be written (9.9)
         loop {
             let read = match self.sessions[s].reader.as_mut() {
                 Some(r) => r.read_line(),
@@ -552,13 +553,10 @@ impl Interp {
                         let (exports, missing) = self.export_lists(s, exports.as_ref(), missing.as_ref())?;
                         Ok(Reply { value, exports, missing })
                     });
-                    return match reply {
-                        Ok(_) if self.out.failed.is_some() => {
-                            let e = self.out.failed.take().expect("just checked");
-                            Err(self.raise(Flow::Error(e), at))
-                        }
-                        Ok(reply) => Ok(reply),
-                        Err(what) => {
+                    return match (reply, unwritten) {
+                        (Ok(_), Some(flow)) => Err(self.raise(flow, at)),
+                        (Ok(reply), None) => Ok(reply),
+                        (Err(what), _) => {
                             let flow = self.protocol_violation(s, &what, &line);
                             Err(self.raise(flow, at))
                         }
@@ -576,20 +574,25 @@ impl Interp {
                 Frame::Call { id: c, target, args, kwargs } => {
                     self.serve_call(s, c, target, &args, &kwargs, &line, at)?;
                 }
-                Frame::Out { stream, text } => self.forward(stream, &text),
+                Frame::Out { stream, text } => {
+                    if let Err(flow) = self.forward(stream, &text) {
+                        unwritten.get_or_insert(flow);
+                    }
+                }
                 Frame::Release { fns } => self.sessions[s].callables.release(&fns),
             }
         }
     }
 
     /// An `out` frame: stdout through `Out`, stderr after `Out` is flushed (9.9). A failed write
-    /// is raised when the request ends, or shows at the end of the run (6.5).
-    fn forward(&mut self, stream: Stream, text: &str) {
+    /// is for the request that wrote it, or shows at the end of the run (6.5).
+    fn forward(&mut self, stream: Stream, text: &str) -> Exec<()> {
         match stream {
-            Stream::Stdout => self.out.write_foreign(text),
+            Stream::Stdout => self.out.write_str(text),
             Stream::Stderr => {
                 let _ = self.out.flush();
                 stderr!("{text}");
+                Ok(())
             }
         }
     }
@@ -847,7 +850,7 @@ impl Interp {
             match rx.recv_timeout(left) {
                 Ok(Some(line)) => {
                     if let Ok(Frame::Out { stream, text }) = vep::parse_frame(&line, Caps::default()) {
-                        self.forward(stream, &text);
+                        let _ = self.forward(stream, &text);
                     }
                 }
                 Ok(None) => open -= 1,
