@@ -17,6 +17,6 @@ func f() {
     }
 }
 f()
-// The release goes out right after the next request; `__del__`'s output comes at the end.
+// The release goes out with the next request, before it, so `__del__` prints first.
 @py { pass }
 print("after")

@@ -1,0 +1,33 @@
+// requires: js
+// timeout: 60
+// A V2 function JS has let go of is collected after 1,000 more, however many calls brought them
+// (INTERNALS 11.9).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def make():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { make, n }
+}
+@js reg {
+    const handlers = new Map();
+    function add(id, f) { handlers.set(id, f) }
+    function drop(id) { handlers.delete(id) }
+    @export { add, drop }
+}
+@import { make, n } from pk
+@import { add, drop } from reg
+func mk() {
+    let t = make()
+    return func(x) => t
+}
+for step in 0..2500 {
+    add(step, mk())
+    drop(step)
+}
+n()
+print(n() >= 1000)

@@ -1,0 +1,29 @@
+// requires: py
+// A function that makes many closures in a loop is freed like one that makes a few (INTERNALS 5.1).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def make():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { make, n }
+}
+@import { make, n } from pk
+func shape(i) {
+    let t = make()
+    let fs = []
+    for k in 0..3000 {
+        fs.push(func() => k)
+    }
+    return i
+}
+n()
+let before = n()
+for i in 0..10 {
+    shape(i)
+}
+n()
+print(n() - before)

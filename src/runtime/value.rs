@@ -136,13 +136,13 @@ impl Drop for Dict {
 
 impl Drop for Func {
     fn drop(&mut self) {
-        // The last reference to a closure whose frame nothing else holds: free the frame's
-        // values here, not through the frame's own drop.
-        if Rc::strong_count(&self.0) == 1 {
-            if let Callable::Closure { env, .. } = &*self.0 {
-                if Rc::strong_count(env) == 1 {
-                    release(super::env::take_values(env));
-                }
+        if let Callable::Closure { env, .. } = &*self.0 {
+            // The last reference to a closure whose frame nothing else holds: free the frame's
+            // values here, not through the frame's own drop.
+            if Rc::strong_count(&self.0) == 1 && Rc::strong_count(env) == 1 {
+                release(super::env::take_values(env));
+            } else {
+                super::env::closure_dropped(env);
             }
         }
     }
