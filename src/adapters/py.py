@@ -834,13 +834,13 @@ if __name__ == "__main__":
         def __mro_entries__(self, bases):
             return (self._current(),)
 
-    _importers = {}  # unit -> (globals, alias, name) of the blocks waiting for it (13.7)
+    _importers = {}  # unit -> (globals, alias, name, stub) of the blocks waiting for it (13.7)
 
     def bind_importers(unit):
         """Block `unit` has loaded, for V2 too: what imported from it gets the real thing."""
         waiting = _importers.pop(unit, ()) if unit in units else ()
-        for g, alias, name in waiting:
-            if isinstance(g.get(alias), UnitStub) and units[unit][1].get(name) == "func":
+        for g, alias, name, stub in waiting:
+            if g.get(alias) is stub and units[unit][1].get(name) == "func":
                 g[alias] = unit_attr(unit, name)
 
     def reply_lost(m):
@@ -859,7 +859,7 @@ if __name__ == "__main__":
             else:
                 g[alias] = UnitStub(e["unit"], e["name"], e.get("route"), alias)
                 if keeps:
-                    _importers.setdefault(e["unit"], []).append((g, alias, e["name"]))
+                    _importers.setdefault(e["unit"], []).append((g, alias, e["name"], g[alias]))
 
     def unique_name(base):
         name, n = base, 1

@@ -984,23 +984,49 @@ pub struct Captured {
 }
 
 /// A child's stdout that ends when the child does. A descendant that called `setsid` is out of
-/// reach of the group kill and can hold the pipe open for as long as it lives (8.5).
+/// reach of the group kill and can hold the pipe open, and write to it, for as long as it lives
+/// (8.5).
 #[cfg(unix)]
 pub struct UntilExit {
-    pub pipe: ChildStdout,
-    pub kill: KillHandle,
+    pipe: ChildStdout,
+    kill: KillHandle,
+    /// Once the child has exited: what it left in the pipe, still to read. Anything after that
+    /// is a descendant's.
+    left: Option<usize>,
+    checked: Instant,
+}
+
+#[cfg(unix)]
+impl UntilExit {
+    pub fn new(pipe: ChildStdout, kill: KillHandle) -> UntilExit {
+        UntilExit { pipe, kill, left: None, checked: Instant::now() }
+    }
 }
 
 #[cfg(unix)]
 impl Read for UntilExit {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut fd = libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(&self.pipe), events: libc::POLLIN, revents: 0 };
-        // SAFETY: one pollfd, alive for the call.
-        let mut poll = |ms| unsafe { libc::poll(&mut fd, 1, ms) };
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.pipe);
         loop {
-            match poll(EXIT_CHECK.as_millis() as i32) {
-                // What it wrote before it went is in the pipe by now.
-                0 if self.kill.has_exited() && poll(0) == 0 => return Ok(0),
+            // Checked even while data flows, so a chatty descendant can't hide the exit.
+            if self.left.is_none() && self.checked.elapsed() >= EXIT_CHECK {
+                self.checked = Instant::now();
+                if self.kill.has_exited() {
+                    let mut n: libc::c_int = 0;
+                    // SAFETY: FIONREAD writes one int, the bytes waiting in the pipe.
+                    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) };
+                    self.left = Some(n.max(0) as usize);
+                }
+            }
+            if let Some(n) = self.left {
+                let k = buf.len().min(n);
+                let got = if k == 0 { 0 } else { self.pipe.read(&mut buf[..k])? };
+                self.left = Some(n - got);
+                return Ok(got);
+            }
+            let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            // SAFETY: one pollfd, alive for the call.
+            match unsafe { libc::poll(&mut p, 1, EXIT_CHECK.as_millis() as i32) } {
                 0 => {}
                 -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
                 _ => return self.pipe.read(buf),

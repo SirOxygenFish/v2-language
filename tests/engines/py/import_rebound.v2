@@ -1,0 +1,27 @@
+// requires: py
+// A name the block rebound stays as the block left it when the target loads (13.7).
+@py { pass }
+@py b {
+    @import { f, g } from a
+    f = g
+    def go():
+        return f()
+    @export { go }
+}
+@py c {
+    @import { f as x, g as y } from a
+    x, y = y, x
+    def go2():
+        return [x(), y()]
+    @export { go2 }
+}
+@py a {
+    def f():
+        return "a.f"
+    def g():
+        return "a.g"
+    @export { f, g }
+}
+@import { go } from b
+@import { go2 } from c
+print(go(), go2())
