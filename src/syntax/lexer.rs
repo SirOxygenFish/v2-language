@@ -275,7 +275,13 @@ impl<'a> Lexer<'a> {
 
     fn end_of_file(&mut self) -> Result<Option<u8>, Diag> {
         if let Some(&(open, span)) = self.stack.last() {
-            return Err(Diag::new(format!("`{}` is never closed", open.opener()), span));
+            let line = &self.src[span.lo as usize..];
+            let d = Diag::new(format!("`{}` is never closed", open.opener()), span);
+            return Err(if line[..line.find('\n').unwrap_or(line.len())].contains("//") {
+                d.hint("`//` starts a comment; integer division is div(a, b)")
+            } else {
+                d
+            });
         }
         let m = self.mark();
         self.push(Tok::Eof, m);

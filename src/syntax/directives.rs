@@ -116,6 +116,17 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
     if compiled {
         compiled_directives(&directives, tag)?;
     }
+    let mut bound: Vec<(&Rc<str>, Span)> = Vec::new();
+    for import in &directives.imports {
+        let ImportItems::Names(items) = &import.items else { continue };
+        for item in items {
+            let local = item.alias.as_ref().map_or(&item.name, |a| &a.text);
+            if let Some((_, first)) = bound.iter().find(|(n, _)| *n == local) {
+                return Err(Diag::new(format!("'{local}' is imported twice"), item.span).note("first imported here", *first));
+            }
+            bound.push((local, item.span));
+        }
+    }
 
     // Step 3: dedent the code lines.
     let code: Vec<usize> = (0..lines.len())

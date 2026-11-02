@@ -319,7 +319,8 @@ The scanner works in state Code, where `{` adds 1 to the depth, `}` subtracts 1,
 - **Rust raw strings.** A word that is exactly `r`, `br` or `cr`, followed by zero or more `#` and then `"`, starts a raw string. It ends at `"` plus the same number of `#` (`r#ident` has no `"`).
 - **Rust chars and lifetimes.** `'\` starts a char that runs to the next unescaped `'`, so `'\u{7D}'` is skipped whole. `'x'` (a `'` two chars on) is a char. Anything else is a lifetime or label, and only the `'` is consumed.
 - **Js templates.** A backtick opens a template, and `\` escapes inside it. `${` pushes a Code context with its own depth; its `}` at depth 0 returns to the template. Templates nest.
-- **Not recognized:** regex literals, preprocessor lines with unbalanced braces, heredocs, unusual string forms. A brace or quote inside one of them can end the block early, or never. C1, C2 and the unterminated error make that failure loud, and the fence form is the fix (DOCS 4.2).
+- **JS regex literals** are recognized where a `/` can't be a division, as in JS itself: at the start, after an operator, an opening bracket, `,`, `;`, `}`, or a keyword such as `return` or `typeof`; one runs to its unescaped `/` outside a `[…]` class, on the same line.
+- **Not recognized:** a regex anywhere else (after `)`, say), preprocessor lines with unbalanced braces, heredocs, unusual string forms. A brace or quote inside one of them can end the block early, or never. C1, C2 and the unterminated error make that failure loud, and the fence form is the fix (DOCS 4.2).
 - **Python f-strings** are scanned as plain strings. PEP 701 same-quote nesting still scans correctly whenever its quotes pair up.
 - **Line states.** For every body line, the scanner records whether it starts in Code or inside a multi-line string, raw string, template or block comment (`RawBody.starts_in_code`, used by dedent in 4.4). A fenced body is scanned only for these states, never for its end. A Plain body marks every line as Code.
 ### 3.9 `extern` bodies
@@ -374,7 +375,7 @@ entry     = ( NAME | STRING | "[" expr "]" ) ":" expr
   - A block in operand position (`1 + @py { 2 }`, `-@py { 2 }`, `a ?? @py { 1 }`, a `for` head) reaches `primary`, which has no block: `a block value must be in parentheses here`, at the `@`.
 - **`@import`.** `engine_import` is the V2-level statement, with both forms. An `@import` directive inside a block takes only the first form, `{ items } from selector` (4.4).
 - **`func`.** A statement that starts with `func` and a name declares a function; `func` followed by `(` starts a `func_expr`, an anonymous function. `lambda` is an ordinary name: `lambda` followed by a parenthesized list and then `=>` or a body `{` is the error `V2 has no lambda keyword` (hint: `anonymous functions are written func(x) => …`).
-- **Assignment** is a statement, not an expression. Targets are NAME, `postfix "." NAME` and `postfix "[" expr "]"`. Any other target is `cannot assign to this expression`, and a target chain that contains `?.` is `cannot assign through ?.`.
+- **Assignment** is a statement, not an expression. Targets are NAME, `postfix "." NAME` and `postfix "[" expr "]"`, in parentheses or not. Any other target is `cannot assign to this expression`, and a target chain that contains `?.` is `cannot assign through ?.`.
 - **Optional chains** (`OptChain`): 5.5.
 - **Operands and arguments.**
   - `-2 ** 2` is `-(2 ** 2)`, and `2 ** -1` is valid.
@@ -489,6 +490,7 @@ pub struct ErrorValue {
 ```
 
 - `Value::clone` is O(1): assigning, passing, returning or storing a list or dict shares it; `str`, `bytes`, `func`, `handle` and `error` are immutable. `.copy()` is shallow: a new `Vec`/`IndexMap`, nested containers shared.
+- **Cycles through frames.** A closure over a frame that the frame holds (in a slot, or in a list or dict in one) makes an `Rc` cycle. Leaving a frame that made closures checks whether only its own values hold it: every reference to it, and to each frame, list, dict, function and error reached from its slots, must come from inside that group. Only the frame and the frames below it are walked, never the frames above it or another call's (an earlier pass of a loop, say), so a long chain of closures costs one step per frame. If so its slots are cleared and the group is freed. A frame that something else still holds (a closure that was returned) is remembered and checked again in a sweep, every 256 such frames at first, then every twice as many as the last sweep kept. A missed reference only makes the group look held, so the check can keep memory but never frees what is in use; a group of more than 2,000 values isn't walked. Other cycles, such as a list holding itself, are not collected.
 - **Freeing is iterative.** The `List`, `Dict` and `Func` handles wrap their `Rc` in a type whose `Drop` moves the contents of the last reference (a closure's frame slots, when nothing else holds the frame) into a thread-local queue that the outermost drop empties one value at a time; `ErrorValue`'s `Drop` queues its `data` and `cause` the same way. So a value nested a million levels deep (`for i in 0..1000000 { v = [v] }`) never overflows the stack when it goes away.
 - `type(x)` is one of `null bool int float str bytes list dict func handle error`. Every `Callable` is `"func"`, including names bound by `@import`; foreign functions, bound methods and classes *returned as values* are callable handles, type `"handle"` (11.6). Native pointers are handles in the native pseudo-session (16.6).
 - Blocks and `@import`s in a function body resolve against the declaring file (`decl.span.file` and its `FileScope`, 6.2), whichever file calls it.
@@ -1245,7 +1247,7 @@ Host strings are always valid UTF-8. Foreign strings can hold lone surrogates: i
 3. `bigint` within i64 → `int` tag, any other `bigint` → handle. `string` → `str`, after the surrogate check.
 4. `Buffer` or any `Uint8Array` (`util.types.isUint8Array`, which works across realms) → `bytes`; other typed arrays → handles.
 5. `Array.isArray(x)` → `list`, recursively; holes become `null`.
-6. A plain object → `dict` over `Object.keys`; symbol keys are ignored. Plain means prototype `null`, or a prototype `p` with `Object.getPrototypeOf(p) === null` and `p.constructor.name === "Object"` (any realm; `instanceof Object` fails across `vm` contexts).
+6. A plain object → `dict` over `Object.keys`; symbol keys are ignored. One with a JS function among its own data properties (a V2 function's stub doesn't count) is a handle instead: it carries behaviour, and copied, its methods would lose `this`. Plain means prototype `null`, or a prototype `p` with `Object.getPrototypeOf(p) === null` and `p.constructor.name === "Object"` (any realm; `instanceof Object` fails across `vm` contexts).
 7. A V2 stub → `fn` tag. A `V2Error` → `error` tag.
 8. Anything else → handle: functions and classes (callable handles, 11.6), symbols, `Map`, `Set`, `Date`, `RegExp`, class instances, other `Error`s, and Promises that are not awaited (9.8).
 

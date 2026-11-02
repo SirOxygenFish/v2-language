@@ -1,0 +1,11 @@
+// requires: js
+// An error whose `message` getter throws is still the user's error (9.6).
+try {
+    @js {
+        const e = new Error("x");
+        Object.defineProperty(e, "message", { get() { throw new Error("g") } });
+        throw e;
+    }
+} catch (e) {
+    print(e.type, e.foreign_type)
+}

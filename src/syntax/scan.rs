@@ -96,6 +96,40 @@ enum Frame {
     Template { start: usize },
 }
 
+/// Whether a JS `/` after `before` starts a regex literal rather than dividing: what comes before
+/// it can't end an operand, which is JS's own rule (3.8).
+fn regex_may_start(before: &str) -> bool {
+    let before = before.trim_end();
+    let Some(last) = before.chars().last() else { return true };
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    if word(last) {
+        let start = before.trim_end_matches(word).len();
+        return matches!(
+            &before[start..],
+            "return" | "typeof" | "instanceof" | "in" | "of" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await"
+        );
+    }
+    !matches!(last, ')' | ']' | '.' | '"' | '\'' | '`')
+}
+
+/// Just past the closing `/` of a regex literal at `i`, or `None` if its line ends first.
+fn regex_end(text: &str, i: usize) -> Option<usize> {
+    let b = text.as_bytes();
+    let (mut j, mut class) = (i + 1, false);
+    while j < b.len() {
+        match b[j] {
+            b'\n' => return None,
+            b'\\' if b.get(j + 1) != Some(&b'\n') => j += 1,
+            b'[' => class = true,
+            b']' => class = false,
+            b'/' if !class => return Some(j + 1),
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
 /// Scan a brace body. `text` holds the source, `start` is just after the opening `{`.
 pub fn scan_braces(text: &str, start: usize, profile: Profile) -> Result<Scanned, Unclosed> {
     let mut s = Scanner::new(text, profile, true);
@@ -270,6 +304,7 @@ impl<'a> Scanner<'a> {
                         self.frames.push(Frame::Template { start: i });
                         i + 1
                     }
+                    '/' if dialect == Dialect::Js && regex_may_start(&self.text[..i]) => regex_end(self.text, i).unwrap_or(i + 1),
                     c if c.is_ascii_digit() && matches!(dialect, Dialect::C | Dialect::Cpp) => {
                         // A number; `'` inside it is a digit separator (1'000'000).
                         let mut j = i;
@@ -457,6 +492,18 @@ mod tests {
         assert_eq!(body(r" let c = '\u{7D}'; }", rs).unwrap(), r" let c = '\u{7D}'; ");
         assert_eq!(body(" /* /* } */ } */ }", rs).unwrap(), " /* /* } */ } */ ");
         assert_eq!(body(" let s = \"a\n}\"; }", rs).unwrap(), " let s = \"a\n}\"; ");
+    }
+
+    #[test]
+    fn js_regexes() {
+        let js = Profile::CLike(Dialect::Js);
+        let src = " s.replace(/`([^`]+)`/g, \"x\"); r = /}/; c = /[/}]/; return /a\\/}/ } tail";
+        assert_eq!(body(src, js).unwrap(), " s.replace(/`([^`]+)`/g, \"x\"); r = /}/; c = /[/}]/; return /a\\/}/ ");
+        // Division: after an operand, a `/` is no regex.
+        assert_eq!(body(" x = a / b / c } d", js).unwrap(), " x = a / b / c ");
+        assert_eq!(body(" x = f(1) / 2 } d", js).unwrap(), " x = f(1) / 2 ");
+        // A regex can't span lines, so a lone `/` there is a division after all.
+        assert_eq!(body(" x = (1\n/ 2) } d", js).unwrap(), " x = (1\n/ 2) ");
     }
 
     #[test]

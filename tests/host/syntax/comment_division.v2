@@ -1,0 +1,3 @@
+// exit: 1
+// stderr: hint: `//` starts a comment; integer division is div(a, b)
+print(1 // 2)
