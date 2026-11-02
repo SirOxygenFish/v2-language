@@ -624,8 +624,8 @@ Two rules catch mismatched braces early:
 - After the closing `}` of **any** block, even a one-line one, only `)`, `]`, `}`, `,`, `;` or a
   comment may follow on that line.
 
-If a block contains braces V2 cannot match — for example inside a JavaScript regex literal, a C
-`#define`, a heredoc or an unusual string form — use the **fence form**: three or more backticks
+If a block contains braces V2 cannot match — for example a C `#define`, a heredoc, an unusual
+string form, or a JavaScript regex right after `)` — use the **fence form**: three or more backticks
 after the header, closed by a line holding only the same backticks.
 
 ````v2
@@ -1208,7 +1208,7 @@ Plain data is **copied** when it crosses between languages:
 | ------- | ------------------- | ---------------------------------- | ------------------------- | --------------- |
 | `null`  | `None`              | `null` (`undefined` becomes `null`) | `NULL` for `const char*` and pointer parameters; a NULL result is `null` | — |
 | `bool`  | `bool`              | `boolean`                          | `bool`                    | `bool`          |
-| `int`   | `int`               | `number` (beyond ±2⁵³: `BigInt`)   | `int`, `long`, `int64_t`… | `i8`…`i64`, `u8`…`u64` |
+| `int`   | `int`               | `number` (from ±2⁵³ on: `BigInt`)  | `int`, `long`, `int64_t`… | `i8`…`i64`, `u8`…`u64` |
 | `float` | `float`             | `number`                           | `float`, `double`         | `f32`, `f64`    |
 | `str`   | `str`               | `string`                           | `const char*` / `std::string` | `&str` / `String` |
 | `bytes` | `bytes`             | `Buffer`                           | —                         | —               |
@@ -1220,7 +1220,8 @@ JSON text is used automatically only when compiled code calls other languages th
 ([11.6](#116-calling-other-languages-from-compiled-code)).
 
 Only plain `list`, `tuple` and `dict` values convert; subclasses such as `namedtuple`,
-`OrderedDict` or `Counter` come back as handles (9.2). Subclasses of `int`, `float` and `str`
+`OrderedDict` or `Counter` come back as handles (9.2), and so does a JavaScript object with methods
+of its own, which would lose `this` as a copy. Subclasses of `int`, `float` and `str`
 arrive as the plain value, so an `IntEnum` member is just its number. Functions go *into* foreign
 code as callables. Foreign functions, methods and classes that come *back* as values are callable
 handles (`type()` says `"handle"`); names you bring in with `@import` are ordinary `func` values,
@@ -1228,7 +1229,7 @@ and passed back to their own language they arrive as the original function or cl
 
 Because data is copied, a Python function that changes a list you passed in does **not** change
 your V2 list. Return the new value instead. One value crossing between processes can't exceed
-64 MiB (`MarshalError`).
+64 MiB, and V2 data sent out can't be nested more than 256 lists or dicts deep (`MarshalError`).
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
 a whole-number JS `number` arrives in V2 as an `int`. Integers are range-checked when they go into
@@ -1269,7 +1270,8 @@ What you can do with a handle:
 Iterating a Python mapping or a JS `Map` works like a dict: `for k in h` gives keys,
 `for k, v in h` keys and values. Other handles give items, or index and item with two variables.
 
-`to_v2(h)` asks the engine to turn the object into plain data. Containers are converted
+`to_v2(h)` asks the engine to turn the object into plain data. Call it on the object itself:
+a value that has already arrived keeps the handles inside it as they are. Containers are converted
 recursively; Python sets and JS `Set`s become lists, JS `Map`s become dicts, and mapping keys that
 are numbers, booleans or `None`/`null` become strings in V2's `str()` form (`1` → `"1"`, `True` → `"true"`, so a
 pandas Series with the default index gives `{"0": …, "1": …}`). Other objects use their

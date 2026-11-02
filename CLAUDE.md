@@ -34,8 +34,9 @@ it is loaded automatically into every session and every subagent.
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
 - Round 3 found `s += piece` is quadratic (1 MB string: 12 s) and imported classes have no static
   members. Both are spec, documented, and go to the owner as proposals in the final report.
-- Scratchpad helpers (session-local): mem/bench.v2 and mem/measure.py (numbers), mkout.py writes a
-  test's .out from the binary (never for sweep tests: their output comes from DOCS).
+- Scratchpad helpers are session-local and can vanish (the app crash of 2026-11-02 wiped them):
+  bench/measure.py re-measures release numbers; rewrite fuzzers if needed. Never generate a sweep
+  test's .out from the binary: its output comes from DOCS.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,

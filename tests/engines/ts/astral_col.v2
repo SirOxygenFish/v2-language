@@ -1,0 +1,7 @@
+// requires: js
+// exit: 1
+// stderr: astral_col.v2:6:29: ForeignError: TypeError
+// Columns in a ts block count in its own text, whatever its stripped types held (12.6).
+@ts {
+let a: "😀" = null as any; a.x; let pad = "xxxxxxxxxx"
+}

@@ -1,9 +1,10 @@
 //! Frames and environments (INTERNALS 5.6).
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
-use super::value::{Callable, Value};
+use super::error::ErrorValue;
+use super::value::{release, Callable, Dict, Func, List, Value};
 use crate::syntax::ast::Layout;
 
 /// A frame and the frames it can see. Builtins frame ← module frame ← call frames ← block
@@ -186,31 +187,191 @@ pub fn take_values(env: &Env) -> Vec<Value> {
     }
 }
 
-/// Called when `env` goes out of scope. A closure stored in the frame it captures (a local
-/// `func`, `let f = func …`) keeps the frame alive through an `Rc` cycle; if nothing else
-/// reaches the frame, clear its slots so the cycle is freed (5.6). Cycles through containers
-/// are not trimmed.
+thread_local! {
+    /// Frames left while something else still held them, and the count that sweeps them.
+    static SUSPECTS: RefCell<(Vec<Weak<Frame>>, usize)> = const { RefCell::new((Vec::new(), FIRST_SWEEP)) };
+}
+
+const FIRST_SWEEP: usize = 256;
+
+/// Called when `env` goes out of scope. A closure over the frame that the frame itself holds,
+/// in a slot or in a list or dict in one, makes an `Rc` cycle. If only that cycle holds the
+/// frame now, its slots are cleared so it goes; if something else still does (a closure that
+/// was returned), the frame is checked again in later sweeps (5.6).
 pub fn leave(env: Env) {
-    if env.closures.get() == 0 {
+    // Nothing else holds it, so no closure does: it goes when `env` does.
+    if env.closures.get() == 0 || Rc::strong_count(&env) == 1 {
         return;
     }
-    let own = env
-        .slots
-        .borrow()
-        .iter()
-        .flatten()
-        .filter(|slot| match &slot.value {
-            Value::Func(c) => {
-                c.strong_count() == 1 && matches!(&**c, Callable::Closure { env: e, .. } if Rc::ptr_eq(e, &env))
-            }
-            _ => false,
-        })
-        .count();
-    if Rc::strong_count(&env) == 1 + own {
-        // Take the slots out first: dropping them may drop closures, which release `env`.
-        let slots = std::mem::take(&mut *env.slots.borrow_mut());
-        drop(slots);
+    if only_itself_holds(&env) {
+        release(take_values(&env));
+        return;
     }
+    let due = SUSPECTS.with(|s| {
+        let mut s = s.borrow_mut();
+        s.0.push(Rc::downgrade(&env));
+        s.0.len() >= s.1
+    });
+    drop(env);
+    if due {
+        sweep();
+    }
+}
+
+/// Clear every remembered frame that only its own values hold now. The next sweep comes after
+/// twice as many frames as were kept, so the work stays in proportion.
+pub fn sweep() {
+    let frames = SUSPECTS.with(|s| std::mem::take(&mut s.borrow_mut().0));
+    let mut kept = Vec::new();
+    for weak in frames {
+        let Some(env) = weak.upgrade() else { continue };
+        if only_itself_holds(&env) {
+            release(take_values(&env));
+        } else {
+            kept.push(weak);
+        }
+    }
+    SUSPECTS.with(|s| {
+        let mut s = s.borrow_mut();
+        s.1 = FIRST_SWEEP.max(2 * kept.len());
+        s.0.extend(kept);
+    });
+}
+
+/// A frame, list, dict, function or error reached from a frame's slots, held once here.
+enum Node {
+    Frame(Env),
+    List(List),
+    Dict(Dict),
+    Func(Func),
+    Error(Rc<ErrorValue>),
+}
+
+impl Node {
+    fn of(v: &Value) -> Option<Node> {
+        match v {
+            Value::List(l) => Some(Node::List(l.clone())),
+            Value::Dict(d) => Some(Node::Dict(d.clone())),
+            Value::Func(f) => Some(Node::Func(f.clone())),
+            Value::Error(e) => Some(Node::Error(e.clone())),
+            _ => None,
+        }
+    }
+
+    fn addr(&self) -> usize {
+        match self {
+            Node::Frame(f) => Rc::as_ptr(f) as usize,
+            Node::List(l) => l.addr(),
+            Node::Dict(d) => d.addr(),
+            Node::Func(f) => f.addr(),
+            Node::Error(e) => Rc::as_ptr(e) as usize,
+        }
+    }
+
+    fn count(&self) -> usize {
+        match self {
+            Node::Frame(f) => Rc::strong_count(f),
+            Node::List(l) => l.strong_count(),
+            Node::Dict(d) => d.strong_count(),
+            Node::Func(f) => f.strong_count(),
+            Node::Error(e) => Rc::strong_count(e),
+        }
+    }
+
+    /// What it holds, into `out`, spending `budget` per value; false if it is being changed
+    /// right now or the budget is spent.
+    fn holds(&self, out: &mut Vec<Node>, budget: &mut usize) -> bool {
+        let mut take = |values: &mut dyn Iterator<Item = &Value>| {
+            for v in values {
+                if *budget == 0 {
+                    return false;
+                }
+                *budget -= 1;
+                out.extend(Node::of(v));
+            }
+            true
+        };
+        match self {
+            Node::Frame(f) => frame_holds(f, out, budget),
+            Node::List(l) => l.try_borrow().is_ok_and(|items| take(&mut items.iter())),
+            Node::Dict(d) => d.try_borrow().is_ok_and(|map| take(&mut map.values())),
+            Node::Func(f) => {
+                match &**f {
+                    Callable::Closure { env, .. } => out.push(Node::Frame(env.clone())),
+                    Callable::Waiting { resolved, .. } => out.extend(resolved.get().and_then(Node::of)),
+                    _ => {}
+                }
+                true
+            }
+            Node::Error(e) => take(&mut [&e.data, &e.cause].into_iter()),
+        }
+    }
+}
+
+fn has_ancestor(f: &Frame, addr: usize) -> bool {
+    let mut p = f.parent.as_ref();
+    while let Some(frame) = p {
+        if Rc::as_ptr(frame) as usize == addr {
+            return true;
+        }
+        p = frame.parent.as_ref();
+    }
+    false
+}
+
+fn frame_holds(f: &Frame, out: &mut Vec<Node>, budget: &mut usize) -> bool {
+    let Ok(slots) = f.slots.try_borrow() else { return false };
+    for slot in slots.iter().flatten() {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        out.extend(Node::of(&slot.value));
+    }
+    out.extend(f.parent.clone().map(Node::Frame));
+    true
+}
+
+/// Whether only `env`'s own values still hold it: every reference to `env`, and to each frame,
+/// list, dict, function and error reached from its slots, comes from inside that group, but the
+/// caller's one to `env`. Only `env` and the frames below it are walked: another call's frame,
+/// or one of an earlier pass of a loop, is left out. A reference this misses only makes the
+/// group look held, so a wrong answer can keep memory but never frees what is in use. A big
+/// group isn't walked.
+fn only_itself_holds(env: &Env) -> bool {
+    let me = Rc::as_ptr(env) as usize;
+    // A group is small, so a list beats a map: (address, references from inside), `env` first.
+    let mut inside: Vec<(usize, usize)> = vec![(me, 0)];
+    let mut kept: Vec<Node> = Vec::new(); // each node reached, held once more here
+    let mut budget = 2_000;
+    let mut out = Vec::new();
+    if !frame_holds(env, &mut out, &mut budget) {
+        return false;
+    }
+    let mut todo = Vec::new();
+    loop {
+        for node in out.drain(..) {
+            let addr = node.addr();
+            // The frames above `env` live on with the code that runs in them.
+            if has_ancestor(env, addr) || matches!(&node, Node::Frame(f) if addr != me && !has_ancestor(f, me)) {
+                continue;
+            }
+            match inside.iter_mut().find(|(a, _)| *a == addr) {
+                Some((_, n)) => *n += 1,
+                None => {
+                    inside.push((addr, 1));
+                    todo.push(node);
+                }
+            }
+        }
+        let Some(node) = todo.pop() else { break };
+        if !node.holds(&mut out, &mut budget) {
+            return false;
+        }
+        kept.push(node);
+    }
+    // `kept` is in the order nodes were first reached, as is `inside` after `env`.
+    Rc::strong_count(env) == inside[0].1 + 1 && kept.iter().zip(&inside[1..]).all(|(n, (_, refs))| n.count() == refs + 1)
 }
 
 #[cfg(test)]
@@ -241,6 +402,52 @@ mod tests {
         drop(closure_in(&frame));
         leave(frame);
         assert!(weak.upgrade().is_none(), "the frame was freed");
+    }
+
+    /// `frame` holding a closure over itself inside a list, and the closure.
+    fn closure_in_list(frame: &Env) -> Value {
+        let f = closure_in(frame);
+        declare(frame, "box".into(), Value::list(vec![f.clone()]), false);
+        // The slot `f` is cleared, so only the list holds the closure.
+        let _ = write(frame, 0, 0, Value::Null);
+        f
+    }
+
+    #[test]
+    fn a_closure_in_a_list_in_its_frame_is_freed_with_it() {
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        drop(closure_in_list(&frame));
+        leave(frame);
+        assert!(weak.upgrade().is_none(), "the frame was freed");
+    }
+
+    #[test]
+    fn a_returned_closure_frees_its_frame_once_dropped() {
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        let returned = closure_in_list(&frame);
+        leave(frame);
+        assert!(weak.upgrade().is_some(), "the returned closure still reaches it");
+        drop(returned);
+        sweep();
+        assert!(weak.upgrade().is_none(), "the next sweep freed it");
+    }
+
+    #[test]
+    fn a_list_held_outside_keeps_the_frame() {
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        drop(closure_in_list(&frame));
+        let outside = lookup(&frame, "box").unwrap();
+        leave(frame);
+        sweep();
+        let kept = weak.upgrade().expect("the list reaches the closure, which reaches the frame");
+        assert!(lookup(&kept, "box").is_some(), "its slots were not cleared");
+        drop(kept);
+        drop(outside);
+        sweep();
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

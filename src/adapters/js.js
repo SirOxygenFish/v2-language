@@ -585,6 +585,8 @@ function surrogateCheck(s) {
   return s;
 }
 
+const ownFunction = (d) => d !== undefined && typeof d.value === 'function' && !stubCells.has(d.value) && !routeStubs.has(d.value);
+
 function isPlainObject(x) {
   const p = Object.getPrototypeOf(x);
   if (p === null) return true;
@@ -646,6 +648,8 @@ function encode(x, depth = 0, open = new Walk()) {
   if (isPlainObject(x)) {
     if (depth >= MAX_DEPTH || open.has(x)) return handleTag(x);
     const keys = Object.keys(x);
+    // One that carries its own functions is behaviour, not data: copied, they'd lose `this`.
+    if (keys.some((k) => ownFunction(Object.getOwnPropertyDescriptor(x, k)))) return handleTag(x);
     open.spend(2 * keys.length);
     open.add(x);
     try {
@@ -800,7 +804,10 @@ function codePointCol(text, utf16col) {
 const FRAME = /^\s*at (?:(.*?) \()?(.+?):(\d+):(\d+)\)?$/;
 
 function frames(e) {
-  const stack = e && typeof e.stack === 'string' ? e.stack : '';
+  let stack = '';
+  try {
+    if (e && typeof e.stack === 'string') stack = e.stack;
+  } catch {} // a `message` getter that throws, read by Node to format the stack
   const out = [];
   for (const line of stack.split('\n')) {
     const m = FRAME.exec(line);
@@ -1030,15 +1037,17 @@ function unitAttr(u, name) {
   }
 }
 
-const withThis = new WeakMap(); // a module's function -> the one object that stands for it
+const withThis = new WeakMap(); // a module's function -> its module object -> what stands for it
 
 function realTarget(unit, name) {
   // The function or class itself. One read from a module object keeps that `this`, as a call
   // through V2 does (13.5): only a plain call differs, everything else is the function's own.
   const [f, self] = unitAttr(units.get(unit), name);
   if (typeof f !== 'function' || self === undefined || isConstructor(f)) return f;
-  if (!withThis.has(f)) withThis.set(f, new Proxy(f, { apply: (t, that, args) => Reflect.apply(t, that === undefined ? self : that, args) }));
-  return withThis.get(f);
+  if (!withThis.has(f)) withThis.set(f, new WeakMap());
+  const stands = withThis.get(f);
+  if (!stands.has(self)) stands.set(self, new Proxy(f, { apply: (t, that, args) => Reflect.apply(t, that === undefined ? self : that, args) }));
+  return stands.get(self);
 }
 
 function unitStub(unit, name, route, alias) {
@@ -1179,7 +1188,7 @@ function settle(v, k, what) {
 
 function doLoad(m) {
   const src = m.lang === 'ts' ? stripTypes(m.source, m) : m.source;
-  rememberSource(m.file, m.line, src);
+  rememberSource(m.file, m.line, m.source); // stripping keeps every UTF-16 offset (12.6)
   const ctx = newContext(m.file);
   for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));
   bindImports(ctx, m.imports || [], m.kind !== 'action');
