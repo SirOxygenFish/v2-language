@@ -1,0 +1,21 @@
+// requires: py
+// timeout: 60
+// Many handles dropped at once, then a call with a big answer: the releases don't fill the pipe
+// while the worker writes its answer (INTERNALS 11.2).
+@py p {
+    class O:
+        def __init__(self, i):
+            self.i = i
+    def make(i):
+        return O(i)
+    def big(n):
+        return "x" * n
+    @export { make, big }
+}
+@import { make, big } from p
+let objs = []
+for i in 0..20000 {
+    objs.push(make(i))
+}
+objs = []
+print(len(big(300000)))

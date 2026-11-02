@@ -25,7 +25,7 @@ const LIMIT = 64 * 1024 * 1024; // bytes per frame, both directions (9.1)
 const MAX_DEPTH = 256; // nested lists/dicts (10.5)
 const OUT_CHUNK = 1024 * 1024; // characters per `out` frame, well below LIMIT
 const FLUSH_AT = 64 * 1024; // buffered characters that force a flush during a request
-const GC_AFTER = 1000; // fn stubs made since the last idle turn that force a collection (11.9)
+const GC_AFTER = 1000; // fn stubs made since the last collection that force one at the next idle turn (11.9)
 const KINDS = ['ForeignError', 'ImportError', 'NameError', 'ValueError', 'MarshalError', 'ProtocolError', 'Error'];
 const MAX_CAUSES = 8; // chained causes sent (9.6)
 const ADAPTER = __filename;
@@ -530,7 +530,7 @@ function releaseHandles(ids) {
 
 const stubs = new Map(); // callable id -> WeakRef to its one stub
 const stubCells = new WeakMap(); // stub -> {id, n}
-let stubsSinceTurn = 0;
+let stubsSinceGc = 0;
 const finalizer = new FinalizationRegistry((cell) => {
   if (stubs.get(cell.id)?.deref() === undefined) stubs.delete(cell.id);
   for (let i = 0; i < cell.n; i++) fnReleases.push(cell.id);
@@ -545,7 +545,7 @@ function stubFor(id, name) {
     stubCells.set(s, cell);
     stubs.set(id, new WeakRef(s));
     finalizer.register(s, cell);
-    stubsSinceTurn += 1;
+    stubsSinceGc += 1;
   }
   stubCells.get(s).n += 1;
   return s;
@@ -1670,11 +1670,11 @@ async function main() {
       // keeps WeakRef targets (every new stub) until the job ends, so a collection for many new
       // stubs comes after the turn, and its finalizers run in one more.
       await new Promise((r) => setImmediate(r));
-      if (stubsSinceTurn > GC_AFTER) {
+      if (stubsSinceGc > GC_AFTER) {
         gc();
         await new Promise((r) => setImmediate(r));
+        stubsSinceGc = 0;
       }
-      stubsSinceTurn = 0;
     } else {
       dispatchOther(m);
     }

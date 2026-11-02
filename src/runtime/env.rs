@@ -21,6 +21,10 @@ pub struct Frame {
     /// Closures created over this frame; when non-zero, leaving the frame looks for the
     /// closure-in-own-frame cycle (5.6).
     pub closures: Cell<u32>,
+    /// Left while something else still held it, so checked again in sweeps (5.1).
+    pub remembered: Cell<bool>,
+    /// Waiting in `RECHECK`.
+    queued: Cell<bool>,
 }
 
 pub struct Slot {
@@ -53,7 +57,7 @@ const MAX_SPARE: usize = 256;
 pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
     let mut slots = SPARE.with(|s| s.borrow_mut().pop()).unwrap_or_default();
     slots.resize_with(layout.len(), || None);
-    Rc::new(Frame { layout: RefCell::new(layout.clone()), slots: RefCell::new(slots), parent: parent.cloned(), closures: Cell::new(0) })
+    Rc::new(Frame { layout: RefCell::new(layout.clone()), slots: RefCell::new(slots), parent: parent.cloned(), closures: Cell::new(0), remembered: Cell::new(false), queued: Cell::new(false) })
 }
 
 impl Drop for Frame {
@@ -196,6 +200,29 @@ pub fn take_values(env: &Env) -> Vec<Value> {
 thread_local! {
     /// Frames left while something else still held them, and the count that sweeps them.
     static SUSPECTS: RefCell<(Vec<Weak<Frame>>, usize)> = const { RefCell::new((Vec::new(), FIRST_SWEEP)) };
+    /// Remembered frames that a closure over them has let go of since: checked at the next leave.
+    static RECHECK: RefCell<Vec<Weak<Frame>>> = const { RefCell::new(Vec::new()) };
+    /// A check is dropping the copies it held, which are no one letting go.
+    static CHECKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A closure over `env` is going: if `env` waits for a sweep, check it soon instead.
+pub fn closure_dropped(env: &Env) {
+    if env.remembered.get() && !env.queued.get() && !CHECKING.try_with(Cell::get).unwrap_or(true) {
+        env.queued.set(true);
+        let _ = RECHECK.try_with(|r| r.borrow_mut().push(Rc::downgrade(env)));
+    }
+}
+
+fn recheck() {
+    let frames = RECHECK.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for env in frames.iter().filter_map(Weak::upgrade) {
+        env.queued.set(false);
+        if env.remembered.get() && only_itself_holds(&env) {
+            env.remembered.set(false);
+            release(take_values(&env));
+        }
+    }
 }
 
 const FIRST_SWEEP: usize = 256;
@@ -205,6 +232,9 @@ const FIRST_SWEEP: usize = 256;
 /// frame now, its slots are cleared so it goes; if something else still does (a closure that
 /// was returned), the frame is checked again in later sweeps (5.6).
 pub fn leave(env: Env) {
+    if RECHECK.with(|r| !r.borrow().is_empty()) {
+        recheck();
+    }
     // Nothing else holds it, so no closure does: it goes when `env` does.
     if env.closures.get() == 0 || Rc::strong_count(&env) == 1 {
         return;
@@ -213,6 +243,7 @@ pub fn leave(env: Env) {
         release(take_values(&env));
         return;
     }
+    env.remembered.set(true);
     let due = SUSPECTS.with(|s| {
         let mut s = s.borrow_mut();
         s.0.push(Rc::downgrade(&env));
@@ -231,7 +262,11 @@ pub fn sweep() {
     let mut kept = Vec::new();
     for weak in frames {
         let Some(env) = weak.upgrade() else { continue };
+        if !env.remembered.get() {
+            continue; // already freed by a recheck
+        }
         if only_itself_holds(&env) {
+            env.remembered.set(false);
             release(take_values(&env));
         } else {
             kept.push(weak);
@@ -242,6 +277,22 @@ pub fn sweep() {
         s.1 = FIRST_SWEEP.max(2 * kept.len());
         s.0.extend(kept);
     });
+}
+
+/// Set while a check runs (`CHECKING`).
+struct Checking;
+
+impl Checking {
+    fn new() -> Checking {
+        CHECKING.with(|c| c.set(true));
+        Checking
+    }
+}
+
+impl Drop for Checking {
+    fn drop(&mut self) {
+        let _ = CHECKING.try_with(|c| c.set(false));
+    }
 }
 
 /// A frame, list, dict, function or error reached from a frame's slots, held once here.
@@ -346,7 +397,10 @@ fn frame_holds(f: &Frame, out: &mut Vec<Node>, budget: &mut usize) -> bool {
 /// more look held, so a wrong answer can keep memory but never frees what is in use. A big group
 /// isn't walked.
 fn only_itself_holds(env: &Env) -> bool {
-    const MAX_NODES: usize = 2_000;
+    // A walk costs about what making the group did, so the bound is only for what a sweep repeats.
+    const MAX_NODES: usize = 100_000;
+    // Declared first, so it ends last: the copies below are dropped while it is set.
+    let _checking = Checking::new();
     let me = Rc::as_ptr(env) as usize;
     // Each value reached, held once more here: its address, its references from inside, and the
     // value; `env` is first, with no value. `edges` are the references, as (holder, held) indexes.
