@@ -799,8 +799,8 @@ if __name__ == "__main__":
         return g[name]
 
     class UnitStub(object):
-        """An inner @import from this session, looked up at every use (13.7). Calls, attributes,
-        isinstance and subclassing reach the current target, so a class stays a class."""
+        """An inner @import from a block of this session that hasn't loaded yet (13.7). Its calls,
+        attributes, isinstance and subclassing reach the target, or say why they can't."""
 
         def __init__(self, unit, name, route, alias):
             self._unit, self._name, self._route = unit, name, route
@@ -821,6 +821,8 @@ if __name__ == "__main__":
             return self._current()(*args, **kwargs)
 
         def __getattr__(self, k):
+            if "_unit" not in self.__dict__:  # half built by copy or pickle
+                raise AttributeError(k)
             return getattr(self._current(), k)
 
         def __instancecheck__(self, x):
@@ -832,19 +834,32 @@ if __name__ == "__main__":
         def __mro_entries__(self, bases):
             return (self._current(),)
 
+    _importers = {}  # unit -> (globals, alias, name) of the blocks waiting for it (13.7)
+
+    def bind_importers(unit):
+        """Block `unit` has loaded, for V2 too: what imported from it gets the real thing."""
+        waiting = _importers.pop(unit, ()) if unit in units else ()
+        for g, alias, name in waiting:
+            if isinstance(g.get(alias), UnitStub) and units[unit][1].get(name) == "func":
+                g[alias] = unit_attr(unit, name)
+
     def reply_lost(m):
         """A load whose reply can't go is a failed block for V2, so it's gone here too (12.1)."""
         u = units.pop(m.get("unit"), None) if m["t"] == "load" else None
         if u is not None:
             sys.modules.pop(u[0].__name__, None)
 
-    def bind_imports(g, imports):
+    def bind_imports(g, imports, keeps):
         for e in imports:
             alias = check_name(e["as"], "@import name")
-            if "unit" in e:
-                g[alias] = UnitStub(e["unit"], e["name"], e.get("route"), alias)
-            else:
+            if "unit" not in e:
                 g[alias] = RouteFunction(e["route"], alias)
+            elif e["unit"] in units:
+                g[alias] = unit_attr(e["unit"], e["name"])
+            else:
+                g[alias] = UnitStub(e["unit"], e["name"], e.get("route"), alias)
+                if keeps:
+                    _importers.setdefault(e["unit"], []).append((g, alias, e["name"]))
 
     def unique_name(base):
         name, n = base, 1
@@ -907,7 +922,7 @@ if __name__ == "__main__":
         g["__file__"], g["__builtins__"] = path, builtins
         for k, v in m["args"].items():
             g[check_name(k)] = decode(v)
-        bind_imports(g, m.get("imports") or [])
+        bind_imports(g, m.get("imports") or [], m["kind"] != "action")
         try:
             tree = ast.parse("\n" * (first - 1) + m["source"], path, "exec")
         except SyntaxError as e:
@@ -1177,6 +1192,8 @@ if __name__ == "__main__":
                     reply = plain_err(rid, "Error", "the error could not be sent (%s)" % type(e2).__name__)
             try:
                 send(reply)
+                if m["t"] == "load":
+                    bind_importers(m["unit"])
             except TooBig as t:
                 reply_lost(m)
                 send(plain_err(rid, "MarshalError", too_big_message(t.args[0])))

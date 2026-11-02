@@ -282,10 +282,13 @@ impl<'a> Lexer<'a> {
         Ok(None)
     }
 
-    /// Past a `:` at the top level of an interpolation, where a format would be.
+    /// Right after a `:` at the top level of an interpolation, with only what a format holds
+    /// between them.
     fn in_format(&self, pos: usize) -> bool {
+        let Some(open) = self.src[..pos].rfind("${") else { return false };
+        let text = &self.src[open..pos];
         let top = matches!(self.stack.last(), Some((Open::Interp, _)));
-        top && self.src[..pos].rfind("${").is_some_and(|i| self.src[i..pos].contains(':') && !self.src[i..pos].contains('?'))
+        top && !text.contains('?') && text.rfind(':').is_some_and(|c| text[c + 1..].bytes().all(|b| b.is_ascii_digit() || b",.+-_<>^=#".contains(&b)))
     }
 
     /// `:.Nf}` right at the top level of an interpolation (3.5).

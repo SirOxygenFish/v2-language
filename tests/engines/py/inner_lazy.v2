@@ -1,6 +1,7 @@
 // requires: py
 // R52: a block imports a function from a block further down; it is looked up when called, in
-// the worker, so its exceptions arrive unwrapped and rebinding is seen (INTERNALS 13.7).
+// the worker, so its exceptions arrive unwrapped; once `b` has run it is the real function, and
+// a later rebinding isn't seen, as with Python's own `from m import f` (INTERNALS 13.7).
 @py a {
     @import { f } from b
     def call_f(x):

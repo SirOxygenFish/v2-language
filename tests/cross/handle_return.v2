@@ -1,0 +1,38 @@
+// requires: py js
+// A handle stays good while a frame names it, whoever held it last (11.2): a V2 function's return
+// value, a value that only the error holds, a temporary block arg.
+func later(a, b) {
+    return a.toordinal() >= b.toordinal() ? a : b
+}
+func ident(x) {
+    return x
+}
+func fails(x) {
+    throw error("K", "m", {x: x})
+}
+@py {
+    @import { later, ident, fails } from v2
+    import datetime, functools
+    print(later(datetime.date(2020, 1, 2), datetime.date(2019, 1, 1)))
+    print(functools.reduce(later, [datetime.date(2001, 1, 1), datetime.date(2003, 1, 1), datetime.date(2002, 1, 1)]))
+    def local():
+        return "local"
+    print(ident(local)())
+    try:
+        fails(datetime.date(2005, 1, 1))
+    except V2Error as e:
+        print(e.data["x"])
+}
+@js {
+    @import { ident } from v2
+    const lf = () => 1;
+    console.log(ident(lf) === lf);
+}
+@py mk {
+    import datetime
+    def date():
+        return datetime.date(2006, 1, 1)
+    @export { date }
+}
+@import { date } from mk
+@py(d: date()) { print(d) }
