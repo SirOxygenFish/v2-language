@@ -1,0 +1,20 @@
+// requires: js
+// A function imported from a module is that function: its own properties, its prototype, one
+// identity. Only a plain call differs, getting the module as `this` (13.5, 13.7).
+@js a {
+    @import { Fn, Point, whoami } from js."./fixtures/fn_lib.js"
+    @import { inspect } from js.util
+    class P3 extends Point {}
+    Point.prototype.norm = function () { return this.x + this.y };
+    function t() {
+        const seen = new Set([whoami, whoami]);
+        return [Fn.tag, Fn.helper(), Fn.name, typeof inspect.custom, new P3(1, 2).norm(), Object.create(Point.prototype) instanceof Point,
+            seen.size, whoami(), whoami.call({}) === "someone else", Object.keys(Fn)];
+    }
+    function same(x, y) { return x === y }
+    @export { t, same }
+}
+@import { t, same } from a
+@import { whoami } from js."./fixtures/fn_lib.js"
+print(t())
+print(same(whoami, whoami))

@@ -879,6 +879,23 @@ fn sleep_flushes_what_was_printed() {
 
 #[cfg(unix)]
 #[test]
+fn no_interpreter_thread_is_not_an_internal_error() {
+    // A process limit (a container's pids limit) is the system's, not a V2 bug (INTERNALS 21).
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root isn't held to RLIMIT_NPROC
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("hi.v2"), "print(\"hi\")\n").unwrap();
+    let v2 = v2_command(&home.0).get_program().to_os_string();
+    let out = Command::new("bash").args(["-c", "ulimit -u 1; exec \"$0\" hi.v2"]).arg(&v2).current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("v2: cannot start the interpreter thread:") && !err.contains("internal error"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_strict_umask_does_not_stop_a_worker() {
     // The run dir's insides have their modes set, not left to the umask (INTERNALS 20.3).
     if !needs("py", "a_strict_umask_does_not_stop_a_worker") {
