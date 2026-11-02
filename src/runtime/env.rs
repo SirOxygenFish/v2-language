@@ -218,9 +218,15 @@ fn recheck() {
     let frames = RECHECK.with(|r| std::mem::take(&mut *r.borrow_mut()));
     for env in frames.iter().filter_map(Weak::upgrade) {
         env.queued.set(false);
-        if env.remembered.get() && only_itself_holds(&env) {
-            env.remembered.set(false);
-            release(take_values(&env));
+        if env.remembered.get() {
+            match check(&env) {
+                Verdict::Garbage => {
+                    env.remembered.set(false);
+                    release(take_values(&env));
+                }
+                Verdict::NoCycle => env.remembered.set(false),
+                Verdict::Held => {}
+            }
         }
     }
 }
@@ -239,9 +245,13 @@ pub fn leave(env: Env) {
     if env.closures.get() == 0 || Rc::strong_count(&env) == 1 {
         return;
     }
-    if only_itself_holds(&env) {
-        release(take_values(&env));
-        return;
+    match check(&env) {
+        Verdict::Garbage => {
+            release(take_values(&env));
+            return;
+        }
+        Verdict::NoCycle => return,
+        Verdict::Held => {}
     }
     env.remembered.set(true);
     let due = SUSPECTS.with(|s| {
@@ -265,11 +275,13 @@ pub fn sweep() {
         if !env.remembered.get() {
             continue; // already freed by a recheck
         }
-        if only_itself_holds(&env) {
-            env.remembered.set(false);
-            release(take_values(&env));
-        } else {
-            kept.push(weak);
+        match check(&env) {
+            Verdict::Garbage => {
+                env.remembered.set(false);
+                release(take_values(&env));
+            }
+            Verdict::NoCycle => env.remembered.set(false),
+            Verdict::Held => kept.push(weak),
         }
     }
     SUSPECTS.with(|s| {
@@ -389,37 +401,58 @@ fn frame_holds(f: &Frame, out: &mut Vec<Node>, budget: &mut usize) -> bool {
     true
 }
 
-/// Whether nothing outside `env`'s own values still reaches it. Every frame, list, dict, function
-/// and error reached from its slots is counted with the references to it from inside that group;
-/// one with more is held from outside, so it lives, and so does whatever it reaches. `env` is
-/// garbage if none of that reaches it. Only `env` and the frames below it are walked, not
-/// another call's frame or one of an earlier pass of a loop. A reference this misses only makes
-/// more look held, so a wrong answer can keep memory but never frees what is in use. A big group
-/// isn't walked.
-fn only_itself_holds(env: &Env) -> bool {
-    // A walk costs about what making the group did, so the bound is only for what a sweep repeats.
-    const MAX_NODES: usize = 100_000;
+/// A value a check reached: its address, its references from inside the group, where its own
+/// references start and end in the check's list of them, and the value (none for the frame).
+type Entry = (usize, usize, (usize, usize), Option<Node>);
+
+/// What a check of a frame found.
+#[derive(Clone, Copy, PartialEq)]
+enum Verdict {
+    /// Nothing outside reaches it: free it.
+    Garbage,
+    /// Something outside still reaches it through a cycle: check again later.
+    Held,
+    /// No cycle runs through it, so plain reference counting frees it.
+    NoCycle,
+}
+
+/// Whether anything outside `env`'s own values still reaches it. Every frame, list, dict,
+/// function and error reached from its slots is counted with the references to it from inside
+/// that group; one with more is held from outside, so it lives, and so does whatever it reaches.
+/// `env` is garbage if none of that reaches it. A reference this misses only makes more look
+/// held, so a wrong answer can keep memory but never frees what is in use; that allows two
+/// shortcuts. A list or dict with holders besides the one that led here isn't walked (data
+/// passed in, shared with the rest of the program), and of the frames that aren't `env` or below
+/// it (another call's, an earlier pass of a loop) only the first few found are.
+fn check(env: &Env) -> Verdict {
+    // A walk costs about what making the group did; the bounds are for what a sweep repeats.
+    const MAX_NODES: usize = 1_000_000;
+    const MAX_FOREIGN: usize = 8;
     // Declared first, so it ends last: the copies below are dropped while it is set.
     let _checking = Checking::new();
     let me = Rc::as_ptr(env) as usize;
-    // Each value reached, held once more here: its address, its references from inside, and the
-    // value; `env` is first, with no value. `edges` are the references, as (holder, held) indexes.
-    let mut nodes: Vec<(usize, usize, Option<Node>)> = vec![(me, 0, None)];
-    let mut edges: Vec<(usize, usize)> = Vec::new();
+    // Each value reached, held once more here: its address, its references from inside, where
+    // its own references start and end in `edges`, and the value; `env` is first, with no value.
+    let mut nodes: Vec<Entry> = vec![(me, 0, (0, 0), None)];
+    let mut edges: Vec<usize> = Vec::new();
     // Found by address in that list while it is short, then through a map.
     let mut by_addr: Option<HashMap<usize, usize>> = None;
-    let mut budget = 100_000; // items looked at, plain ones included
+    let mut budget = 10_000_000; // items looked at, plain ones included
+    let mut foreign = 0;
+    // Something was left unwalked, so a cycle through it can't be ruled out.
+    let mut partial = false;
     let mut out = Vec::new();
     if !frame_holds(env, &mut out, &mut budget) {
-        return false;
+        return Verdict::Held;
     }
     let mut todo = Vec::new();
     let mut from = 0;
     loop {
+        let first = edges.len();
         for node in out.drain(..) {
             let addr = node.addr();
             // The frames above `env` live on with the code that runs in them.
-            if has_ancestor(env, addr) || matches!(&node, Node::Frame(f) if addr != me && !has_ancestor(f, me)) {
+            if has_ancestor(env, addr) {
                 continue;
             }
             let found = match &by_addr {
@@ -429,7 +462,15 @@ fn only_itself_holds(env: &Env) -> bool {
             let k = match found {
                 Some(k) => k,
                 None => {
-                    nodes.push((addr, 0, Some(node)));
+                    let other_frame = matches!(&node, Node::Frame(f) if !has_ancestor(f, me));
+                    if other_frame && foreign == MAX_FOREIGN {
+                        partial = true;
+                        continue;
+                    }
+                    foreign += usize::from(other_frame);
+                    // Held twice already, by this and something else: not walked.
+                    let shared = matches!(&node, Node::List(_) | Node::Dict(_)) && node.count() > 2;
+                    nodes.push((addr, 0, (0, 0), Some(node)));
                     let k = nodes.len() - 1;
                     match &mut by_addr {
                         Some(map) => {
@@ -438,38 +479,47 @@ fn only_itself_holds(env: &Env) -> bool {
                         None if k >= 32 => by_addr = Some(nodes.iter().enumerate().map(|(k, n)| (n.0, k)).collect()),
                         None => {}
                     }
-                    todo.push(k);
+                    if shared {
+                        partial = true;
+                    } else {
+                        todo.push(k);
+                    }
                     k
                 }
             };
             nodes[k].1 += 1;
-            edges.push((from, k));
+            edges.push(k);
         }
+        nodes[from].2 = (first, edges.len());
         let Some(k) = todo.pop() else { break };
         from = k;
-        if nodes.len() > MAX_NODES || !nodes[k].2.as_ref().is_some_and(|node| node.holds(&mut out, &mut budget)) {
-            return false;
+        if nodes.len() > MAX_NODES || !nodes[k].3.as_ref().is_some_and(|node| node.holds(&mut out, &mut budget)) {
+            return Verdict::Held;
         }
     }
+    if nodes[0].1 == 0 && !partial {
+        return Verdict::NoCycle;
+    }
     // What something outside holds lives, with all it reaches here.
-    let held = |n: &(usize, usize, Option<Node>)| match &n.2 {
+    let held = |n: &Entry| match &n.3 {
         Some(node) => node.count() > n.1 + 1,
         None => Rc::strong_count(env) > n.1 + 1, // more than the caller's
     };
-    let mut live: Vec<usize> = (0..nodes.len()).filter(|&k| held(&nodes[k])).collect();
-    if live.is_empty() {
-        return true;
+    if held(&nodes[0]) {
+        return Verdict::Held;
     }
+    let mut live: Vec<usize> = (1..nodes.len()).filter(|&k| held(&nodes[k])).collect();
     let mut seen = vec![false; nodes.len()];
     while let Some(k) = live.pop() {
         if k == 0 {
-            return false;
+            return Verdict::Held;
         }
         if !std::mem::replace(&mut seen[k], true) {
-            live.extend(edges.iter().filter(|e| e.0 == k).map(|e| e.1));
+            let (a, b) = nodes[k].2;
+            live.extend_from_slice(&edges[a..b]);
         }
     }
-    true
+    Verdict::Garbage
 }
 
 #[cfg(test)]

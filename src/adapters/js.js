@@ -25,7 +25,7 @@ const LIMIT = 64 * 1024 * 1024; // bytes per frame, both directions (9.1)
 const MAX_DEPTH = 256; // nested lists/dicts (10.5)
 const OUT_CHUNK = 1024 * 1024; // characters per `out` frame, well below LIMIT
 const FLUSH_AT = 64 * 1024; // buffered characters that force a flush during a request
-const GC_AFTER = 1000; // fn stubs made since the last collection that force one at the next idle turn (11.9)
+const GC_AFTER = 200; // fn stubs made since the last collection that force one at the next idle turn (11.9)
 const KINDS = ['ForeignError', 'ImportError', 'NameError', 'ValueError', 'MarshalError', 'ProtocolError', 'Error'];
 const MAX_CAUSES = 8; // chained causes sent (9.6)
 const ADAPTER = __filename;
@@ -827,7 +827,10 @@ function frames(e) {
 function errorName(e) {
   if (e === null || (typeof e !== 'object' && typeof e !== 'function')) return typeof e;
   try {
-    return typeof e.name === 'string' ? e.name : typeName(e);
+    if (typeof e.name !== 'string') return typeName(e);
+    // A subclass that doesn't set `name` still says what it is, as a Python class does.
+    const own = typeof e.constructor === 'function' ? e.constructor.name : '';
+    return e.name === 'Error' && own && own !== 'Error' ? own : e.name;
   } catch {
     return 'Error';
   }

@@ -1,0 +1,44 @@
+// requires: py
+// timeout: 60
+// More shapes the frame check frees (INTERNALS 5.1): a wrapper another call made and the frame
+// keeps (`memoize(slow)`), and a frame with a big local list.
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def make():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { make, n }
+}
+@import { make, n } from pk
+func memoize(g) {
+    let c = {}
+    return func(x) => g(x)
+}
+func wrapped(i) {
+    let t = make()
+    func slow(x) {
+        return x + 1
+    }
+    let fast = memoize(slow)
+    return fast(i)
+}
+func big(i) {
+    let t = make()
+    let pad = range(0, 150000)
+    let f = func() => pad[0]
+    return f()
+}
+func released(f) {
+    n()
+    let before = n()
+    for i in 0..20 {
+        f(i)
+    }
+    n()
+    return n() - before
+}
+print(released(wrapped), released(big))

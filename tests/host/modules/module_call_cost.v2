@@ -1,0 +1,8 @@
+// timeout: 30
+// A module's function costs the same per call whatever data the module holds (5.1).
+import "./fixtures/big_table.v2" as m
+let s = 0
+for k in 0..1000 {
+    s = s + m.get(k)
+}
+print(s)

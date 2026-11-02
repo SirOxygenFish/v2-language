@@ -237,6 +237,8 @@ count += 1             // also -=, *=, /=, %=
 - Declaring the same name twice in the same block is an error; an inner block may *shadow* it.
   A function's parameters, a loop's variables and a `catch` name count as declared in the body they
   belong to, so `func f(x) { let x = 1 }` is an error.
+- Lists and dicts that point at each other (a parent pointer, a doubly linked list, a list holding
+  itself) are not freed: V2 has no general cycle collector. Break the link when you are done.
 - `x += y` always means `x = x + y`, a full copy each time, so build long strings and lists with
   `push` and `join` rather than `+=` in a loop. For lists that makes a **new** list: other names for the old
   list don't see the change (use `.push()` to change a list in place).
@@ -1160,7 +1162,9 @@ print(by_age.map(func(p) => p.name))      // ["Linus", "Ada", "Grace"]
 Python calls the V2 function once per item; each call crosses back into V2 and returns.
 
 A V2 function that foreign code keeps (a listener, a callback stored on an object) keeps the
-function that made it alive, with all its variables, until the foreign side lets go. If one of
+function that made it alive, with all its variables, until the foreign side lets go. Python lets
+go at once; JavaScript when its garbage collector next runs, which V2 asks for after every 200 or
+so V2 functions it hands over. If one of
 those variables holds the foreign object that keeps the callback, neither side can let go: make
 such a callback in a small helper function that holds only what it needs.
 

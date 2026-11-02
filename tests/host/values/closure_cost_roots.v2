@@ -1,0 +1,21 @@
+// timeout: 30
+// Many values in a frame that are also held elsewhere cost a walk in proportion to them (5.1).
+let keep = []
+func mk(i) {
+    return func() => i
+}
+for i in 0..4000 {
+    keep.push(mk(i))
+}
+func run() {
+    let mine = keep.copy()
+    func local() {
+        return len(mine)
+    }
+    return local()
+}
+let s = 0
+for k in 0..300 {
+    s = s + run()
+}
+print(s)
