@@ -125,6 +125,11 @@ fn position(f: &Frame, name: &str) -> Option<usize> {
 }
 
 /// The value of `name` in `env` itself.
+/// A name's value in this frame, if its slot is a constant one.
+pub fn own_const(env: &Env, name: &str) -> Option<Value> {
+    position(env, name).and_then(|i| env.slots.borrow()[i].as_ref().filter(|slot| slot.is_const).map(|slot| slot.value.clone()))
+}
+
 pub fn own_value(env: &Env, name: &str) -> Option<Value> {
     position(env, name).and_then(|i| env.slots.borrow()[i].as_ref().map(|slot| slot.value.clone()))
 }
@@ -333,24 +338,29 @@ fn frame_holds(f: &Frame, out: &mut Vec<Node>, budget: &mut usize) -> bool {
     true
 }
 
-/// Whether only `env`'s own values still hold it: every reference to `env`, and to each frame,
-/// list, dict, function and error reached from its slots, comes from inside that group, but the
-/// caller's one to `env`. Only `env` and the frames below it are walked: another call's frame,
-/// or one of an earlier pass of a loop, is left out. A reference this misses only makes the
-/// group look held, so a wrong answer can keep memory but never frees what is in use. A big
-/// group isn't walked.
+/// Whether nothing outside `env`'s own values still reaches it. Every frame, list, dict, function
+/// and error reached from its slots is counted with the references to it from inside that group;
+/// one with more is held from outside, so it lives, and so does whatever it reaches. `env` is
+/// garbage if none of that reaches it. Only `env` and the frames below it are walked, not
+/// another call's frame or one of an earlier pass of a loop. A reference this misses only makes
+/// more look held, so a wrong answer can keep memory but never frees what is in use. A big group
+/// isn't walked.
 fn only_itself_holds(env: &Env) -> bool {
+    const MAX_NODES: usize = 2_000;
     let me = Rc::as_ptr(env) as usize;
-    // Each node reached, held once more here, with its references from inside; `env` is first,
-    // with no node. Found by address in this list while it is short, then through a map.
+    // Each value reached, held once more here: its address, its references from inside, and the
+    // value; `env` is first, with no value. `edges` are the references, as (holder, held) indexes.
     let mut nodes: Vec<(usize, usize, Option<Node>)> = vec![(me, 0, None)];
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    // Found by address in that list while it is short, then through a map.
     let mut by_addr: Option<HashMap<usize, usize>> = None;
-    let mut budget = 2_000;
+    let mut budget = 100_000; // items looked at, plain ones included
     let mut out = Vec::new();
     if !frame_holds(env, &mut out, &mut budget) {
         return false;
     }
     let mut todo = Vec::new();
+    let mut from = 0;
     loop {
         for node in out.drain(..) {
             let addr = node.addr();
@@ -360,33 +370,52 @@ fn only_itself_holds(env: &Env) -> bool {
             }
             let found = match &by_addr {
                 Some(map) => map.get(&addr).copied(),
-                None => nodes.iter().position(|(a, _, _)| *a == addr),
+                None => nodes.iter().position(|n| n.0 == addr),
             };
-            match found {
-                Some(k) => nodes[k].1 += 1,
+            let k = match found {
+                Some(k) => k,
                 None => {
-                    nodes.push((addr, 1, Some(node)));
+                    nodes.push((addr, 0, Some(node)));
                     let k = nodes.len() - 1;
                     match &mut by_addr {
                         Some(map) => {
                             map.insert(addr, k);
                         }
-                        None if k >= 32 => by_addr = Some(nodes.iter().enumerate().map(|(k, (a, _, _))| (*a, k)).collect()),
+                        None if k >= 32 => by_addr = Some(nodes.iter().enumerate().map(|(k, n)| (n.0, k)).collect()),
                         None => {}
                     }
                     todo.push(k);
+                    k
                 }
-            }
+            };
+            nodes[k].1 += 1;
+            edges.push((from, k));
         }
         let Some(k) = todo.pop() else { break };
-        if !nodes[k].2.as_ref().is_some_and(|node| node.holds(&mut out, &mut budget)) {
+        from = k;
+        if nodes.len() > MAX_NODES || !nodes[k].2.as_ref().is_some_and(|node| node.holds(&mut out, &mut budget)) {
             return false;
         }
     }
-    nodes.iter().all(|(_, refs, node)| match node {
-        Some(n) => n.count() == refs + 1,
-        None => Rc::strong_count(env) == refs + 1, // the caller's
-    })
+    // What something outside holds lives, with all it reaches here.
+    let held = |n: &(usize, usize, Option<Node>)| match &n.2 {
+        Some(node) => node.count() > n.1 + 1,
+        None => Rc::strong_count(env) > n.1 + 1, // more than the caller's
+    };
+    let mut live: Vec<usize> = (0..nodes.len()).filter(|&k| held(&nodes[k])).collect();
+    if live.is_empty() {
+        return true;
+    }
+    let mut seen = vec![false; nodes.len()];
+    while let Some(k) = live.pop() {
+        if k == 0 {
+            return false;
+        }
+        if !std::mem::replace(&mut seen[k], true) {
+            live.extend(edges.iter().filter(|e| e.0 == k).map(|e| e.1));
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -458,6 +487,19 @@ mod tests {
         drop(returned);
         sweep();
         assert!(weak.upgrade().is_none(), "the next sweep freed it");
+    }
+
+    #[test]
+    fn a_value_shared_with_others_doesnt_keep_the_frame() {
+        // `inc` passed in is held outside too, but nothing outside reaches the frame through it.
+        let outside = Value::list(vec![Value::Int(1)]);
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        declare(&frame, "shared".into(), outside.clone(), false);
+        drop(closure_in(&frame));
+        leave(frame);
+        assert!(weak.upgrade().is_none(), "the frame was freed");
+        drop(outside);
     }
 
     #[test]

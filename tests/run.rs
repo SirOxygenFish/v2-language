@@ -454,6 +454,15 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
+fn a_url_in_a_string_gets_no_comment_hint() {
+    // The `//` hint is for a comment that hid a bracket's close, not for one inside a string.
+    let (code, _, stderr, _home) = run_with_files(&[("u.v2", "let u = print(\"http://x.com\"
+")], &["u.v2"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("is never closed") && !stderr.contains("starts a comment"), "{stderr}");
+}
+
+#[test]
 fn a_script_named_like_a_command_runs_by_its_path() {
     // DOCS 15: only the exact first word is a command, and what follows the script is its own.
     let (code, stdout, stderr, _home) = run_with_files(&[("doctor", "print(args())

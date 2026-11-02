@@ -472,7 +472,7 @@ impl<'a> Parser<'a> {
             // `=> {` starts a dict: the JS habit of a block after `=>` lands here.
             let dict = matches!(self.peek(), Tok::LBrace(_));
             let hint = "`=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }";
-            FuncBody::Expr(self.expr().map_err(|d| if dict { d.hint(hint) } else { d })?)
+            FuncBody::Expr(self.expr().map_err(|d| if dict && d.message.contains("dict key") { d.hint(hint) } else { d })?)
         } else {
             FuncBody::Block(self.body("func")?)
         };
