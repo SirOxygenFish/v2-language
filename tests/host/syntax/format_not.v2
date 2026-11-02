@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: a number can't be followed directly by a letter
+// The `:` of a dict is no format (3.5).
+print(f"${{a: 1}.a + 3x}")

@@ -1,2 +1,3 @@
 use @export { f } here and @import { g } from h
 x @export { f }
+true

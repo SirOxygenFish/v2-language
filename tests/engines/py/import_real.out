@@ -1,0 +1,3 @@
+["x", 1, 1, "RED", true, "fn1's own words", true, "<class '", true]
+[true, true, true, true, 99, null, 99, true]
+caught JSONDecodeError

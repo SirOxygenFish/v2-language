@@ -1,0 +1,3 @@
+// exit: 1
+// stderr: a number can't be followed directly by a letter
+print(f"${[1, 2][0:1][0] + 3x}")

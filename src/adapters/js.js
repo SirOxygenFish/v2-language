@@ -76,8 +76,15 @@ function gone() {
 function leave() {
   // Exits; a `process.on('exit')` handler that throws is the user's error, not the adapter's. On
   // Windows Node's own teardown can fail a libuv assertion while a `fetch` winds down, so the
-  // process ends without it: everything has been written by now (9.10).
-  if (process.platform === 'win32') process.reallyExit = () => rawKill(process.pid, 'SIGKILL');
+  // process ends without it, once everything is written, the exit handlers' output too (9.10).
+  const end = process.platform === 'win32' ? () => rawKill(process.pid, 'SIGKILL') : process.reallyExit.bind(process);
+  process.reallyExit = (code) => {
+    process.reallyExit = end;
+    try {
+      drainOut(true);
+    } catch {}
+    end(code);
+  };
   try {
     rawExit(0);
   } catch (e) {
@@ -723,7 +730,7 @@ function decodeTag(j) {
       return entry.obj;
     }
     case 'fn':
-      return 'unit' in j ? unitAttr(units.get(j.unit), j.name)[0] : stubFor(j.id, j.name);
+      return 'unit' in j ? realTarget(j.unit, j.name) : stubFor(j.id, j.name);
     case 'int': {
       const n = BigInt(j.v);
       return n >= -(2n ** 53n - 1n) && n <= 2n ** 53n - 1n ? Number(n) : n;
@@ -1023,9 +1030,16 @@ function unitAttr(u, name) {
   }
 }
 
+function realTarget(unit, name) {
+  // The function or class itself; one read from a module object keeps that `this`, as a call
+  // through V2 does (13.5).
+  const [f, self] = unitAttr(units.get(unit), name);
+  return typeof f === 'function' && self !== undefined && !isConstructor(f) ? f.bind(self) : f;
+}
+
 function unitStub(unit, name, route, alias) {
-  // An inner @import from this session, looked up at every use (13.7). A Proxy, so calls, `new`,
-  // `instanceof`, `class X extends` and static members all reach the current target (11.3).
+  // An inner @import from a block of this session that hasn't loaded yet (13.7). A Proxy, so calls,
+  // `new`, `instanceof`, `class X extends` and static members reach the target, or say why not.
   const current = () => {
     const u = units.get(unit);
     if (!u) hostCall({ route }, [], alias); // V2 says why it isn't here (13.6)
@@ -1056,10 +1070,28 @@ function unitStub(unit, name, route, alias) {
   return stub;
 }
 
-function bindImports(ctx, imports) {
+const importers = new Map(); // unit -> {ctx, alias, name, stub} of the blocks waiting for it (13.7)
+
+function bindImporters(unit) {
+  // Block `unit` has loaded, for V2 too: what imported from it gets the real thing.
+  const u = units.get(unit);
+  const waiting = (u && importers.get(unit)) || [];
+  importers.delete(unit);
+  for (const { ctx, alias, name, stub } of waiting) {
+    if (ctx[alias] === stub && u.kinds.get(name) === 'func') defineData(ctx, alias, realTarget(unit, name));
+  }
+}
+
+function bindImports(ctx, imports, keeps) {
   for (const e of imports) {
     const alias = checkName(e.as, '@import name');
-    defineData(ctx, alias, 'unit' in e ? unitStub(e.unit, e.name, e.route, alias) : routeStub(e.route, alias));
+    if (!('unit' in e)) defineData(ctx, alias, routeStub(e.route, alias));
+    else if (units.has(e.unit)) defineData(ctx, alias, realTarget(e.unit, e.name));
+    else {
+      const stub = unitStub(e.unit, e.name, e.route, alias);
+      defineData(ctx, alias, stub);
+      if (keeps) importers.set(e.unit, [...(importers.get(e.unit) || []), { ctx, alias, name: e.name, stub }]);
+    }
   }
 }
 
@@ -1146,7 +1178,7 @@ function doLoad(m) {
   rememberSource(m.file, m.line, src);
   const ctx = newContext(m.file);
   for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));
-  bindImports(ctx, m.imports || []);
+  bindImports(ctx, m.imports || [], m.kind !== 'action');
   const script = compileOrExplain(src, m);
   const before = new Set(Object.getOwnPropertyNames(ctx));
   return settle(script.runInContext(ctx), (v) => {
@@ -1506,6 +1538,7 @@ const plainErr = (id, kind, message) => ({ t: 'err', id, error: { type: kind, me
 function trySend(m, frame) {
   try {
     send(frame);
+    if (m.t === 'load') bindImporters(m.unit);
   } catch (e) {
     rollbackCounts();
     if (m.t === 'load') units.delete(m.unit); // a failed block for V2, so it's gone here too (12.1)
