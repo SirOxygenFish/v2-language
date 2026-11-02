@@ -661,6 +661,12 @@ impl Interp {
                             let msg = format!("'{name}' is not a top-level name in {}", self.sm.file(file).display);
                             return Err(self.raise(import_error(msg), span));
                         }
+                        // A block imports functions; a value already there that isn't one is a
+                        // constant (DOCS 6.2).
+                        let value = own_value(&self.files[&file].frame, &name);
+                        if value.is_some_and(|v| !matches!(&v, Value::Func(_)) && !matches!(&v, Value::Handle(h) if h.callable)) {
+                            return Err(self.raise(constant_error(&name), span));
+                        }
                         let r = self.route(b.unit_id, i, &name, Route::V2 { file, name: name.clone() });
                         entries.push(json!({"as": &*alias, "route": r}));
                     }

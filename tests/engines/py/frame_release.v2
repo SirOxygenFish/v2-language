@@ -1,0 +1,61 @@
+// requires: py
+// A function's frame is freed when only its own values hold it, wherever its closures sit:
+// with a closure in a variable and in a list, in a dict of local functions, or made in an `if` or
+// a loop body (INTERNALS 5.1). Each frame holds a Python object that counts its own release.
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def make():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { make, n }
+}
+@import { make, n } from pk
+func alias(i) {
+    let t = make()
+    let f = func() => t
+    let box = [f]
+    return i
+}
+func handlers(i) {
+    let t = make()
+    func on_a() {
+        return t
+    }
+    func on_b() {
+        return t
+    }
+    let hs = {a: on_a, b: on_b}
+    return i
+}
+func in_if(i) {
+    let t = make()
+    let keep = null
+    if i >= 0 {
+        let y = i
+        keep = func() => t
+    }
+    return i
+}
+func in_loop(i) {
+    let t = make()
+    let fs = []
+    for k in 0..2 {
+        fs.push(func() => t)
+    }
+    return i
+}
+// Releases go out with the next call, so the count shows on the call after that.
+func released(f) {
+    n()
+    let before = n()
+    for i in 0..50 {
+        f(i)
+    }
+    n()
+    return n() - before
+}
+print(released(alias), released(handlers), released(in_if), released(in_loop))

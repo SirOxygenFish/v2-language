@@ -1,0 +1,3 @@
+// exit: 1
+// stderr: dict_keyword.v2:3:10: SyntaxError: keyword `from` can't be a bare dict key: quote it
+let d = {from: 1}

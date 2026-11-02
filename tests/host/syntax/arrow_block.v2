@@ -1,0 +1,3 @@
+// exit: 1
+// stderr: hint: `=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }
+let f = func(n) => { let d = {}; return d }
