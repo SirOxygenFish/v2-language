@@ -1,0 +1,7 @@
+let _table = []
+for i in 0..50000 {
+    _table.push([i])
+}
+func get(i) {
+    return _table[i][0]
+}

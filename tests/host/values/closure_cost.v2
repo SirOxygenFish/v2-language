@@ -1,0 +1,17 @@
+// timeout: 30
+// A function with a closure costs no more per call when it is given big shared data (5.1).
+func process(rows) {
+    func first(r) {
+        return r.id
+    }
+    return first(rows[0]) + len(rows)
+}
+let rows = []
+for i in 0..50000 {
+    rows.push({id: i})
+}
+let s = 0
+for k in 0..1000 {
+    s = s + process(rows)
+}
+print(s)

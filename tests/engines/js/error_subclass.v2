@@ -1,0 +1,25 @@
+// requires: js
+// A JS error class says what it is, as a Python one does (DOCS 3.9, 10).
+func kind(f) {
+    try {
+        f()
+    } catch (e) {
+        return e.foreign_type
+    }
+}
+@js {
+    class AppErr extends Error {}
+    class Named extends Error {
+        constructor(m) {
+            super(m);
+            this.name = "CustomName";
+        }
+    }
+    function a() { throw new AppErr("x") }
+    function b() { throw new Named("x") }
+    function c() { throw new Error("x") }
+    function d() { throw new TypeError("x") }
+    @export { a, b, c, d }
+}
+@import { a, b, c, d } from @js
+print(kind(a), kind(b), kind(c), kind(d))

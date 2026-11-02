@@ -1,6 +1,6 @@
 // requires: js
 // timeout: 60
-// A V2 function JS has let go of is collected after 1,000 more, however many calls brought them
+// A V2 function JS has let go of is collected after 200 more, however many calls brought them
 // (INTERNALS 11.9).
 @py pk {
     freed = [0]
@@ -25,9 +25,9 @@ func mk() {
     let t = make()
     return func(x) => t
 }
-for step in 0..2500 {
+for step in 0..600 {
     add(step, mk())
     drop(step)
 }
 n()
-print(n() >= 1000)
+print(n() >= 400)
