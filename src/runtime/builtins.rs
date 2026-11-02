@@ -17,7 +17,7 @@ use super::ops::{binop, is_handle, order, HANDLE_HINT};
 use super::value::{float_str, Value};
 use crate::codec::json;
 use crate::engines::process::{self, stop_if_interrupted};
-use crate::engines::resolve::{find_program, is_drive_relative, Lookup};
+use crate::engines::resolve::{first_program, is_drive_relative, Lookup};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::{os_message, Span};
 
@@ -410,7 +410,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         other => return type_error(format!("exec() argument 'input' must be a str, bytes or null, got {}", other.type_name())),
     };
     let lookup = Lookup::from_env();
-    argv[0] = match find_program(name, &lookup).into_iter().next() {
+    argv[0] = match first_program(name, &lookup) {
         Some(p) => p.into_os_string(),
         None if is_drive_relative(std::path::Path::new(&**name)) => {
             return io_error(format!("exec: cannot start '{name}': a drive-relative path: write it relative to the working directory, or absolute"));
@@ -439,7 +439,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 
 /// `sleep(seconds)` on the interpreter thread; an interrupt still ends the run through the
 /// watchdog (5.10, 6.5).
-fn sleep(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+fn sleep(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let (secs, shown) = match &args[0] {
         Value::Int(n) => (*n as f64, n.to_string()),
         Value::Float(x) => (*x, float_str(*x)),
@@ -449,7 +449,11 @@ fn sleep(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         return value_error(format!("sleep() argument 'seconds' must not be negative, got {shown}"));
     }
     match Duration::try_from_secs_f64(secs) {
-        Ok(d) => std::thread::sleep(d),
+        Ok(d) => {
+            // What was printed before a wait is out during it, and survives an interrupt.
+            let _ = it.out.flush();
+            std::thread::sleep(d)
+        }
         Err(_) => return value_error(format!("sleep() argument 'seconds' is out of range: {shown}")),
     }
     Ok(Value::Null)

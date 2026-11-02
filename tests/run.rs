@@ -855,6 +855,46 @@ fn writing_to_a_closed_stdout_is_an_io_error() {
 }
 
 #[test]
+fn sleep_flushes_what_was_printed() {
+    // Through a pipe `print` is buffered, but a wait shows what came before it (INTERNALS 5.10).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("wait.v2"), "print(\"first\")\nsleep(20)\n").unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("wait.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start v2");
+    let start = Instant::now();
+    let mut line = String::new();
+    let got = std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut line);
+    let took = start.elapsed();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(got.is_ok() && line == "first\n", "{line:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_strict_umask_does_not_stop_a_worker() {
+    // The run dir's insides have their modes set, not left to the umask (INTERNALS 20.3).
+    if !needs("py", "a_strict_umask_does_not_stop_a_worker") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("mask.v2"), "print(@py { 1 + 1 })\n").unwrap();
+    for umask in ["0222", "0277", "0777"] {
+        let v2 = v2_command(&home.0).get_program().to_os_string();
+        let script = format!("umask {umask}; exec \"$0\" mask.v2");
+        let out = Command::new("sh").args(["-c", &script]).arg(&v2).current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "2\n", "umask {umask}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
 fn a_run_that_used_fetch_ends_quietly() {
     // A libuv assertion from Node's teardown would land on stderr (INTERNALS 9.10).
     if !needs("js", "a_run_that_used_fetch_ends_quietly") {
@@ -1483,7 +1523,7 @@ fn a_host_panic_exits_101() {
 #[cfg(unix)]
 #[test]
 fn every_interrupt_signal_exits_130_and_ignored_ones_stay_ignored() {
-    // INTERNALS 6.5: SIGINT, SIGTERM and SIGHUP all end the run with 130, with no catch,
+    // INTERNALS 6.5: SIGINT, SIGTERM, SIGHUP and SIGQUIT all end the run with 130, with no catch,
     // finally or diagnostic; a signal ignored at startup (nohup) stays ignored.
     use std::os::unix::process::CommandExt;
     let home = TempHome::new();
@@ -1505,7 +1545,7 @@ fn every_interrupt_signal_exits_130_and_ignored_ones_stay_ignored() {
         std::thread::sleep(Duration::from_millis(300));
         child
     };
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
         let child = start(false);
         // SAFETY: sending a signal to our own child.
         unsafe {

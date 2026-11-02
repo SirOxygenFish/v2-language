@@ -171,7 +171,10 @@ impl Interp {
                 return Err(self.raise(Flow::Error(e), at));
             }
         };
-        let reader: Box<dyn Read + Send> = Box::new(child.take_stdout().expect("piped stdout"));
+        let pipe = child.take_stdout().expect("piped stdout");
+        #[cfg(unix)]
+        let pipe = crate::engines::process::UntilExit { pipe, kill: child.kill_handle() };
+        let reader: Box<dyn Read + Send> = Box::new(pipe);
         let writer: Box<dyn Write> = Box::new(child.take_stdin().expect("piped stdin"));
         let parkable = timeouts.call.is_none().then(|| child.kill_handle());
         let s = self.new_session(key, engine, Some(reader), Some(writer), Some(child), timeouts);

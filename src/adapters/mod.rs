@@ -30,11 +30,18 @@ pub fn materialize(file: &str, text: &str) -> Result<PathBuf, String> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(failed(e)),
     }
+    #[cfg(unix)]
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(failed)?;
     let path = dir.join(file);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(&path).and_then(|mut f| f.write_all(text.as_bytes())).map_err(failed)?;
+    let write = |mut f: std::fs::File| {
+        #[cfg(unix)]
+        f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        f.write_all(text.as_bytes())
+    };
+    options.open(&path).and_then(write).map_err(failed)?;
     Ok(path)
 }
