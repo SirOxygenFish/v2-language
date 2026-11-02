@@ -1,0 +1,17 @@
+// requires: js
+// A function two modules export gets, in each, the module it was read from as `this` (13.5,
+// 13.7); an object with methods of its own stays itself (10.7).
+@import { who as whoA } from js."./fixtures/mod_a.js"
+@import { who as whoB } from js."./fixtures/mod_b.js"
+print(whoA(), whoB())
+let r = @js {
+    @import { who as wA } from js."./fixtures/mod_a.js"
+    @import { who as wB } from js."./fixtures/mod_b.js"
+    [wA(), wB()]
+}
+print(r)
+@import js."./fixtures/obj_api.js" as m
+let api = m.api
+print(type(api), api.get())
+api.set(9)
+print(api.n, api.get(), type(m.data), m.data)

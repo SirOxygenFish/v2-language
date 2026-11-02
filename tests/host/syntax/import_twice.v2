@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: import_twice.v2:6:24: SyntaxError: 'x' is imported twice
+// One name, one import, in a block (4.5).
+@py {
+    @import { a as x } from b
+    @import { c, d, e, f as x } from g
+}

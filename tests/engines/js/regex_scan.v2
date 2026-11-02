@@ -1,0 +1,17 @@
+// requires: js
+// A regex holding a backtick, a quote or a brace doesn't confuse where a block ends (3.8).
+print("before")
+@js md {
+    function inlineCode(s) {
+        return s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    }
+    @export { inlineCode }
+}
+@js {
+    const a = "x`y".replace(/`/g, "'");
+    console.log(a, /}/.test("}"), /[/}]/.test("/"), /"/.test('"'), 10 / 2 / 5);
+}
+print("between")
+@js { console.log("`"); }
+@import { inlineCode } from md
+print(inlineCode("use `v2 check` first"))
