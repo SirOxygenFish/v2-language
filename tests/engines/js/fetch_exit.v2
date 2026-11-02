@@ -1,0 +1,20 @@
+// requires: js
+// A run that used fetch ends quietly: Node's own teardown can't complain on stderr (9.10).
+@js net {
+    const http = require("http");
+    async function run(n) {
+        const srv = http.createServer((req, res) => res.end("hi"));
+        await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+        const base = `http://127.0.0.1:${srv.address().port}`;
+        for (let i = 0; i < n; i++) {
+            const r = await fetch(base + "/");
+            await r.text();
+        }
+        srv.close();
+    }
+    @export { run }
+}
+@import { run } from net
+run(2)
+run(1)
+print("done")

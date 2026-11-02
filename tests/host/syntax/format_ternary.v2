@@ -1,0 +1,4 @@
+// A `:` that isn't a format still works, and a number error in a ternary stays what it was.
+let x = 1
+print(f"${x == 1 ? 2 : 3}")
+print(f"${x:.1f}", f"${x:.99f}".lines()[0][0:3])

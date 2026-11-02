@@ -35,6 +35,7 @@ const ADAPTER = __filename;
 const rawWriteSync = fs.writeSync;
 const rawReadSync = fs.readSync;
 const rawExit = process.exit.bind(process);
+const rawKill = process.kill.bind(process);
 
 // ---------------------------------------------------------------------------------------------
 // Errors
@@ -69,11 +70,14 @@ const wellFormed = (s) => (typeof s === 'string' ? s.toWellFormed() : String(s))
 
 function gone() {
   // The host is gone: end of input or a broken pipe (9.1).
-  rawExit(0);
+  leave();
 }
 
 function leave() {
-  // Exits; a `process.on('exit')` handler that throws is the user's error, not the adapter's.
+  // Exits; a `process.on('exit')` handler that throws is the user's error, not the adapter's. On
+  // Windows Node's own teardown can fail a libuv assertion while a `fetch` winds down, so the
+  // process ends without it: everything has been written by now (9.10).
+  if (process.platform === 'win32') process.reallyExit = () => rawKill(process.pid, 'SIGKILL');
   try {
     rawExit(0);
   } catch (e) {
@@ -153,7 +157,7 @@ function writeFrame(obj) {
     throw e;
   }
   const data = Buffer.from(text + '\n', 'utf8');
-  if (data.length > LIMIT) throw new TooBig(String(data.length));
+  if (data.length - 1 > LIMIT) throw new TooBig(String(data.length - 1)); // the newline isn't part of the frame
   let off = 0;
   while (off < data.length) {
     try {
@@ -719,7 +723,7 @@ function decodeTag(j) {
       return entry.obj;
     }
     case 'fn':
-      return stubFor(j.id, j.name);
+      return 'unit' in j ? unitAttr(units.get(j.unit), j.name)[0] : stubFor(j.id, j.name);
     case 'int': {
       const n = BigInt(j.v);
       return n >= -(2n ** 53n - 1n) && n <= 2n ** 53n - 1n ? Number(n) : n;
@@ -1477,7 +1481,7 @@ function doOp(m) {
           pending.unshift(x);
           break;
         }
-        if (n > 1) size += (JSON.stringify(j) || 'null').length;
+        if (n > 1) size += Buffer.byteLength(JSON.stringify(j) || 'null');
         if (items.length && size > LIMIT / 2) {
           rollbackCounts(mark);
           pending.unshift(x);
@@ -1504,6 +1508,7 @@ function trySend(m, frame) {
     send(frame);
   } catch (e) {
     rollbackCounts();
+    if (m.t === 'load') units.delete(m.unit); // a failed block for V2, so it's gone here too (12.1)
     if (e instanceof TooBig) send(plainErr(m.id, 'MarshalError', tooBigMessage(Number(e.message))));
     else send(plainErr(m.id, 'Error', `the reply could not be sent (${errorName(e)})`));
   }

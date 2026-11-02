@@ -1,0 +1,50 @@
+// requires: py js
+// timeout: 60
+// A definition block whose reply is too big to send has failed, for its neighbours too (13.7).
+@py user {
+    @import { f } from big
+    def callf():
+        try:
+            return f()
+        except V2Error as e:
+            return [e.type, e.message.startswith("block 'big' failed to load")]
+    @export { callf }
+}
+try {
+    @py big {
+        A = "x" * 40000000
+        B = "y" * 40000000
+        def f():
+            return "works"
+        @export { A, B, f }
+    }
+} catch (e) {
+    print(e.type)
+}
+@import { callf } from user
+print(callf())
+print(callf())
+@js juser {
+    @import { g } from jbig
+    function callg() {
+        try {
+            return g();
+        } catch (e) {
+            return [e.type, e.message.startsWith("block 'jbig' failed to load")];
+        }
+    }
+    @export { callg }
+}
+try {
+    @js jbig {
+        const A = "x".repeat(40000000);
+        const B = "y".repeat(40000000);
+        function g() { return "works" }
+        @export { A, B, g }
+    }
+} catch (e) {
+    print(e.type)
+}
+@import { callg } from juser
+print(callg())
+print(callg())

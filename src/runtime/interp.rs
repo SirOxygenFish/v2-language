@@ -92,6 +92,17 @@ fn stack_here() -> usize {
     std::hint::black_box(&marker) as *const u8 as usize
 }
 
+/// `func has no method 'cwd'`, and for an imported name the way to its members (DOCS 6.1).
+fn no_member(o: &Value, what: &str, n: &str) -> String {
+    let msg = format!("{} has no {what} '{n}'", o.type_name());
+    match o {
+        Value::Func(f) if matches!(**f, Callable::Proxy { .. }) => {
+            format!("{msg} — an imported class is only a function here; @import its module as m to reach m.{}.{n}", f.name())
+        }
+        _ => msg,
+    }
+}
+
 impl Interp {
     /// `parsed` holds the files the entry file's imports name (6.1 step 2); `stack_size` is the
     /// size of the thread this runs on, and the guard trips at 7/8 of it.
@@ -1051,7 +1062,7 @@ impl Interp {
         let Some(table) = methods::table(o) else {
             let msg = match o {
                 Value::Null => format!("cannot read '{}' of null (use ?.)", name.text),
-                other => format!("{} has no method '{}'", other.type_name(), name.text),
+                other => no_member(other, "method", &name.text),
             };
             return self.fail_at("TypeError", msg, name.span);
         };
@@ -1090,7 +1101,7 @@ impl Interp {
             }
             Value::Error(e) => self.error_field(e, n),
             Value::Null => type_error(format!("cannot read '{n}' of null (use ?.)")),
-            other => type_error(format!("{} has no field '{n}'", other.type_name())),
+            other => type_error(no_member(other, "field", n)),
         }
     }
 

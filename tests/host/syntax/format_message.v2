@@ -1,0 +1,4 @@
+// exit: 1
+// stderr: format_message.v2:4:15: SyntaxError: the only format in ${…} is :.Nf, with N up to 99
+// DOCS 3.5.
+print(f"${x:,.2f}")

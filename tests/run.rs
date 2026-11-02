@@ -855,6 +855,17 @@ fn writing_to_a_closed_stdout_is_an_io_error() {
 }
 
 #[test]
+fn a_run_that_used_fetch_ends_quietly() {
+    // A libuv assertion from Node's teardown would land on stderr (INTERNALS 9.10).
+    if !needs("js", "a_run_that_used_fetch_ends_quietly") {
+        return;
+    }
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/engines/js/fetch_exit.v2")).unwrap();
+    let (code, stdout, stderr, _home) = run_with_files(&[("fetch.v2", &src)], &["fetch.v2"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "done\n", ""));
+}
+
+#[test]
 fn a_worker_writing_to_a_closed_stdout_is_an_io_error() {
     // INTERNALS 9.9: the write fails with no V2 expression waiting, so the IOError comes when the
     // block returns, catchable, and the worker is still there.
@@ -890,6 +901,62 @@ print(@py { 1 + 1 }, stderr: true)
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("caught IOError true\n2\n"), "{err}");
+}
+
+#[test]
+fn a_failed_write_belongs_to_the_request_that_wrote_it() {
+    // INTERNALS 9.9: not to a later request, and not to a nested one; an `err` wins over it.
+    if !needs("py", "a_failed_write_belongs_to_the_request_that_wrote_it") || !needs("js", "a_failed_write_belongs_to_the_request_that_wrote_it") {
+        return;
+    }
+    let src = "\
+func first() {
+    @py {
+        print(\"x\" * 100000)
+        raise ValueError(\"boom\")
+    }
+}
+try {
+    first()
+} catch (e) {
+    print(\"A\", e.type, stderr: true)
+}
+print(\"B\", @py { 40 + 2 }, stderr: true)
+@py {
+    def go(f):
+        print(\"x\" * 100000)
+        return f()
+    @export { go }
+}
+@js {
+    function quiet() { return 5 }
+    @export { quiet }
+}
+@import { go } from @py
+@import { quiet } from @js
+try {
+    go(func() {
+        print(\"C\", quiet(), stderr: true)
+    })
+    print(\"not reached\", stderr: true)
+} catch (e) {
+    print(\"D\", e.type, stderr: true)
+}
+";
+    let home = TempHome::new();
+    std::fs::write(home.0.join("stale.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("stale.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    drop(child.stdout.take()); // close the read end
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("A ForeignError\nB 42\nC 5\nD IOError\n"), "{err}");
 }
 
 /// Windows: put the child in its own process group, so Ctrl+Break can be sent to it alone. The

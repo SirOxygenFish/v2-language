@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: TypeError: func has no method 'cwd' — an imported class is only a function here; @import its module as m to reach m.Path.cwd
+// requires: py
+// DOCS 6.1.
+@import { Path } from py.pathlib
+print(type(Path("x")))
+Path.cwd()

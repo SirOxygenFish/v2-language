@@ -35,6 +35,8 @@ it is loaded automatically into every session and every subagent.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
+- Round 3 found `s += piece` is quadratic (1 MB string: 12 s) and imported classes have no static
+  members. Both are spec, documented, and go to the owner as proposals in the final report.
 - Scratchpad helpers (session-local): mem/bench.v2 and mem/measure.py (numbers), mkout.py writes a
   test's .out from the binary (never for sweep tests: their output comes from DOCS).
 
@@ -152,7 +154,7 @@ it is loaded automatically into every session and every subagent.
   `module_unit` (ids, py name check) + `import_module` (one `module` frame), `inner_imports`
   (13.7 entries: same-session `{as,unit,name,route}` or routes), `call_route`/`resolve_route`,
   `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.
-  Adapters: py `do_module`/`module_attr`/`unit_stub`/`RouteFunction`; js `doModule` (resolve
+  Adapters: py `do_module`/`module_attr`/`UnitStub`/`RouteFunction`; js `doModule` (resolve
   first; TLA via import() only for the module itself)/`moduleAttr`/`unitStub` (a Proxy)/`routeStub`.
 - `engines/traces.rs` (2.3, 2.5, 12.6): `foreign_frames(s, err)` → frame texts + the innermost
   block position and tag; `block_at` uses `FileScope.bodies` (every block) limited to the

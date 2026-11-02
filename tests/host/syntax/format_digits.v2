@@ -1,0 +1,3 @@
+// exit: 1
+// stderr: format_digits.v2:3:14: SyntaxError: the only format in ${…} is :.Nf, with N up to 99
+print(f"${x:.100f}")

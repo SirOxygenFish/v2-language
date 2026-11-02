@@ -141,8 +141,8 @@ if __name__ == "__main__":
 
     def write_frame(obj):
         data = dumps(obj)
-        if len(data) > LIMIT:
-            raise TooBig(len(data))
+        if len(data) - 1 > LIMIT:  # the newline isn't part of the frame
+            raise TooBig(len(data) - 1)
         write_all(data)
 
     def too_big_message(n):
@@ -599,7 +599,7 @@ if __name__ == "__main__":
                     raise Fail("ProtocolError", "unknown handle id %s" % j["id"])
                 return entry[0]
             if tag == "fn":
-                return stub_for(j["id"], j.get("name"))
+                return unit_attr(j["unit"], j["name"]) if "unit" in j else stub_for(j["id"], j.get("name"))
             if tag == "int":
                 return int(j["v"])
             if tag == "bytes":
@@ -798,29 +798,51 @@ if __name__ == "__main__":
             raise Fail("NameError", "'%s' is no longer defined" % name)
         return g[name]
 
-    def unit_stub(unit, name, route, alias):
-        """An inner @import from this session: calls it here, looked up at every call (13.7)."""
+    class UnitStub(object):
+        """An inner @import from this session, looked up at every use (13.7). Calls, attributes,
+        isinstance and subclassing reach the current target, so a class stays a class."""
 
-        def stub(*args, **kwargs):
-            u = units.get(unit)
+        def __init__(self, unit, name, route, alias):
+            self._unit, self._name, self._route = unit, name, route
+            self.__name__ = self.__qualname__ = alias
+
+        def _current(self):
+            u = units.get(self._unit)
             if u is None:
-                return host_call({"route": route}, args, kwargs, alias)  # V2 says why it isn't here (13.6)
-            if u[1] is not None and u[1].get(name) == "value":
-                raise V2Error("ImportError", "'%s' is a constant — pass it in as a block arg" % name)
+                host_call({"route": self._route}, (), {}, self.__name__)  # V2 says why it isn't here (13.6)
+            if u[1] is not None and u[1].get(self._name) == "value":
+                raise V2Error("ImportError", "'%s' is a constant — pass it in as a block arg" % self._name)
             try:
-                f = unit_attr(unit, name)
+                return unit_attr(self._unit, self._name)
             except Fail as e:
                 raise NameError(e.message)
-            return f(*args, **kwargs)
 
-        stub.__name__ = stub.__qualname__ = alias
-        return stub
+        def __call__(self, /, *args, **kwargs):
+            return self._current()(*args, **kwargs)
+
+        def __getattr__(self, k):
+            return getattr(self._current(), k)
+
+        def __instancecheck__(self, x):
+            return isinstance(x, self._current())
+
+        def __subclasscheck__(self, c):
+            return issubclass(c, self._current())
+
+        def __mro_entries__(self, bases):
+            return (self._current(),)
+
+    def reply_lost(m):
+        """A load whose reply can't go is a failed block for V2, so it's gone here too (12.1)."""
+        u = units.pop(m.get("unit"), None) if m["t"] == "load" else None
+        if u is not None:
+            sys.modules.pop(u[0].__name__, None)
 
     def bind_imports(g, imports):
         for e in imports:
             alias = check_name(e["as"], "@import name")
             if "unit" in e:
-                g[alias] = unit_stub(e["unit"], e["name"], e.get("route"), alias)
+                g[alias] = UnitStub(e["unit"], e["name"], e.get("route"), alias)
             else:
                 g[alias] = RouteFunction(e["route"], alias)
 
@@ -1156,9 +1178,11 @@ if __name__ == "__main__":
             try:
                 send(reply)
             except TooBig as t:
+                reply_lost(m)
                 send(plain_err(rid, "MarshalError", too_big_message(t.args[0])))
             except BaseException as e:
                 rollback_counts()
+                reply_lost(m)
                 send(plain_err(rid, "Error", "the reply could not be sent (%s)" % type(e).__name__))
         finally:
             stack.pop()
