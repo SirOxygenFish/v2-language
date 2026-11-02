@@ -374,15 +374,15 @@ fn releases_ride_the_next_frame() {
         let c = w.recv_t("call");
         let handles: Vec<Json> = (1..=3).map(|i| json!({"$v2":"h","id":i,"type":"Thing"})).collect();
         w.ret(&c, Json::Array(handles));
-        // The three dropped handles come right after the next request, in one frame.
-        let c = w.recv_t("call");
+        // The three dropped handles come before the next request, in one frame.
         let r = w.recv_t("release");
         assert_eq!(r["h"], json!([1, 2, 3]));
+        let c = w.recv_t("call");
         let many: Vec<Json> = (10..266).map(|i| json!({"$v2":"h","id":i,"type":"Thing"})).collect();
         w.ret(&c, Json::Array(many));
-        let c = w.recv_t("call");
         let r = w.recv_t("release");
         assert_eq!(r["h"].as_array().map(Vec::len), Some(256), "carried by the next request");
+        let c = w.recv_t("call");
         w.ret(&c, Json::Null);
         w.recv_t("bye");
     });

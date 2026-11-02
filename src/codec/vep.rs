@@ -314,6 +314,30 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 
 /// The callable ids of every `fn` tag in an encoded frame, one per tag: what a frame that was
 /// never sent must give back to the callable table (10.1, 11.8).
+/// The handle ids a frame names: its `h` tags, and an `op`'s or a call target's `h` (11.2). A user's
+/// dict key `h` counts too, which can only delay a release.
+pub fn handle_ids(frame: &Json) -> std::collections::HashSet<u64> {
+    fn walk(j: &Json, out: &mut std::collections::HashSet<u64>) {
+        match j {
+            Json::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            Json::Object(m) => match m.get("$v2").and_then(Json::as_str) {
+                Some("h") => out.extend(m.get("id").and_then(Json::as_u64)),
+                Some("dict") => m.get("v").and_then(Json::as_object).iter().flat_map(|v| v.values()).for_each(|v| walk(v, out)),
+                Some("error") => ["data", "cause"].iter().filter_map(|k| m.get(*k)).for_each(|v| walk(v, out)),
+                Some(_) => {}
+                None => {
+                    out.extend(m.get("h").and_then(Json::as_u64));
+                    m.values().for_each(|v| walk(v, out));
+                }
+            },
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(frame, &mut out);
+    out
+}
+
 pub fn fn_ids(frame: &Json) -> Vec<u64> {
     fn walk(j: &Json, out: &mut Vec<u64>) {
         match j {
