@@ -1,0 +1,12 @@
+// requires: py js
+// A line holding only a comment doesn't set a block's indentation (DOCS 4.1).
+@py {
+    x = 1
+# a note at the left edge
+    print(x)
+}
+@js {
+    const y = 2;
+// a note at the left edge
+    console.log(y);
+}

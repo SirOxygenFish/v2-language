@@ -202,7 +202,7 @@ with a digit. Keywords are listed in the [appendix](#keywords).
 `type(x)` returns the type name as a string: `type(3)` is `"int"`, `type([])` is `"list"`.
 
 `str(x)` and `print` show strings inside containers quoted, and whole-number floats keep their
-`.0`: `print({k: [1, "a", 2.0]})` shows `{"k": [1, "a", 2.0]}`, while `print("a")` shows `a`.
+`.0` (from `1e16` on they print in exponent form): `print({k: [1, "a", 2.0]})` shows `{"k": [1, "a", 2.0]}`, while `print("a")` shows `a`.
 
 **Truthiness.** `null`, `false`, `0`, `0.0`, `""`, `b""`, `[]` and `{}` are *falsy*. Everything
 else, including every handle, is *truthy*.
@@ -608,8 +608,9 @@ An **embedded block** is a piece of another language written directly in a `.v2`
   but whitespace may follow that `{`: the code starts on the next line.
 
 Your code is handed to the other language **as written**. V2 only removes the common indentation
-(so you can indent blocks to match the surrounding V2 code; mixing tabs and spaces in that
-indentation is an error) and blanks out its own `@export`/`@import` lines, keeping line numbers
+of the code lines (so you can indent blocks to match the surrounding V2 code; a line holding only a
+comment doesn't count, lines of a multi-line string lose it only where they have it, and mixing
+tabs and spaces in that indentation is an error) and blanks out its own `@export`/`@import` lines, keeping line numbers
 intact. V2 never pastes V2 values into foreign code. The only code V2 ever adds is the small
 wrappers it generates around compiled blocks (chapter 11).
 
@@ -991,12 +992,14 @@ tag. The whole-module form `@import MODULE_SELECTOR as alias` only works with pa
 like `py.numpy`, and only in V2 code. Inside a block it is a `SyntaxError`: use the language's own
 import there (`import numpy as np` in a `@py` block).
 
-An imported name is an ordinary V2 function in the scope where the `@import` appears. Call it,
-pass it around, store it, or re-export it from a V2 module. List every name you import: there is
+An imported name is an ordinary V2 function in the scope where the `@import` appears, and a
+constant there (it can't be reassigned). Call it, pass it around, store it, or re-export it from a
+V2 module. List every name you import: there is
 no `@import { * }`.
 
 Inside a block, `@import` brings in functions only: naming a constant that a block or package
-exports is an `ImportError` (`'VERSION' is a constant — pass it in as a block arg`).
+exports is an `ImportError` (`'VERSION' is a constant — pass it in as a block arg`), at the `@import`
+when V2 can already tell, otherwise when the name is first called.
 
 ### 6.3 Ambiguity rules
 
@@ -1235,7 +1238,7 @@ and passed back to their own language they arrive as the original function or cl
 
 Because data is copied, a Python function that changes a list you passed in does **not** change
 your V2 list. Return the new value instead. One value crossing between processes can't exceed
-64 MiB, and V2 data sent out can't be nested more than 256 lists or dicts deep (`MarshalError`); data
+64 MiB as sent (its JSON text, a little longer than the data), and V2 data sent out can't be nested more than 256 lists or dicts deep (`MarshalError`); data
 coming back that deep stays a handle from the 257th level on.
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
@@ -1755,8 +1758,9 @@ to run a script with such a name, write it as a path: `v2 ./doctor`.
   so a project folder can't slip in its own fake `python` or `gcc`.
 - Processes started by `exec`, run-engine blocks and compiled programs (and everything they start)
   are stopped when the call or block finishes or times out; processes started from Python or
-  JavaScript code are stopped when V2 exits, unless they detach themselves (`start_new_session`,
-  `detached: true`, a daemon).
+  JavaScript code are stopped when V2 exits. On Linux and macOS one that detaches itself
+  (`start_new_session`, `detached: true`, a daemon) lives on; on Windows only one created to break
+  away from V2's job (`CREATE_BREAKAWAY_FROM_JOB`) does.
 - `extern` and compiled blocks run native code inside the V2 process. A mistake there can crash
   the program or corrupt memory; V2 checks the values it converts, but cannot check what native
   code does.

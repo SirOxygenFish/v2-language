@@ -276,8 +276,11 @@ impl<'a> Lexer<'a> {
     fn end_of_file(&mut self) -> Result<Option<u8>, Diag> {
         if let Some(&(open, span)) = self.stack.last() {
             let line = &self.src[span.lo as usize..];
+            let line = &line[..line.find('\n').unwrap_or(line.len())];
             let d = Diag::new(format!("`{}` is never closed", open.opener()), span);
-            return Err(if line[..line.find('\n').unwrap_or(line.len())].contains("//") {
+            // A `//` outside a string: an even number of quotes before it.
+            let comment = line.find("//").is_some_and(|p| line[..p].matches('"').count().is_multiple_of(2) && line[..p].matches('\'').count().is_multiple_of(2));
+            return Err(if comment {
                 d.hint("`//` starts a comment; integer division is div(a, b)")
             } else {
                 d
