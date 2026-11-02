@@ -1,6 +1,7 @@
 // requires: py
 // 5.6: a body that directly makes a closure keeps its own frame, so the closure's cycle goes by
-// that frame. Here `f`'s frame has no closure of its own, so nothing trims it and `h` stays.
+// that frame. `f` keeps the closure its `if` body made, so leaving `f` checks the cycle (5.1)
+// and frees it, `h` with it.
 @py tools {
     class Held:
         def __del__(self):
@@ -16,6 +17,6 @@ func f() {
     }
 }
 f()
-// Releases go out with the next request, so this would run `__del__` if `h` had gone.
+// The release goes out right after the next request; `__del__`'s output comes at the end.
 @py { pass }
 print("after")

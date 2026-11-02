@@ -99,15 +99,24 @@ enum Frame {
 /// Whether a JS `/` after `before` starts a regex literal rather than dividing: what comes before
 /// it can't end an operand, which is JS's own rule (3.8).
 fn regex_may_start(before: &str) -> bool {
-    let before = before.trim_end();
+    let mut before = before.trim_end();
+    // A block comment is no token: look before it.
+    while let Some(open) = before.strip_suffix("*/").and_then(|b| b.rfind("/*")) {
+        before = before[..open].trim_end();
+    }
     let Some(last) = before.chars().last() else { return true };
     let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     if word(last) {
         let start = before.trim_end_matches(word).len();
-        return matches!(
-            &before[start..],
-            "return" | "typeof" | "instanceof" | "in" | "of" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await"
-        );
+        // A keyword read as a property (`o.in`) is a name, which ends an operand.
+        let property = before[..start].trim_end().ends_with('.');
+        return !property
+            && matches!(&before[start..], "return" | "typeof" | "instanceof" | "in" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await");
+    }
+    // Postfix `++`, `--` and TypeScript's `x!` end an operand too.
+    let ends_operand = |s: &str| s.chars().last().is_some_and(|c| word(c) || c == ')' || c == ']');
+    if before.ends_with("++") || before.ends_with("--") || (last == '!' && ends_operand(&before[..before.len() - 1])) {
+        return false;
     }
     !matches!(last, ')' | ']' | '.' | '"' | '\'' | '`')
 }
@@ -502,6 +511,11 @@ mod tests {
         // Division: after an operand, a `/` is no regex.
         assert_eq!(body(" x = a / b / c } d", js).unwrap(), " x = a / b / c ");
         assert_eq!(body(" x = f(1) / 2 } d", js).unwrap(), " x = f(1) / 2 ");
+        // After a postfix operator, a property named like a keyword, `x!` or a comment: division.
+        for src in [" b = a++ / 2; s = \"/\" } t", " b = a-- / 2; s = \"/\" } t", " b = o.in / 2; s = \"/\" } t", " b = m! / 2; s = \"/\" } t", " b = 4 /* c */ / 2; s = \"/\" } t", " b = of / 2; s = \"/\" } t"] {
+            assert_eq!(body(src, js).unwrap(), &src[..src.len() - 3], "{src}");
+        }
+        assert_eq!(body(" if (!/}/.test(s)) x() } t", js).unwrap(), " if (!/}/.test(s)) x() ");
         // A regex can't span lines, so a lone `/` there is a division after all.
         assert_eq!(body(" x = (1\n/ 2) } d", js).unwrap(), " x = (1\n/ 2) ");
     }

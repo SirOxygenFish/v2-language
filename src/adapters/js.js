@@ -649,7 +649,7 @@ function encode(x, depth = 0, open = new Walk()) {
     if (depth >= MAX_DEPTH || open.has(x)) return handleTag(x);
     const keys = Object.keys(x);
     // One that carries its own functions is behaviour, not data: copied, they'd lose `this`.
-    if (keys.some((k) => ownFunction(Object.getOwnPropertyDescriptor(x, k)))) return handleTag(x);
+    if (Reflect.ownKeys(x).some((k) => ownFunction(Object.getOwnPropertyDescriptor(x, k)))) return handleTag(x);
     open.spend(2 * keys.length);
     open.add(x);
     try {

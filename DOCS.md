@@ -232,7 +232,8 @@ count = count + 1
 count += 1             // also -=, *=, /=, %=
 ```
 
-- Variables live in the block (`{ ... }`) where they are declared.
+- Variables live in the body (`{ ... }`) of the `if`, loop or function where they are declared.
+  There is no bare `{ ... }` block: a `{` that starts a statement is a dict.
 - Declaring the same name twice in the same block is an error; an inner block may *shadow* it.
   A function's parameters, a loop's variables and a `catch` name count as declared in the body they
   belong to, so `func f(x) { let x = 1 }` is an error.
@@ -549,7 +550,7 @@ bigger come from the languages you embed.
 | `args()`                                | command-line arguments after the script name                |
 | `sleep(seconds)`                        | wait (an int or float ≥ 0); Ctrl+C still stops the program  |
 | `time()`                                | seconds since 1970-01-01 UTC, as a float                    |
-| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run |
+| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; on Linux and macOS only the low 8 bits of `code` reach the shell |
 | `error(type, message, data = null)`     | make an error value                                         |
 | `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
 | `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
@@ -1155,6 +1156,11 @@ print(by_age.map(func(p) => p.name))      // ["Linus", "Ada", "Grace"]
 
 Python calls the V2 function once per item; each call crosses back into V2 and returns.
 
+A V2 function that foreign code keeps (a listener, a callback stored on an object) keeps the
+function that made it alive, with all its variables, until the foreign side lets go. If one of
+those variables holds the foreign object that keeps the callback, neither side can let go: make
+such a callback in a small helper function that holds only what it needs.
+
 ### 8.3 Compiled code calling other languages
 
 Compiled blocks can import too. Because C, C++ and Rust have no common dynamic data type,
@@ -1229,7 +1235,8 @@ and passed back to their own language they arrive as the original function or cl
 
 Because data is copied, a Python function that changes a list you passed in does **not** change
 your V2 list. Return the new value instead. One value crossing between processes can't exceed
-64 MiB, and V2 data sent out can't be nested more than 256 lists or dicts deep (`MarshalError`).
+64 MiB, and V2 data sent out can't be nested more than 256 lists or dicts deep (`MarshalError`); data
+coming back that deep stays a handle from the 257th level on.
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
 a whole-number JS `number` arrives in V2 as an `int`. Integers are range-checked when they go into

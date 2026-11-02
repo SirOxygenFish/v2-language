@@ -9,12 +9,14 @@ func run() {
     print(sqrt(25))
 }
 print(run())
-// `from v2` checks what it finds is a function, so a constant has to be there by then.
+// `from v2` looks at what it finds, so `pi` has to be there by then: not a waiting reference,
+// which would pass for a function, but the constant, which a block can't import (DOCS 6.2).
 @import { pi } from py.math
-@py {
-    @import { pi } from v2
-    try:
-        pi()
-    except Exception as e:
-        print(e.type, "|", e.message)
+try {
+    @py {
+        @import { pi } from v2
+        pass
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
 }
