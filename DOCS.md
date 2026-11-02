@@ -1746,7 +1746,8 @@ to run a script with such a name, write it as a path: `v2 ./doctor`.
   so a project folder can't slip in its own fake `python` or `gcc`.
 - Processes started by `exec`, run-engine blocks and compiled programs (and everything they start)
   are stopped when the call or block finishes or times out; processes started from Python or
-  JavaScript code are stopped when V2 exits.
+  JavaScript code are stopped when V2 exits, unless they detach themselves (`start_new_session`,
+  `detached: true`, a daemon).
 - `extern` and compiled blocks run native code inside the V2 process. A mistake there can crash
   the program or corrupt memory; V2 checks the values it converts, but cannot check what native
   code does.
