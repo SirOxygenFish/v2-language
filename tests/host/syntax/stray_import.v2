@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: stray_import.v2:4:12: SyntaxError: @import goes on a line of its own
+@py {
+    x = 1; @import { f } from g
+}

@@ -1,0 +1,16 @@
+// requires: js
+// timeout: 60
+// A frame of exactly 64 MiB goes; the newline isn't part of it (9.1).
+@js {
+    function mk(n) { return "a".repeat(n) }
+    @export { mk }
+}
+@import { mk } from @js
+let frame = len("{\"t\":\"ret\",\"id\":3,\"value\":\"\"}")
+print(len(mk(64 * 1024 * 1024 - frame)))
+try {
+    mk(64 * 1024 * 1024 - frame + 1)
+} catch (e) {
+    print(e.type)
+}
+print(mk(3))

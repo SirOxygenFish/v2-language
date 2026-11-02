@@ -236,7 +236,8 @@ count += 1             // also -=, *=, /=, %=
 - Declaring the same name twice in the same block is an error; an inner block may *shadow* it.
   A function's parameters, a loop's variables and a `catch` name count as declared in the body they
   belong to, so `func f(x) { let x = 1 }` is an error.
-- `x += y` always means `x = x + y`. For lists that makes a **new** list: other names for the old
+- `x += y` always means `x = x + y`, a full copy each time, so build long strings and lists with
+  `push` and `join` rather than `+=` in a loop. For lists that makes a **new** list: other names for the old
   list don't see the change (use `.push()` to change a list in place).
 - `const` stops reassignment of the name. A `const` list can still be changed with `.push()`.
 - Assigning to a name that was never declared is an error — there are no accidental globals.
@@ -955,7 +956,9 @@ Inside a block, on its own line:
   signature V2 can convert; the others are left out, and an `@import` of one says why.
 - In `py`, `js` and `ts` blocks you may also export a constant, e.g. `@export { VERSION }`; V2
   copies its value when the block loads. Compiled blocks export functions only.
-- Exporting a class (Python) or constructor (JS) gives you a function that returns handles.
+- Exporting a class (Python) or constructor (JS) gives you a function that returns handles. To
+  reach a class's own members, such as `Path.cwd()`, import the module: `@import py.pathlib as m`,
+  then `m.Path.cwd()`.
 - Every exported name is checked when the block loads; a missing name is an `ImportError`.
 - A name that isn't a valid V2 name (JavaScript's `$x`) can be written in quotes: `@export { "$x" }`.
   Compiled blocks export functions by plain name; a quoted item there is a `SyntaxError`.
@@ -1217,9 +1220,11 @@ JSON text is used automatically only when compiled code calls other languages th
 ([11.6](#116-calling-other-languages-from-compiled-code)).
 
 Only plain `list`, `tuple` and `dict` values convert; subclasses such as `namedtuple`,
-`OrderedDict` or `Counter` come back as handles (9.2). Functions go *into* foreign code as
-callables. Foreign functions, methods and classes that come *back* as values are callable handles
-(`type()` says `"handle"`); names you bring in with `@import` are ordinary `func` values.
+`OrderedDict` or `Counter` come back as handles (9.2). Subclasses of `int`, `float` and `str`
+arrive as the plain value, so an `IntEnum` member is just its number. Functions go *into* foreign
+code as callables. Foreign functions, methods and classes that come *back* as values are callable
+handles (`type()` says `"handle"`); names you bring in with `@import` are ordinary `func` values,
+and passed back to their own language they arrive as the original function or class.
 
 Because data is copied, a Python function that changes a list you passed in does **not** change
 your V2 list. Return the new value instead. One value crossing between processes can't exceed

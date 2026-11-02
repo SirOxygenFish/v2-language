@@ -1,0 +1,13 @@
+// requires: js
+// timeout: 60
+// Batches of `next` are counted in bytes: items that each fit arrive, whatever the text (11.4).
+@js {
+    function letters() {
+        return new Set(["a", "b", "c"].map((p) => p + "\u20ac".repeat(10400000)));
+    }
+    @export { letters }
+}
+@import { letters } from @js
+for x in letters() {
+    print(x[0], len(x))
+}

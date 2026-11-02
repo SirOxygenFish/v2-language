@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use super::ast::*;
 use super::directives;
-use super::lexer::LABEL_HINT;
+use super::lexer::{LABEL_HINT, ONLY_FIXED};
 use super::span::{SourceMap, Span};
 use super::token::{BraceKind, FPartTok, Kw, Op, Tok, Token};
 use super::Diag;
@@ -1219,6 +1219,9 @@ impl<'a> Parser<'a> {
                         Parser { sm: self.sm, toks, pos: 0, depth: self.depth, links: self.links, peak: self.links };
                     let expr = sub.expr()?;
                     self.peak = self.peak.max(sub.peak);
+                    if matches!(sub.peek(), Tok::Op(Op::Colon)) {
+                        return Err(Diag::new(ONLY_FIXED, sub.span()));
+                    }
                     if !matches!(sub.peek(), Tok::RBrace) || sub.pos + 1 != sub.toks.len() {
                         return Err(Diag::new(format!("expected `}}` to close the ${{…}}, found {}", sub.peek()), sub.span()));
                     }

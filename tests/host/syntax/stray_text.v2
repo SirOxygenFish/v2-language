@@ -1,0 +1,11 @@
+// requires: py js
+// The words themselves are fine in strings and comments, and after an escape.
+@py {
+    a = "use @export { f } here"
+    b = 'and @import { g } from h'  # or @export { f }
+    print(a, b)
+}
+@js {
+    const c = `x @export { f }`; // or @import { g }
+    console.log(c);
+}

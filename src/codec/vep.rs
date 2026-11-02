@@ -12,7 +12,7 @@ use crate::engines::handles::{CallableTable, HandleRef, ReleaseQueue};
 use crate::engines::imports::Route;
 use crate::engines::vep::Caps;
 use crate::runtime::error::{fail, ErrorValue, Exec};
-use crate::runtime::value::Value;
+use crate::runtime::value::{Callable, Value};
 use crate::syntax::span::SourceMap;
 
 /// Lists and dicts nest at most this deep on the wire (10.5).
@@ -126,7 +126,13 @@ impl Encoder<'_, '_> {
                     Json::Object(out)
                 }
             }
-            Value::Func(f) => self.callable(v, f.name())?,
+            Value::Func(f) => match &**f {
+                // Home, it is the function itself, not a way back through V2 (11.8).
+                Callable::Proxy { session, unit, name } if *session == self.wire.session => {
+                    json!({"$v2": "fn", "unit": &**unit, "name": &**name})
+                }
+                _ => self.callable(v, f.name())?,
+            },
             Value::Handle(h) => {
                 // Another session's callable handle goes as a function its own session calls (11.6).
                 if h.session != self.wire.session && (h.callable || self.passing) {

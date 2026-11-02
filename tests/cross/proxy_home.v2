@@ -1,0 +1,30 @@
+// requires: py js
+// An imported function or class is the real thing back in its own language (DOCS 9.1, 11.8).
+@import { Row } from py.sqlite3
+@import py.sqlite3 as sq
+@py chk {
+    def shout(s):
+        return s.upper()
+    def is_shout(f):
+        return f is shout
+    def apply(f, x):
+        return f(x)
+    @export { shout, is_shout, apply }
+}
+@js jchk {
+    function twice(x) { return x * 2 }
+    function isTwice(f) { return f === twice }
+    class Box {}
+    function isBox(c) { return c === Box && new c() instanceof Box }
+    @export { twice, isTwice, Box, isBox }
+}
+@import { shout, is_shout, apply } from chk
+@import { twice, isTwice, Box, isBox } from jchk
+print(is_shout(shout), isTwice(twice), isBox(Box))
+let db = sq.connect(":memory:")
+db.execute("create table t (a int)")
+db.execute("insert into t values (1)")
+db.row_factory = Row
+print(db.execute("select a from t").fetchone()["a"])
+print(apply(twice, 5), apply(shout, "a"))
+print(type(shout), shout("b"))

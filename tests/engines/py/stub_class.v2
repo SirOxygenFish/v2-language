@@ -1,0 +1,28 @@
+// requires: py
+// A block's import of a class stays a class: isinstance, class members, subclassing (13.7).
+@py lib {
+    class Foo:
+        KIND = "foo"
+        def __init__(self, x):
+            self.x = x
+        @classmethod
+        def make(cls):
+            return cls(1)
+    def plain(x):
+        return x + 1
+    @export { Foo, plain }
+}
+@py user {
+    @import { Foo, plain } from lib
+    class Sub(Foo):
+        def twice(self):
+            return self.x * 2
+    def check():
+        foo = Foo(7)
+        sub = Sub(4)
+        return [foo.x, isinstance(foo, Foo), isinstance(1, Foo), isinstance(sub, Foo), issubclass(Sub, Foo),
+                Foo.KIND, Foo.make().x, sub.twice(), plain(1), plain.__name__]
+    @export { check }
+}
+@import { check } from user
+print(check())

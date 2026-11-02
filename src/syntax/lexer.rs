@@ -10,6 +10,9 @@ use super::span::{FileId, SourceMap, Span};
 use super::token::{BraceKind, Delim, FPartTok, Kw, Op, RawBody, Tok, Token};
 use super::Diag;
 
+/// What a `:` in an interpolation can start (3.5).
+pub const ONLY_FIXED: &str = "the only format in ${…} is :.Nf, with N up to 99";
+
 /// Past this many nested `${…}`, lexing stops with `nested too deeply` (4.1).
 const MAX_INTERP_DEPTH: u32 = 256;
 
@@ -277,6 +280,12 @@ impl<'a> Lexer<'a> {
         let m = self.mark();
         self.push(Tok::Eof, m);
         Ok(None)
+    }
+
+    /// Past a `:` at the top level of an interpolation, where a format would be.
+    fn in_format(&self, pos: usize) -> bool {
+        let top = matches!(self.stack.last(), Some((Open::Interp, _)));
+        top && self.src[..pos].rfind("${").is_some_and(|i| self.src[i..pos].contains(':') && !self.src[i..pos].contains('?'))
     }
 
     /// `:.Nf}` right at the top level of an interpolation (3.5).
@@ -548,7 +557,8 @@ impl<'a> Lexer<'a> {
             if int_part == "0" && matches!(c, 'b' | 'o' | 'B' | 'O' | 'X') {
                 return Err(Diag::new("V2 has only decimal and 0x hex integer literals", span));
             }
-            return Err(Diag::new("a number can't be followed directly by a letter", span));
+            let msg = if self.in_format(m.pos) { ONLY_FIXED } else { "a number can't be followed directly by a letter" };
+            return Err(Diag::new(msg, span));
         }
         let text = &self.src[start..self.pos];
         let span = self.span_from(m);
