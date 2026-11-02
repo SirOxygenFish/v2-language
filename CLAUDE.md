@@ -25,11 +25,8 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.14, the loop. Sweep rounds 1 and 2 are committed (2ef914f). Round 3 was stopped before it
-  reported (usage limit): rerun it on a fresh snapshot with two reviewers, the newest code (`Walk`,
-  `encode_passing`, `Out.failed`, stub routes, the import pre-check) and realistic programs. Stop
-  after two rounds in a row with no real defect, then close 1.14: ROADMAP boxes and log, final
-  report. Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
+- Now: 1.14, the loop. Sweep rounds 1-3 are committed; round 4 found real defects too, so two clean rounds
+  are still needed before closing 1.14 (ROADMAP boxes and log, final report). Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
   (mem/fuzz_line.py) found the same family for almost nothing. mem/fuzz_scope.py compares two
   binaries on random V2 programs.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
@@ -152,7 +149,8 @@ it is loaded automatically into every session and every subagent.
   `candidates`/`provides`/`provider` (13.3 steps; `Seen` = blocks a waiting `@import`'s statement
   saw), `exec_import` (V2 level: `import_waits`, `wait_import`, or `resolve_import`), `settle`,
   `module_unit` (ids, py name check) + `import_module` (one `module` frame), `inner_imports`
-  (13.7 entries: same-session `{as,unit,name,route}` or routes), `call_route`/`resolve_route`,
+  (13.7 entries: same-session `{as,unit,name,route}`, the real object once that unit has loaded, or
+  routes), `call_route`/`resolve_route`,
   `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.
   Adapters: py `do_module`/`module_attr`/`UnitStub`/`RouteFunction`; js `doModule` (resolve
   first; TLA via import() only for the module itself)/`moduleAttr`/`unitStub` (a Proxy)/`routeStub`.

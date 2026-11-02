@@ -1,0 +1,33 @@
+// requires: js
+// Once its block has loaded, a block's import is the real thing, in either order (13.7), and a
+// function read from a module object keeps that `this` (13.5).
+@js early {
+    @import { Counter } from lib
+    function go() {
+        Counter.count = 10;
+        return [Counter.bump(), "bump" in Counter, Object.keys(Counter), String(Counter).startsWith("class")];
+    }
+    @export { go }
+}
+@js lib {
+    class Counter {
+        static count = 0;
+        static bump() { return ++this.count }
+    }
+    @export { Counter }
+}
+@import { go } from early
+print(go())
+@js late {
+    @import { getN } from js."./fixtures/this_mod.js"
+    @import { Counter } from lib
+    function viaImport() { return getN() }
+    function call(f) { return f() }
+    function loaded() { return [Object.keys(Counter), "bump" in Counter] }
+    @export { viaImport, call, loaded }
+}
+@import { viaImport, call, loaded } from late
+print(loaded())
+@import { getN } from js."./fixtures/this_mod.js"
+print(viaImport(), call(getN), getN())
+print(@js(f: getN) { f() })

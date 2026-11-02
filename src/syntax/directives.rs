@@ -177,10 +177,10 @@ fn finish(
 }
 
 /// `@export {` or `@import {` after code on a line, where it would reach the other language as
-/// code. Past a quote or a comment marker the text may not be code, so it is left alone (DOCS 6.1).
+/// code. Past a quote, or a `#` or `/` that can start a comment or a regex, the text may not be
+/// code, so it is left alone (DOCS 6.1).
 fn stray_directive(t: &str) -> Option<(usize, &'static str)> {
-    let end = t.find(['"', '\'', '`', '#']).unwrap_or(t.len());
-    let code = &t[..t[..end].find("//").unwrap_or(end)];
+    let code = &t[..t.find(['"', '\'', '`', '#', '/']).unwrap_or(t.len())];
     ["@export", "@import"].into_iter().find_map(|word| {
         let (at, _) = code.match_indices(word).find(|&(i, _)| {
             i > 0 && code.as_bytes()[i - 1] != b'@' && code[i + word.len()..].trim_start().starts_with('{')

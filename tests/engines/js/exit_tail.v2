@@ -1,0 +1,10 @@
+// requires: js
+// An exit handler's last words get out, newline or not (9.10).
+@js H {
+    process.on("exit", () => { process.stdout.write("tail-no-newline") });
+    function ping() { return 1 }
+    @export { ping }
+}
+@import { ping } from H
+ping()
+print("v2 done")

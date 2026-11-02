@@ -432,22 +432,22 @@ impl Interp {
         Ok(())
     }
 
-    /// Send one frame, the session's queued releases first (9.10). A write error is the
-    /// worker going away (9.1).
+    /// Send one frame, then the session's queued releases: the frame may name a handle nothing
+    /// else holds any more (9.10, 11.2). A write error is the worker going away (9.1).
     fn send(&mut self, s: SessionId, frame: &Json) -> Result<(), WriteErr> {
         let _ = self.out.flush();
         let session = &mut self.sessions[s];
         let Some(w) = session.writer.as_mut() else { return Err(WriteErr::Io(std::io::ErrorKind::BrokenPipe.into())) };
-        if session.caps.handles {
-            let ids = std::mem::take(&mut *session.releases.borrow_mut());
-            if !ids.is_empty() {
-                vep::write_frame(w.as_mut(), &vep::release(&ids))?;
-            }
-        }
         let sent = vep::write_frame(w.as_mut(), frame);
         if let Err(WriteErr::TooBig(_)) = sent {
             // Nothing went out, so the `fn` tags it carried were never sent (10.1, 11.8).
             session.callables.release(&crate::codec::vep::fn_ids(frame));
+        }
+        if sent.is_ok() && session.caps.handles {
+            let ids = std::mem::take(&mut *session.releases.borrow_mut());
+            if !ids.is_empty() {
+                vep::write_frame(w.as_mut(), &vep::release(&ids))?;
+            }
         }
         sent
     }

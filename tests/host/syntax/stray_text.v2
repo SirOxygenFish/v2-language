@@ -8,4 +8,9 @@
 @js {
     const c = `x @export { f }`; // or @import { g }
     console.log(c);
+    /** @import { Foo } from './foo' */
+    /* @export { g } */
+    const isImport = (s) => /^@import {(.*)}/.test(s) || /@export {2}/.test(s);
+    function half(x) { return x / 2 } // @export { half }
+    console.log(isImport("@import {a}"));
 }

@@ -1,0 +1,59 @@
+// requires: py
+// Once its block has loaded, a block's import is the real thing, in either order (13.7).
+@py early {
+    @import { Boom, Color, Base, fn1 } from lib
+    import copy
+    def go():
+        try:
+            raise Boom("x")
+        except Boom as e:
+            caught = str(e)
+        return [caught, Color["RED"].value, len(Color), list(Color)[0].name, Color.RED in Color,
+                fn1.__doc__, fn1 is copy.deepcopy(fn1), repr(Base)[:8], type(Base) is type]
+    @export { go }
+}
+@py lib {
+    import enum
+    class Boom(Exception):
+        pass
+    class Color(enum.Enum):
+        RED = 1
+    class Base:
+        K = 1
+    def fn1(a):
+        "fn1's own words"
+        return a
+    def get_fn():
+        return fn1
+    def accepts(c):
+        return issubclass(c, Base)
+    def base_k():
+        return Base.K
+    def mk():
+        return Base()
+    @export { Boom, Color, Base, fn1, get_fn, accepts, base_k, mk }
+}
+@py late {
+    @import { Boom, Base, fn1, get_fn, accepts, base_k, mk } from lib
+    import copy
+    def f(x: Base | None = None):
+        return x
+    Made = type("Made", (Base,), {})
+    def go2():
+        Base.K = 99
+        return [fn1 == get_fn(), fn1 is get_fn(), type(mk()) is Base, accepts(Base), base_k(), f(), Made.K,
+                copy.deepcopy({"cb": fn1})["cb"] is fn1]
+    @export { go2 }
+}
+@import { go } from early
+@import { go2 } from late
+print(go())
+print(go2())
+// A module's names are real too.
+@py {
+    @import { loads, JSONDecodeError } from py.json
+    try:
+        loads("{")
+    except JSONDecodeError as e:
+        print("caught", type(e).__name__)
+}

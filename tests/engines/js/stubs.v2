@@ -16,7 +16,7 @@ print(@js {
         bye() { return "bye " + this.n; }
     }
     const s = new Sub(3);
-    [s instanceof Sub, s instanceof Base, s.hi(), s.bye(), new Base(1) instanceof Base, Base(5).n, Base.make(2).n, Sub.make(4).hi()]
+    [s instanceof Sub, s instanceof Base, s.hi(), s.bye(), new Base(1) instanceof Base, Base.make(2).n, Sub.make(4).hi()]
 })
 print(@js {
     @import { EventEmitter } from js.events
