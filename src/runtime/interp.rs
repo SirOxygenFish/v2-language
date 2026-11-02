@@ -320,7 +320,12 @@ impl Interp {
             Some(n) => n.text.clone(),
             None => format!("func@{}:{}", self.sm.file(decl.span.file).display, decl.span.line).into(),
         };
-        env.closures.set(env.closures.get() + 1);
+        // A cycle through this closure can run through any frame from here up (5.1).
+        let mut frame = Some(env);
+        while let Some(f) = frame {
+            f.closures.set(f.closures.get() + 1);
+            frame = f.parent.as_ref();
+        }
         Value::func(Callable::Closure { decl: decl.clone(), env: env.clone(), name })
     }
 

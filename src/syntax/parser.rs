@@ -469,7 +469,10 @@ impl<'a> Parser<'a> {
         let (params, rest) = self.params()?;
         let body = if name.is_none() && self.at_op(Op::FatArrow) {
             self.bump();
-            FuncBody::Expr(self.expr()?)
+            // `=> {` starts a dict: the JS habit of a block after `=>` lands here.
+            let dict = matches!(self.peek(), Tok::LBrace(_));
+            let hint = "`=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }";
+            FuncBody::Expr(self.expr().map_err(|d| if dict { d.hint(hint) } else { d })?)
         } else {
             FuncBody::Block(self.body("func")?)
         };
@@ -1192,6 +1195,7 @@ impl<'a> Parser<'a> {
                     self.expect_op(Op::RBracket)?;
                     DictKey::Computed(k)
                 }
+                Tok::Kw(_) => return Err(Diag::new(format!("{} can't be a bare dict key: quote it", t.tok), t.span)),
                 _ => return Err(Diag::new("dict keys are names, strings or [expr]", t.span)),
             };
             self.expect_op(Op::Colon)?;
@@ -1376,7 +1380,7 @@ extern "m" as m { double cos(double x); }
         assert_eq!(err("f() = 1"), "cannot assign to this expression");
         assert_eq!(err("a?.b = 1"), "cannot assign through ?.");
         assert_eq!(err("let d = {1: 2}"), "dict keys are names, strings or [expr]");
-        assert_eq!(err("let d = {true: 2}"), "dict keys are names, strings or [expr]");
+        assert_eq!(err("let d = {true: 2}"), "keyword `true` can't be a bare dict key: quote it");
         assert_eq!(err("try { }"), "try needs a catch or a finally");
         assert_eq!(err("let r = 0..3"), "a..b is only allowed in a for head; use range(a, b)");
         assert_eq!(err("for i, x in 0..3 { }"), "a range loop takes one variable");

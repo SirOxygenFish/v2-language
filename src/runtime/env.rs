@@ -1,6 +1,7 @@
 //! Frames and environments (INTERNALS 5.6).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use super::error::ErrorValue;
@@ -340,9 +341,10 @@ fn frame_holds(f: &Frame, out: &mut Vec<Node>, budget: &mut usize) -> bool {
 /// group isn't walked.
 fn only_itself_holds(env: &Env) -> bool {
     let me = Rc::as_ptr(env) as usize;
-    // A group is small, so a list beats a map: (address, references from inside), `env` first.
-    let mut inside: Vec<(usize, usize)> = vec![(me, 0)];
-    let mut kept: Vec<Node> = Vec::new(); // each node reached, held once more here
+    // Each node reached, held once more here, with its references from inside; `env` is first,
+    // with no node. Found by address in this list while it is short, then through a map.
+    let mut nodes: Vec<(usize, usize, Option<Node>)> = vec![(me, 0, None)];
+    let mut by_addr: Option<HashMap<usize, usize>> = None;
     let mut budget = 2_000;
     let mut out = Vec::new();
     if !frame_holds(env, &mut out, &mut budget) {
@@ -356,22 +358,35 @@ fn only_itself_holds(env: &Env) -> bool {
             if has_ancestor(env, addr) || matches!(&node, Node::Frame(f) if addr != me && !has_ancestor(f, me)) {
                 continue;
             }
-            match inside.iter_mut().find(|(a, _)| *a == addr) {
-                Some((_, n)) => *n += 1,
+            let found = match &by_addr {
+                Some(map) => map.get(&addr).copied(),
+                None => nodes.iter().position(|(a, _, _)| *a == addr),
+            };
+            match found {
+                Some(k) => nodes[k].1 += 1,
                 None => {
-                    inside.push((addr, 1));
-                    todo.push(node);
+                    nodes.push((addr, 1, Some(node)));
+                    let k = nodes.len() - 1;
+                    match &mut by_addr {
+                        Some(map) => {
+                            map.insert(addr, k);
+                        }
+                        None if k >= 32 => by_addr = Some(nodes.iter().enumerate().map(|(k, (a, _, _))| (*a, k)).collect()),
+                        None => {}
+                    }
+                    todo.push(k);
                 }
             }
         }
-        let Some(node) = todo.pop() else { break };
-        if !node.holds(&mut out, &mut budget) {
+        let Some(k) = todo.pop() else { break };
+        if !nodes[k].2.as_ref().is_some_and(|node| node.holds(&mut out, &mut budget)) {
             return false;
         }
-        kept.push(node);
     }
-    // `kept` is in the order nodes were first reached, as is `inside` after `env`.
-    Rc::strong_count(env) == inside[0].1 + 1 && kept.iter().zip(&inside[1..]).all(|(n, (_, refs))| n.count() == refs + 1)
+    nodes.iter().all(|(_, refs, node)| match node {
+        Some(n) => n.count() == refs + 1,
+        None => Rc::strong_count(env) == refs + 1, // the caller's
+    })
 }
 
 #[cfg(test)]
@@ -418,6 +433,17 @@ mod tests {
         let frame = frame();
         let weak = Rc::downgrade(&frame);
         drop(closure_in_list(&frame));
+        leave(frame);
+        assert!(weak.upgrade().is_none(), "the frame was freed");
+    }
+
+    #[test]
+    fn a_closure_in_a_slot_and_a_list_is_freed_with_its_frame() {
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        let f = closure_in(&frame);
+        declare(&frame, "box".into(), Value::list(vec![f.clone()]), false);
+        drop(f);
         leave(frame);
         assert!(weak.upgrade().is_none(), "the frame was freed");
     }

@@ -1,0 +1,10 @@
+// requires: js
+// An object with methods is a handle even when they don't show in Object.keys (10.7).
+let m = @js { Math }
+print(type(m), m.max(1, 5))
+let o = @js {
+    const o = { a: 1 };
+    Object.defineProperty(o, "twice", { value() { return this.a * 2 }, enumerable: false });
+    o
+}
+print(type(o), o.twice(), type(@js { ({ a: 1, b: [2] }) }))

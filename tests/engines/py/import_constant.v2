@@ -1,0 +1,23 @@
+// requires: py
+// A block imports functions from v2; a value that isn't one is a constant (DOCS 6.2).
+const LIMIT = 10
+func twice(x) {
+    return x * 2
+}
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(func() {
+    @py {
+        @import { LIMIT } from v2
+        print(LIMIT)
+    }
+})
+@py {
+    @import { twice } from v2
+    print(twice(4))
+}
