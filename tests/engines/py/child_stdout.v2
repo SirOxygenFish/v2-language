@@ -1,0 +1,9 @@
+// requires: py
+// stderr: child says hi
+// A block's sys.stdout has the fd-level fileno, so a child given it writes to stderr like any
+// child of a block (DOCS 4.6, INTERNALS 9.9).
+@py {
+    import subprocess, sys
+    r = subprocess.run([sys.executable, "-c", "print('child says hi')"], stdout=sys.stdout, stdin=sys.stdin)
+    print(r.returncode)
+}

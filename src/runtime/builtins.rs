@@ -171,8 +171,9 @@ pub struct Out {
     w: Box<dyn Write>,
     tty: bool,
     pending: &'static Mutex<Vec<u8>>,
-    /// A write failed and raised its `IOError`, so the end of the run needn't say it again (6.5).
-    pub failed: bool,
+    /// Output that couldn't be written and whose `IOError` never reached the program (a block's
+    /// own error won): the end of the run reports it (6.5).
+    pub lost: Option<Rc<str>>,
 }
 
 impl Out {
@@ -180,7 +181,7 @@ impl Out {
         let stdout = std::io::stdout();
         let tty = stdout.is_terminal();
         let lock: StdoutLock<'static> = stdout.lock();
-        Out { w: Box::new(lock), tty, pending: &PENDING, failed: false }
+        Out { w: Box::new(lock), tty, pending: &PENDING, lost: None }
     }
 
     /// An `Out` that collects into a shared buffer (tests).
@@ -198,7 +199,7 @@ impl Out {
         }
         let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let pending = Box::leak(Box::new(Mutex::new(Vec::new())));
-        (Out { w: Box::new(Shared(buf.clone())), tty: true, pending, failed: false }, buf)
+        (Out { w: Box::new(Shared(buf.clone())), tty: true, pending, lost: None }, buf)
     }
 
     pub fn write_str(&mut self, s: &str) -> Exec<()> {
@@ -207,17 +208,27 @@ impl Out {
         if !self.tty && pending.len() < OUT_BUFFER {
             return Ok(());
         }
-        match drain(&mut *self.w, &mut pending) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.failed = true;
-                fail("IOError", format!("cannot write to stdout: {}", os_message(&e)))
-            }
-        }
+        let r = drain(&mut *self.w, &mut pending);
+        drop(pending);
+        self.raise(r)
     }
 
     pub fn flush(&mut self) -> std::io::Result<()> {
         drain(&mut *self.w, &mut lock(self.pending))
+    }
+
+    /// Flush, and raise a failure as 5.10's `IOError` (`input()`'s prompt).
+    pub fn flush_or_raise(&mut self) -> Exec<()> {
+        let r = self.flush();
+        self.raise(r)
+    }
+
+    /// A failed write's `IOError`. What it couldn't write goes with it: a program that catches
+    /// it has handled that output, and the end of the run doesn't count it as lost (6.5).
+    fn raise(&mut self, r: std::io::Result<()>) -> Exec<()> {
+        let Err(e) = r else { return Ok(()) };
+        lock(self.pending).clear();
+        fail("IOError", format!("cannot write to stdout: {}", os_message(&e)))
     }
 }
 
@@ -246,9 +257,7 @@ fn io_error<T>(message: String) -> Exec<T> {
 fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let prompt = it.str_of(&args[0], at)?;
     it.out.write_str(&prompt)?;
-    if let Err(e) = it.out.flush() {
-        return io_error(format!("cannot write to stdout: {}", os_message(&e)));
-    }
+    it.out.flush_or_raise()?;
     let mut line = Vec::new();
     match std::io::stdin().lock().read_until(b'\n', &mut line) {
         Ok(0) => return Ok(Value::Null),

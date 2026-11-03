@@ -267,7 +267,8 @@ if __name__ == "__main__":
             return False
 
         def fileno(self):
-            raise io.UnsupportedOperation("fileno")
+            # Fd level: what reaches it goes to stderr, as a child's output does (9.9).
+            return self._fd
 
         def write(self, s):
             if not isinstance(s, str):
@@ -325,7 +326,7 @@ if __name__ == "__main__":
             return False
 
         def fileno(self):
-            raise io.UnsupportedOperation("fileno")
+            return 0  # the null device: a child given it reads end of input (9.9)
 
         def _refuse(self, *args, **kwargs):
             raise OSError("blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg")

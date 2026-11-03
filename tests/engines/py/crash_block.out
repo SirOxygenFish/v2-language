@@ -1,4 +1,4 @@
-EngineCrashed | true |  during a @py block (exit code 3); see its error output above
+EngineCrashed | true |  during a @py block (exit code 3); see its error output above, if any
 EngineCrashed | engine 'py' is not running (stopped earlier: exited with code 3 during a @py block at crash_block.v2:12); engines are not restarted
 the script continues
 EngineCrashed

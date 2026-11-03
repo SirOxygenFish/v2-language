@@ -329,10 +329,10 @@ impl Interp {
                 self.sessions[s].state = State::Dead(DeadReason::SpawnFailed(e.clone()));
                 return Flow::Error(e);
             }
-            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above"));
+            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any"));
         }
         let pid = pid.map_or_else(String::new, |p| format!(" (pid {p})"));
-        error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above", pending.name))
+        error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above, if any", pending.name))
     }
 
     /// 8.4: preload noise to stderr, `hello` (VEP/1, caps, version), then `init`, all within
@@ -608,6 +608,10 @@ impl Interp {
                     };
                 }
                 Frame::Err { error: e, .. } => {
+                    // Its error wins, so a failed write of the request's output is never raised.
+                    if let Some(Flow::Error(lost)) = unwritten {
+                        self.out.lost.get_or_insert(lost.message.clone());
+                    }
                     return match self.foreign_error(s, &e, at) {
                         Ok(err) => Err(self.raise(Flow::Error(err), at)),
                         Err(what) => {
@@ -895,7 +899,9 @@ impl Interp {
             match rx.recv_timeout(left) {
                 Ok(Some(line)) => {
                     if let Ok(Frame::Out { stream, text }) = vep::parse_frame(&line, Caps::default()) {
-                        let _ = self.forward(stream, &text);
+                        if let Err(Flow::Error(lost)) = self.forward(stream, &text) {
+                            self.out.lost.get_or_insert(lost.message.clone());
+                        }
                     }
                 }
                 Ok(None) => open -= 1,

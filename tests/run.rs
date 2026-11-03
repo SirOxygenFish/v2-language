@@ -949,6 +949,9 @@ func boom() {
     }
     async function with_cause() {
         setTimeout(() => { throw new Error(\"outer\", { cause: new TypeError(\"inner\") }) }, 1);
+        const g = new AggregateError([new RangeError(\"first\"), new SyntaxError(\"second\")], \"group\");
+        g.errors.push(g);
+        setTimeout(() => { throw g }, 2);
         return await new Promise(res => setTimeout(() => res(1), 50));
     }
     @export { wait_on_timer, with_cause }
@@ -963,6 +966,9 @@ print(with_cause())
 ";
     let (code, stdout, stderr, _home) = run_with_files(&[("timer.v2", src)], &["timer.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "caught Error\n1\n"));
+    // A block's own AggregateError (another realm) shows its members, and itself only once.
+    assert!(stderr.contains("\n  RangeError: first\n") && stderr.contains("\n  SyntaxError: second\n"), "{stderr}");
+    assert!(stderr.contains("\n  AggregateError: group (shown above)\n") && stderr.len() < 4000, "{stderr}");
     assert!(stderr.starts_with("V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
     // By line: a frame's column is the body's, not the file's.
     assert!(stderr.contains("timer.v2:7)\n"), "{stderr}");
@@ -1008,6 +1014,85 @@ print(go())
     assert!(stderr.contains("V2Error: V2 function 'boom' called from another thread"), "{stderr}");
     assert!(stderr.contains("V2Error: ValueError: from v2"), "{stderr}");
     assert!(!stderr.contains("py.py") && !stderr.contains("^^"), "{stderr}");
+}
+
+#[test]
+fn a_program_that_catches_a_closed_stdout_ends_well() {
+    // INTERNALS 6.5: what a failed write couldn't write goes with its IOError, so a program that
+    // catches it has handled that output: exit 0, nothing said at the end.
+    let home = TempHome::new();
+    let src = "try {\n    while true {\n        print(\"x\")\n    }\n} catch (e) {\n    print(\"caught\", e.type, stderr: true)\n}\n";
+    std::fs::write(home.0.join("caught.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("caught.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    drop(child.stdout.take()); // close the read end
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), normalize(&err).as_str()), (Some(0), "caught IOError\n"));
+}
+
+#[test]
+fn a_preload_that_logs_leaves_console_log_on_stdout() {
+    // INTERNALS 14.4: Node's console binds at its first use, which a NODE_OPTIONS preload may
+    // make; blocks get a console on the adapter's streams.
+    if !needs("js", "a_preload_that_logs_leaves_console_log_on_stdout") {
+        return;
+    }
+    let files = [("preload.js", "console.log(\"preload noise\")\n"), ("pre.v2", "print(\"v2 before\")\n@js { console.log(\"from js\") }\nprint(\"v2 after\")\n")];
+    let (code, stdout, _stderr, _home) = run_with_files_env(&files, &["pre.v2"], &[("NODE_OPTIONS", "--require=./preload.js")]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "v2 before\nfrom js\nv2 after\n"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_child_that_left_its_process_group_ends_with_the_run() {
+    // INTERNALS 8.3: kill_tree also ends what is left in the worker's session; only `setsid`
+    // detaches (DOCS 16).
+    if !needs("py", "a_child_that_left_its_process_group_ends_with_the_run") {
+        return;
+    }
+    let src = "@py {\n    import subprocess, os\n    p = subprocess.Popen([\"sleep\", \"30\"], preexec_fn=os.setpgrp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n    open(\"child.pid\", \"w\").write(str(p.pid))\n}\n";
+    let start = Instant::now();
+    let (code, _stdout, stderr, home) = run_with_files(&[("pgrp.v2", src)], &["pgrp.v2"]);
+    assert!(start.elapsed() < Duration::from_secs(10), "the run waited for its child");
+    assert_eq!(code, Some(0), "{stderr}");
+    let pid: u32 = std::fs::read_to_string(home.0.join("child.pid")).unwrap().trim().parse().unwrap();
+    let gone = Instant::now() + Duration::from_secs(2);
+    while running(pid) {
+        assert!(Instant::now() < gone, "the child {pid} outlived the run");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_loss_that_a_blocks_error_hid_is_reported_at_the_end() {
+    // INTERNALS 6.5, 9.9: the block's own error wins over its failed write, so the program is
+    // never told; the end of the run says it.
+    if !needs("py", "a_loss_that_a_blocks_error_hid_is_reported_at_the_end") {
+        return;
+    }
+    let home = TempHome::new();
+    let src = "let big = \"y\" * 100000\n@py(big) {\n    import sys\n    sys.stdout.write(big)\n    raise ValueError(\"block failed\")\n}\n";
+    std::fs::write(home.0.join("hidden.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("hidden.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    drop(child.stdout.take()); // close the read end
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("v2: cannot write to stdout") && err.contains("ValueError: block failed"), "{err}");
 }
 
 #[test]
@@ -1425,6 +1510,12 @@ fn an_interrupt_still_writes_what_was_printed() {
             "print(\"before\")\n@py {\n    import time\n    print(\"from py\", flush=True)\n    open(\"ready\", \"w\").write(\"1\")\n    time.sleep(30)\n}\n",
             "before\nfrom py\n",
             Some("py"),
+        ),
+        // JavaScript has no flush: a line that doesn't end goes out at once (9.9).
+        (
+            "@js {\n    process.stdout.write(\"partial \")\n    require(\"fs\").writeFileSync(\"ready\", \"1\")\n    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000)\n}\n",
+            "partial ",
+            Some("js"),
         ),
     ];
     for (src, want, engine) in cases {
