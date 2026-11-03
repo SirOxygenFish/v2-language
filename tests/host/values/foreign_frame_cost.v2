@@ -1,0 +1,20 @@
+// timeout: 30
+// A function with a closure, given another call's closure over big data, costs the same per
+// call whatever that data is: what the rest of the program holds isn't walked (INTERNALS 5.1).
+func factory(n) {
+    let table = []
+    for i in 0..n {
+        table.push({id: i})
+    }
+    return func(i) => table[i].id
+}
+func use(get, i) {
+    let local = func() => get(i)
+    return local()
+}
+let get = factory(50000)
+let s = 0
+for i in 0..2000 {
+    s = s + use(get, i)
+}
+print(s)
