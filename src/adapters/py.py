@@ -14,7 +14,7 @@ if __name__ == "__main__":
 
     VEP = 1
     LIMIT = 64 * 1024 * 1024  # bytes per frame, both directions (9.1)
-    MAX_DEPTH = 256  # nested lists/dicts (10.5)
+    MAX_DEPTH = 256  # nested lists, dicts and errors (10.5)
     OUT_CHUNK = 1024 * 1024  # characters per `out` frame, well below LIMIT
     FLUSH_AT = 64 * 1024  # buffered characters that force a flush during a request
     IDLE_CAP = 1024 * 1024  # buffered characters a non-dispatch thread may add while idle (9.9)
@@ -603,10 +603,11 @@ if __name__ == "__main__":
 
     def error_tag(e, depth=0, path=None):
         """A V2Error as an `error` tag (10.3). One that came from V2 keeps its members (location,
-        trace), but its data and cause are encoded again, so their handles and stubs belong to
-        this frame (11.1, 11.8). An error tag is not a nesting level (10.5)."""
+        trace, the host's `ref`), but its data and cause are encoded again, so their handles and
+        stubs belong to this frame (11.1, 11.8; the host restores the ones it sent, 9.6). An error
+        is a nesting level, like a list or a dict (10.5)."""
         path = path if path is not None else Walk()
-        if id(e) in path:  # an error inside its own data
+        if depth >= MAX_DEPTH or id(e) in path:  # too deep, or an error inside its own data
             return handle_tag(e)
         text = lambda v: well_formed(v) if isinstance(v, str) else None
         if e._v2 is not None:
@@ -617,9 +618,9 @@ if __name__ == "__main__":
                    "col": None, "trace": []}
         path.add(id(e))
         try:
-            tag["data"] = encode(e.data, depth, path)
+            tag["data"] = encode(e.data, depth + 1, path)
             cause = getattr(e, "_cause", None)
-            tag["cause"] = error_tag(cause, depth, path) if isinstance(cause, V2Error) else None
+            tag["cause"] = error_tag(cause, depth + 1, path) if isinstance(cause, V2Error) else None
         finally:
             path.discard(id(e))
         return tag
@@ -1137,9 +1138,11 @@ if __name__ == "__main__":
             return "null"
         if isinstance(k, bool) or is_numpy(k, "bool_", "bool"):
             return "true" if k else "false"
-        if isinstance(k, numbers.Integral) and I64_MIN <= int(k) <= I64_MAX:
-            return str(int(k))
-        if isinstance(k, float) or (is_numpy(k) and isinstance(k, numbers.Real)):
+        if isinstance(k, numbers.Integral):
+            # Outside i64 it is a MarshalError, never a rounded float (numpy ints are Real too).
+            if I64_MIN <= int(k) <= I64_MAX:
+                return str(int(k))
+        elif isinstance(k, float) or (is_numpy(k) and isinstance(k, numbers.Real)):
             return float_text(float(k))
         raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data (key of type %s)" % (type_name(mapping), type_name(k)))
 

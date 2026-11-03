@@ -1,0 +1,16 @@
+// requires: py
+// to_v2 of a mapping whose key is an integer outside i64 is a MarshalError, numpy's integers
+// included (they are numbers.Real too), never a rounded float key (DOCS 9.2, INTERNALS 11.5).
+let keys = @py {
+    class uint64(int):
+        pass
+    uint64.__module__ = "numpy"  # what V2 knows numpy's integers by
+    [{uint64(2**64 - 1): "a"}, {2**64 - 1: "a"}, {uint64(5): "a"}]
+}
+for i in 0..3 {
+    try {
+        print(to_v2(keys[i]))
+    } catch (e) {
+        print(e.type, e.message)
+    }
+}

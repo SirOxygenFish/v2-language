@@ -75,7 +75,7 @@ impl Encoder<'_, '_> {
 
     fn enter(&mut self, addr: usize, kind: &str) -> Exec<()> {
         if self.open.contains(&addr) {
-            return self.fail(format!("cannot send a {kind} that contains itself"));
+            return self.fail(format!("cannot send {kind} that contains itself"));
         }
         if self.open.len() >= MAX_DEPTH {
             return self.fail(format!("value nested deeper than {MAX_DEPTH} levels"));
@@ -97,7 +97,7 @@ impl Encoder<'_, '_> {
             Value::Str(s) => Json::String(s.to_string()),
             Value::Bytes(b) => json!({"$v2": "bytes", "b64": base64_encode(b)}),
             Value::List(l) => {
-                self.enter(l.addr(), "list")?;
+                self.enter(l.addr(), "a list")?;
                 let items = l.borrow().clone();
                 let mut out = Vec::with_capacity(items.len());
                 for (i, item) in items.iter().enumerate() {
@@ -109,7 +109,7 @@ impl Encoder<'_, '_> {
                 Json::Array(out)
             }
             Value::Dict(d) => {
-                self.enter(d.addr(), "dict")?;
+                self.enter(d.addr(), "a dict")?;
                 let entries: Vec<(Rc<str>, Value)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 let mut out = Map::with_capacity(entries.len());
                 let mut tagged = false;
@@ -160,10 +160,13 @@ impl Encoder<'_, '_> {
         Ok(json!({"$v2": "fn", "id": id, "name": name}))
     }
 
-    /// A V2 error, with its location and frames (10.3).
+    /// A V2 error, with its location and frames (10.3). It is a nesting level, like a list or a
+    /// dict: its data and cause are one level below it (10.5).
     fn error(&mut self, e: &ErrorValue) -> Exec<Json> {
+        self.enter(e as *const ErrorValue as usize, "an error")?;
         let data = self.value(&e.data)?;
         let cause = self.value(&e.cause)?;
+        self.open.pop();
         let (file, line, col) = match e.span.get() {
             Some(s) => (json!(self.wire.sm.file(s.file).path.to_string_lossy()), json!(s.line), json!(s.col)),
             None => (Json::Null, Json::Null, Json::Null),
@@ -282,17 +285,20 @@ impl Wire<'_> {
 
     /// An `error` tag back to an `ErrorValue`: its location if the file is one of this run's (10.3).
     fn error(&mut self, m: &Map<String, Json>, depth: usize) -> Result<ErrorValue, String> {
+        if depth >= MAX_DEPTH {
+            return Err(format!("value nested deeper than {MAX_DEPTH} levels"));
+        }
         let text = |member: &str| m.get(member).and_then(Json::as_str).ok_or_else(|| format!("an 'error' tag with a bad '{member}'"));
         let optional = |member: &str| m.get(member).and_then(Json::as_str).map(Rc::<str>::from);
         let data = match m.get("data") {
-            Some(d) => self.decode_at(d, depth)?,
+            Some(d) => self.decode_at(d, depth + 1)?,
             None => Value::Null,
         };
         let mut e = ErrorValue::with_data(text("type")?.into(), text("message")?.into(), data);
         e.lang = optional("lang");
         e.foreign_type = optional("foreign_type");
         if let Some(c) = m.get("cause").filter(|c| !c.is_null()) {
-            e.cause = self.decode_at(c, depth)?;
+            e.cause = self.decode_at(c, depth + 1)?;
         }
         let file = optional("file").and_then(|f| self.sm.id_of(std::path::Path::new(&*f)));
         let line = m.get("line").and_then(Json::as_u64).and_then(|n| u32::try_from(n).ok());
@@ -634,16 +640,21 @@ mod tests {
     }
 
     #[test]
-    fn error_tags_are_not_a_level() {
-        // An error whose data is 256 lists deep goes out, and comes back unchanged (9.6, 10.5).
-        let mut data = Value::Null;
-        for _ in 0..256 {
-            data = Value::list(vec![data]);
-        }
-        let e = Value::Error(Rc::new(ErrorValue::with_data("ValueError".into(), "deep".into(), data)));
+    fn errors_are_a_level() {
+        // 10.5: an error is a level like a list, so its data has 255 left, both ways.
+        let deep = |lists: usize| {
+            let mut data = Value::Null;
+            for _ in 0..lists {
+                data = Value::list(vec![data]);
+            }
+            Value::Error(Rc::new(ErrorValue::with_data("ValueError".into(), "deep".into(), data)))
+        };
         let mut f = Fixture::new();
-        let j = f.wire(ALL).encode(&e, "value").expect("256 levels go out");
+        let j = f.wire(ALL).encode(&deep(255), "value").expect("256 levels go out");
         assert!(f.wire(ALL).decode(&j).is_ok(), "and come back");
+        assert_eq!(enc(&deep(256)).split(" (").next(), Some("MarshalError: value nested deeper than 256 levels"));
+        let tag = json!({"$v2": "error", "type": "K", "message": "m", "data": j});
+        assert_eq!(f.wire(ALL).decode(&tag).err().as_deref(), Some("value nested deeper than 256 levels"));
     }
 
     #[test]

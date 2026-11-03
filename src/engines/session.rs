@@ -80,6 +80,10 @@ pub struct Session {
     pub releases: ReleaseQueue,
     pub callables: CallableTable,
     timeouts: Timeouts,
+    /// The V2 errors sent into this worker during the outermost request, by their tag's `ref`,
+    /// so one that comes back gets its own data and cause, not the worker's copy (9.6).
+    sent_errors: Vec<(u64, Rc<ErrorValue>)>,
+    next_ref: u64,
 }
 
 impl Session {
@@ -266,6 +270,8 @@ impl Interp {
             releases: Rc::default(),
             callables: CallableTable::default(),
             timeouts,
+            sent_errors: Vec::new(),
+            next_ref: 0,
         });
         self.sessions.len() - 1
     }
@@ -542,6 +548,9 @@ impl Interp {
         }
         if let State::Busy(n) = session.state {
             session.state = if n <= 1 { State::Ready } else { State::Busy(n - 1) };
+            if n <= 1 {
+                session.sent_errors.clear();
+            }
         }
         result
     }
@@ -754,12 +763,12 @@ impl Interp {
     }
 
     /// The `error` of an `err` answering a V2 error: its kind and message, and the error itself
-    /// as a tag so that it comes back unchanged (9.6).
+    /// as a tag with a `ref`, so that it comes back unchanged (9.6).
     fn error_payload(&mut self, s: SessionId, e: &Rc<ErrorValue>) -> Json {
-        let tag = match self.wire(s).encode_passing(&Value::Error(e.clone()), "the error") {
+        let mut tag = match self.wire(s).encode_passing(&Value::Error(e.clone()), "the error") {
             Ok(tag) => tag,
-            // Data or a cause that can't cross is left out; type, message, location and trace
-            // still go back.
+            // Data or a cause that can't cross is left out of what the worker gets; type, message,
+            // location and trace still go, and the `ref` brings the whole error home.
             Err(_) => {
                 let mut bare = ErrorValue::with_data(e.kind.clone(), e.message.clone(), Value::Null);
                 bare.lang = e.lang.clone();
@@ -773,6 +782,12 @@ impl Interp {
                 self.wire(s).encode(&Value::Error(Rc::new(bare)), "the error").unwrap_or(Json::Null)
             }
         };
+        if let Some(m) = tag.as_object_mut() {
+            let session = &mut self.sessions[s];
+            session.next_ref += 1;
+            m.insert("ref".into(), json!(session.next_ref));
+            session.sent_errors.push((session.next_ref, e.clone()));
+        }
         json!({"type": &*e.kind, "message": &*e.message, "foreign_type": null, "trace": [], "v2": tag})
     }
 
@@ -814,6 +829,13 @@ impl Interp {
                 Value::Error(err) => err,
                 _ => return Err("an 'err' whose 'v2' is not an error".into()),
             };
+            // One V2 sent gets its own data and cause back: the worker's copy (decoded above, so
+            // its handles are counted and released) has only what its language could keep.
+            let sent = tag.get("ref").and_then(Json::as_u64).and_then(|r| self.sessions[s].sent_errors.iter().find(|(n, _)| *n == r));
+            if let (Some((_, original)), Some(x)) = (sent, Rc::get_mut(&mut err)) {
+                x.data = original.data.clone();
+                x.cause = original.cause.clone();
+            }
             // A V2 error that crossed foreign code keeps its own frames, with the foreign ones
             // between the callback's and those below the request (9.6).
             let foreign = self.foreign_frames(s, e).frames;

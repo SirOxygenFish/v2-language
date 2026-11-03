@@ -18,7 +18,7 @@ ForeignError | OSError | blocks cannot read standard input: V2's input() owns it
 ValueError | null | data inside | null | 59
 true handle true
 ValueError | null | cyclic data | null | 68
-null
+[1, [...]]
 Custom | null | never raised | null | 73
 true
 ForeignError | V2Error | fake | py | 76
