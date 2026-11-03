@@ -21,10 +21,15 @@ pub struct Frame {
     /// Closures created over this frame; when non-zero, leaving the frame looks for the
     /// closure-in-own-frame cycle (5.6).
     pub closures: Cell<u32>,
-    /// Left while something else still held it, so checked again in sweeps (5.1).
+    /// Left while something else still held it, so in `Gc::remembered` (5.1).
     pub remembered: Cell<bool>,
-    /// Waiting in `RECHECK`.
+    /// Waiting in `Gc::recheck`.
     queued: Cell<bool>,
+    /// What its last check looked at, and when (in frames left): what a recheck must wait for.
+    weight: Cell<u32>,
+    checked: Cell<u32>,
+    /// Frames left before it was made: a walk from a younger frame doesn't go into it.
+    born: u32,
 }
 
 pub struct Slot {
@@ -47,6 +52,8 @@ pub enum WriteError {
 }
 
 thread_local! {
+    /// Frames left so far: their age, and what pays for rechecks (5.1).
+    static TICKS: Cell<u32> = const { Cell::new(0) };
     /// Slot arrays of frames that are gone: a malloc and a free less per call.
     static SPARE: RefCell<Vec<Vec<Option<Slot>>>> = const { RefCell::new(Vec::new()) };
 }
@@ -57,7 +64,17 @@ const MAX_SPARE: usize = 256;
 pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
     let mut slots = SPARE.with(|s| s.borrow_mut().pop()).unwrap_or_default();
     slots.resize_with(layout.len(), || None);
-    Rc::new(Frame { layout: RefCell::new(layout.clone()), slots: RefCell::new(slots), parent: parent.cloned(), closures: Cell::new(0), remembered: Cell::new(false), queued: Cell::new(false) })
+    Rc::new(Frame {
+        layout: RefCell::new(layout.clone()),
+        slots: RefCell::new(slots),
+        parent: parent.cloned(),
+        closures: Cell::new(0),
+        remembered: Cell::new(false),
+        queued: Cell::new(false),
+        weight: Cell::new(0),
+        checked: Cell::new(0),
+        born: TICKS.with(Cell::get),
+    })
 }
 
 impl Drop for Frame {
@@ -197,98 +214,152 @@ pub fn take_values(env: &Env) -> Vec<Value> {
     }
 }
 
+/// Items a check at a scope exit, or a recheck, looks at before it leaves the frame to the next
+/// collection; values it holds at most (5.1).
+const CHECK_BUDGET: usize = if cfg!(test) { 1_000 } else { 10_000_000 };
+const MAX_NODES: usize = if cfg!(test) { 1_000 } else { 1_000_000 };
+/// A remembered frame is checked again only once the frames left since its last check, times
+/// this, reach what that check looked at: a big group costs each call a few items, not itself.
+const RECHECK_RATE: usize = 8;
+/// What the frames remembered must weigh before the first collection.
+const FIRST_COLLECTION: usize = 100_000;
+
+/// The cycle collector of 5.1.
+struct Gc {
+    /// Frames left while something else still held them.
+    remembered: Vec<Weak<Frame>>,
+    /// How many of those were alive at the last collection or tidying.
+    kept: usize,
+    /// Remembered frames that a closure over them, or below them, has let go of since.
+    recheck: Vec<Weak<Frame>>,
+    /// What frames remembered since the last collection weighed, and what starts the next.
+    pressure: usize,
+    due: usize,
+}
+
 thread_local! {
-    /// Frames left while something else still held them, and the count that sweeps them.
-    static SUSPECTS: RefCell<(Vec<Weak<Frame>>, usize)> = const { RefCell::new((Vec::new(), FIRST_SWEEP)) };
-    /// Remembered frames that a closure over them has let go of since: checked at the next leave.
-    static RECHECK: RefCell<Vec<Weak<Frame>>> = const { RefCell::new(Vec::new()) };
+    static GC: RefCell<Gc> = const {
+        RefCell::new(Gc { remembered: Vec::new(), kept: 0, recheck: Vec::new(), pressure: 0, due: FIRST_COLLECTION })
+    };
     /// A check is dropping the copies it held, which are no one letting go.
     static CHECKING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// A closure over `env` is going: if `env` waits for a sweep, check it soon instead.
+/// A closure over `env` is going and leaves at most one holder: each remembered frame from `env`
+/// up may be garbage now, so it is checked again at the next scope exit.
 pub fn closure_dropped(env: &Env) {
-    if env.remembered.get() && !env.queued.get() && !CHECKING.try_with(Cell::get).unwrap_or(true) {
-        env.queued.set(true);
-        let _ = RECHECK.try_with(|r| r.borrow_mut().push(Rc::downgrade(env)));
+    if CHECKING.try_with(Cell::get).unwrap_or(true) {
+        return;
     }
-}
-
-fn recheck() {
-    let frames = RECHECK.with(|r| std::mem::take(&mut *r.borrow_mut()));
-    for env in frames.iter().filter_map(Weak::upgrade) {
-        env.queued.set(false);
-        if env.remembered.get() {
-            match check(&env) {
-                Verdict::Garbage => {
-                    env.remembered.set(false);
-                    release(take_values(&env));
-                }
-                Verdict::NoCycle => env.remembered.set(false),
-                Verdict::Held => {}
-            }
+    let mut frame = Some(env);
+    while let Some(f) = frame {
+        if f.remembered.get() && !f.queued.get() {
+            let queued = GC.try_with(|g| g.try_borrow_mut().map(|mut g| g.recheck.push(Rc::downgrade(f))).is_ok());
+            f.queued.set(queued.unwrap_or(false));
         }
+        frame = f.parent.as_ref();
     }
 }
-
-const FIRST_SWEEP: usize = 256;
 
 /// Called when `env` goes out of scope. A closure over the frame that the frame itself holds,
 /// in a slot or in a list or dict in one, makes an `Rc` cycle. If only that cycle holds the
 /// frame now, its slots are cleared so it goes; if something else still does (a closure that
-/// was returned), the frame is checked again in later sweeps (5.6).
+/// was returned), it is remembered, for rechecks and collections (5.1).
 pub fn leave(env: Env) {
-    if RECHECK.with(|r| !r.borrow().is_empty()) {
-        recheck();
+    let ticks = TICKS.with(|t| t.get().wrapping_add(1));
+    TICKS.with(|t| t.set(ticks));
+    let Ok(pending) = GC.try_with(|g| !g.borrow().recheck.is_empty()) else { return };
+    if pending {
+        recheck(ticks);
     }
     // Nothing else holds it, so no closure does: it goes when `env` does.
     if env.closures.get() == 0 || Rc::strong_count(&env) == 1 {
         return;
     }
-    match check(&env) {
-        Verdict::Garbage => {
-            release(take_values(&env));
-            return;
-        }
-        Verdict::NoCycle => return,
-        Verdict::Held => {}
-    }
+    let weight = match walk(std::slice::from_ref(&env), true, CHECK_BUDGET, MAX_NODES) {
+        Some(found) if !found.dead.is_empty() => return free(found.frames),
+        Some(found) => found.work,
+        None => CHECK_BUDGET,
+    };
+    env.weight.set(u32::try_from(weight).unwrap_or(u32::MAX));
+    env.checked.set(ticks);
     env.remembered.set(true);
-    let due = SUSPECTS.with(|s| {
-        let mut s = s.borrow_mut();
-        s.0.push(Rc::downgrade(&env));
-        s.0.len() >= s.1
+    let due = GC.try_with(|g| {
+        let mut g = g.borrow_mut();
+        g.remembered.push(Rc::downgrade(&env));
+        // A dead entry keeps its frame's memory: tidy once they could outnumber the rest.
+        if g.remembered.len() >= 2 * g.kept.max(512) {
+            g.remembered.retain(|w| w.strong_count() > 0);
+            g.kept = g.remembered.len();
+        }
+        g.pressure += weight;
+        g.pressure >= g.due
     });
     drop(env);
-    if due {
-        sweep();
+    if due == Ok(true) {
+        collect();
     }
 }
 
-/// Clear every remembered frame that only its own values hold now. The next sweep comes after
-/// twice as many frames as were kept, so the work stays in proportion.
-pub fn sweep() {
-    let frames = SUSPECTS.with(|s| std::mem::take(&mut s.borrow_mut().0));
-    let mut kept = Vec::new();
-    for weak in frames {
-        let Some(env) = weak.upgrade() else { continue };
-        if !env.remembered.get() {
-            continue; // already freed by a recheck
+/// Check the remembered frames a closure has let go of, each once the frames left since its
+/// last check pay for it; the rest wait for a collection.
+fn recheck(ticks: u32) {
+    let Ok(frames) = GC.try_with(|g| std::mem::take(&mut g.borrow_mut().recheck)) else { return };
+    // Outermost first: freeing it frees what is below it too.
+    for env in frames.iter().rev().filter_map(Weak::upgrade) {
+        env.queued.set(false);
+        let paid = (ticks.wrapping_sub(env.checked.get()) as usize + 1).saturating_mul(RECHECK_RATE);
+        if !env.remembered.get() || paid < env.weight.get() as usize {
+            continue;
         }
-        match check(&env) {
-            Verdict::Garbage => {
-                env.remembered.set(false);
-                release(take_values(&env));
+        match walk(std::slice::from_ref(&env), true, CHECK_BUDGET, MAX_NODES) {
+            Some(found) if !found.dead.is_empty() => free(found.frames),
+            found => {
+                let weight = found.map_or(CHECK_BUDGET, |f| f.work);
+                env.weight.set(u32::try_from(weight).unwrap_or(u32::MAX));
+                env.checked.set(ticks);
             }
-            Verdict::NoCycle => env.remembered.set(false),
-            Verdict::Held => kept.push(weak),
         }
     }
-    SUSPECTS.with(|s| {
-        let mut s = s.borrow_mut();
-        s.1 = FIRST_SWEEP.max(2 * kept.len());
-        s.0.extend(kept);
+}
+
+/// Check every remembered frame together, with no budget: this frees a cycle through several of
+/// them, one made after its frame was left, and one too big for a check at a scope exit. The
+/// next comes once the frames remembered since weigh as much as what this one found alive, so
+/// the work stays in proportion to the program's.
+pub fn collect() {
+    let Ok(weak) = GC.try_with(|g| std::mem::take(&mut g.borrow_mut().remembered)) else { return };
+    let seeds: Vec<Env> = weak.iter().filter_map(Weak::upgrade).filter(|f| f.remembered.get()).collect();
+    drop(weak);
+    let found = walk(&seeds, false, usize::MAX, usize::MAX);
+    let mut dead = vec![false; seeds.len()];
+    for &k in found.as_ref().map_or(&[][..], |f| &f.dead) {
+        dead[k] = true;
+    }
+    let kept: Vec<Weak<Frame>> = seeds.iter().zip(dead).filter(|(_, d)| !d).map(|(f, _)| Rc::downgrade(f)).collect();
+    let live = found.as_ref().map_or(0, |f| f.live);
+    let _ = GC.try_with(|g| {
+        let mut g = g.borrow_mut();
+        g.remembered.extend(kept);
+        g.kept = g.remembered.len();
+        g.pressure = 0;
+        g.due = FIRST_COLLECTION.max(live);
     });
+    drop(seeds);
+    if let Some(found) = found {
+        free(found.frames);
+    }
+}
+
+/// Clear frames nothing outside reaches, so their cycles go.
+fn free(frames: Vec<Env>) {
+    let mut values = Vec::new();
+    for f in &frames {
+        f.remembered.set(false);
+        values.extend(take_values(f));
+    }
+    drop(frames);
+    release(values);
 }
 
 /// Set while a check runs (`CHECKING`).
@@ -307,7 +378,8 @@ impl Drop for Checking {
     }
 }
 
-/// A frame, list, dict, function or error reached from a frame's slots, held once here.
+/// A frame, list, dict, function or error that a walk reached, held once here.
+#[derive(Clone)]
 enum Node {
     Frame(Env),
     List(List),
@@ -317,26 +389,6 @@ enum Node {
 }
 
 impl Node {
-    fn of(v: &Value) -> Option<Node> {
-        match v {
-            Value::List(l) => Some(Node::List(l.clone())),
-            Value::Dict(d) => Some(Node::Dict(d.clone())),
-            Value::Func(f) => Some(Node::Func(f.clone())),
-            Value::Error(e) => Some(Node::Error(e.clone())),
-            _ => None,
-        }
-    }
-
-    fn addr(&self) -> usize {
-        match self {
-            Node::Frame(f) => Rc::as_ptr(f) as usize,
-            Node::List(l) => l.addr(),
-            Node::Dict(d) => d.addr(),
-            Node::Func(f) => f.addr(),
-            Node::Error(e) => Rc::as_ptr(e) as usize,
-        }
-    }
-
     fn count(&self) -> usize {
         match self {
             Node::Frame(f) => Rc::strong_count(f),
@@ -347,179 +399,215 @@ impl Node {
         }
     }
 
-    /// What it holds, into `out`, spending `budget` per value; false if it is being changed
-    /// right now or the budget is spent.
-    fn holds(&self, out: &mut Vec<Node>, budget: &mut usize) -> bool {
-        let mut take = |values: &mut dyn Iterator<Item = &Value>| {
-            for v in values {
-                if *budget == 0 {
-                    return false;
-                }
-                *budget -= 1;
-                out.extend(Node::of(v));
-            }
-            true
-        };
+    /// Calls `f` on each reference it holds while `f` returns true. One being changed right now
+    /// is taken to hold nothing, which only makes more look held.
+    fn each(&self, f: &mut dyn FnMut(Ref<'_>) -> bool) -> bool {
         match self {
-            Node::Frame(f) => frame_holds(f, out, budget),
-            Node::List(l) => l.try_borrow().is_ok_and(|items| take(&mut items.iter())),
-            Node::Dict(d) => d.try_borrow().is_ok_and(|map| take(&mut map.values())),
-            Node::Func(f) => {
-                match &**f {
-                    Callable::Closure { env, .. } => out.push(Node::Frame(env.clone())),
-                    Callable::Waiting { resolved, .. } => out.extend(resolved.get().and_then(Node::of)),
-                    _ => {}
+            Node::Frame(env) => {
+                if let Ok(slots) = env.slots.try_borrow() {
+                    for slot in slots.iter().flatten() {
+                        if !f(Ref::Value(&slot.value)) {
+                            return false;
+                        }
+                    }
                 }
-                true
+                env.parent.as_ref().is_none_or(|p| f(Ref::Frame(p)))
             }
-            Node::Error(e) => take(&mut [&e.data, &e.cause].into_iter()),
+            Node::List(l) => l.try_borrow().map_or(true, |items| items.iter().all(|v| f(Ref::Value(v)))),
+            Node::Dict(d) => d.try_borrow().map_or(true, |map| map.values().all(|v| f(Ref::Value(v)))),
+            Node::Func(func) => match &**func {
+                Callable::Closure { env, .. } => f(Ref::Frame(env)),
+                Callable::Waiting { resolved, .. } => resolved.get().is_none_or(|v| f(Ref::Value(v))),
+                _ => true,
+            },
+            Node::Error(e) => f(Ref::Value(&e.data)) && f(Ref::Value(&e.cause)),
         }
     }
 }
 
-fn has_ancestor(f: &Frame, addr: usize) -> bool {
-    let mut p = f.parent.as_ref();
-    while let Some(frame) = p {
-        if Rc::as_ptr(frame) as usize == addr {
-            return true;
-        }
-        p = frame.parent.as_ref();
+/// A reference a walk follows.
+enum Ref<'a> {
+    Value(&'a Value),
+    Frame(&'a Env),
+}
+
+impl Ref<'_> {
+    /// The address of what it points at and that value's holders; `None` for a value that holds
+    /// nothing a walk follows (an int, a string, a handle).
+    fn target(&self) -> Option<(usize, usize)> {
+        Some(match self {
+            Ref::Frame(f) => (Rc::as_ptr(f) as usize, Rc::strong_count(f)),
+            Ref::Value(Value::List(l)) => (l.addr(), l.strong_count()),
+            Ref::Value(Value::Dict(d)) => (d.addr(), d.strong_count()),
+            Ref::Value(Value::Func(f)) => (f.addr(), f.strong_count()),
+            Ref::Value(Value::Error(e)) => (Rc::as_ptr(e) as usize, Rc::strong_count(e)),
+            Ref::Value(_) => return None,
+        })
     }
-    false
-}
 
-fn frame_holds(f: &Frame, out: &mut Vec<Node>, budget: &mut usize) -> bool {
-    let Ok(slots) = f.slots.try_borrow() else { return false };
-    for slot in slots.iter().flatten() {
-        if *budget == 0 {
-            return false;
-        }
-        *budget -= 1;
-        out.extend(Node::of(&slot.value));
+    fn node(&self) -> Option<Node> {
+        Some(match self {
+            Ref::Frame(f) => Node::Frame(Rc::clone(f)),
+            Ref::Value(Value::List(l)) => Node::List(l.clone()),
+            Ref::Value(Value::Dict(d)) => Node::Dict(d.clone()),
+            Ref::Value(Value::Func(f)) => Node::Func(f.clone()),
+            Ref::Value(Value::Error(e)) => Node::Error(e.clone()),
+            Ref::Value(_) => return None,
+        })
     }
-    out.extend(f.parent.clone().map(Node::Frame));
-    true
 }
 
-/// A value a check reached: its address, its references from inside the group, where its own
-/// references start and end in the check's list of them, and the value (none for the frame).
-type Entry = (usize, usize, (usize, usize), Option<Node>);
-
-/// What a check of a frame found.
-#[derive(Clone, Copy, PartialEq)]
-enum Verdict {
-    /// Nothing outside reaches it: free it.
-    Garbage,
-    /// Something outside still reaches it through a cycle: check again later.
-    Held,
-    /// No cycle runs through it, so plain reference counting frees it.
-    NoCycle,
+/// A value a walk reached: the value, held once here, its address, its references from walked
+/// values, where its own references start and end in the walk's list of them, how many items
+/// it has, whether it is walked, and whether it may be.
+struct Entry {
+    node: Node,
+    addr: usize,
+    refs: usize,
+    edges: (usize, usize),
+    items: usize,
+    walked: bool,
+    closed: bool,
 }
 
-/// Whether anything outside `env`'s own values still reaches it. Every frame, list, dict,
-/// function and error reached from its slots is counted with the references to it from inside
-/// that group; one with more is held from outside, so it lives, and so does whatever it reaches.
-/// `env` is garbage if none of that reaches it. A reference this misses only makes more look
-/// held, so a wrong answer can keep memory but never frees what is in use; that allows two
-/// shortcuts. A list or dict with holders besides the one that led here isn't walked (data
-/// passed in, shared with the rest of the program), and of the frames that aren't `env` or below
-/// it (another call's, an earlier pass of a loop) only the first few found are.
-fn check(env: &Env) -> Verdict {
-    // A walk costs about what making the group did; the bounds are for what a sweep repeats.
-    const MAX_NODES: usize = 1_000_000;
-    const MAX_FOREIGN: usize = 8;
+/// What a walk found.
+struct Found {
+    /// The seeds nothing outside reaches, by position.
+    dead: Vec<usize>,
+    /// Every frame nothing outside reaches, the seeds among them.
+    frames: Vec<Env>,
+    /// Items looked at, and those of them in values that live.
+    work: usize,
+    live: usize,
+}
+
+/// A walk's lists, kept for the next one so a small walk allocates nothing.
+#[derive(Default)]
+struct Scratch {
+    nodes: Vec<Entry>,
+    edges: Vec<usize>,
+    todo: Vec<usize>,
+    live: Vec<bool>,
+}
+
+thread_local! {
+    static SCRATCH: Cell<Option<Scratch>> = const { Cell::new(None) };
+}
+
+/// Whether anything outside the values reached from `seeds` still reaches each of them. Every
+/// frame, list, dict, function and error reached is counted with its references from the walked
+/// ones; one with more holders than that is held from outside, so it lives, with all it reaches
+/// (followed along each value's own references, so linear). A reference the walk misses only
+/// makes more look held, so a wrong answer can keep memory but never frees what is in use.
+/// `lazy`: a value is walked only once all its holders are found among walked ones, so what the
+/// rest of the program shares (data passed in, a running frame, another call's function) costs
+/// nothing, and a frame older than the seeds isn't walked: it was checked when it was left, and
+/// a closure over it in a seed (a chain of closures, each over the frame before) would make every
+/// walk go back to the first one. `None`: more than `budget` items or `max_nodes` values.
+fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Option<Found> {
     // Declared first, so it ends last: the copies below are dropped while it is set.
     let _checking = Checking::new();
-    let me = Rc::as_ptr(env) as usize;
-    // Each value reached, held once more here: its address, its references from inside, where
-    // its own references start and end in `edges`, and the value; `env` is first, with no value.
-    let mut nodes: Vec<Entry> = vec![(me, 0, (0, 0), None)];
-    let mut edges: Vec<usize> = Vec::new();
+    let mut scratch = SCRATCH.try_with(Cell::take).ok().flatten().unwrap_or_default();
+    let Scratch { nodes, edges, todo, live } = &mut scratch;
+    let n = seeds.len();
+    nodes.extend(seeds.iter().map(|s| Entry { node: Node::Frame(s.clone()), addr: Rc::as_ptr(s) as usize, refs: 0, edges: (0, 0), items: 0, walked: true, closed: false }));
+    let youngest = seeds.iter().map(|s| s.born).max().unwrap_or(0);
     // Found by address in that list while it is short, then through a map.
-    let mut by_addr: Option<HashMap<usize, usize>> = None;
-    let mut budget = 10_000_000; // items looked at, plain ones included
-    let mut foreign = 0;
-    // Something was left unwalked, so a cycle through it can't be ruled out.
-    let mut partial = false;
-    let mut out = Vec::new();
-    if !frame_holds(env, &mut out, &mut budget) {
-        return Verdict::Held;
-    }
-    let mut todo = Vec::new();
-    let mut from = 0;
-    loop {
+    let index = |nodes: &[Entry]| nodes.iter().enumerate().map(|(k, e)| (e.addr, k)).collect::<HashMap<usize, usize>>();
+    let mut by_addr = (n >= 32).then(|| index(nodes));
+    todo.extend((0..n).rev());
+    // Holders that aren't references from walked values: this list's copy, a seed's owner.
+    let ours = |k: usize| 1 + usize::from(k < n);
+    while let Some(k) = todo.pop() {
+        // Held once more while it is walked.
+        let node = nodes[k].node.clone();
         let first = edges.len();
-        for node in out.drain(..) {
-            let addr = node.addr();
-            // The frames above `env` live on with the code that runs in them.
-            if has_ancestor(env, addr) {
-                continue;
+        let mut items = 0;
+        let mut over = false;
+        node.each(&mut |r| {
+            if budget == 0 {
+                over = true;
+                return false;
             }
+            budget -= 1;
+            items += 1;
+            let Some((addr, count)) = r.target() else { return true };
             let found = match &by_addr {
                 Some(map) => map.get(&addr).copied(),
-                None => nodes.iter().position(|n| n.0 == addr),
+                None => nodes.iter().position(|e| e.addr == addr),
             };
-            let k = match found {
-                Some(k) => k,
-                None => {
-                    let other_frame = matches!(&node, Node::Frame(f) if !has_ancestor(f, me));
-                    if other_frame && foreign == MAX_FOREIGN {
-                        partial = true;
-                        continue;
+            let j = match found {
+                Some(j) => {
+                    let e = &mut nodes[j];
+                    e.refs += 1;
+                    // Every holder found: walk it too.
+                    if !e.walked && !e.closed && e.refs + ours(j) + usize::from(j == k) == count {
+                        e.walked = true;
+                        todo.push(j);
                     }
-                    foreign += usize::from(other_frame);
-                    // Held twice already, by this and something else: not walked.
-                    let shared = matches!(&node, Node::List(_) | Node::Dict(_)) && node.count() > 2;
-                    nodes.push((addr, 0, (0, 0), Some(node)));
-                    let k = nodes.len() - 1;
+                    j
+                }
+                None => {
+                    let Some(node) = r.node() else { return true };
+                    let j = nodes.len();
+                    // Made before the frame checked (wrapping like the ticks).
+                    let closed = lazy && matches!(&node, Node::Frame(f) if (youngest.wrapping_sub(f.born) as i32) > 0);
+                    // `count` has no copy of ours yet.
+                    let walked = !lazy || (count == 1 && !closed);
+                    nodes.push(Entry { node, addr, refs: 1, edges: (0, 0), items: 0, walked, closed });
                     match &mut by_addr {
                         Some(map) => {
-                            map.insert(addr, k);
+                            map.insert(addr, j);
                         }
-                        None if k >= 32 => by_addr = Some(nodes.iter().enumerate().map(|(k, n)| (n.0, k)).collect()),
+                        None if j >= 32 => by_addr = Some(index(nodes)),
                         None => {}
                     }
-                    if shared {
-                        partial = true;
-                    } else {
-                        todo.push(k);
+                    if walked {
+                        todo.push(j);
                     }
-                    k
+                    j
                 }
             };
-            nodes[k].1 += 1;
-            edges.push(k);
+            edges.push(j);
+            true
+        });
+        if over || nodes.len() > max_nodes {
+            return None;
         }
-        nodes[from].2 = (first, edges.len());
-        let Some(k) = todo.pop() else { break };
-        from = k;
-        if nodes.len() > MAX_NODES || !nodes[k].3.as_ref().is_some_and(|node| node.holds(&mut out, &mut budget)) {
-            return Verdict::Held;
-        }
+        nodes[k].edges = (first, edges.len());
+        nodes[k].items = items + 1;
     }
-    if nodes[0].1 == 0 && !partial {
-        return Verdict::NoCycle;
-    }
-    // What something outside holds lives, with all it reaches here.
-    let held = |n: &Entry| match &n.3 {
-        Some(node) => node.count() > n.1 + 1,
-        None => Rc::strong_count(env) > n.1 + 1, // more than the caller's
-    };
-    if held(&nodes[0]) {
-        return Verdict::Held;
-    }
-    let mut live: Vec<usize> = (1..nodes.len()).filter(|&k| held(&nodes[k])).collect();
-    let mut seen = vec![false; nodes.len()];
-    while let Some(k) = live.pop() {
-        if k == 0 {
-            return Verdict::Held;
-        }
-        if !std::mem::replace(&mut seen[k], true) {
-            let (a, b) = nodes[k].2;
-            live.extend_from_slice(&edges[a..b]);
+    // What something outside holds lives, with all it reaches.
+    live.resize(nodes.len(), false);
+    todo.extend((0..nodes.len()).filter(|&k| nodes[k].refs + ours(k) < nodes[k].node.count()));
+    while let Some(k) = todo.pop() {
+        if !std::mem::replace(&mut live[k], true) {
+            let (a, b) = nodes[k].edges;
+            todo.extend_from_slice(&edges[a..b]);
         }
     }
-    Verdict::Garbage
+    let mut found = Found { dead: Vec::new(), frames: Vec::new(), work: 0, live: 0 };
+    for (k, (e, &l)) in nodes.iter().zip(live.iter()).enumerate() {
+        found.work += e.items;
+        if l {
+            found.live += e.items;
+            continue;
+        }
+        if k < n {
+            found.dead.push(k);
+        }
+        if let Node::Frame(f) = &e.node {
+            found.frames.push(f.clone());
+        }
+    }
+    nodes.clear();
+    edges.clear();
+    live.clear();
+    // A big walk's lists go, not kept for the rest of the run.
+    if nodes.capacity() <= 4096 && edges.capacity() <= 16384 {
+        let _ = SCRATCH.try_with(|s| s.set(Some(scratch)));
+    }
+    Some(found)
 }
 
 #[cfg(test)]
@@ -528,13 +616,18 @@ mod tests {
     use crate::syntax::ast::{ExprKind, StmtKind};
     use crate::syntax::parser::parse_str;
 
-    /// A closure over `frame`, stored in `frame` (the cycle of a local `func`).
-    fn closure_in(frame: &Env) -> Value {
+    /// A closure over `frame`.
+    fn closure_over(frame: &Env) -> Value {
         let prog = parse_str("let f = func() => 1").unwrap();
         let StmtKind::Let(_, Some(e)) = &prog[0].kind else { panic!("let") };
         let ExprKind::Func(decl) = &e.kind else { panic!("func") };
         frame.closures.set(frame.closures.get() + 1);
-        let f = Value::func(Callable::Closure { decl: decl.clone(), env: frame.clone(), name: "f".into() });
+        Value::func(Callable::Closure { decl: decl.clone(), env: frame.clone(), name: "f".into() })
+    }
+
+    /// A closure over `frame`, stored in `frame` (the cycle of a local `func`).
+    fn closure_in(frame: &Env) -> Value {
+        let f = closure_over(frame);
         declare(frame, "f".into(), f.clone(), false);
         f
     }
@@ -589,8 +682,8 @@ mod tests {
         leave(frame);
         assert!(weak.upgrade().is_some(), "the returned closure still reaches it");
         drop(returned);
-        sweep();
-        assert!(weak.upgrade().is_none(), "the next sweep freed it");
+        collect();
+        assert!(weak.upgrade().is_none(), "the next collection freed it");
     }
 
     #[test]
@@ -613,13 +706,41 @@ mod tests {
         drop(closure_in_list(&frame));
         let outside = lookup(&frame, "box").unwrap();
         leave(frame);
-        sweep();
+        collect();
         let kept = weak.upgrade().expect("the list reaches the closure, which reaches the frame");
         assert!(lookup(&kept, "box").is_some(), "its slots were not cleared");
         drop(kept);
         drop(outside);
-        sweep();
+        collect();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn a_cycle_made_after_leaving_is_freed() {
+        // No cycle when it is left, but the frame is remembered: the closure that escaped can
+        // still store itself there.
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        let escaped = closure_over(&frame);
+        leave(frame);
+        let kept = weak.upgrade().expect("the closure still reaches its frame");
+        declare(&kept, "me".into(), escaped.clone(), false);
+        drop(kept);
+        drop(escaped);
+        leave(self::frame());
+        assert!(weak.upgrade().is_none(), "the recheck at the next scope exit freed it");
+    }
+
+    #[test]
+    fn a_group_too_big_to_check_is_collected() {
+        let frame = frame();
+        let weak = Rc::downgrade(&frame);
+        drop(closure_in(&frame));
+        declare(&frame, "big".into(), Value::list(vec![Value::Int(0); CHECK_BUDGET]), false);
+        leave(frame);
+        assert!(weak.upgrade().is_some(), "too big to check when it was left");
+        collect();
+        assert!(weak.upgrade().is_none(), "a collection has no budget");
     }
 
     #[test]

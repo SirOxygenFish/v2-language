@@ -1,0 +1,86 @@
+// requires: py
+// More shapes freed at once (INTERNALS 5.1): a cycle made after the frame was left (a returned
+// closure that stores closures in its frame's dict, or stores itself), a list the frame holds
+// under two names, nine wrappers made by other calls, and closures made in a loop body.
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def make():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { make, n }
+}
+@import { make, n } from pk
+func make_cache() {
+    let t = make()
+    let cache = {}
+    return func(k) {
+        if !(k in cache) {
+            cache[k] = func() => k + "!"
+        }
+        return cache[k]()
+    }
+}
+func make_setter() {
+    let t = make()
+    let me = null
+    return func(x) {
+        me = x
+    }
+}
+func cache() {
+    let c = make_cache()
+    c("x")
+}
+func setter() {
+    let s = make_setter()
+    s(s)
+}
+func two_names() {
+    let t = make()
+    let items = []
+    let state = {items: items}
+    items.push(func() => len(state))
+    return len(items)
+}
+func wrap(g) {
+    return func() => g()
+}
+func nine() {
+    let t = make()
+    func helper() {
+        return 1
+    }
+    let ws = [wrap(helper), wrap(helper), wrap(helper), wrap(helper), wrap(helper), wrap(helper), wrap(helper), wrap(helper), wrap(helper)]
+    return len(ws)
+}
+func loop_made() {
+    let t = make()
+    let fs = []
+    for i in 0..2 {
+        fs.push(func() => t)
+    }
+    return fs[0]
+}
+func in_loop() {
+    let f = loop_made()
+    f()
+}
+func nop() {
+    return null
+}
+// Releases go out with the next call, so the count shows on the call after that.
+func released(f) {
+    n()
+    let before = n()
+    for i in 0..30 {
+        f()
+    }
+    nop()
+    n()
+    return n() - before
+}
+print(released(cache), released(setter), released(two_names), released(nine), released(in_loop))

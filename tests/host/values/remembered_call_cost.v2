@@ -1,0 +1,19 @@
+// timeout: 30
+// Calling a function that a returned closure's frame holds costs about the same whatever data
+// that frame holds: a recheck waits until the calls since pay for it (INTERNALS 5.1).
+func make_obj(n) {
+    let rows = []
+    for i in 0..n {
+        rows.push({id: i})
+    }
+    func helper(i) {
+        return rows[i].id
+    }
+    return func(i) => helper(i % n)
+}
+let obj = make_obj(50000)
+let s = 0
+for i in 0..2000 {
+    s = s + obj(i)
+}
+print(s)

@@ -25,15 +25,19 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.14, the loop. Sweep rounds 1-3 are committed; round 4 found real defects too, so two clean rounds
-  are still needed before closing 1.14 (ROADMAP boxes and log, final report). Keep reviews lean: 1.11's took 24 agents and 2.9M tokens; a differential fuzz
-  (mem/fuzz_line.py) found the same family for almost nothing. mem/fuzz_scope.py compares two
-  binaries on random V2 programs.
+- Now: 1.14, the loop. Sweep rounds 1-10 are committed; every round so far found real defects, so
+  two clean rounds in a row are still needed before closing 1.14 (ROADMAP boxes and log, final
+  report). After that the owner wants "a serious chat". Keep reviews lean: two reviewer agents a
+  round, each from a new angle; a differential fuzz finds a lot for little.
+- Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
+  v2 and its workers past 2 GB together or the time limit; a test ran away to 47 GB on
+  2026-11-02), never kill by name, and stop and report when an action is refused.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
-- Round 3 found `s += piece` is quadratic (1 MB string: 12 s) and imported classes have no static
-  members. Both are spec, documented, and go to the owner as proposals in the final report.
+- For the owner in the final report (spec, documented, not fixed): `s += piece` is quadratic (1 MB
+  string: 12 s), `dict.remove` is O(n) (100k: 15 s), imported classes have no static members;
+  also `#!` lines and narrower closure capture.
 - Scratchpad helpers are session-local and can vanish (the app crash of 2026-11-02 wiped them):
   bench/measure.py re-measures release numbers; rewrite fuzzers if needed. Never generate a sweep
   test's .out from the binary: its output comes from DOCS.
@@ -90,7 +94,9 @@ it is loaded automatically into every session and every subagent.
   Builtin | Proxy {session, unit, name} | Route {route, name} | Waiting {import, local, seen,
   resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`),
   `env` (`Frame` = layout + slots, by position; an empty slot means not declared yet, so reads
-  and writes fall back by name; a spare-array pool), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  and writes fall back by name; a spare-array pool; the frame cycle collector of 5.1: `walk`
+  (lazy for `leave` and `recheck`, everything for `collect`); `closure_dropped` from `Func::drop`
+  queues rechecks), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns

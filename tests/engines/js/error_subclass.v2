@@ -19,7 +19,24 @@ func kind(f) {
     function b() { throw new Named("x") }
     function c() { throw new Error("x") }
     function d() { throw new TypeError("x") }
-    @export { a, b, c, d }
+    class SubType extends TypeError {}
+    class SetsError extends Error {
+        constructor(m) {
+            super(m);
+            this.name = "Error";
+        }
+    }
+    function e() { throw new SubType("x") }
+    function f() { throw new SetsError("x") }
+    function g() {
+        const x = new Error("x");
+        x.name = "CustomName";
+        Object.defineProperty(x, "constructor", { get() { throw new Error("no") } });
+        throw x;
+    }
+    function h() { throw { name: "Error", message: "x" } }
+    @export { a, b, c, d, e, f, g, h }
 }
-@import { a, b, c, d } from @js
+@import { a, b, c, d, e, f, g, h } from @js
 print(kind(a), kind(b), kind(c), kind(d))
+print(kind(e), kind(f), kind(g), kind(h))

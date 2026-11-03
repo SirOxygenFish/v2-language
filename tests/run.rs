@@ -932,6 +932,68 @@ fn a_run_that_used_fetch_ends_quietly() {
 }
 
 #[test]
+fn a_js_error_with_no_call_to_attach_to_keeps_only_user_frames() {
+    // INTERNALS 1.1 and 12.6: printed with the frames an error reaching V2 keeps; one from V2 says
+    // its type and where V2 raised it.
+    if !needs("js", "a_js_error_with_no_call_to_attach_to_keeps_only_user_frames") {
+        return;
+    }
+    let src = "\
+func boom() {
+    throw error(\"ValueError\", \"timer boom\")
+}
+@js J {
+    @import { boom } from v2
+    async function wait_on_timer() {
+        return await new Promise(res => setTimeout(() => res(boom()), 5));
+    }
+    @export { wait_on_timer }
+}
+@import { wait_on_timer } from J
+try {
+    wait_on_timer()
+} catch (e) {
+    print(\"caught\", e.type)
+}
+";
+    let (code, stdout, stderr, _home) = run_with_files(&[("timer.v2", src)], &["timer.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "caught Error\n"));
+    assert!(stderr.starts_with("V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
+    assert!(stderr.contains("timer.v2:7:"), "{stderr}");
+    assert!(!stderr.contains("js.js") && !stderr.contains("node:"), "{stderr}");
+}
+
+#[test]
+fn a_python_thread_error_keeps_only_user_frames() {
+    // INTERNALS 1.1 and 12.6: the refusal a thread gets is printed without the adapter's frames.
+    if !needs("py", "a_python_thread_error_keeps_only_user_frames") {
+        return;
+    }
+    let src = "\
+func boom() {
+    return 1
+}
+@py P {
+    import threading
+    @import { boom } from v2
+    def go():
+        t = threading.Thread(target=lambda: boom())
+        t.start()
+        t.join()
+        return 2
+    @export { go }
+}
+@import { go } from P
+print(go())
+";
+    let (code, stdout, stderr, _home) = run_with_files(&[("thread.v2", src)], &["thread.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "2\n"));
+    assert!(stderr.contains("line 8, in <lambda>"), "{stderr}");
+    assert!(stderr.contains("V2Error: V2 function 'boom' called from another thread"), "{stderr}");
+    assert!(!stderr.contains("py.py"), "{stderr}");
+}
+
+#[test]
 fn a_worker_writing_to_a_closed_stdout_is_an_io_error() {
     // INTERNALS 9.9: the write fails with no V2 expression waiting, so the IOError comes when the
     // block returns, catchable, and the worker is still there.
