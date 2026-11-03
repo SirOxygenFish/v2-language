@@ -647,6 +647,40 @@ if __name__ == "__main__":
             out.append({"file": well_formed(name), "line": fs.lineno, "col": col, "func": func})
         return out
 
+    def internal(fs):
+        return fs.filename.startswith("<frozen ") or os.path.normcase(os.path.abspath(fs.filename)) == ADAPTER
+
+    def print_unattached(header, e):
+        """An exception with no V2 call to attach to (1.1), as Python prints it, with the frames
+        12.6 keeps."""
+        te = traceback.TracebackException.from_exception(e)
+        todo, seen = [te], set()
+        while todo:
+            t = todo.pop()
+            if t is not None and id(t) not in seen:
+                seen.add(id(t))
+                t.stack = traceback.StackSummary.from_list([fs for fs in t.stack if not internal(fs)])
+                todo += [t.__cause__, t.__context__, *(getattr(t, "exceptions", None) or ())]
+        sys.stderr.write(header + "".join(te.format()))
+
+    def thread_hook(a):
+        if a.exc_type is not SystemExit:
+            name = a.thread.name if a.thread is not None else threading.get_ident()
+            print_unattached("Exception in thread %s:\n" % name, a.exc_value)
+
+    def unraisable_hook(u):
+        try:
+            what = "%s: %r" % (u.err_msg or "Exception ignored in", u.object) if u.object is not None else u.err_msg
+        except Exception:
+            what = u.err_msg or "Exception ignored in"
+        if u.exc_value is None:
+            sys.stderr.write("%s\n%s\n" % (what or "Exception ignored", getattr(u.exc_type, "__name__", "")))
+        else:
+            print_unattached((what or "Exception ignored") + "\n", u.exc_value)
+
+    threading.excepthook = thread_hook
+    sys.unraisablehook = unraisable_hook
+
     def serialize(e, depth=0):
         """An exception as `err.error` (9.6)."""
         if isinstance(e, Fail):
