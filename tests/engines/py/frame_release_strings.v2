@@ -1,0 +1,29 @@
+// requires: py
+// A remembered frame counts the strings it holds toward the next collection, so cycles holding big
+// strings don't pile up while the program makes few lists and dicts (INTERNALS 5.1).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def track():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { track, n }
+}
+@import { track, n } from pk
+func make(n) {
+    let t = track()
+    let s = "x" * n
+    let box = {}
+    box.f = func() => len(s)
+    return box
+}
+n()
+let before = n()
+for i in 0..100 {
+    let r = make(400000)
+}
+n()
+print(n() - before >= 90)

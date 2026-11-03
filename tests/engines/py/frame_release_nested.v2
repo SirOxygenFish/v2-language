@@ -1,0 +1,37 @@
+// requires: py
+// A cycle through the frame of a function's own nested call is freed when the function returns,
+// however big that frame's group (INTERNALS 5.1).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def track():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { track, n }
+}
+@import { track, n } from pk
+func outer(i) {
+    let t = track()
+    let pad = range(0, 100)
+    func inner(cb) {
+        let pad2 = range(0, 100)
+        let back = cb
+        return func() => len(pad2) + back()
+    }
+    let me = func() => len(pad)
+    let k = inner(me)
+    return k()
+}
+func released(f) {
+    n()
+    let before = n()
+    for i in 0..30 {
+        f(i)
+    }
+    n()
+    return n() - before
+}
+print(released(outer))

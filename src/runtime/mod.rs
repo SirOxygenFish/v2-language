@@ -61,11 +61,14 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     let result = interp.run(file, &program);
     // Program output comes before the error that ended it (5.10). Output that can't be written
     // at the end is reported, and a run that would have exited 0 exits 1 (6.5).
-    let flushed = interp.out.flush();
-    // Not said again after the `IOError` that a write raised, unless the run would succeed.
-    let said = interp.out.failed && !matches!(result, Ok(()) | Err(Flow::Exit(0)));
-    if let (Err(e), false) = (&flushed, said) {
-        stderrln!("v2: cannot write to stdout: {}", os_message(e));
+    // Output that never reached stdout and that no `IOError` told the program about (6.5).
+    let lost = |out: &mut crate::runtime::builtins::Out| match out.flush() {
+        Err(e) => Some(format!("cannot write to stdout: {}", os_message(&e))),
+        Ok(()) => out.lost.take().map(|m| m.to_string()),
+    };
+    let flushed = lost(&mut interp.out);
+    if let Some(m) = &flushed {
+        stderrln!("v2: {m}");
     }
     let code = match result {
         Ok(()) => 0,
@@ -86,11 +89,11 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     // Then the engines stop: `bye`, one shared grace period that still forwards their output,
     // kill and reap; late output is flushed too (6.5, 8.7).
     interp.shutdown_sessions();
-    let late = interp.out.flush();
-    if let (Ok(()), Err(e), false) = (&flushed, &late, said) {
-        stderrln!("v2: cannot write to stdout: {}", os_message(e));
+    let late = lost(&mut interp.out);
+    if let (None, Some(m)) = (&flushed, &late) {
+        stderrln!("v2: {m}");
     }
-    if (flushed.is_err() || late.is_err()) && code == 0 {
+    if (flushed.is_some() || late.is_some()) && code == 0 {
         1
     } else {
         code

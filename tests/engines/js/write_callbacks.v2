@@ -1,6 +1,7 @@
 // requires: js
-// A write's callback runs after it, in order, and a loop's callbacks wait in one tick, not one
-// each: a block that logs a lot doesn't hold every line in memory until it ends (INTERNALS 9.9).
+// A write's callback runs as Node runs it: in a tick of its own, in order with other ticks, the
+// same callback again counted into the tick still waiting (so a block that logs a lot doesn't
+// hold every line in memory until it ends), with null, and a throw loses no later one (9.9).
 @js J {
     function grew(n) {
         const before = process.memoryUsage().heapUsed;
@@ -10,11 +11,14 @@
     async function order() {
         const seen = [];
         const a = () => seen.push("a");
+        process.stdout.write("", () => seen.push("w1"));
+        process.nextTick(() => seen.push("tick"));
+        process.stdout.write("", () => seen.push("w2"));
         for (let i = 0; i < 3; i++) process.stdout.write("", a);
-        process.stdout.write("", () => seen.push("b"));
-        process.stdout.write("", a);
+        process.stdout.write("", () => { throw new Error("cb boom") });
+        process.stdout.write("", (err) => seen.push(String(err)));
         await new Promise((r) => setImmediate(r));
-        return seen.join("");
+        return seen.join(",");
     }
     @export { grew, order }
 }
