@@ -599,7 +599,11 @@ impl Interp {
                         Ok(Reply { value, exports, missing })
                     });
                     return match (reply, unwritten) {
-                        (Ok(_), Some(flow)) => Err(self.raise(flow, at)),
+                        (Ok(_), Some(flow)) => {
+                            // Its later output went nowhere either: it goes with the IOError.
+                            self.out.discard();
+                            Err(self.raise(flow, at))
+                        }
                         (Ok(reply), None) => Ok(reply),
                         (Err(what), _) => {
                             let flow = self.protocol_violation(s, &what, &line);
@@ -610,6 +614,7 @@ impl Interp {
                 Frame::Err { error: e, .. } => {
                     // Its error wins, so a failed write of the request's output is never raised.
                     if let Some(Flow::Error(lost)) = unwritten {
+                        self.out.discard();
                         self.out.lost.get_or_insert(lost.message.clone());
                     }
                     return match self.foreign_error(s, &e, at) {

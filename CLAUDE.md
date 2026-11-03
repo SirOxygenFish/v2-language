@@ -25,7 +25,7 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.14, the loop. Sweep rounds 1-12 are committed; every round so far found real defects, so
+- Now: 1.14, the loop. Sweep rounds 1-14 are committed; every round so far found real defects, so
   two clean rounds in a row are still needed before closing 1.14 (ROADMAP boxes and log, final
   report). After that the owner wants "a serious chat". Keep reviews lean: two reviewer agents a
   round, each from a new angle; a differential fuzz finds a lot for little.

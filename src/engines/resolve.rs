@@ -178,15 +178,15 @@ pub enum ProbeOutcome {
 
 /// Runs version probes; the tests inject fakes.
 pub trait Prober {
-    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)]) -> ProbeOutcome;
+    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Duration) -> ProbeOutcome;
 }
 
-/// Runs the probe under 8.3's child rules with a 10 s timer; stdout then stderr, lossy UTF-8.
+/// Runs the probe under 8.3's child rules with a timer; stdout then stderr, lossy UTF-8.
 pub struct RealProber;
 
 impl Prober for RealProber {
-    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)]) -> ProbeOutcome {
-        match process::run_captured(argv, env, Some(PROBE_LIMIT), None) {
+    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Duration) -> ProbeOutcome {
+        match process::run_captured(argv, env, Some(limit), None) {
             Err(e) => ProbeOutcome::SpawnFailed(e.message),
             Ok(c) if c.timed_out => ProbeOutcome::TimedOut,
             Ok(c) => match c.status.signal {
@@ -221,10 +221,10 @@ impl Judged {
 /// The skip reason of the Store's fake `python.exe` (7.6): the one skip the cache remembers (7.7).
 const PLACEHOLDER: &str = "Microsoft Store placeholder";
 
-fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome) -> Judged {
+fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Duration) -> Judged {
     match outcome {
         ProbeOutcome::SpawnFailed(msg) => Judged::Skipped(msg.clone()),
-        ProbeOutcome::TimedOut => Judged::Skipped(format!("version probe timed out ({} s)", PROBE_LIMIT.as_secs())),
+        ProbeOutcome::TimedOut => Judged::Skipped(format!("version probe timed out ({} s)", limit.as_secs_f64())),
         ProbeOutcome::Killed(sig) => Judged::Skipped(format!("version probe failed ({})", ExitInfo { code: None, signal: Some(*sig) }.describe())),
         ProbeOutcome::Exited { code, output } => {
             // The placeholder prints "Python was not found" and exits 9009 (7.6).
@@ -504,8 +504,8 @@ impl Resolver<'_> {
         spec.env.iter().map(|(k, v)| (OsString::from(&**k), OsString::from(&**v))).collect()
     }
 
-    /// Probe one hit, through the cache.
-    fn probe(&mut self, spec: &EngineSpec, argv: &[OsString], path: &Path) -> Judged {
+    /// Probe one hit, through the cache, for at most `limit`.
+    fn probe(&mut self, spec: &EngineSpec, argv: &[OsString], path: &Path, limit: Duration) -> Judged {
         let key = cache_key(spec, argv, path);
         if let Some(j) = key.as_deref().and_then(|k| self.cache.get(k)) {
             return j;
@@ -514,8 +514,8 @@ impl Resolver<'_> {
         if let Some((args, _)) = &spec.probe {
             full.extend(args.iter().map(|a| OsString::from(&**a)));
         }
-        let outcome = self.prober.probe(&full, &Self::env(spec));
-        let judged = judge(spec, self.lookup.is_alias(path), &outcome);
+        let outcome = self.prober.probe(&full, &Self::env(spec), limit);
+        let judged = judge(spec, self.lookup.is_alias(path), &outcome, limit);
         if let Some(key) = key {
             let output = match &outcome {
                 ProbeOutcome::Exited { output, .. } => output.as_str(),
@@ -540,7 +540,10 @@ impl Resolver<'_> {
 
     fn usable(&mut self, spec: &Rc<EngineSpec>, argv: Vec<OsString>, origin: Origin, what: &str, from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let path = PathBuf::from(&argv[0]);
-        match self.probe(spec, &argv, &path) {
+        // The user's own command may start slowly: its probe waits as long as starting it may.
+        let start = self.cfg.engines.get(&*spec.id).and_then(|e| e.startup_timeout.as_ref()).map(|t| Duration::from_secs_f64(t.value));
+        let limit = start.map_or(PROBE_LIMIT, |t| t.max(PROBE_LIMIT));
+        match self.probe(spec, &argv, &path, limit) {
             Judged::Usable(v) => Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: Some(v), skipped: Vec::new() }),
             other => {
                 let reason = other.reason().unwrap_or_default();
@@ -600,7 +603,7 @@ impl Resolver<'_> {
                 }
                 let mut argv = vec![hit.clone().into_os_string()];
                 argv.extend(candidate[1..].iter().map(|a| OsString::from(&**a)));
-                match self.probe(spec, &argv, &hit) {
+                match self.probe(spec, &argv, &hit, PROBE_LIMIT) {
                     Judged::Usable(v) => {
                         return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped })
                     }
@@ -620,7 +623,7 @@ impl Resolver<'_> {
     /// without opening an install dialog (7.6).
     fn command_line_tools(&self) -> bool {
         let argv = [OsString::from("/usr/bin/xcode-select"), OsString::from("-p")];
-        matches!(self.prober.probe(&argv, &[]), ProbeOutcome::Exited { code: Some(0), .. })
+        matches!(self.prober.probe(&argv, &[], PROBE_LIMIT), ProbeOutcome::Exited { code: Some(0), .. })
     }
 
     /// ts: the js engine, if its Node has built-in type stripping (7.6).
@@ -686,12 +689,14 @@ mod tests {
         answer: Box<dyn Fn(&Path) -> ProbeOutcome>,
         calls: Rc<Cell<usize>>,
         argvs: Rc<RefCell<Vec<Vec<OsString>>>>,
+        limits: Rc<RefCell<Vec<Duration>>>,
     }
 
     impl Prober for Fake {
-        fn probe(&self, argv: &[OsString], _: &[(OsString, OsString)]) -> ProbeOutcome {
+        fn probe(&self, argv: &[OsString], _: &[(OsString, OsString)], limit: Duration) -> ProbeOutcome {
             self.calls.set(self.calls.get() + 1);
             self.argvs.borrow_mut().push(argv.to_vec());
+            self.limits.borrow_mut().push(limit);
             (self.answer)(Path::new(&argv[0]))
         }
     }
@@ -701,7 +706,7 @@ mod tests {
     }
 
     fn fake(answer: impl Fn(&Path) -> ProbeOutcome + 'static) -> Fake {
-        Fake { answer: Box::new(answer), calls: Rc::new(Cell::new(0)), argvs: Rc::new(RefCell::new(Vec::new())) }
+        Fake { answer: Box::new(answer), calls: Rc::new(Cell::new(0)), argvs: Rc::new(RefCell::new(Vec::new())), limits: Rc::default() }
     }
 
     fn lookup(dirs: &[&Path], apps: Option<&Path>) -> Lookup {
@@ -904,6 +909,22 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_command_is_probed_as_long_as_it_may_start() {
+        // 7.7: a command the user configured with a startup_timeout above 10 s isn't judged
+        // unusable at 10 s; what auto-detection finds still is.
+        let d = temp("slowstart");
+        let node = exe(&d, "node");
+        let l = lookup(&[&d], None);
+        let mut cfg = with_command("js", &[&node.to_string_lossy()], project_source());
+        cfg.engines.get_mut("js").unwrap().startup_timeout = Some(Sourced { value: 60.0, from: project_source() });
+        let p = fake(|_| says("v24.11.1"));
+        let limits = p.limits.clone();
+        resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap();
+        resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "js").unwrap();
+        assert_eq!(*limits.borrow(), [Duration::from_secs(60), PROBE_LIMIT]);
+    }
+
+    #[test]
     fn configured_command_missing_no_fallback() {
         let d = temp("cfgmiss");
         exe(&d, "python3");
@@ -1086,7 +1107,7 @@ mod tests {
 
     #[test]
     fn a_probe_killed_by_a_signal_says_so() {
-        let j = judge(&spec("py"), false, &ProbeOutcome::Killed(9));
+        let j = judge(&spec("py"), false, &ProbeOutcome::Killed(9), PROBE_LIMIT);
         let text = ExitInfo { code: None, signal: Some(9) }.describe();
         assert_eq!(j, Judged::Skipped(format!("version probe failed ({text})")));
         assert!(text.starts_with("killed by signal 9"), "{text}");

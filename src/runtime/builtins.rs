@@ -217,6 +217,11 @@ impl Out {
         drain(&mut *self.w, &mut lock(self.pending))
     }
 
+    /// Drop what is waiting: the rest of the output of a request whose write failed (9.9).
+    pub fn discard(&mut self) {
+        lock(self.pending).clear();
+    }
+
     /// Flush, and raise a failure as 5.10's `IOError` (`input()`'s prompt).
     pub fn flush_or_raise(&mut self) -> Exec<()> {
         let r = self.flush();

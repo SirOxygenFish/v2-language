@@ -5,7 +5,13 @@
 @js J {
     function grew(n) {
         const before = process.memoryUsage().heapUsed;
-        for (let i = 0; i < n; i++) console.error("");
+        // console.log's way, on both streams in turn: a shared callback per stream.
+        const out = () => {};
+        const err = () => {};
+        for (let i = 0; i < n; i++) {
+            process.stdout.write("", out);
+            process.stderr.write("", err);
+        }
         return (process.memoryUsage().heapUsed - before) / 1048576;
     }
     async function order() {
@@ -17,6 +23,13 @@
         for (let i = 0; i < 3; i++) process.stdout.write("", a);
         process.stdout.write("", () => { throw new Error("cb boom") });
         process.stdout.write("", (err) => seen.push(String(err)));
+        // Each stream counts its own: f, f, then g, g.
+        const f = () => seen.push("f");
+        const g = () => seen.push("g");
+        process.stdout.write("", f);
+        process.stderr.write("", g);
+        process.stdout.write("", f);
+        process.stderr.write("", g);
         await new Promise((r) => setImmediate(r));
         return seen.join(",");
     }

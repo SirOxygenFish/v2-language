@@ -1,0 +1,11 @@
+// requires: py
+// platform: unix
+// A forked child's output goes to stderr like any child of a block, never into V2's channel
+// with the engine, even when several print big lines at once (DOCS 4.6, INTERNALS 9.9).
+@py {
+    import multiprocessing as mp
+    import fork_shout
+    with mp.get_context("fork").Pool(3) as pool:
+        print(pool.map(fork_shout.shout, range(6)))
+}
+print("done")

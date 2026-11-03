@@ -1,9 +1,15 @@
 // requires: py
 // stderr: child says hi
-// A block's sys.stdout has the fd-level fileno, so a child given it writes to stderr like any
-// child of a block (DOCS 4.6, INTERNALS 9.9).
+// A block's sys.stdin and sys.stderr have their descriptors (0, the null device, and 2), so a
+// child given them reads nothing and writes to stderr; sys.stdout is V2's and has none, which
+// fileno() says plainly (DOCS 4.6, INTERNALS 9.9).
 @py {
-    import subprocess, sys
-    r = subprocess.run([sys.executable, "-c", "print('child says hi')"], stdout=sys.stdout, stdin=sys.stdin)
-    print(r.returncode)
+    import io, subprocess, sys
+    child = "import sys; print('child says hi', file=sys.stderr); print(len(sys.stdin.read()))"
+    r = subprocess.run([sys.executable, "-c", child], stdin=sys.stdin, stderr=sys.stderr, stdout=subprocess.PIPE)
+    print(r.returncode, r.stdout.decode().strip())
+    try:
+        sys.stdout.fileno()
+    except io.UnsupportedOperation as e:
+        print("no fileno:", "no file descriptor" in str(e))
 }

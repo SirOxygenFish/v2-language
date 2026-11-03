@@ -70,7 +70,7 @@ impl<R: Read, W: Write> Worker<R, W> {
 struct NoProbe;
 
 impl Prober for NoProbe {
-    fn probe(&self, _: &[OsString], _: &[(OsString, OsString)]) -> ProbeOutcome {
+    fn probe(&self, _: &[OsString], _: &[(OsString, OsString)], _: std::time::Duration) -> ProbeOutcome {
         ProbeOutcome::SpawnFailed("no probes in session tests".into())
     }
 }

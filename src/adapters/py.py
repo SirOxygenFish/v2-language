@@ -267,8 +267,12 @@ if __name__ == "__main__":
             return False
 
         def fileno(self):
-            # Fd level: what reaches it goes to stderr, as a child's output does (9.9).
-            return self._fd
+            # stderr is fd 2. stdout is V2's, with no descriptor here: fd 1 is stderr, and
+            # console-aware libraries (click) would write to it (9.9).
+            if self._fd == 2:
+                return 2
+            raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor; "
+                                          "a child process of a block writes to stderr (DOCS 4.6)")
 
         def write(self, s):
             if not isinstance(s, str):
@@ -341,8 +345,28 @@ if __name__ == "__main__":
     sys.stdin = NoInput()
     sys.__stdout__, sys.__stderr__, sys.__stdin__ = sys.stdout, sys.stderr, sys.stdin
 
+    forked = [False]
+
+    def forked_child():
+        """A forked child (multiprocessing's default on Linux) is not the worker: it closes the
+        protocol and writes to fds 1 and 2 like any child of a block, fd 1 being stderr (9.9)."""
+        forked[0] = True
+        for fd in (IN, OUT):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        sys.stdout = open(1, "w", encoding="utf-8", errors="backslashreplace", buffering=1, closefd=False)
+        sys.stderr = open(2, "w", encoding="utf-8", errors="backslashreplace", buffering=1, closefd=False)
+        sys.__stdout__, sys.__stderr__ = sys.stdout, sys.stderr
+
+    if hasattr(os, "register_at_fork"):
+        os.register_at_fork(after_in_child=forked_child)
+
     def final_flush():
         """At exit (bye, after atexit handlers that print): the last output (9.10)."""
+        if forked[0]:
+            return
         closing[0] = True
         try:
             for b in _byte_streams:
@@ -767,6 +791,8 @@ if __name__ == "__main__":
     _next_out_id = [0]
 
     def host_call(target, args, kwargs, name):
+        if forked[0]:
+            raise V2Error("Error", "V2 function '%s' called from a forked process" % name)
         if not stack or stack[-1][0] != "request":
             raise V2Error("Error", "V2 function '%s' called outside an active V2 call" % name)
         if threading.get_ident() != DISPATCH:
