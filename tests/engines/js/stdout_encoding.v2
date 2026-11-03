@@ -1,7 +1,21 @@
 // requires: js
-// process.stdout.write keeps Node's encoding argument (INTERNALS 9.9).
+// process.stdout.write and end take what Node's do: strings in any encoding and bytes of any view
+// through a UTF-8 decoder, so a character split across writes joins; a byte left incomplete
+// becomes U+FFFD, before the next UTF-8 string or when the block ends (INTERNALS 9.9, 14.4).
 @js {
     process.stdout.write("68690a", "hex")
     process.stdout.write("b2sK", "base64")
     process.stdout.write("utf8\n", "utf8")
+    process.stdout.write(Uint16Array.of(0x4241, 0x0a43))
+    process.stdout.write("e282", "hex")
+    process.stdout.write("ac0a", "hex")
+    process.stdout.write("c3", "hex")
+    process.stdout.write("x\n")
+    process.stdout.write("c3", "hex")
+}
+print("v2")
+@js {
+    try { process.stdout.write(5) } catch (e) { console.log(e.code) }
+    try { process.stdout.write(null) } catch (e) { console.log(e.code) }
+    process.stdout.end("6f6b0a", "hex")
 }

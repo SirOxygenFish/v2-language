@@ -1,0 +1,43 @@
+// requires: py
+// A big string counts toward the next collection whoever holds it: held twice by the garbage,
+// or passed in and the garbage's alone only later (INTERNALS 5.1).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def track():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { track, n }
+}
+@import { track, n } from pk
+func twice() {
+    let t = track()
+    let s = "x" * 400000
+    let u = s
+    let box = {}
+    box.f = func() => len(s) + len(u)
+    return box
+}
+func passed(s) {
+    let t = track()
+    let box = {}
+    box.f = func() => len(s)
+    return box
+}
+func freed(f) {
+    n()
+    let before = n()
+    // Few enough that the tracking handles alone (1,000 items each) start no collection.
+    for i in 0..30 {
+        let r = f()
+    }
+    n()
+    return n() - before >= 25
+}
+print(freed(twice), freed(func() {
+    let s = "y" * 400000
+    return passed(s)
+}))

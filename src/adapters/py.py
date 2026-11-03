@@ -65,6 +65,9 @@ if __name__ == "__main__":
             self.foreign_type = foreign_type
             self._v2 = None  # the `error` tag it came as, sent back unchanged (9.6)
 
+        def __reduce__(self):
+            return (V2Error, (self.type, self.message, self.data, self.lang, self.foreign_type))
+
     # A builtin, so `except V2Error` works in blocks and in the modules they use (DOCS 8.4).
     builtins.V2Error = V2Error
 
@@ -274,11 +277,27 @@ if __name__ == "__main__":
             raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor; "
                                           "a child process of a block writes to stderr (DOCS 4.6)")
 
+        @property
+        def line_buffering(self):
+            return True
+
+        def reconfigure(self, *, encoding=None, errors=None, newline=None, line_buffering=None, write_through=None):
+            # V2's output is UTF-8 and goes out line by line: only that can be asked for.
+            if encoding is not None and codecs.lookup(encoding).name != "utf-8":
+                raise ValueError("a block's %s is V2's, which is UTF-8, not %s" % (self._stream, encoding))
+
         def write(self, s):
             if not isinstance(s, str):
                 raise TypeError("write() argument must be str, not " + type(s).__name__)
             if not s:
                 return 0
+            if forked[0]:
+                # A forked child writes at the fd level, like any child of a block (9.9), also
+                # through a stream saved before the fork (a logging handler).
+                data = s.encode("utf-8", "backslashreplace")
+                while data:
+                    data = data[os.write(self._fd, data):]
+                return len(s)
             with _out_cond:
                 if threading.get_ident() != DISPATCH:
                     while not active() and _out_size[0] >= IDLE_CAP:
@@ -291,7 +310,8 @@ if __name__ == "__main__":
             return len(s)
 
         def flush(self):
-            flush_out()
+            if not forked[0]:
+                flush_out()
 
     class BytesOutput(io.RawIOBase):
         """sys.stdout.buffer: bytes decoded as UTF-8 (invalid bytes become U+FFFD)."""
@@ -349,16 +369,15 @@ if __name__ == "__main__":
 
     def forked_child():
         """A forked child (multiprocessing's default on Linux) is not the worker: it closes the
-        protocol and writes to fds 1 and 2 like any child of a block, fd 1 being stderr (9.9)."""
+        protocol, writes to fds 1 and 2 like any child of a block, fd 1 being stderr, and ends
+        as a Python process does (9.9)."""
         forked[0] = True
         for fd in (IN, OUT):
             try:
                 os.close(fd)
             except OSError:
                 pass
-        sys.stdout = open(1, "w", encoding="utf-8", errors="backslashreplace", buffering=1, closefd=False)
-        sys.stderr = open(2, "w", encoding="utf-8", errors="backslashreplace", buffering=1, closefd=False)
-        sys.__stdout__, sys.__stderr__ = sys.stdout, sys.stderr
+        sys.excepthook = lambda t, e, tb: print_unattached("", e)
 
     if hasattr(os, "register_at_fork"):
         os.register_at_fork(after_in_child=forked_child)
@@ -1257,13 +1276,19 @@ if __name__ == "__main__":
             try:
                 reply = {"t": "ret", "id": rid}
                 reply.update(HANDLERS[m["t"]](m))
-            except BaseException as e:
+            except BaseException:
+                # A forked child has no one to answer: the error ends it, as in a Python script.
+                if forked[0]:
+                    raise
+                e = sys.exc_info()[1]
                 rollback_counts()
                 try:
                     reply = {"t": "err", "id": rid, "error": serialize(e)}
                 except BaseException as e2:
                     rollback_counts()
                     reply = plain_err(rid, "Error", "the error could not be sent (%s)" % type(e2).__name__)
+            if forked[0]:
+                raise SystemExit(0)  # its work is done; the worker answers, not it
             try:
                 send(reply)
                 if m["t"] == "load":

@@ -1,0 +1,21 @@
+// requires: py
+// platform: unix
+// stderr: child logs 2
+// A forked child writes at the fd level also through a stream saved before the fork, such as a
+// logging handler's, and ends as a Python process does: an uncaught error is printed and is
+// exit status 1, sys.exit(3) is 3 (INTERNALS 9.9).
+@py {
+    import logging, os, sys
+    import multiprocessing as mp
+    import fork_log
+    logging.basicConfig(level=logging.INFO)
+    with mp.get_context("fork").Pool(2) as pool:
+        print(pool.map(fork_log.work, range(3)))
+    for kind in ["exit3", "raise"]:
+        pid = os.fork()
+        if pid == 0:
+            if kind == "exit3":
+                sys.exit(3)
+            raise KeyError("lost")
+        print(kind, os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+}

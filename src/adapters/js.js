@@ -288,23 +288,44 @@ function laterFor() {
   };
 }
 
+// What a write sends, as Node takes it: bytes of any view, and a string in another encoding,
+// through the stream's decoder, so a sequence split across writes joins; a UTF-8 string as it
+// is, after what the decoder held, which can't join it (as U+FFFD, like any invalid byte).
+function chunkText(decoder, data, encoding) {
+  if (typeof data === 'string') {
+    if (typeof encoding !== 'string' || /^utf-?8$/i.test(encoding)) return decoder.end() + data;
+    return decoder.write(Buffer.from(data, encoding));
+  }
+  if (ArrayBuffer.isView(data)) return decoder.write(Buffer.from(data.buffer, data.byteOffset, data.byteLength));
+  if (data === null) throw Object.assign(new TypeError('May not write null values to stream'), { code: 'ERR_STREAM_NULL_VALUES' });
+  throw Object.assign(
+    new TypeError(`The "chunk" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received ${typeName(data)}`),
+    { code: 'ERR_INVALID_ARG_TYPE' },
+  );
+}
+
+// A sequence the decoders still hold when a reply goes out is written then, as U+FFFD.
+const unfinished = [];
+function endUnfinished() {
+  for (const end of unfinished) end();
+}
+
 function outputStream(name) {
   // process.stdout and process.stderr: text sent as `out` frames in program order (9.9).
   const decoder = new StringDecoder('utf8');
   const later = laterFor();
+  unfinished.push(() => writeOut(name, decoder.end()));
   const w = new stream.Writable({
     decodeStrings: false,
     write(data, encoding, cb) {
-      writeOut(name, typeof data === 'string' ? data : decoder.write(data));
+      writeOut(name, chunkText(decoder, data, encoding));
       cb();
     },
   });
   // Writes complete at once, so they keep their order with frames and with console.log.
   w.write = function (data, encoding, cb) {
     if (typeof encoding === 'function') [cb, encoding] = [encoding, undefined];
-    const bytes = typeof data !== 'string' || (typeof encoding === 'string' && !/^utf-?8$/i.test(encoding));
-    const text = bytes ? decoder.write(Buffer.isBuffer(data) ? data : Buffer.from(data, encoding)) : data;
-    writeOut(name, text);
+    writeOut(name, chunkText(decoder, data, encoding));
     if (typeof cb === 'function') later(cb);
     return true;
   };
@@ -338,13 +359,16 @@ Object.defineProperty(process, 'stderr', { configurable: true, enumerable: true,
 // the frames 12.6 keeps.
 console._stdout = stdoutStream;
 console._stderr = stderrStream;
-console.trace = function trace(...data) {
+function trace(...data) {
+  // Through `error`, as Node's does: its group indent, and an `error` the program replaced.
   const here = { message: util.format(...data) };
   Error.captureStackTrace(here, trace);
   const lines = [here.message ? `Trace: ${here.message}` : 'Trace'];
   for (const f of frames(here)) lines.push(`    at ${f.func ? `${f.func} (${f.file}:${f.line})` : `${f.file}:${f.line}`}`);
-  stderrStream.write(lines.join('\n') + '\n');
-};
+  (this ?? console).error(lines.join('\n'));
+}
+console.Console.prototype.trace = trace; // consoles a program makes
+console.trace = trace.bind(console);
 Object.defineProperty(process, 'stdin', { configurable: true, enumerable: true, get: () => (stdinStream ??= noInput()) });
 
 const stdinError = () => Object.assign(new Error("blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg"), { code: 'EBADF' });
@@ -511,11 +535,13 @@ process.on('SIGINT', () => {});
 if (process.platform === 'win32') process.on('SIGBREAK', () => {});
 function isAggregate(e) {
   // An AggregateError or a subclass, from any realm.
-  let p = e;
-  for (let i = 0; i < 32 && p !== null && typeof p === 'object'; i++) {
-    p = Object.getPrototypeOf(p);
-    if (p && Object.hasOwn(p, 'constructor') && p.constructor?.name === 'AggregateError') return true;
-  }
+  try {
+    let p = e;
+    for (let i = 0; i < 32 && p !== null && typeof p === 'object'; i++) {
+      p = Object.getPrototypeOf(p);
+      if (p && Object.hasOwn(p, 'constructor') && p.constructor?.name === 'AggregateError') return true;
+    }
+  } catch {} // a `constructor` getter or Proxy trap that throws
   return false;
 }
 
@@ -542,13 +568,16 @@ function printUnattached(prefix, e) {
   };
   try {
     describe(e, prefix, '');
+    const chain = new Set([e]);
     let cause = e;
     for (let i = 0; i < MAX_CAUSES; i++) {
       cause = cause !== null && typeof cause === 'object' ? (cause instanceof V2Error ? cause._cause : cause.cause) : undefined;
       if (cause === undefined || cause === null) break;
-      const again = shown.has(cause);
+      // A cause shown before (a group's member) still leads on to its own; a cycle stops.
+      const cycle = chain.has(cause);
+      chain.add(cause);
       describe(cause, 'caused by: ', '');
-      if (again) break; // a cycle of causes
+      if (cycle) break;
     }
   } catch {
     lines.push(`${prefix}<an error that can't be printed>`); // a revoked Proxy, a throwing trap
@@ -1649,6 +1678,7 @@ const HANDLERS = { init: doInit, load: doLoad, module: doModule, call: doCall, o
 const plainErr = (id, kind, message) => ({ t: 'err', id, error: { type: kind, message, foreign_type: null, trace: [] } });
 
 function trySend(m, frame) {
+  endUnfinished();
   try {
     send(frame);
     if (m.t === 'load') bindImporters(m.unit);
