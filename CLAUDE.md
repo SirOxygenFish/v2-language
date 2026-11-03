@@ -25,13 +25,14 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.14, the loop. Sweep rounds 1-10 are committed; every round so far found real defects, so
+- Now: 1.14, the loop. Sweep rounds 1-12 are committed; every round so far found real defects, so
   two clean rounds in a row are still needed before closing 1.14 (ROADMAP boxes and log, final
   report). After that the owner wants "a serious chat". Keep reviews lean: two reviewer agents a
   round, each from a new angle; a differential fuzz finds a lot for little.
 - Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
   v2 and its workers past 2 GB together or the time limit; a test ran away to 47 GB on
-  2026-11-02), never kill by name, and stop and report when an action is refused.
+  2026-11-02; in WSL `~/v2snap/capped.py`, a /proc version, with snapshots `~/v2snap/v2*`), never
+  kill by name, and stop and report when an action is refused.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
@@ -96,9 +97,11 @@ it is loaded automatically into every session and every subagent.
   `env` (`Frame` = layout + slots, by position; an empty slot means not declared yet, so reads
   and writes fall back by name; a spare-array pool; the frame cycle collector of 5.1: `walk`
   (lazy for `leave` and `recheck`, everything for `collect`); `closure_dropped` from `Func::drop`
-  queues rechecks), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  queues rechecks; `made()` counts list items, dict entries and frame slots, which start
+  collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
-  writer, `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
+  writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
+  `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
   `fail(..)`; the caller places it at the call site.
 - `Flow { Error, Return, Break, Continue, Exit }`, `Exec<T> = Result<T, Flow>`. Interrupts are
@@ -125,7 +128,9 @@ it is loaded automatically into every session and every subagent.
   EngineNotFound exits 3.
 - `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders; `hello` = vep, version, pid,
   caps), `engines/handles.rs` (`HandleRef`: Drop only queues the release; `CallableTable`),
-  `engines/session.rs` (`Interp.sessions: Vec<Session>`, `start_session`/`attach_session`,
+  `engines/session.rs` (`Interp.sessions: Vec<Session>`, `start_session`/`attach_session` (Unix, an
+  engine with `protocol_fds` (js): the protocol on two pipes named in `V2_VEP_FDS`, fd 0 null,
+  fd 1 the host's stderr),
   `worker_command(e, adapter)`, handshake, `request` re-entrant loop serving reverse calls with
   the timer paused, `shutdown_sessions`: one reader thread per worker, so readers are
   `Box<dyn Read + Send>`; a worker `err` may only use 9.6's kinds, others become ForeignError).

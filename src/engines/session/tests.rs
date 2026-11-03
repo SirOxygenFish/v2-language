@@ -171,7 +171,7 @@ fn handshake_failures() {
             "EngineCrashed",
             "engine 'py' failed to start: boom",
         ),
-        (|_| {}, "EngineCrashed", "engine 'py' exited during startup (an unknown exit status); see its error output above"),
+        (|_| {}, "EngineCrashed", "engine 'py' exited during startup (an unknown exit status); see its error output above, if any"),
     ];
     for (script, kind, message) in cases {
         let (mut it, _) = interp();
@@ -255,7 +255,7 @@ fn eof_is_engine_crashed() {
     it.handshake(s, at()).unwrap();
     let e = err_of(it.request(s, call("ratio"), "a call to 'ratio'", at()));
     assert_eq!(&*e.kind, "EngineCrashed");
-    assert_eq!(&*e.message, "engine 'py' (pid 4242) exited during a call to 'ratio' (an unknown exit status); see its error output above");
+    assert_eq!(&*e.message, "engine 'py' (pid 4242) exited during a call to 'ratio' (an unknown exit status); see its error output above, if any");
     let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
     assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: exited during a call to 'ratio' at main.v2:1); engines are not restarted");
     t.join().unwrap();
@@ -535,7 +535,7 @@ fn a_crash_during_a_call_names_the_exit_code() {
     let (mut it, _) = interp();
     let s = start(&mut it, "crash", no_timeouts()).expect("started");
     let e = err_of(it.request(s, call("ratio"), "a call to 'ratio'", at()));
-    assert_eq!(&*e.message, "engine 'py' (pid 4242) exited during a call to 'ratio' (exit code 3); see its error output above");
+    assert_eq!(&*e.message, "engine 'py' (pid 4242) exited during a call to 'ratio' (exit code 3); see its error output above, if any");
     let again = err_of(it.request(s, call("f"), "a call to 'f'", at()));
     assert_eq!(&*again.message, "engine 'py' is not running (stopped earlier: exited with code 3 during a call to 'ratio' at main.v2:1); engines are not restarted");
 }

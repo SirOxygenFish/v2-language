@@ -74,6 +74,24 @@ fn die(w: &Watch) -> ! {
     hard_exit(EXIT_INTERRUPTED)
 }
 
+/// Kill every process in the session `sid` leads (8.3). Linux, through /proc.
+#[cfg(target_os = "linux")]
+fn kill_session(sid: libc::pid_t) {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return };
+    for entry in dir.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) else { continue };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        // After the command in parentheses: state, ppid, pgrp, session.
+        let session = stat.rfind(')').and_then(|i| stat[i + 1..].split_whitespace().nth(3)?.parse::<libc::pid_t>().ok());
+        if session == Some(sid) {
+            // SAFETY: a plain signal call; `sid` is a live (unreaped) leader's, so not reused.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 /// Remove the run dir; on Windows up to 3 more tries 50 ms apart while killed processes
 /// release their locks; errors are ignored (6.5, 20.3).
 pub fn remove_run_dir(dir: &std::path::Path) {
@@ -633,6 +651,9 @@ impl KillHandle {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
+        // One that only left the group (`setpgrp`, to keep Ctrl+C away) is still in the session.
+        #[cfg(target_os = "linux")]
+        kill_session(self.0.pid);
     }
 
     /// Wait until every process of the tree has stopped, or `deadline`. Windows only: a

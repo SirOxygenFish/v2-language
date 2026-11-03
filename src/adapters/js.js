@@ -262,27 +262,27 @@ function send(frame) {
 }
 
 function writeOut(s, text) {
+  // Out at once, as Node's own stdout writes: JS has no flush for a line that doesn't end.
   if (!text) return;
   outBuf.push([s, text]);
   outSize += text.length;
-  if (active() && (text.endsWith('\n') || outSize >= FLUSH_AT)) drainOut();
+  if (active()) drainOut();
 }
 
-// Write callbacks, run in one tick: `console.log` passes one per line, and a tick each would hold
-// a loop's every line in memory until it ends. A run of the same callback is kept as a count.
-let callbacks = null;
+// Write callbacks as Node's own streams run them: each in a tick of its own, with the same callback
+// again counted into the tick still waiting (`console.log` passes one per line, and a tick each
+// would hold a loop's every line in memory until it ends).
+let waiting = null;
 function later(cb) {
-  if (callbacks) {
-    const last = callbacks[callbacks.length - 1];
-    if (last[0] === cb) last[1] += 1;
-    else callbacks.push([cb, 1]);
+  if (waiting !== null && waiting.cb === cb) {
+    waiting.count += 1;
     return;
   }
-  callbacks = [[cb, 1]];
+  const tick = { cb, count: 1 };
+  waiting = tick;
   process.nextTick(() => {
-    const due = callbacks;
-    callbacks = null;
-    for (const [f, n] of due) for (let i = 0; i < n; i++) f();
+    if (waiting === tick) waiting = null;
+    for (let i = 0; i < tick.count; i++) tick.cb(null);
   });
 }
 
@@ -328,6 +328,12 @@ let stdinStream = null;
 // 2. Stdio exactly as 9.9: the getters, fs on fds 0-2, child_process stdio.
 Object.defineProperty(process, 'stdout', { configurable: true, enumerable: true, get: () => stdoutStream });
 Object.defineProperty(process, 'stderr', { configurable: true, enumerable: true, get: () => stderrStream });
+// Node's `console` binds to process.stdout at its first use, which a preload (NODE_OPTIONS
+// --require) may already have made: blocks get one on these streams.
+Object.defineProperty(globalThis, 'console', {
+  configurable: true, enumerable: false, writable: true,
+  value: new console.Console({ stdout: stdoutStream, stderr: stderrStream }),
+});
 Object.defineProperty(process, 'stdin', { configurable: true, enumerable: true, get: () => (stdinStream ??= noInput()) });
 
 const stdinError = () => Object.assign(new Error("blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg"), { code: 'EBADF' });
@@ -496,13 +502,20 @@ function printUnattached(prefix, e) {
   // With the frames 12.6 keeps, by line (a frame's column is the body's, not the file's), and its
   // causes as V2 prints them; an error from V2 also says its type and where V2 raised it.
   const lines = [];
+  const shown = new Set(); // an error in its own causes or group, or in two, is shown once
   const describe = (e, head, indent) => {
     const fromV2 = e instanceof V2Error;
-    lines.push(`${indent}${head}${errorName(e)}: ${fromV2 ? `${e.type}: ` : ''}${errorMessage(e)}`);
+    const title = `${indent}${head}${errorName(e)}: ${fromV2 ? `${e.type}: ` : ''}${errorMessage(e)}`;
+    if (e !== null && typeof e === 'object') {
+      if (shown.has(e)) return void lines.push(`${title} (shown above)`);
+      shown.add(e);
+    }
+    lines.push(title);
     const raised = fromV2 && e._v2 && Array.isArray(e._v2.trace) ? e._v2.trace[0] : null;
     if (typeof raised === 'string') lines.push(`${indent}    at ${raised}`);
     for (const f of frames(e)) lines.push(`${indent}    at ${f.func ? `${f.func} (${f.file}:${f.line})` : `${f.file}:${f.line}`}`);
-    if (e instanceof AggregateError && Array.isArray(e.errors)) {
+    // From any realm: each block runs in a context of its own.
+    if (util.types.isNativeError(e) && Array.isArray(e.errors) && indent.length < 2 * MAX_CAUSES) {
       for (const inner of e.errors.slice(0, MAX_CAUSES)) describe(inner, '', indent + '  ');
     }
   };

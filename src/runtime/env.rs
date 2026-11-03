@@ -280,10 +280,10 @@ pub fn closure_dropped(env: &Env) {
 pub fn leave(env: Env) {
     let ticks = TICKS.with(|t| t.get().wrapping_add(1));
     TICKS.with(|t| t.set(ticks));
-    let made = MADE.with(Cell::get);
+    let so_far = MADE.with(Cell::get);
     let Ok((pending, due)) = GC.try_with(|g| {
         let g = g.borrow();
-        (!g.recheck.is_empty(), !g.remembered.is_empty() && made.wrapping_sub(g.since) >= g.due)
+        (!g.recheck.is_empty(), !g.remembered.is_empty() && so_far.wrapping_sub(g.since) >= g.due)
     }) else {
         return;
     };
@@ -300,7 +300,12 @@ pub fn leave(env: Env) {
     }
     let weight = match walk(std::slice::from_ref(&env), true, CHECK_BUDGET, MAX_NODES) {
         Some(found) if !found.dead.is_empty() => return free(found.frames),
-        Some(found) => found.work,
+        Some(found) => {
+            // What it holds now waits for a collection, as if made now: strings, bytes and
+            // handles too, which `made` doesn't see.
+            made(found.held);
+            found.work
+        }
         None => CHECK_BUDGET,
     };
     env.weight.set(u32::try_from(weight).unwrap_or(u32::MAX));
@@ -499,6 +504,33 @@ struct Found {
     /// Items looked at, and those of them in values that live.
     work: usize,
     live: usize,
+    /// What the strings, bytes and handles looked at weigh, in items (5.1).
+    held: usize,
+}
+
+/// A handle's weight in items: its object, in another process, could be big.
+const HANDLE_WEIGHT: usize = 1_000;
+
+/// What a value that holds nothing a walk follows weighs, in items of 16 bytes.
+fn weight(v: &Value) -> usize {
+    match v {
+        Value::Str(s) => s.len() / 16,
+        Value::Bytes(b) => b.len() / 16,
+        Value::Handle(_) => HANDLE_WEIGHT,
+        _ => 0,
+    }
+}
+
+/// Whether `f` is a frame below `seed`'s: its own nested calls and bodies.
+fn below(f: &Frame, seed: usize) -> bool {
+    let mut p = f.parent.as_ref();
+    while let Some(frame) = p {
+        if Rc::as_ptr(frame) as usize == seed {
+            return true;
+        }
+        p = frame.parent.as_ref();
+    }
+    false
 }
 
 /// A walk's lists, kept for the next one so a small walk allocates nothing.
@@ -533,6 +565,8 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
     let n = seeds.len();
     nodes.extend(seeds.iter().map(|s| Entry { node: Node::Frame(s.clone()), addr: Rc::as_ptr(s) as usize, refs: 0, edges: (0, 0), items: 0, walked: true, closed: false }));
     let youngest = seeds.iter().map(|s| s.born).max().unwrap_or(0);
+    let checked = seeds.first().map_or(0, |s| Rc::as_ptr(s) as usize);
+    let mut held = 0;
     // Found by address in that list while it is short, then through a map.
     let index = |nodes: &[Entry]| nodes.iter().enumerate().map(|(k, e)| (e.addr, k)).collect::<HashMap<usize, usize>>();
     let mut by_addr = (n >= 32).then(|| index(nodes));
@@ -552,7 +586,12 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
             }
             budget -= 1;
             items += 1;
-            let Some((addr, count)) = r.target() else { return true };
+            let Some((addr, count)) = r.target() else {
+                if let Ref::Value(v) = r {
+                    held += weight(v);
+                }
+                return true;
+            };
             let found = match &by_addr {
                 Some(map) => map.get(&addr).copied(),
                 None => nodes.iter().position(|e| e.addr == addr),
@@ -572,10 +611,11 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
                     let Some(node) = r.node() else { return true };
                     let j = nodes.len();
                     // Made before the frame checked (wrapping like the ticks), or checked before
-                    // with a big group: a chain built by recursion would be walked at every level.
+                    // with a big group and not the checked frame's own nested call: a chain built
+                    // by recursion would be walked at every level.
                     let closed = lazy
                         && matches!(&node, Node::Frame(f) if (youngest.wrapping_sub(f.born) as i32) > 0
-                            || (f.remembered.get() && f.weight.get() > SMALL_GROUP));
+                            || (f.remembered.get() && f.weight.get() > SMALL_GROUP && !below(f, checked)));
                     // `count` has no copy of ours yet.
                     let walked = !lazy || (count == 1 && !closed);
                     nodes.push(Entry { node, addr, refs: 1, edges: (0, 0), items: 0, walked, closed });
@@ -610,7 +650,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
             todo.extend_from_slice(&edges[a..b]);
         }
     }
-    let mut found = Found { dead: Vec::new(), frames: Vec::new(), work: 0, live: 0 };
+    let mut found = Found { dead: Vec::new(), frames: Vec::new(), work: 0, live: 0, held };
     for (k, (e, &l)) in nodes.iter().zip(live.iter()).enumerate() {
         found.work += e.items;
         if l {
