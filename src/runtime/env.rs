@@ -1,7 +1,7 @@
 //! Frames and environments (INTERNALS 5.6).
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use super::error::ErrorValue;
@@ -56,6 +56,9 @@ thread_local! {
     static TICKS: Cell<u32> = const { Cell::new(0) };
     /// List items, dict entries and frame slots made so far: what starts a collection (5.1).
     static MADE: Cell<usize> = const { Cell::new(0) };
+    /// The strings, bytes and handles counted toward the next collection, by address: each
+    /// counts once, however many frames reach it.
+    static COUNTED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     /// Slot arrays of frames that are gone: a malloc and a free less per call.
     static SPARE: RefCell<Vec<Vec<Option<Slot>>>> = const { RefCell::new(Vec::new()) };
 }
@@ -368,6 +371,7 @@ pub fn collect() {
         g.remembered.extend(kept);
         g.kept = g.remembered.len();
         g.since = MADE.with(Cell::get);
+        COUNTED.with(|c| c.borrow_mut().clear());
         g.due = FIRST_COLLECTION.max(live);
     });
     drop(seeds);
@@ -514,15 +518,15 @@ struct Found {
 /// A handle's weight in items: its object, in another process, could be big.
 const HANDLE_WEIGHT: usize = 1_000;
 
-/// What a value that holds nothing a walk follows weighs, in items of 16 bytes, when this is its
-/// only holder: a shared one goes nowhere when the group does, and counting it at every frame
-/// that reaches it would start a collection on every call.
-fn weight(v: &Value) -> usize {
+/// What a value that holds nothing a walk follows weighs, in items of 16 bytes, and its address.
+/// Who else holds it doesn't matter: a value shared when its frame is left may be the garbage's
+/// alone later.
+fn weight(v: &Value) -> Option<(usize, usize)> {
     match v {
-        Value::Str(s) if Rc::strong_count(s) == 1 => s.len() / 16,
-        Value::Bytes(b) if Rc::strong_count(b) == 1 => b.len() / 16,
-        Value::Handle(h) if Rc::strong_count(h) == 1 => HANDLE_WEIGHT,
-        _ => 0,
+        Value::Str(s) if s.len() >= 16 => Some((Rc::as_ptr(s) as *const u8 as usize, s.len() / 16)),
+        Value::Bytes(b) if b.len() >= 16 => Some((Rc::as_ptr(b) as *const u8 as usize, b.len() / 16)),
+        Value::Handle(h) => Some((Rc::as_ptr(h) as usize, HANDLE_WEIGHT)),
+        _ => None,
     }
 }
 
@@ -571,6 +575,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
     nodes.extend(seeds.iter().map(|s| Entry { node: Node::Frame(s.clone()), addr: Rc::as_ptr(s) as usize, refs: 0, edges: (0, 0), items: 0, held: 0, walked: true, closed: false }));
     let youngest = seeds.iter().map(|s| s.born).max().unwrap_or(0);
     let checked = seeds.first().map_or(0, |s| Rc::as_ptr(s) as usize);
+    let mut seen = HashSet::new();
     // Found by address in that list while it is short, then through a map.
     let index = |nodes: &[Entry]| nodes.iter().enumerate().map(|(k, e)| (e.addr, k)).collect::<HashMap<usize, usize>>();
     let mut by_addr = (n >= 32).then(|| index(nodes));
@@ -593,7 +598,13 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
             items += 1;
             let Some((addr, count)) = r.target() else {
                 if let Ref::Value(v) = r {
-                    held += weight(v);
+                    if let Some((at, w)) = weight(v) {
+                        // Once per walk, and in a check at a scope exit once until the next
+                        // collection: a value many frames reach counts once.
+                        if seen.insert(at) && (!lazy || COUNTED.with(|c| c.borrow_mut().insert(at))) {
+                            held += w;
+                        }
+                    }
                 }
                 return true;
             };

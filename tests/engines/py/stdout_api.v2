@@ -1,0 +1,21 @@
+// requires: py
+// A block's sys.stdout answers line_buffering and reconfigure (only UTF-8, V2's), and a V2Error
+// keeps its fields through pickle and copy, as a pool worker's error does (INTERNALS 14.3).
+func bad(x) {
+    throw error("ValueError", "nope", {k: x})
+}
+@py {
+    @import { bad } from v2
+    import copy, pickle, sys
+    sys.stdout.reconfigure(encoding="utf-8")
+    print(sys.stdout.line_buffering)
+    try:
+        sys.stdout.reconfigure(encoding="latin-1")
+    except ValueError as e:
+        print("refused:", "UTF-8" in str(e))
+    try:
+        bad(7)
+    except V2Error as e:
+        for e2 in (pickle.loads(pickle.dumps(e)), copy.copy(e)):
+            print(str(e2), e2.type, e2.message, e2.data)
+}

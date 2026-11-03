@@ -117,7 +117,7 @@ mod tests {
     struct Counting(Rc<Cell<usize>>);
 
     impl Prober for Counting {
-        fn probe(&self, argv: &[OsString], _: &[(OsString, OsString)], _: std::time::Duration) -> ProbeOutcome {
+        fn probe(&self, argv: &[OsString], _: &[(OsString, OsString)], _: Option<std::time::Duration>) -> ProbeOutcome {
             self.0.set(self.0.get() + 1);
             let name = argv[0].to_string_lossy().to_lowercase();
             let output = if name.contains("node") { "v24.11.1\n" } else { "Python 3.12.1\n" };

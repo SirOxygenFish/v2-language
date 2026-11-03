@@ -178,15 +178,16 @@ pub enum ProbeOutcome {
 
 /// Runs version probes; the tests inject fakes.
 pub trait Prober {
-    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Duration) -> ProbeOutcome;
+    /// `limit`: `None` is no time limit.
+    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Option<Duration>) -> ProbeOutcome;
 }
 
 /// Runs the probe under 8.3's child rules with a timer; stdout then stderr, lossy UTF-8.
 pub struct RealProber;
 
 impl Prober for RealProber {
-    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Duration) -> ProbeOutcome {
-        match process::run_captured(argv, env, Some(limit), None) {
+    fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Option<Duration>) -> ProbeOutcome {
+        match process::run_captured(argv, env, limit, None) {
             Err(e) => ProbeOutcome::SpawnFailed(e.message),
             Ok(c) if c.timed_out => ProbeOutcome::TimedOut,
             Ok(c) => match c.status.signal {
@@ -221,10 +222,10 @@ impl Judged {
 /// The skip reason of the Store's fake `python.exe` (7.6): the one skip the cache remembers (7.7).
 const PLACEHOLDER: &str = "Microsoft Store placeholder";
 
-fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Duration) -> Judged {
+fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<Duration>) -> Judged {
     match outcome {
         ProbeOutcome::SpawnFailed(msg) => Judged::Skipped(msg.clone()),
-        ProbeOutcome::TimedOut => Judged::Skipped(format!("version probe timed out ({} s)", limit.as_secs_f64())),
+        ProbeOutcome::TimedOut => Judged::Skipped(format!("version probe timed out ({} s)", limit.unwrap_or(PROBE_LIMIT).as_secs_f64())),
         ProbeOutcome::Killed(sig) => Judged::Skipped(format!("version probe failed ({})", ExitInfo { code: None, signal: Some(*sig) }.describe())),
         ProbeOutcome::Exited { code, output } => {
             // The placeholder prints "Python was not found" and exits 9009 (7.6).
@@ -264,7 +265,9 @@ pub struct ProbeCache {
     file: Option<PathBuf>,
     mode: CacheMode,
     entries: Map<String, Json>,
-    dirty: bool,
+    /// This run's changes (`None`: removed), laid over the file as it is when saving, so runs
+    /// at the same time keep each other's.
+    changed: Vec<(String, Option<Json>)>,
 }
 
 impl ProbeCache {
@@ -272,7 +275,7 @@ impl ProbeCache {
     pub fn open(home: Option<&Path>, mode: CacheMode) -> ProbeCache {
         let file = home.filter(|_| mode != CacheMode::Off).map(|h| h.join(".v2").join("cache").join("toolchains.json"));
         let entries = file.as_deref().and_then(read_cache).unwrap_or_default();
-        ProbeCache { file, mode, entries, dirty: false }
+        ProbeCache { file, mode, entries, changed: Vec::new() }
     }
 
     /// A cache that neither reads nor writes.
@@ -306,12 +309,15 @@ impl ProbeCache {
             return;
         }
         if matches!(j, Judged::Skipped(reason) if reason == PLACEHOLDER) {
-            self.entries.insert(key, json!({"path": path.to_string_lossy(), "placeholder": true}));
-            self.dirty = true;
+            let entry = json!({"path": path.to_string_lossy(), "placeholder": true});
+            self.entries.insert(key.clone(), entry.clone());
+            self.changed.push((key, Some(entry)));
             return;
         }
         let Judged::Usable(version) = j else {
-            self.dirty |= self.entries.shift_remove(&key).is_some();
+            if self.entries.shift_remove(&key).is_some() {
+                self.changed.push((key, None));
+            }
             return;
         };
         let entry = json!({
@@ -320,22 +326,28 @@ impl ProbeCache {
             "version": version.to_string(),
             "output": output,
         });
-        self.entries.insert(key, entry);
-        self.dirty = true;
+        self.entries.insert(key.clone(), entry.clone());
+        self.changed.push((key, Some(entry)));
     }
 
     /// Write the file if anything changed: a temp file, then a rename (a failed rename is ignored).
     pub fn save(&mut self) {
         let Some(file) = &self.file else { return };
-        if !self.dirty {
+        if self.changed.is_empty() {
             return;
         }
-        self.dirty = false;
         let Some(dir) = file.parent() else { return };
         if create_private_dir(dir).is_err() {
             return;
         }
-        let text = json!({"format": 1, "entries": Json::Object(self.entries.clone())}).to_string();
+        let mut entries = read_cache(file).unwrap_or_default();
+        for (key, entry) in self.changed.drain(..) {
+            match entry {
+                Some(entry) => entries.insert(key, entry),
+                None => entries.shift_remove(&key),
+            };
+        }
+        let text = json!({"format": 1, "entries": Json::Object(entries)}).to_string();
         let tmp = dir.join(format!("toolchains.json.{}.tmp", std::process::id()));
         if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, file).is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -505,7 +517,7 @@ impl Resolver<'_> {
     }
 
     /// Probe one hit, through the cache, for at most `limit`.
-    fn probe(&mut self, spec: &EngineSpec, argv: &[OsString], path: &Path, limit: Duration) -> Judged {
+    fn probe(&mut self, spec: &EngineSpec, argv: &[OsString], path: &Path, limit: Option<Duration>) -> Judged {
         let key = cache_key(spec, argv, path);
         if let Some(j) = key.as_deref().and_then(|k| self.cache.get(k)) {
             return j;
@@ -540,15 +552,22 @@ impl Resolver<'_> {
 
     fn usable(&mut self, spec: &Rc<EngineSpec>, argv: Vec<OsString>, origin: Origin, what: &str, from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let path = PathBuf::from(&argv[0]);
-        // The user's own command may start slowly: its probe waits as long as starting it may.
-        let start = self.cfg.engines.get(&*spec.id).and_then(|e| e.startup_timeout.as_ref()).map(|t| Duration::from_secs_f64(t.value));
-        let limit = start.map_or(PROBE_LIMIT, |t| t.max(PROBE_LIMIT));
+        // The user's own command may start slowly: its probe waits as long as starting it may
+        // (`startup_timeout`, 30 s unless set; 0 is no limit).
+        let start = self.cfg.engines.get(&*spec.id).and_then(|e| e.startup_timeout.as_ref()).map_or(crate::engines::units::STARTUP_DEFAULT, |t| t.value);
+        // Too big for a Duration is no limit, like 0.
+        let limit = (start > 0.0).then(|| Duration::try_from_secs_f64(start).ok()).flatten().map(|t| t.max(PROBE_LIMIT));
         match self.probe(spec, &argv, &path, limit) {
             Judged::Usable(v) => Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: Some(v), skipped: Vec::new() }),
             other => {
                 let reason = other.reason().unwrap_or_default();
+                let hint = if reason.starts_with("version probe timed out") {
+                    format!("; raise [engines.{}] startup_timeout if it is only slow", spec.id)
+                } else {
+                    String::new()
+                };
                 let mut nf = NotFound::broken(
-                    format!("engine '{}' {what} (set by {}) is not usable: {reason}", spec.id, set_by(from)),
+                    format!("engine '{}' {what} (set by {}) is not usable: {reason}{hint}", spec.id, set_by(from)),
                     join(&argv),
                     from,
                 );
@@ -603,7 +622,7 @@ impl Resolver<'_> {
                 }
                 let mut argv = vec![hit.clone().into_os_string()];
                 argv.extend(candidate[1..].iter().map(|a| OsString::from(&**a)));
-                match self.probe(spec, &argv, &hit, PROBE_LIMIT) {
+                match self.probe(spec, &argv, &hit, Some(PROBE_LIMIT)) {
                     Judged::Usable(v) => {
                         return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped })
                     }
@@ -623,7 +642,7 @@ impl Resolver<'_> {
     /// without opening an install dialog (7.6).
     fn command_line_tools(&self) -> bool {
         let argv = [OsString::from("/usr/bin/xcode-select"), OsString::from("-p")];
-        matches!(self.prober.probe(&argv, &[], PROBE_LIMIT), ProbeOutcome::Exited { code: Some(0), .. })
+        matches!(self.prober.probe(&argv, &[], Some(PROBE_LIMIT)), ProbeOutcome::Exited { code: Some(0), .. })
     }
 
     /// ts: the js engine, if its Node has built-in type stripping (7.6).
@@ -689,11 +708,11 @@ mod tests {
         answer: Box<dyn Fn(&Path) -> ProbeOutcome>,
         calls: Rc<Cell<usize>>,
         argvs: Rc<RefCell<Vec<Vec<OsString>>>>,
-        limits: Rc<RefCell<Vec<Duration>>>,
+        limits: Rc<RefCell<Vec<Option<Duration>>>>,
     }
 
     impl Prober for Fake {
-        fn probe(&self, argv: &[OsString], _: &[(OsString, OsString)], limit: Duration) -> ProbeOutcome {
+        fn probe(&self, argv: &[OsString], _: &[(OsString, OsString)], limit: Option<Duration>) -> ProbeOutcome {
             self.calls.set(self.calls.get() + 1);
             self.argvs.borrow_mut().push(argv.to_vec());
             self.limits.borrow_mut().push(limit);
@@ -921,7 +940,38 @@ mod tests {
         let limits = p.limits.clone();
         resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap();
         resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "js").unwrap();
-        assert_eq!(*limits.borrow(), [Duration::from_secs(60), PROBE_LIMIT]);
+        assert_eq!(*limits.borrow(), [Some(Duration::from_secs(60)), Some(PROBE_LIMIT)]);
+        // Unset, it is the 30 s default; 0 is no limit.
+        limits.borrow_mut().clear();
+        cfg.engines.get_mut("js").unwrap().startup_timeout = None;
+        resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap();
+        cfg.engines.get_mut("js").unwrap().startup_timeout = Some(Sourced { value: 0.0, from: project_source() });
+        resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap();
+        // Too big for a Duration is no limit, not a panic.
+        cfg.engines.get_mut("js").unwrap().startup_timeout = Some(Sourced { value: 1e300, from: project_source() });
+        resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap();
+        assert_eq!(*limits.borrow(), [Some(Duration::from_secs(30)), None, None]);
+    }
+
+    #[test]
+    fn runs_at_the_same_time_keep_each_others_cache_entries() {
+        // 7.7: a save lays this run's changes over the file as it is then.
+        let home = temp("cache-race");
+        let d = temp("cache-race-bin");
+        let (a, b) = (exe(&d, "node"), exe(&d, "nodejs"));
+        let p = fake(|_| says("v24.11.1"));
+        let spec = spec("js");
+        let mut first = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+        let mut second = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+        for (cache, exe) in [(&mut first, &a), (&mut second, &b)] {
+            let mut r = Resolver { cfg: &Config::default(), lookup: &lookup(&[], None), prober: &p, cache };
+            assert!(matches!(r.probe(&spec, &[exe.clone().into_os_string()], exe, Some(PROBE_LIMIT)), Judged::Usable(_)));
+        }
+        first.save();
+        second.save();
+        let file = home.join(".v2").join("cache").join("toolchains.json");
+        let saved: Json = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        assert_eq!(saved["entries"].as_object().unwrap().len(), 2, "{saved}");
     }
 
     #[test]
@@ -1107,7 +1157,7 @@ mod tests {
 
     #[test]
     fn a_probe_killed_by_a_signal_says_so() {
-        let j = judge(&spec("py"), false, &ProbeOutcome::Killed(9), PROBE_LIMIT);
+        let j = judge(&spec("py"), false, &ProbeOutcome::Killed(9), Some(PROBE_LIMIT));
         let text = ExitInfo { code: None, signal: Some(9) }.describe();
         assert_eq!(j, Judged::Skipped(format!("version probe failed ({text})")));
         assert!(text.starts_with("killed by signal 9"), "{text}");
