@@ -1,5 +1,5 @@
-# Build and test V2 on every platform (INTERNALS 22.5). The engine columns of the matrix
-# (Python, Node, C/C++ compilers, V2_TEST_REQUIRE) are added as roadmap Phases 1 and 2 land.
+# Build and test V2 on every platform (INTERNALS 22.5). The C/C++ and @rust columns of the matrix
+# are added when roadmap Phase 2 lands.
 name: CI
 
 on:
@@ -8,14 +8,26 @@ on:
 
 jobs:
   test:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - { name: windows-latest, os: windows-latest, python: '3.13', node: '22' }
+          - { name: ubuntu-latest, os: ubuntu-latest, python: '3.13', node: '22' }
+          - { name: macos-latest, os: macos-latest, python: '3.13', node: '22' }
+          - { name: minimum versions, os: ubuntu-22.04, python: '3.10', node: '22.13.0' }
+    env:
+      V2_TEST_REQUIRE: py,js,ts
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --locked

@@ -1,0 +1,7 @@
+// requires: py js
+// The other order: lib.v2 imports first, so its folder's copies win for both files (DOCS 7).
+import "./fixtures/other/lib.v2" as lib
+@import { who as py_who } from py.same
+@import { who as js_who } from js.jpkg
+print(lib.both())
+print(py_who(), js_who())

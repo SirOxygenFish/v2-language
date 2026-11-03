@@ -1,0 +1,5 @@
+@import { who as py_who } from py.same
+@import { who as js_who } from js.jpkg
+func both() {
+    return [py_who(), js_who()]
+}
