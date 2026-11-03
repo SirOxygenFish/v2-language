@@ -1,0 +1,7 @@
+// requires: js
+// process.stdout.write keeps Node's encoding argument (INTERNALS 9.9).
+@js {
+    process.stdout.write("68690a", "hex")
+    process.stdout.write("b2sK", "base64")
+    process.stdout.write("utf8\n", "utf8")
+}

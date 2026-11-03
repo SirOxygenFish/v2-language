@@ -952,6 +952,12 @@ func boom() {
         const g = new AggregateError([new RangeError(\"first\"), new SyntaxError(\"second\")], \"group\");
         g.errors.push(g);
         setTimeout(() => { throw g }, 2);
+        const s = new Error(\"self\");
+        s.cause = s;
+        setTimeout(() => { throw s }, 3);
+        const notGroup = new Error(\"not a group\");
+        notGroup.errors = [\"member\"];
+        setTimeout(() => { throw notGroup }, 4);
         return await new Promise(res => setTimeout(() => res(1), 50));
     }
     @export { wait_on_timer, with_cause }
@@ -969,6 +975,8 @@ print(with_cause())
     // A block's own AggregateError (another realm) shows its members, and itself only once.
     assert!(stderr.contains("\n  RangeError: first\n") && stderr.contains("\n  SyntaxError: second\n"), "{stderr}");
     assert!(stderr.contains("\n  AggregateError: group (shown above)\n") && stderr.len() < 4000, "{stderr}");
+    assert_eq!(stderr.matches("caused by: Error: self (shown above)").count(), 1, "{stderr}");
+    assert!(stderr.contains("Error: not a group\n") && !stderr.contains("member"), "{stderr}");
     assert!(stderr.starts_with("V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
     // By line: a frame's column is the body's, not the file's.
     assert!(stderr.contains("timer.v2:7)\n"), "{stderr}");
@@ -1044,9 +1052,31 @@ fn a_preload_that_logs_leaves_console_log_on_stdout() {
     if !needs("js", "a_preload_that_logs_leaves_console_log_on_stdout") {
         return;
     }
-    let files = [("preload.js", "console.log(\"preload noise\")\n"), ("pre.v2", "print(\"v2 before\")\n@js { console.log(\"from js\") }\nprint(\"v2 after\")\n")];
-    let (code, stdout, _stderr, _home) = run_with_files_env(&files, &["pre.v2"], &[("NODE_OPTIONS", "--require=./preload.js")]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "v2 before\nfrom js\nv2 after\n"));
+    let files = [
+        ("preload.js", "const { log } = console\nconsole.log(\"preload noise\")\nglobalThis.preloadLog = log\n"),
+        ("pre.v2", "print(\"v2 before\")\n@js {\n    console.log(\"from js\")\n    require(\"console\").log(\"required\")\n    preloadLog(\"kept\")\n}\nprint(\"v2 after\")\n"),
+    ];
+    let (code, stdout, stderr, _home) = run_with_files_env(&files, &["pre.v2"], &[("NODE_OPTIONS", "--require=./preload.js")]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "v2 before\nfrom js\nrequired\nkept\nv2 after\n"), "{stderr}");
+}
+
+#[test]
+fn a_blocks_console_is_nodes_with_the_users_frames() {
+    // INTERNALS 14.4: the console blocks get keeps Node's members, and console.trace shows the
+    // block's frames, not the adapter's (12.6).
+    if !needs("js", "a_blocks_console_is_nodes_with_the_users_frames") {
+        return;
+    }
+    let src = "\
+@js {
+    console.log(typeof console.Console, typeof console.profile, typeof console.timeStamp)
+    console.trace(\"here\", 1)
+}
+";
+    let (code, stdout, stderr, _home) = run_with_files(&[("trace.v2", src)], &["trace.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "function function function\n"));
+    assert!(stderr.starts_with("Trace: here 1\n    at ") && stderr.contains("trace.v2:3"), "{stderr}");
+    assert!(!stderr.contains("js.js") && !stderr.contains("node:"), "{stderr}");
 }
 
 #[cfg(target_os = "linux")]
@@ -1067,6 +1097,34 @@ fn a_child_that_left_its_process_group_ends_with_the_run() {
     while running(pid) {
         assert!(Instant::now() < gone, "the child {pid} outlived the run");
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_blocks_failed_output_goes_with_its_io_error() {
+    // INTERNALS 6.5, 9.9: what a block wrote after its first failed write goes too, so a caught
+    // IOError ends well and an uncaught one is the only message.
+    if !needs("py", "a_blocks_failed_output_goes_with_its_io_error") {
+        return;
+    }
+    let block = "@py P {\n    def blk():\n        for i in range(1000):\n            print(\"p\" * 99)\n    @export { blk }\n}\n@import { blk } from P\n";
+    for (end, want_code) in [("try {\n    blk()\n} catch (e) {\n    print(\"caught\", e.type, stderr: true)\n}\n", 0), ("blk()\n", 1)] {
+        let home = TempHome::new();
+        std::fs::write(home.0.join("lines.v2"), format!("{block}{end}")).unwrap();
+        let mut child = v2_command(&home.0)
+            .arg("lines.v2")
+            .current_dir(&home.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start v2");
+        drop(child.stdout.take()); // close the read end
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(want_code), "{err}");
+        // Caught: nothing said; uncaught: the IOError alone.
+        assert_eq!(err.matches("cannot write to stdout").count(), want_code as usize, "{err}");
     }
 }
 

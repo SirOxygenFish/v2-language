@@ -576,7 +576,8 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 `argv` is a non-empty list of strings; a program name without a path separator is searched on
 `PATH` like engine commands. A `str` or `bytes` `input` becomes the program's standard input
 (with `null` it is empty). The result is a dict `{code, stdout, stderr}`, both outputs captured
-whole and decoded as UTF-8 (invalid bytes become U+FFFD). A non-zero `code` is not an error; on
+whole and decoded as UTF-8 (invalid bytes become U+FFFD), so `exec` returns when they end: a
+background process the program leaves holding them open makes it wait for that too. A non-zero `code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
 directory and environment with no timeout; what it started is stopped when `exec` returns or on
@@ -1350,7 +1351,7 @@ its original type.
 | `EngineUnknown`    | a block or selector uses a tag that is neither built in nor declared (in `v2.toml` or with `define_engine`) |
 | `EngineNotFound`   | the engine's toolchain isn't installed, is too old, or can't start — including a configured command or venv that doesn't exist (message includes how to fix it) |
 | `EngineCrashed`    | the engine process died; every later use of that engine fails too     |
-| `EngineTimeout`    | a call ran longer than `call_timeout`; a worker engine (py, js, bridged) is stopped for the rest of the run, so later uses of it raise `EngineCrashed` |
+| `EngineTimeout`    | an engine took longer than `startup_timeout` to start, or a call ran longer than `call_timeout`; a worker engine (py, js, bridged) is stopped for the rest of the run, so later uses of it raise `EngineCrashed` |
 | `EngineExitError`  | a compiled program or `run` engine block exited with a non-zero status |
 | `MarshalError`     | a value couldn't cross (e.g. a non-callable handle sent to another engine, or a value over 64 MiB), or doesn't fit a C type (range, NUL inside a string, `null` for a `std::string`/`&str`, …), or a native result doesn't fit V2 (an unsigned value above the `int` range, a returned string that isn't valid UTF-8) |
 | `BuildError`       | a compiled block failed to compile (compiler output, `.v2` line numbers) |

@@ -484,13 +484,15 @@ impl Ref<'_> {
 
 /// A value a walk reached: the value, held once here, its address, its references from walked
 /// values, where its own references start and end in the walk's list of them, how many items
-/// it has, whether it is walked, and whether it may be.
+/// it has and what its strings, bytes and handles weigh, whether it is walked, and whether it
+/// may be.
 struct Entry {
     node: Node,
     addr: usize,
     refs: usize,
     edges: (usize, usize),
     items: usize,
+    held: usize,
     walked: bool,
     closed: bool,
 }
@@ -501,7 +503,8 @@ struct Found {
     dead: Vec<usize>,
     /// Every frame nothing outside reaches, the seeds among them.
     frames: Vec<Env>,
-    /// Items looked at, and those of them in values that live.
+    /// Items looked at, and those of them in values that live, with what their strings, bytes and
+    /// handles weigh.
     work: usize,
     live: usize,
     /// What the strings, bytes and handles looked at weigh, in items (5.1).
@@ -511,12 +514,14 @@ struct Found {
 /// A handle's weight in items: its object, in another process, could be big.
 const HANDLE_WEIGHT: usize = 1_000;
 
-/// What a value that holds nothing a walk follows weighs, in items of 16 bytes.
+/// What a value that holds nothing a walk follows weighs, in items of 16 bytes, when this is its
+/// only holder: a shared one goes nowhere when the group does, and counting it at every frame
+/// that reaches it would start a collection on every call.
 fn weight(v: &Value) -> usize {
     match v {
-        Value::Str(s) => s.len() / 16,
-        Value::Bytes(b) => b.len() / 16,
-        Value::Handle(_) => HANDLE_WEIGHT,
+        Value::Str(s) if Rc::strong_count(s) == 1 => s.len() / 16,
+        Value::Bytes(b) if Rc::strong_count(b) == 1 => b.len() / 16,
+        Value::Handle(h) if Rc::strong_count(h) == 1 => HANDLE_WEIGHT,
         _ => 0,
     }
 }
@@ -563,10 +568,9 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
     let mut scratch = SCRATCH.try_with(Cell::take).ok().flatten().unwrap_or_default();
     let Scratch { nodes, edges, todo, live } = &mut scratch;
     let n = seeds.len();
-    nodes.extend(seeds.iter().map(|s| Entry { node: Node::Frame(s.clone()), addr: Rc::as_ptr(s) as usize, refs: 0, edges: (0, 0), items: 0, walked: true, closed: false }));
+    nodes.extend(seeds.iter().map(|s| Entry { node: Node::Frame(s.clone()), addr: Rc::as_ptr(s) as usize, refs: 0, edges: (0, 0), items: 0, held: 0, walked: true, closed: false }));
     let youngest = seeds.iter().map(|s| s.born).max().unwrap_or(0);
     let checked = seeds.first().map_or(0, |s| Rc::as_ptr(s) as usize);
-    let mut held = 0;
     // Found by address in that list while it is short, then through a map.
     let index = |nodes: &[Entry]| nodes.iter().enumerate().map(|(k, e)| (e.addr, k)).collect::<HashMap<usize, usize>>();
     let mut by_addr = (n >= 32).then(|| index(nodes));
@@ -578,6 +582,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
         let node = nodes[k].node.clone();
         let first = edges.len();
         let mut items = 0;
+        let mut held = 0;
         let mut over = false;
         node.each(&mut |r| {
             if budget == 0 {
@@ -618,7 +623,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
                             || (f.remembered.get() && f.weight.get() > SMALL_GROUP && !below(f, checked)));
                     // `count` has no copy of ours yet.
                     let walked = !lazy || (count == 1 && !closed);
-                    nodes.push(Entry { node, addr, refs: 1, edges: (0, 0), items: 0, walked, closed });
+                    nodes.push(Entry { node, addr, refs: 1, edges: (0, 0), items: 0, held: 0, walked, closed });
                     match &mut by_addr {
                         Some(map) => {
                             map.insert(addr, j);
@@ -640,6 +645,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
         }
         nodes[k].edges = (first, edges.len());
         nodes[k].items = items + 1;
+        nodes[k].held = held;
     }
     // What something outside holds lives, with all it reaches.
     live.resize(nodes.len(), false);
@@ -650,11 +656,12 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
             todo.extend_from_slice(&edges[a..b]);
         }
     }
-    let mut found = Found { dead: Vec::new(), frames: Vec::new(), work: 0, live: 0, held };
+    let mut found = Found { dead: Vec::new(), frames: Vec::new(), work: 0, live: 0, held: 0 };
     for (k, (e, &l)) in nodes.iter().zip(live.iter()).enumerate() {
         found.work += e.items;
+        found.held += e.held;
         if l {
-            found.live += e.items;
+            found.live += e.items + e.held;
             continue;
         }
         if k < n {
