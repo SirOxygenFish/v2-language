@@ -1136,7 +1136,9 @@ impl Interp {
         match o {
             Value::Handle(h) => self.handle_setattr(h, n, &v, name.span),
             Value::Dict(d) => {
-                d.borrow_mut().insert(n.clone(), v);
+                if d.borrow_mut().insert(n.clone(), v).is_none() {
+                    env::made(1);
+                }
                 Ok(())
             }
             Value::Str(_) | Value::Bytes(_) => type_error(format!("{} is immutable", o.type_name())),
@@ -1214,7 +1216,9 @@ impl Interp {
             }
             Value::Dict(d) => match k {
                 Value::Str(key) => {
-                    d.borrow_mut().insert(key.clone(), v);
+                    if d.borrow_mut().insert(key.clone(), v).is_none() {
+                        env::made(1);
+                    }
                     Ok(())
                 }
                 other => type_error(format!("dict keys must be str, got {}", other.type_name())),

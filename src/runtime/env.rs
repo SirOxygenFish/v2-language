@@ -54,6 +54,8 @@ pub enum WriteError {
 thread_local! {
     /// Frames left so far: their age, and what pays for rechecks (5.1).
     static TICKS: Cell<u32> = const { Cell::new(0) };
+    /// List items, dict entries and frame slots made so far: what starts a collection (5.1).
+    static MADE: Cell<usize> = const { Cell::new(0) };
     /// Slot arrays of frames that are gone: a malloc and a free less per call.
     static SPARE: RefCell<Vec<Vec<Option<Slot>>>> = const { RefCell::new(Vec::new()) };
 }
@@ -61,7 +63,14 @@ thread_local! {
 /// How many spare arrays to keep: about the depth of a program's usual recursion.
 const MAX_SPARE: usize = 256;
 
+/// `n` more values made in lists, dicts or frames.
+#[inline]
+pub fn made(n: usize) {
+    let _ = MADE.try_with(|m| m.set(m.get().wrapping_add(n)));
+}
+
 pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
+    made(layout.len() + 1);
     let mut slots = SPARE.with(|s| s.borrow_mut().pop()).unwrap_or_default();
     slots.resize_with(layout.len(), || None);
     Rc::new(Frame {
@@ -221,8 +230,11 @@ const MAX_NODES: usize = if cfg!(test) { 1_000 } else { 1_000_000 };
 /// A remembered frame is checked again only once the frames left since its last check, times
 /// this, reach what that check looked at: a big group costs each call a few items, not itself.
 const RECHECK_RATE: usize = 8;
-/// What the frames remembered must weigh before the first collection.
+/// Values the program must make before the first collection.
 const FIRST_COLLECTION: usize = 100_000;
+/// A remembered frame whose last check looked at more is not walked again from another
+/// frame's check: rechecks and collections see to it (5.1).
+const SMALL_GROUP: u32 = 64;
 
 /// The cycle collector of 5.1.
 struct Gc {
@@ -232,14 +244,14 @@ struct Gc {
     kept: usize,
     /// Remembered frames that a closure over them, or below them, has let go of since.
     recheck: Vec<Weak<Frame>>,
-    /// What frames remembered since the last collection weighed, and what starts the next.
-    pressure: usize,
+    /// `MADE` at the last collection, and how much more starts the next.
+    since: usize,
     due: usize,
 }
 
 thread_local! {
     static GC: RefCell<Gc> = const {
-        RefCell::new(Gc { remembered: Vec::new(), kept: 0, recheck: Vec::new(), pressure: 0, due: FIRST_COLLECTION })
+        RefCell::new(Gc { remembered: Vec::new(), kept: 0, recheck: Vec::new(), since: 0, due: FIRST_COLLECTION })
     };
     /// A check is dropping the copies it held, which are no one letting go.
     static CHECKING: Cell<bool> = const { Cell::new(false) };
@@ -268,12 +280,22 @@ pub fn closure_dropped(env: &Env) {
 pub fn leave(env: Env) {
     let ticks = TICKS.with(|t| t.get().wrapping_add(1));
     TICKS.with(|t| t.set(ticks));
-    let Ok(pending) = GC.try_with(|g| !g.borrow().recheck.is_empty()) else { return };
+    let made = MADE.with(Cell::get);
+    let Ok((pending, due)) = GC.try_with(|g| {
+        let g = g.borrow();
+        (!g.recheck.is_empty(), !g.remembered.is_empty() && made.wrapping_sub(g.since) >= g.due)
+    }) else {
+        return;
+    };
     if pending {
         recheck(ticks);
     }
     // Nothing else holds it, so no closure does: it goes when `env` does.
     if env.closures.get() == 0 || Rc::strong_count(&env) == 1 {
+        if due {
+            drop(env);
+            collect();
+        }
         return;
     }
     let weight = match walk(std::slice::from_ref(&env), true, CHECK_BUDGET, MAX_NODES) {
@@ -284,7 +306,7 @@ pub fn leave(env: Env) {
     env.weight.set(u32::try_from(weight).unwrap_or(u32::MAX));
     env.checked.set(ticks);
     env.remembered.set(true);
-    let due = GC.try_with(|g| {
+    let _ = GC.try_with(|g| {
         let mut g = g.borrow_mut();
         g.remembered.push(Rc::downgrade(&env));
         // A dead entry keeps its frame's memory: tidy once they could outnumber the rest.
@@ -292,11 +314,9 @@ pub fn leave(env: Env) {
             g.remembered.retain(|w| w.strong_count() > 0);
             g.kept = g.remembered.len();
         }
-        g.pressure += weight;
-        g.pressure >= g.due
     });
     drop(env);
-    if due == Ok(true) {
+    if due {
         collect();
     }
 }
@@ -324,9 +344,9 @@ fn recheck(ticks: u32) {
 }
 
 /// Check every remembered frame together, with no budget: this frees a cycle through several of
-/// them, one made after its frame was left, and one too big for a check at a scope exit. The
-/// next comes once the frames remembered since weigh as much as what this one found alive, so
-/// the work stays in proportion to the program's.
+/// them, one made after its frame was left, one a dropped list or dict let go of, and one too big
+/// for a check at a scope exit. The next comes once the program has made as many values as this
+/// one found alive, so the work stays in proportion to the program's and garbage to what lives.
 pub fn collect() {
     let Ok(weak) = GC.try_with(|g| std::mem::take(&mut g.borrow_mut().remembered)) else { return };
     let seeds: Vec<Env> = weak.iter().filter_map(Weak::upgrade).filter(|f| f.remembered.get()).collect();
@@ -342,7 +362,7 @@ pub fn collect() {
         let mut g = g.borrow_mut();
         g.remembered.extend(kept);
         g.kept = g.remembered.len();
-        g.pressure = 0;
+        g.since = MADE.with(Cell::get);
         g.due = FIRST_COLLECTION.max(live);
     });
     drop(seeds);
@@ -501,9 +521,10 @@ thread_local! {
 /// makes more look held, so a wrong answer can keep memory but never frees what is in use.
 /// `lazy`: a value is walked only once all its holders are found among walked ones, so what the
 /// rest of the program shares (data passed in, a running frame, another call's function) costs
-/// nothing, and a frame older than the seeds isn't walked: it was checked when it was left, and
-/// a closure over it in a seed (a chain of closures, each over the frame before) would make every
-/// walk go back to the first one. `None`: more than `budget` items or `max_nodes` values.
+/// nothing. Nor is a frame older than the seeds, or one checked before whose group was big: it was
+/// checked when it was left, and a chain of closures, each over the frame before (built by a loop
+/// or by recursion), would make every walk go back to the first one. `None`: more than `budget`
+/// items or `max_nodes` values.
 fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Option<Found> {
     // Declared first, so it ends last: the copies below are dropped while it is set.
     let _checking = Checking::new();
@@ -550,8 +571,11 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
                 None => {
                     let Some(node) = r.node() else { return true };
                     let j = nodes.len();
-                    // Made before the frame checked (wrapping like the ticks).
-                    let closed = lazy && matches!(&node, Node::Frame(f) if (youngest.wrapping_sub(f.born) as i32) > 0);
+                    // Made before the frame checked (wrapping like the ticks), or checked before
+                    // with a big group: a chain built by recursion would be walked at every level.
+                    let closed = lazy
+                        && matches!(&node, Node::Frame(f) if (youngest.wrapping_sub(f.born) as i32) > 0
+                            || (f.remembered.get() && f.weight.get() > SMALL_GROUP));
                     // `count` has no copy of ours yet.
                     let walked = !lazy || (count == 1 && !closed);
                     nodes.push(Entry { node, addr, refs: 1, edges: (0, 0), items: 0, walked, closed });

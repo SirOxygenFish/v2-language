@@ -60,6 +60,8 @@ fn die(w: &Watch) -> ! {
     for (_, kill) in &w.children {
         kill.kill_tree();
     }
+    // What the program printed still reaches a file or a pipe (6.5).
+    crate::runtime::builtins::write_pending(Duration::from_millis(300));
     // A killed process releases its files only once it has stopped (Windows), so wait a little
     // for the trees before removing the run dir (20.3).
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -435,6 +437,8 @@ pub enum Pipe {
     Null,
     Piped,
     Inherit,
+    /// The host's stderr (for a child's stdout).
+    Stderr,
 }
 
 impl Pipe {
@@ -443,6 +447,13 @@ impl Pipe {
             Pipe::Null => Stdio::null(),
             Pipe::Piped => Stdio::piped(),
             Pipe::Inherit => Stdio::inherit(),
+            Pipe::Stderr => {
+                #[cfg(unix)]
+                let copy = std::os::fd::AsFd::as_fd(&std::io::stderr()).try_clone_to_owned().map(Stdio::from);
+                #[cfg(windows)]
+                let copy = std::os::windows::io::AsHandle::as_handle(&std::io::stderr()).try_clone_to_owned().map(Stdio::from);
+                copy.unwrap_or_else(|_| Stdio::null())
+            }
         }
     }
 }
@@ -454,6 +465,8 @@ pub struct Spawn<'a> {
     pub stdin: Pipe,
     pub stdout: Pipe,
     pub stderr: Pipe,
+    /// Unix: descriptors the child keeps, at their own numbers (a worker's protocol, 9.9).
+    pub keep: &'a [i32],
 }
 
 /// How a child ended: an exit code, or (Unix) the signal that killed it.
@@ -792,7 +805,7 @@ impl ChildProc {
         // Under the watchdog's lock: the interrupt path can't run between the spawn and the
         // registration, so it never misses a child (6.5).
         let mut w = lock();
-        let (child, kill) = platform_spawn(&mut cmd).map_err(|e| spawn_error(program, &e))?;
+        let (child, kill) = platform_spawn(&mut cmd, s.keep).map_err(|e| spawn_error(program, &e))?;
         let reg = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         w.children.push((reg, kill.clone()));
         drop(w);
@@ -860,15 +873,21 @@ impl Drop for ChildProc {
 /// Unix: the child leads a new session (no controlling terminal), and on Linux dies with the
 /// spawning thread (8.3).
 #[cfg(unix)]
-fn platform_spawn(cmd: &mut Command) -> std::io::Result<(std::process::Child, KillHandle)> {
+fn platform_spawn(cmd: &mut Command, keep: &[i32]) -> std::io::Result<(std::process::Child, KillHandle)> {
     use std::os::unix::process::CommandExt;
     #[cfg(target_os = "linux")]
     let host = std::process::id() as libc::pid_t;
+    let keep = keep.to_vec();
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
+            }
+            for &fd in &keep {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             #[cfg(target_os = "linux")]
             {
@@ -890,7 +909,7 @@ fn platform_spawn(cmd: &mut Command) -> std::io::Result<(std::process::Child, Ki
 /// Windows: created suspended in a new process group, put in its own kill-on-close Job Object,
 /// then resumed, so every descendant is in the job (8.3).
 #[cfg(windows)]
-fn platform_spawn(cmd: &mut Command) -> std::io::Result<(std::process::Child, KillHandle)> {
+fn platform_spawn(cmd: &mut Command, _keep: &[i32]) -> std::io::Result<(std::process::Child, KillHandle)> {
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
@@ -988,7 +1007,7 @@ pub struct Captured {
 /// (8.5).
 #[cfg(unix)]
 pub struct UntilExit {
-    pipe: ChildStdout,
+    pipe: std::fs::File,
     kill: KillHandle,
     /// Once the child has exited: what it left in the pipe, still to read. Anything after that
     /// is a descendant's.
@@ -998,8 +1017,8 @@ pub struct UntilExit {
 
 #[cfg(unix)]
 impl UntilExit {
-    pub fn new(pipe: ChildStdout, kill: KillHandle) -> UntilExit {
-        UntilExit { pipe, kill, left: None, checked: Instant::now() }
+    pub fn new(pipe: impl Into<std::os::fd::OwnedFd>, kill: KillHandle) -> UntilExit {
+        UntilExit { pipe: std::fs::File::from(pipe.into()), kill, left: None, checked: Instant::now() }
     }
 }
 
@@ -1056,7 +1075,7 @@ pub fn run_captured(
     input: Option<Vec<u8>>,
 ) -> Result<Captured, SpawnError> {
     let stdin = if input.is_some() { Pipe::Piped } else { Pipe::Null };
-    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped })?;
+    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped, keep: &[] })?;
     // A child that exits without reading gets a write error here, which is not the caller's.
     let feed = input.zip(child.take_stdin()).map(|(bytes, mut pipe)| {
         std::thread::spawn(move || {
@@ -1171,7 +1190,7 @@ pub(crate) mod tests {
     fn a_worker_parks_once_per_idle_period() {
         // 8.8, on the bookkeeping alone: a real `Watch` is global and its clock is real.
         let (argv, env) = helper("sleep:20000");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null }).unwrap();
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] }).unwrap();
         let kill = child.kill_handle();
         let after = Duration::from_secs(10);
         let t0 = Instant::now();
@@ -1263,7 +1282,7 @@ pub(crate) mod tests {
             // A host killed with no exit path: its children must die with it (6.5, 8.3).
             "owner" => {
                 let (argv, env) = helper(&format!("late:{arg}"));
-                let _child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null }).unwrap();
+                let _child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] }).unwrap();
                 wait_for(&started(arg));
                 writeln!(out, "ready").unwrap();
                 out.flush().unwrap();
@@ -1273,7 +1292,7 @@ pub(crate) mod tests {
             "spawn_after_interrupt" => {
                 INTERRUPTED.store(true, Ordering::SeqCst);
                 let (argv, env) = helper(&format!("late:{arg}"));
-                let _ = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null });
+                let _ = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] });
                 writeln!(out, "spawned").unwrap();
             }
             // Leave a grandchild holding stdout, then exit at once.
@@ -1296,7 +1315,7 @@ pub(crate) mod tests {
                 set_run_dir(dir.clone());
                 let (argv, env) = helper(&format!("grandchild:{marker}"));
                 // The child's cwd is the run dir (as a compiler's would be); the host's is not.
-                let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null }).unwrap();
+                let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null, keep: &[] }).unwrap();
                 std::env::set_current_dir(std::env::temp_dir()).unwrap();
                 wait_ready(&mut child.take_stdout().unwrap());
                 Watchdog::start();
@@ -1411,7 +1430,7 @@ pub(crate) mod tests {
         // A session reads its worker's stdout to EOF (8.5): when the worker exits but a
         // grandchild still holds the pipe, the watchdog's exited check kills the tree.
         let (argv, env) = helper("holder");
-        let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null })
+        let mut child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null, keep: &[] })
             .expect("spawn");
         let timer = push_timer(None, child.kill_handle());
         let start = Instant::now();
@@ -1471,7 +1490,7 @@ pub(crate) mod tests {
         let spawn = |name: &str| {
             let marker = dir.join(name);
             let (argv, env) = helper(&format!("grandchild:{}", marker.display()));
-            let mut c = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null })
+            let mut c = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Piped, stderr: Pipe::Null, keep: &[] })
                 .expect("spawn");
             wait_ready(&mut c.take_stdout().unwrap());
             (c, marker)
@@ -1492,7 +1511,7 @@ pub(crate) mod tests {
     fn dropped_timers_and_reaped_children_leave_no_state() {
         let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("sleep:20000");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] })
             .expect("spawn");
         let reg = child.reg;
         assert!(lock().children.iter().any(|(id, _)| *id == reg), "registered for the interrupt path");
@@ -1514,7 +1533,7 @@ pub(crate) mod tests {
         let _serial = crate::engines::process::tests::serial();
         // A session reaps a dead worker while its request still holds the timer (8.5, 8.6).
         let (argv, env) = helper("exit:0");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] })
             .expect("spawn");
         child.wait_exit();
         let timer = push_timer(Some(Duration::from_millis(200)), child.kill_handle());
@@ -1529,7 +1548,7 @@ pub(crate) mod tests {
     fn a_paused_timer_fires_only_after_resume() {
         let _serial = crate::engines::process::tests::serial();
         let (argv, env) = helper("sleep:20000");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] })
             .expect("spawn");
         let timer = push_timer(Some(Duration::from_millis(300)), child.kill_handle());
         timer.pause();
@@ -1607,7 +1626,7 @@ pub(crate) mod tests {
     #[test]
     fn a_killed_child_reports_its_signal() {
         let (argv, env) = helper("sleep:20000");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] })
             .expect("spawn");
         child.kill_tree();
         let killed = ExitInfo { code: None, signal: Some(libc::SIGKILL) };
@@ -1622,7 +1641,7 @@ pub(crate) mod tests {
         let bad = temp("bad").join("not-a-program.exe");
         std::fs::write(&bad, b"").unwrap();
         let argv = [bad.into_os_string()];
-        let e = ChildProc::spawn(&Spawn { argv: &argv, env: &[], stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+        let e = ChildProc::spawn(&Spawn { argv: &argv, env: &[], stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] })
             .err()
             .expect("an error");
         assert!(e.message.ends_with(" (not a valid program for this machine)") && !e.message.contains("%1"), "{e:?}");
@@ -1637,7 +1656,7 @@ pub(crate) mod tests {
         let _serial = crate::engines::process::tests::serial();
         // In this child's job, not just in some job (the test runner may be in one already).
         let (argv, env) = helper("sleep:5000");
-        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null })
+        let child = ChildProc::spawn(&Spawn { argv: &argv, env: &env, stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[] })
             .expect("spawn");
         let kill = child.kill_handle();
         let mut in_job = 0;

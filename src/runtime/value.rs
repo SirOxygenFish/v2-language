@@ -176,10 +176,12 @@ impl Value {
     }
 
     pub fn list(items: Vec<Value>) -> Value {
+        super::env::made(items.len() + 1);
         Value::List(List::new(RefCell::new(items)))
     }
 
     pub fn dict(map: IndexMap<Rc<str>, Value>) -> Value {
+        super::env::made(map.len() + 1);
         Value::Dict(Dict::new(RefCell::new(map)))
     }
 

@@ -627,8 +627,12 @@ impl Resolver<'_> {
     pub fn resolve_ts(&mut self, spec: &Rc<EngineSpec>, js: Result<&ResolvedEngine, &NotFound>) -> Result<ResolvedEngine, NotFound> {
         let js = js.map_err(|nf| {
             let rest: Vec<&str> = nf.message.lines().skip(1).collect();
-            let mut message = "engine 'ts' (TypeScript) not found — @ts blocks run on the js engine".to_string();
-            if rest.is_empty() {
+            // A configured js that can't run is named for what is wrong with it.
+            let mut message = match nf.status {
+                Status::Missing | Status::Old(_) => "engine 'ts' (TypeScript) not found — @ts blocks run on the js engine".to_string(),
+                Status::Broken => format!("engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and {}", nf.message.lines().next().unwrap_or_default()),
+            };
+            if rest.is_empty() && nf.status != Status::Broken {
                 message.push_str(&format!("\njs: {}", nf.message));
             }
             for line in rest {
@@ -1206,7 +1210,7 @@ mod tests {
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };
         let js = r.resolve(&spec("js")).unwrap_err();
         let nf = r.resolve_ts(&spec("ts"), Err(&js)).unwrap_err();
-        assert_eq!(nf.message, format!("engine 'ts' (TypeScript) not found — @ts blocks run on the js engine\njs: {}", js.message));
+        assert_eq!(nf.message, format!("engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and {}", js.message));
     }
 
     #[cfg(windows)]
