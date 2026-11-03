@@ -59,6 +59,9 @@ pub struct Line {
     running: Option<u64>,
 }
 
+/// `startup_timeout` when the config gives none, in seconds (DOCS 14).
+pub const STARTUP_DEFAULT: f64 = 30.0;
+
 impl Line {
     pub fn push(&mut self, key: Rc<str>, item: Waiting) {
         self.places.push_back(Place { seq: self.next, key, item });
@@ -299,7 +302,7 @@ impl Interp {
         let cfg = self.registry.config().engines.get(key);
         let limit = |secs: f64| Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero());
         Timeouts {
-            startup: limit(cfg.and_then(|c| c.startup_timeout.as_ref()).map_or(30.0, |t| t.value)),
+            startup: limit(cfg.and_then(|c| c.startup_timeout.as_ref()).map_or(STARTUP_DEFAULT, |t| t.value)),
             call: cfg.and_then(|c| c.call_timeout.as_ref()).and_then(|t| limit(t.value)),
         }
     }

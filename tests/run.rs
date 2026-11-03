@@ -958,6 +958,12 @@ func boom() {
         const notGroup = new Error(\"not a group\");
         notGroup.errors = [\"member\"];
         setTimeout(() => { throw notGroup }, 4);
+        const y = new Error(\"y\");
+        const x = new Error(\"x\", { cause: y });
+        setTimeout(() => { throw new AggregateError([x], \"agg\", { cause: x }) }, 5);
+        class Odd extends Error {}
+        Object.defineProperty(Odd.prototype, \"constructor\", { get() { throw new Error(\"no\") } });
+        setTimeout(() => { throw new Odd(\"odd\", { cause: new Error(\"its cause\") }) }, 6);
         return await new Promise(res => setTimeout(() => res(1), 50));
     }
     @export { wait_on_timer, with_cause }
@@ -977,6 +983,8 @@ print(with_cause())
     assert!(stderr.contains("\n  AggregateError: group (shown above)\n") && stderr.len() < 4000, "{stderr}");
     assert_eq!(stderr.matches("caused by: Error: self (shown above)").count(), 1, "{stderr}");
     assert!(stderr.contains("Error: not a group\n") && !stderr.contains("member"), "{stderr}");
+    assert!(stderr.contains("caused by: Error: x (shown above)\ncaused by: Error: y\n"), "{stderr}");
+    assert!(stderr.contains("caused by: Error: its cause\n"), "{stderr}");
     assert!(stderr.starts_with("V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
     // By line: a frame's column is the body's, not the file's.
     assert!(stderr.contains("timer.v2:7)\n"), "{stderr}");
@@ -1071,11 +1079,16 @@ fn a_blocks_console_is_nodes_with_the_users_frames() {
 @js {
     console.log(typeof console.Console, typeof console.profile, typeof console.timeStamp)
     console.trace(\"here\", 1)
+    console.group()
+    console.trace(\"grouped\")
+    console.groupEnd()
 }
 ";
     let (code, stdout, stderr, _home) = run_with_files(&[("trace.v2", src)], &["trace.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "function function function\n"));
     assert!(stderr.starts_with("Trace: here 1\n    at ") && stderr.contains("trace.v2:3"), "{stderr}");
+    // Through console.error, so inside a group it is indented like everything else.
+    assert!(stderr.contains("\n  Trace: grouped\n      at "), "{stderr}");
     assert!(!stderr.contains("js.js") && !stderr.contains("node:"), "{stderr}");
 }
 
