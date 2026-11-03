@@ -1,0 +1,44 @@
+// requires: py js
+// An error is a nesting level, like a list or a dict: 256 levels cross both ways, one more is a
+// MarshalError at the host, and the engine goes on (DOCS 9.1, INTERNALS 10.5).
+@js b {
+    function echo(x) { return x }
+    @export { echo }
+}
+@py a {
+    def pecho(x):
+        return x
+    @export { pecho }
+}
+@import { echo } from b
+@import { pecho } from a
+func chain(n) {
+    let e = null
+    for i in 0..n {
+        e = error("K", "m", e)
+    }
+    return e
+}
+func levels(v) {
+    let n = 0
+    while type(v) == "error" || type(v) == "list" {
+        n += 1
+        v = type(v) == "error" ? v.data : v[0]
+    }
+    return n
+}
+let mixed = 1
+for i in 0..128 {
+    mixed = [error("K", "m", mixed)]
+}
+for f in [echo, pecho] {
+    print(levels(f(chain(256))), levels(f(mixed)))
+    for deep in [chain(257), chain(1000), [mixed]] {
+        try {
+            f(deep)
+        } catch (e) {
+            print(e.type, e.message.starts_with("value nested deeper than 256 levels"))
+        }
+    }
+    print(f("still running"))
+}

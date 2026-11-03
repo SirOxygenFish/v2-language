@@ -1,0 +1,30 @@
+// requires: py js
+// A V2 error that passes uncaught through Python or JavaScript comes back as it was sent: its data
+// keeps what the foreign language can't (JS's 1.0 and -0.0, key order, a function of that very
+// engine), also through both languages in turn (INTERNALS 9.6).
+@js b {
+    function jcall(cb) { return cb() }
+    function jf() { return 1 }
+    @export { jcall, jf }
+}
+@py a {
+    def pcall(cb):
+        return cb()
+    def pf():
+        return 1
+    @export { pcall, pf }
+}
+@import { jcall, jf } from b
+@import { pcall, pf } from a
+func through(call, data) {
+    try {
+        call(func() { throw error("K", "m", data) })
+    } catch (e) {
+        return e.data
+    }
+}
+let d = through(jcall, {x: 1.0, b: 1, "2": 2})
+print(d, type(d.x))
+print(through(jcall, -0.0))
+print(through(jcall, jf) == jf, through(pcall, pf) == pf)
+print(through(func(cb) => pcall(func() => jcall(cb)), {y: 2.0, l: [1.0]}))

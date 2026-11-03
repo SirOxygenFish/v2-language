@@ -1,7 +1,7 @@
 ValueError | null | data inside | null | 16
 true handle true
 ValueError | null | cyclic data | null | 25
-null
+[1, [...]]
 Custom | null | never raised | null | 29
 true
 ["ForeignError", "js", "TypeError"]

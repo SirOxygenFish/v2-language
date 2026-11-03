@@ -1038,7 +1038,7 @@ The `ret` of a `load` or `module` carries `value`, `exports` and `missing`. `exp
 - Without `v2`, the kind is `type` if it is one of the seven kinds above; any other `type`, a host-only kind such as `EngineNotFound` included, becomes `ForeignError` with `foreign_type = type`, so a worker's own error can't make V2 exit 3. The location is the innermost frame that maps into a `.v2` file, else the V2 call site (2.4, 12.6); `e.lang` follows 12.6. If `trace` is empty, the lines of `text` become the trace.
 - Adapters make every error string well-formed first (10.4).
 
-**The other direction.** When a worker's `call` fails (a V2 function, or another language's function behind a route or `fn`), the host's `err` always carries `v2`. Adapters raise it as `V2Error` (14.2), which keeps the tag, so if foreign code does not catch it, it goes back in `v2` unchanged.
+**The other direction.** When a worker's `call` fails (a V2 function, or another language's function behind a route or `fn`), the host's `err` always carries `v2`. Adapters raise it as `V2Error` (14.2), which keeps the tag, so if foreign code does not catch it, it goes back in `v2` unchanged. The adapters encode its data and cause again (their handles and stubs belong to the new frame, 11.1, 11.8), so the tag the host sends also has a `ref`, a number per session, and an error that comes back with a `ref` the host sent during the outermost request to that engine gets the data and cause it had when sent: what the foreign language can't keep (JS's `1.0`, key order, a function of that engine) is not lost. The worker's copy is still decoded, so its handle counts balance; later, or with an unknown `ref`, that copy is the data.
 
 ### 9.7 Ids, depth and the re-entrant loop
 
@@ -1201,7 +1201,7 @@ An object with a `"$v2"` member is a tag in a value position: `args`, `kwargs` v
 | `int` | `v`: decimal string | V2 ints beyond ±(2^53−1) going out; JS `BigInt`s within i64, and integral JS `number`s beyond ±(2^53−1) but within i64 (10.7), coming back |
 | `bytes` | `b64` | `bytes`, as standard padded base64 |
 | `float` | `v`: `"nan"`, `"inf"` or `"-inf"` | a non-finite float |
-| `error` | `type`, `message`, `data`, `lang`, `foreign_type`, `file`, `line`, `col`, `trace` (strings), `cause` (tag or `null`) | a V2 error value |
+| `error` | `type`, `message`, `data`, `lang`, `foreign_type`, `file`, `line`, `col`, `trace` (strings), `cause` (tag or `null`); in an `err`'s `v2`, also `ref` (9.6), which adapters keep and decoders ignore | a V2 error value |
 | `dict` | `v`: object | a real dict that has a `"$v2"` key: the keys of `v` are literal, its values are decoded normally |
 
 An unknown tag or a missing member is a fatal `ProtocolError` on the host (9.11); adapters answer it with `err` `ProtocolError`.
@@ -1216,7 +1216,7 @@ Host strings are always valid UTF-8. Foreign strings can hold lone surrogates: i
 
 - **Copying.** Lists and dicts are copied in both directions, so mutations never propagate (DOCS 9.1). Substructure shared inside one value is copied once per occurrence.
 - **Dict keys** on the wire are strings. Whoever encodes a dict that has a `"$v2"` key wraps it in the `dict` tag.
-- **Depth limit: 256 nested lists/dicts.** Host encode fails with `MarshalError: value nested deeper than 256 levels`; host decode fails with a fatal `ProtocolError`; adapter encode sends the container at depth 257 as a handle.
+- **Depth limit: 256 nested lists, dicts and errors** (an error's data and cause are one level below it). Host encode fails with `MarshalError: value nested deeper than 256 levels`; host decode fails with a fatal `ProtocolError`; adapter encode sends the container or error at depth 257 as a handle.
 - **Cycles.** Host encode tracks the `Rc` pointers on the current path; a revisit fails with `MarshalError: cannot send a list that contains itself`. Adapter encode tracks object identities on the current path and sends a revisited container as a handle: Python `a = [1]; a.append(a)` arrives as `[1, <handle>]`.
 - **Error paths.** Errors inside containers name the path, e.g. `… (at args[0]["when"])`.
 
