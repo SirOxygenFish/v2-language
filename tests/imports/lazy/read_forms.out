@@ -1,0 +1,8 @@
+after c
+a loads
+c loads
+after a
+b loads
+after b
+func
+6 3

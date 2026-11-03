@@ -2363,3 +2363,305 @@ fn a_worker_with_a_call_timeout_keeps_its_ram() {
     let (code, out, err, _home) = run_with_files_env(&[("main.v2", WORKING_SET), ("v2.toml", toml)], &["main.v2"], &[("V2_TEST_PARK_MS", "50")]);
     assert_eq!((code, out.as_str()), (Some(0), "true\nfalse\n"), "{err}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The phase 0-1 audit (ROADMAP 1.14): promises that had no test
+
+#[test]
+fn a_syntax_error_is_the_first_thing_on_stderr() {
+    // R07: stderr *starts* with the diagnostic (the harness finds header lines in order only).
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/host/syntax/unterminated.v2")).unwrap();
+    let first = parse_header(&src).unwrap().stderr[0].clone();
+    let (code, stdout, stderr) = run_generated("unterminated.v2", &src);
+    assert_eq!((code, stdout.as_str()), (Some(1), ""), "{stderr}");
+    assert!(normalize(&stderr).starts_with(&format!("{first}\n")), "{stderr}");
+}
+
+#[test]
+fn exit_codes_past_8_bits() {
+    // DOCS 3.11: on Linux and macOS only the low 8 bits of exit's code reach the shell.
+    for (n, unix, windows) in [(257, 1, 257), (-1, 255, -1)] {
+        let (code, _, stderr) = run_generated("exit.v2", &format!("exit({n})\n"));
+        assert_eq!(code, Some(if cfg!(windows) { windows } else { unix }), "exit({n}): {stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn args_and_getenv_turn_invalid_utf8_into_replacement_characters() {
+    // DOCS 3.11: they don't fail on bytes that aren't UTF-8.
+    use std::os::unix::ffi::OsStrExt;
+    let home = TempHome::new();
+    std::fs::write(home.0.join("a.v2"), "print(args())\nprint(getenv(\"V2_BAD\"))\n").unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("a.v2").arg(std::ffi::OsStr::from_bytes(b"x\xfey")).env("V2_BAD", std::ffi::OsStr::from_bytes(b"a\xffb"));
+    cmd.current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[\"x\u{FFFD}y\"]\na\u{FFFD}b\n");
+}
+
+#[test]
+fn check_starts_no_engine_and_writes_nothing() {
+    // DOCS 15, 16: `v2 check` only parses and checks. Blocks, package imports and imports from
+    // blocks start nothing, run nothing and write nothing, not even the probe cache.
+    let src = "@import { mean } from py.statistics\n@py stats {\n    def f():\n        return 1\n    @export { f }\n}\n@import { f } from stats\n@py { open(\"ran_py.txt\", \"w\").write(\"x\") }\n@js { require(\"fs\").writeFileSync(\"ran_js.txt\", \"x\") }\nprint(f(), mean([1]))\n";
+    let (code, stdout, stderr, home) = run_with_files(&[("c.v2", src), ("v2.toml", "# root\n")], &["check", "c.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "check c.v2: 1 file, 0 errors\n"), "{stderr}");
+    let mut left = names_in(&home.0);
+    left.sort();
+    assert_eq!(left, ["c.v2", "v2.toml"]);
+}
+
+#[test]
+fn a_waiting_import_that_failed_is_tried_again_at_its_next_use() {
+    // INTERNALS 12.7, ch. 21: a waiting @import that fails when its language starts leaves its
+    // references waiting; each use tries again, and works once the module exists.
+    if !needs("py", "a_waiting_import_that_failed_is_tried_again_at_its_next_use") {
+        return;
+    }
+    let src = "@import { hi } from py.late_mod\nprint(\"waiting\")\ntry {\n    @py { print(\"not printed\") }\n} catch (e) {\n    print(\"first:\", e.type, e.message)\n}\ntry {\n    print(hi())\n} catch (e) {\n    print(\"second:\", e.type, e.message)\n}\nwrite_file(\"late_mod.py\", \"def hi():\\n    return 'hi'\\n\")\n@py {\n    import importlib\n    importlib.invalidate_caches()\n}\nprint(hi())\n";
+    let (code, stdout, stderr, _home) = run_with_files(&[("retry.v2", src), ("v2.toml", "# root\n")], &["retry.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let missing = "ImportError No module named 'late_mod'";
+    assert_eq!(stdout, format!("waiting\nfirst: {missing}\nsecond: {missing}\nhi\n"));
+}
+
+#[test]
+fn exit_inside_nested_foreign_calls_runs_no_finally() {
+    // ch. 21 Host row, INTERNALS 9.10: exit() under V2 -> js -> py -> V2 ends the run with its
+    // code at once; no `finally` runs, V2's or the workers'.
+    if !needs("py", "exit_inside_nested_foreign_calls_runs_no_finally") || !needs("js", "exit_inside_nested_foreign_calls_runs_no_finally") {
+        return;
+    }
+    let src = r#"@py w {
+    def go(f):
+        try:
+            f()
+        finally:
+            open("py_finally.txt", "w").write("ran")
+    @export { go }
+}
+@js j {
+    function jgo(f) {
+        try {
+            return f()
+        } finally {
+            require("fs").writeFileSync("js_finally.txt", "ran")
+        }
+    }
+    @export { jgo }
+}
+@import { go } from w
+@import { jgo } from j
+print("start")
+try {
+    jgo(func() => go(func() => exit(5)))
+} finally {
+    write_file("v2_finally.txt", "ran")
+}
+print("not reached")
+"#;
+    let (code, stdout, stderr, home) = run_with_files(&[("nested.v2", src)], &["nested.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(5), "start\n"), "{stderr}");
+    std::thread::sleep(Duration::from_millis(300));
+    let ran: Vec<String> = names_in(&home.0).into_iter().filter(|n| n.ends_with("_finally.txt")).collect();
+    assert!(ran.is_empty(), "these finally blocks ran: {ran:?}");
+}
+
+#[test]
+fn workers_run_in_v2s_working_directory_and_environment() {
+    // DOCS 16, INTERNALS 8.3: workers inherit V2's working directory, not the script's folder,
+    // and its environment.
+    if !needs("py", "workers_run_in_v2s_working_directory_and_environment") || !needs("js", "workers_run_in_v2s_working_directory_and_environment") {
+        return;
+    }
+    let home = TempHome::new();
+    let main = "print(@py { import os; [os.path.basename(os.getcwd()), os.environ.get(\"V2_TEST_MARK\")] })\nprint(@js { [require(\"path\").basename(process.cwd()), process.env.V2_TEST_MARK] })\n";
+    for (path, text) in [("proj/v2.toml", "# root\n"), ("proj/sub/main.v2", main)] {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    std::fs::create_dir_all(home.0.join("work")).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg(home.0.join("proj/sub/main.v2")).current_dir(home.0.join("work")).env("V2_TEST_MARK", "mark");
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(normalize(&String::from_utf8_lossy(&out.stdout)), "[\"work\", \"mark\"]\n[\"work\", \"mark\"]\n");
+}
+
+#[test]
+fn js_packages_are_found_through_node_path() {
+    // DOCS 7: after the node_modules folders from the script's folder up, Node looks in NODE_PATH.
+    if !needs("js", "js_packages_are_found_through_node_path") {
+        return;
+    }
+    let home = TempHome::new();
+    let main = "@import { hi } from js.npmod\nprint(hi())\nprint(@js { require(\"npmod\").hi() })\n";
+    for (path, text) in [("np/npmod/index.js", "exports.hi = () => \"from NODE_PATH\";\n"), ("proj/v2.toml", "# root\n"), ("proj/main.v2", main)] {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let run = |node_path: Option<PathBuf>| {
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("proj/main.v2").current_dir(&home.0).env_remove("NODE_PATH");
+        if let Some(p) = node_path {
+            cmd.env("NODE_PATH", p);
+        }
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (code, stdout, stderr) = run(Some(home.0.join("np")));
+    assert_eq!((code, stdout.as_str()), (Some(0), "from NODE_PATH\nfrom NODE_PATH\n"), "{stderr}");
+    let (code, _, stderr) = run(None);
+    assert!(code == Some(1) && stderr.contains("Cannot find module 'npmod'"), "{stderr}");
+}
+
+/// The Python that blocks run on here (a block's `sys.executable`), for tests that make their own
+/// venv or engine command.
+fn block_python() -> String {
+    let (code, stdout, stderr) = run_generated("which.v2", "print(@py { import sys; sys.executable })\n");
+    assert_eq!(code, Some(0), "{stderr}");
+    stdout.trim().to_string()
+}
+
+/// The first folder named `name` under `root`.
+fn find_dir(root: &Path, name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if p.file_name().is_some_and(|n| n == name) {
+                return Some(p);
+            }
+            if let Some(found) = find_dir(&p, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn a_python_venv_from_v2_toml_is_used_unless_a_command_is_set() {
+    // DOCS 5, 7, 14: `[python] venv`, relative to the v2.toml, gives blocks that venv's Python and
+    // its packages; `[engines.py] command` wins over it.
+    if !needs("py", "a_python_venv_from_v2_toml_is_used_unless_a_command_is_set") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    let made = Command::new(&python).args(["-m", "venv", "--without-pip"]).arg(home.0.join(".venv")).output().expect("run python -m venv");
+    assert!(made.status.success(), "python -m venv: {}", String::from_utf8_lossy(&made.stderr));
+    let site = find_dir(&home.0.join(".venv"), "site-packages").expect("the venv's site-packages");
+    std::fs::write(site.join("venvonly.py"), "def where():\n    return \"venv package\"\n").unwrap();
+    std::fs::create_dir_all(home.0.join("sub")).unwrap();
+    let main = "@import { where } from py.venvonly\nprint(where())\nprint(@py { import os, sys; os.path.basename(sys.prefix) })\n";
+    std::fs::write(home.0.join("sub/main.v2"), main).unwrap();
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "venv package\n.venv\n"), "{stderr}");
+    std::fs::write(home.0.join("v2.toml"), format!("[python]\nvenv = \".venv\"\n\n[engines.py]\ncommand = ['{python}']\n")).unwrap();
+    std::fs::write(home.0.join("sub/main.v2"), "print(@py { import os, sys; os.path.basename(sys.prefix) })\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_ne!(stdout, ".venv\n", "the configured command lost to the venv");
+}
+
+#[test]
+fn startup_timeout_from_v2_toml_reaches_the_worker() {
+    // DOCS 14, INTERNALS 8.4: a configured command that never says hello is stopped after the
+    // project's startup_timeout, and the engine stays down for the rest of the run.
+    if !needs("py", "startup_timeout_from_v2_toml_reaches_the_worker") {
+        return;
+    }
+    let python = block_python();
+    let slow = "import sys, time\nif sys.argv[1:] == [\"--version\"]:\n    print(\"Python %d.%d.%d\" % sys.version_info[:3])\n    sys.exit(0)\ntime.sleep(60)\n";
+    let toml = format!("[engines.py]\ncommand = ['{python}', 'slow.py']\nstartup_timeout = 1\n");
+    let main = "let t0 = time()\ntry {\n    @py { 1 }\n} catch (e) {\n    print(e.type, time() - t0 < 10)\n    print(e.message)\n}\ntry {\n    @py { 1 }\n} catch (e) {\n    print(e.type, e.message)\n}\n";
+    let (code, stdout, stderr, _home) = run_with_files(&[("slow.py", slow), ("v2.toml", &toml), ("main.v2", main)], &["main.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first(), Some(&"EngineTimeout true"), "{stdout}");
+    assert!(lines[1].starts_with("engine 'py' did not start within 1 s"), "{stdout}");
+    assert!(lines[2].starts_with("EngineCrashed engine 'py' is not running (stopped earlier: did not start within 1 s)"), "{stdout}");
+}
+
+/// Kills, by pid, the processes a test left running on purpose, however the test ends.
+struct Reap(Vec<u32>);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        for &pid in self.0.iter().filter(|&&p| p != 0) {
+            #[cfg(unix)]
+            // SAFETY: a signal to a process this test started.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            // SAFETY: plain Win32 calls on a handle this function owns.
+            unsafe {
+                use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                if !h.is_null() {
+                    TerminateProcess(h, 1);
+                    windows_sys::Win32::Foundation::CloseHandle(h);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn children_of_blocks_end_with_the_run_unless_they_left() {
+    // DOCS 16: what Python and JavaScript code started is stopped when V2 exits; on Linux and
+    // macOS one that detached itself lives on, on Windows only one that broke away from V2's job.
+    if !needs("py", "children_of_blocks_end_with_the_run_unless_they_left") || !needs("js", "children_of_blocks_end_with_the_run_unless_they_left") {
+        return;
+    }
+    let src = r#"@py {
+    import os, subprocess, sys
+    quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    away = dict(creationflags=0x01000000) if os.name == "nt" else dict(start_new_session=True)
+    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+    plain = subprocess.Popen(sleep, **quiet)
+    try:
+        left = subprocess.Popen(sleep, **quiet, **away).pid
+    except PermissionError:
+        left = 0  # this machine's own job forbids breaking away
+    open("py.pids", "w").write(str(plain.pid) + " " + str(left))
+}
+@js {
+    const { spawn } = require("child_process")
+    const sleep = ["-e", "setTimeout(() => {}, 60000)"]
+    const plain = spawn(process.execPath, sleep, { stdio: "ignore" })
+    const left = spawn(process.execPath, sleep, { stdio: "ignore", detached: true })
+    plain.unref()
+    left.unref()
+    require("fs").writeFileSync("js.pids", plain.pid + " " + left.pid)
+}
+"#;
+    let (code, _stdout, stderr, home) = run_with_files(&[("kids.v2", src)], &["kids.v2"]);
+    let pids = |f: &str| -> Vec<u32> {
+        std::fs::read_to_string(home.0.join(f)).unwrap_or_default().split_whitespace().map(|p| p.parse().unwrap()).collect()
+    };
+    let (py, js) = (pids("py.pids"), pids("js.pids"));
+    let _reap = Reap(py.iter().chain(&js).copied().collect());
+    assert_eq!((code, py.len(), js.len()), (Some(0), 2, 2), "{stderr}");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    for pid in [py[0], js[0]] {
+        while running(pid) {
+            assert!(Instant::now() < deadline, "the child {pid} outlived the run");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if py[1] == 0 {
+        let _ = writeln!(std::io::stderr(), "SKIP the breakaway part of children_of_blocks_end_with_the_run_unless_they_left (not allowed here)");
+    } else {
+        assert!(running(py[1]), "the Python child that left V2 ended with it");
+    }
+    assert_eq!(running(js[1]), cfg!(unix), "a detached Node child lives on only on Linux and macOS");
+}

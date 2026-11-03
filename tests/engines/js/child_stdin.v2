@@ -1,0 +1,13 @@
+// requires: js
+// stderr: child read 0 bytes
+// stderr: execFileSync child read 0 bytes
+// A child a JS block starts with stdio 'inherit' reads end-of-input, never the protocol or V2's
+// input (DOCS 4.6, INTERNALS 9.9); input() still gets every line.
+@js {
+    const { spawnSync, execFileSync } = require("child_process")
+    const read = "let n = 0; process.stdin.on('data', d => n += d.length); process.stdin.on('end', () => console.error(PREFIX + n + ' bytes'))"
+    spawnSync(process.execPath, ["-e", read.replace("PREFIX", "'child read '")], { stdio: "inherit" })
+    execFileSync(process.execPath, ["-e", read.replace("PREFIX", "'execFileSync child read '")], { stdio: "inherit" })
+    console.log("protocol intact")
+}
+print(input(), input(), input())

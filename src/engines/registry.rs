@@ -171,6 +171,34 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_found_by_probing_is_memoized() {
+        // 7.1: a too-old python on PATH is probed once, however often py is asked for.
+        struct Old(Rc<Cell<usize>>);
+        impl Prober for Old {
+            fn probe(&self, _: &[OsString], _: &[(OsString, OsString)], _: Option<std::time::Duration>) -> ProbeOutcome {
+                self.0.set(self.0.get() + 1);
+                ProbeOutcome::Exited { code: Some(0), output: "Python 3.9.6\n".into() }
+            }
+        }
+        let d = std::env::temp_dir().join(format!("v2reg-{}-old", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let python = d.join(if cfg!(windows) { "python.exe" } else { "python" });
+        std::fs::write(&python, b"").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&python, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let lookup = Lookup { path: Some(d.into_os_string()), pathext: None, windows_apps: None, cwd: std::env::temp_dir(), xcrun_shims: Vec::new() };
+        let reg = Registry::new(Rc::new(Config::default()), Box::new(Old(calls.clone())), lookup, ProbeCache::off());
+        for _ in 0..3 {
+            let Err(crate::runtime::error::Flow::Error(e)) = reg.resolve_tag("py") else { panic!("too old") };
+            assert_eq!(&*e.kind, "EngineNotFound");
+        }
+        assert!(!reg.engine_available("python"));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
     fn engine_available_never_errors() {
         let (reg, _) = registry(Some(OsString::new()));
         for tag in ["py", "js", "ts", "lua", "", "@py", "PY"] {

@@ -1,0 +1,8 @@
+// requires: py js
+// d.name(args) calls what a dict holds under that key only when it is a function, or a foreign
+// function got as a value; a foreign object there is data, and the dict method runs (DOCS 3.6).
+let data = {values: @py { object() }, keys: @js { new Map() }}
+print(type(data["values"]), type(data["keys"]))
+print(len(data.values()), len(data.keys()))
+let fns = {values: @py { len }, keys: @js { Math.max }}
+print(fns.values([1, 2, 3]), fns.keys(4, 9))
