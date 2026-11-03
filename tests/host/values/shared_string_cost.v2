@@ -1,0 +1,12 @@
+// timeout: 30
+// Closures that share one big string cost no more than ones that share a small one: a string
+// counts toward collections only where it is held alone (INTERNALS 5.1).
+let big = "x" * 1600000
+let keep = []
+func mk(s, i) {
+    return func() => len(s) + i
+}
+for i in 0..20000 {
+    keep.push(mk(big, i))
+}
+print(keep[19999]())

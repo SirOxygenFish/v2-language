@@ -270,25 +270,28 @@ function writeOut(s, text) {
 }
 
 // Write callbacks as Node's own streams run them: each in a tick of its own, with the same callback
-// again counted into the tick still waiting (`console.log` passes one per line, and a tick each
-// would hold a loop's every line in memory until it ends).
-let waiting = null;
-function later(cb) {
-  if (waiting !== null && waiting.cb === cb) {
-    waiting.count += 1;
-    return;
-  }
-  const tick = { cb, count: 1 };
-  waiting = tick;
-  process.nextTick(() => {
-    if (waiting === tick) waiting = null;
-    for (let i = 0; i < tick.count; i++) tick.cb(null);
-  });
+// again counted into the stream's tick still waiting (`console.log` passes one per line, and a
+// tick each would hold a loop's every line in memory until it ends).
+function laterFor() {
+  let waiting = null;
+  return (cb) => {
+    if (waiting !== null && waiting.cb === cb) {
+      waiting.count += 1;
+      return;
+    }
+    const tick = { cb, count: 1 };
+    waiting = tick;
+    process.nextTick(() => {
+      if (waiting === tick) waiting = null;
+      for (let i = 0; i < tick.count; i++) tick.cb(null);
+    });
+  };
 }
 
 function outputStream(name) {
   // process.stdout and process.stderr: text sent as `out` frames in program order (9.9).
   const decoder = new StringDecoder('utf8');
+  const later = laterFor();
   const w = new stream.Writable({
     decodeStrings: false,
     write(data, encoding, cb) {
@@ -299,7 +302,8 @@ function outputStream(name) {
   // Writes complete at once, so they keep their order with frames and with console.log.
   w.write = function (data, encoding, cb) {
     if (typeof encoding === 'function') [cb, encoding] = [encoding, undefined];
-    const text = typeof data === 'string' ? data : decoder.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
+    const bytes = typeof data !== 'string' || (typeof encoding === 'string' && !/^utf-?8$/i.test(encoding));
+    const text = bytes ? decoder.write(Buffer.isBuffer(data) ? data : Buffer.from(data, encoding)) : data;
     writeOut(name, text);
     if (typeof cb === 'function') later(cb);
     return true;
@@ -329,11 +333,18 @@ let stdinStream = null;
 Object.defineProperty(process, 'stdout', { configurable: true, enumerable: true, get: () => stdoutStream });
 Object.defineProperty(process, 'stderr', { configurable: true, enumerable: true, get: () => stderrStream });
 // Node's `console` binds to process.stdout at its first use, which a preload (NODE_OPTIONS
-// --require) may already have made: blocks get one on these streams.
-Object.defineProperty(globalThis, 'console', {
-  configurable: true, enumerable: false, writable: true,
-  value: new console.Console({ stdout: stdoutStream, stderr: stderrStream }),
-});
+// --require) may already have made: its streams are set to these, so it stays the one
+// `require('console')` gives, and a method a preload took for itself follows. Its `trace` shows
+// the frames 12.6 keeps.
+console._stdout = stdoutStream;
+console._stderr = stderrStream;
+console.trace = function trace(...data) {
+  const here = { message: util.format(...data) };
+  Error.captureStackTrace(here, trace);
+  const lines = [here.message ? `Trace: ${here.message}` : 'Trace'];
+  for (const f of frames(here)) lines.push(`    at ${f.func ? `${f.func} (${f.file}:${f.line})` : `${f.file}:${f.line}`}`);
+  stderrStream.write(lines.join('\n') + '\n');
+};
 Object.defineProperty(process, 'stdin', { configurable: true, enumerable: true, get: () => (stdinStream ??= noInput()) });
 
 const stdinError = () => Object.assign(new Error("blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg"), { code: 'EBADF' });
@@ -498,6 +509,16 @@ process.exit = function (code) {
 // 4. The host owns Ctrl+C; errors with no call to attach to are printed and the worker goes on.
 process.on('SIGINT', () => {});
 if (process.platform === 'win32') process.on('SIGBREAK', () => {});
+function isAggregate(e) {
+  // An AggregateError or a subclass, from any realm.
+  let p = e;
+  for (let i = 0; i < 32 && p !== null && typeof p === 'object'; i++) {
+    p = Object.getPrototypeOf(p);
+    if (p && Object.hasOwn(p, 'constructor') && p.constructor?.name === 'AggregateError') return true;
+  }
+  return false;
+}
+
 function printUnattached(prefix, e) {
   // With the frames 12.6 keeps, by line (a frame's column is the body's, not the file's), and its
   // causes as V2 prints them; an error from V2 also says its type and where V2 raised it.
@@ -515,7 +536,7 @@ function printUnattached(prefix, e) {
     if (typeof raised === 'string') lines.push(`${indent}    at ${raised}`);
     for (const f of frames(e)) lines.push(`${indent}    at ${f.func ? `${f.func} (${f.file}:${f.line})` : `${f.file}:${f.line}`}`);
     // From any realm: each block runs in a context of its own.
-    if (util.types.isNativeError(e) && Array.isArray(e.errors) && indent.length < 2 * MAX_CAUSES) {
+    if (isAggregate(e) && Array.isArray(e.errors) && indent.length < 2 * MAX_CAUSES) {
       for (const inner of e.errors.slice(0, MAX_CAUSES)) describe(inner, '', indent + '  ');
     }
   };
@@ -525,7 +546,9 @@ function printUnattached(prefix, e) {
     for (let i = 0; i < MAX_CAUSES; i++) {
       cause = cause !== null && typeof cause === 'object' ? (cause instanceof V2Error ? cause._cause : cause.cause) : undefined;
       if (cause === undefined || cause === null) break;
+      const again = shown.has(cause);
       describe(cause, 'caused by: ', '');
+      if (again) break; // a cycle of causes
     }
   } catch {
     lines.push(`${prefix}<an error that can't be printed>`); // a revoked Proxy, a throwing trap
