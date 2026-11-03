@@ -22,7 +22,7 @@ const gc = vm.runInNewContext('gc');
 
 const VEP = 1;
 const LIMIT = 64 * 1024 * 1024; // bytes per frame, both directions (9.1)
-const MAX_DEPTH = 256; // nested lists/dicts (10.5)
+const MAX_DEPTH = 256; // nested lists, objects and errors (10.5)
 const OUT_CHUNK = 1024 * 1024; // characters per `out` frame, well below LIMIT
 const FLUSH_AT = 64 * 1024; // buffered characters that force a flush during a request
 const GC_AFTER = 200; // fn stubs made since the last collection that force one at the next idle turn (11.9)
@@ -805,10 +805,11 @@ const textOrNull = (v) => (typeof v === 'string' ? wellFormed(v) : null);
 
 function errorTag(e, depth = 0, open = new Walk(), causes = 0) {
   // A V2Error as an `error` tag (10.3). One that came from V2 keeps its members (location,
-  // trace), but its data and cause are encoded again, so their handles and stubs belong to this
-  // frame (11.1, 11.8). An error tag is not a nesting level (10.5), but one inside its own data
-  // is sent as a handle.
-  if (open.has(e)) return handleTag(e);
+  // trace, the host's `ref`), but its data and cause are encoded again, so their handles and
+  // stubs belong to this frame (11.1, 11.8; the host restores the ones it sent, 9.6). An error is
+  // a nesting level, like a list or an object (10.5); one too deep or inside its own data is sent
+  // as a handle.
+  if (depth >= MAX_DEPTH || open.has(e)) return handleTag(e);
   const tag = e._v2
     ? { ...e._v2 }
     : {
@@ -817,8 +818,8 @@ function errorTag(e, depth = 0, open = new Walk(), causes = 0) {
       };
   open.add(e);
   try {
-    tag.data = encode(e.data, depth, open);
-    tag.cause = e._cause instanceof V2Error && causes < MAX_CAUSES ? errorTag(e._cause, depth, open, causes + 1) : null;
+    tag.data = encode(e.data, depth + 1, open);
+    tag.cause = e._cause instanceof V2Error && causes < MAX_CAUSES ? errorTag(e._cause, depth + 1, open, causes + 1) : null;
   } finally {
     open.delete(e);
   }

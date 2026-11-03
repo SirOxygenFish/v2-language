@@ -61,7 +61,7 @@ func thrower(x) {
 let h = @py { {1, 2} }
 let d = fields(func() => @py(f: thrower, h) { f(h) })
 print(d.data.cb == cb, type(d.data.h), d.data.h == h)
-// Data that can't cross is left out, but the error keeps its type and location.
+// Data that can't cross is left out on the way, and the error comes home as it was (INTERNALS 9.6).
 let loop = [1]
 loop.push(loop)
 func cyclic() {

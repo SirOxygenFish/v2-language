@@ -1247,8 +1247,9 @@ and passed back to their own language they arrive as the original function or cl
 
 Because data is copied, a Python function that changes a list you passed in does **not** change
 your V2 list. Return the new value instead. One value crossing between processes can't exceed
-64 MiB as sent (its JSON text, a little longer than the data), and V2 data sent out can't be nested more than 256 lists or dicts deep (`MarshalError`); data
-coming back that deep stays a handle from the 257th level on.
+64 MiB as sent (its JSON text, a little longer than the data), and V2 data sent out can't be nested more than 256 lists, dicts or errors deep (`MarshalError`); data
+coming back that deep stays a handle from the 257th level on (in the items a `for` loop gets from
+a handle, two levels sooner, three in a mapping's values).
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
 a whole-number JS `number` arrives in V2 as an `int` (beyond the 64-bit range, as a `float`).
