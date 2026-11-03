@@ -56,10 +56,14 @@ const EXIT_USAGE: i32 = 2;
 const EXIT_PANIC: i32 = 101;
 
 fn main() {
-    let args: Vec<String> = std::env::args_os()
-        .skip(1)
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // A file V2 couldn't name in its messages and paths: said so, not "no such file" (19.1).
+    let file = raw.get(usize::from(raw.first().is_some_and(|w| w == "check")));
+    if let Some(file) = file.filter(|f| f.to_str().is_none()) {
+        stderrln!("v2: the file name '{}' is not valid UTF-8, which V2 needs", file.to_string_lossy());
+        exit(EXIT_USAGE);
+    }
+    let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().into_owned()).collect();
 
     // A panic anywhere is a V2 bug: one line on stderr, exit 101 (6.5). The write can't fail
     // into a second panic.

@@ -35,8 +35,10 @@ func kind(f) {
         throw x;
     }
     function h() { throw { name: "Error", message: "x" } }
-    @export { a, b, c, d, e, f, g, h }
+    class MyAbort extends DOMException {}
+    function i() { throw new MyAbort("x", "AbortError") }
+    @export { a, b, c, d, e, f, g, h, i }
 }
-@import { a, b, c, d, e, f, g, h } from @js
+@import { a, b, c, d, e, f, g, h, i } from @js
 print(kind(a), kind(b), kind(c), kind(d))
-print(kind(e), kind(f), kind(g), kind(h))
+print(kind(e), kind(f), kind(g), kind(h), kind(i))

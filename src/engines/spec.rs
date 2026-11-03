@@ -86,6 +86,9 @@ pub struct EngineSpec {
     pub min_version: Option<Version>,
     /// The probe's arguments and how to read its output (7.2, 7.7).
     pub probe: Option<(Vec<Rc<str>>, VersionPattern)>,
+    /// Unix: the worker speaks the protocol on two fds of its own, named in `V2_VEP_FDS`, so its
+    /// fds 0 and 1 can be the null device and stderr. For an adapter without `dup2` (9.9).
+    pub protocol_fds: bool,
 }
 
 fn strs(items: &[&str]) -> Vec<Rc<str>> {
@@ -109,6 +112,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             env: vec![("PYTHONUTF8".into(), "1".into()), ("PYTHONIOENCODING".into(), "utf-8".into())],
             min_version: Some(Version(3, 10, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Python)),
+            protocol_fds: false,
         },
         EngineSpec {
             id: "js".into(),
@@ -120,6 +124,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             env: Vec::new(),
             min_version: Some(Version(22, 13, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Node)),
+            protocol_fds: true,
         },
         EngineSpec {
             id: "ts".into(),
@@ -131,6 +136,7 @@ pub fn builtins() -> Vec<EngineSpec> {
             env: Vec::new(),
             min_version: None,
             probe: None,
+            protocol_fds: false,
         },
     ]
 }

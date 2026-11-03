@@ -1,0 +1,22 @@
+// requires: js
+// A write's callback runs after it, in order, and a loop's callbacks wait in one tick, not one
+// each: a block that logs a lot doesn't hold every line in memory until it ends (INTERNALS 9.9).
+@js J {
+    function grew(n) {
+        const before = process.memoryUsage().heapUsed;
+        for (let i = 0; i < n; i++) console.error("");
+        return (process.memoryUsage().heapUsed - before) / 1048576;
+    }
+    async function order() {
+        const seen = [];
+        const a = () => seen.push("a");
+        for (let i = 0; i < 3; i++) process.stdout.write("", a);
+        process.stdout.write("", () => seen.push("b"));
+        process.stdout.write("", a);
+        await new Promise((r) => setImmediate(r));
+        return seen.join("");
+    }
+    @export { grew, order }
+}
+@import { grew, order } from J
+print(grew(300000) < 20, order())

@@ -3,8 +3,9 @@
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
-use std::io::{BufRead, BufWriter, IsTerminal, StdoutLock, Write};
+use std::io::{BufRead, IsTerminal, StdoutLock, Write};
 use std::rc::Rc;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexMap;
@@ -102,11 +103,76 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { name: "engine_available", params: &[ParamSpec::req("tag")], f: engine_available },
 ];
 
+/// What the program printed and stdout hasn't taken yet. Outside `Out`, so the interrupt path
+/// can write it out (6.5).
+static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+/// What `Out` holds before it writes, when stdout isn't a terminal.
+const OUT_BUFFER: usize = 64 * 1024;
+
+fn lock(m: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Write `buf` to `w`, keeping what it didn't take.
+fn drain(w: &mut dyn Write, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    let mut done = 0;
+    let r = loop {
+        if done == buf.len() {
+            break w.flush();
+        }
+        match w.write(&buf[done..]) {
+            Ok(0) => break Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => break Err(e),
+        }
+    };
+    buf.drain(..done);
+    r
+}
+
+/// The interrupt path (6.5): write what the program printed straight to the descriptor (the
+/// interpreter thread holds `stdout`'s lock), from a thread of its own, so a reader that stopped
+/// reading can't hold the exit longer than `wait`.
+pub fn write_pending(wait: Duration) {
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = std::thread::Builder::new().spawn(move || {
+        let mut pending = lock(&PENDING);
+        if !pending.is_empty() {
+            let _ = raw_stdout().write_all(&pending);
+            pending.clear();
+        }
+        let _ = done.send(());
+    });
+    if writer.is_ok() {
+        let _ = finished.recv_timeout(wait);
+    }
+}
+
+/// Stdout's descriptor as a file that is never closed.
+fn raw_stdout() -> std::mem::ManuallyDrop<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: fd 1 stays open for the process, and `ManuallyDrop` never closes it.
+        std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(std::io::stdout().as_raw_fd()) })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        // SAFETY: the standard handle stays open for the process, and `ManuallyDrop` never closes it.
+        std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(std::io::stdout().as_raw_handle()) })
+    }
+}
+
 /// The only writer of the host's stdout: buffered, flushed after every write when stdout is a
 /// terminal, and at the end of the run (5.10).
 pub struct Out {
-    w: BufWriter<Box<dyn Write>>,
+    w: Box<dyn Write>,
     tty: bool,
+    pending: &'static Mutex<Vec<u8>>,
+    /// A write failed and raised its `IOError`, so the end of the run needn't say it again (6.5).
+    pub failed: bool,
 }
 
 impl Out {
@@ -114,7 +180,7 @@ impl Out {
         let stdout = std::io::stdout();
         let tty = stdout.is_terminal();
         let lock: StdoutLock<'static> = stdout.lock();
-        Out { w: BufWriter::with_capacity(64 * 1024, Box::new(lock)), tty }
+        Out { w: Box::new(lock), tty, pending: &PENDING, failed: false }
     }
 
     /// An `Out` that collects into a shared buffer (tests).
@@ -131,19 +197,27 @@ impl Out {
             }
         }
         let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        (Out { w: BufWriter::new(Box::new(Shared(buf.clone()))), tty: true }, buf)
+        let pending = Box::leak(Box::new(Mutex::new(Vec::new())));
+        (Out { w: Box::new(Shared(buf.clone())), tty: true, pending, failed: false }, buf)
     }
 
     pub fn write_str(&mut self, s: &str) -> Exec<()> {
-        let r = self.w.write_all(s.as_bytes()).and_then(|_| if self.tty { self.w.flush() } else { Ok(()) });
-        match r {
+        let mut pending = lock(self.pending);
+        pending.extend_from_slice(s.as_bytes());
+        if !self.tty && pending.len() < OUT_BUFFER {
+            return Ok(());
+        }
+        match drain(&mut *self.w, &mut pending) {
             Ok(()) => Ok(()),
-            Err(e) => fail("IOError", format!("cannot write to stdout: {}", os_message(&e))),
+            Err(e) => {
+                self.failed = true;
+                fail("IOError", format!("cannot write to stdout: {}", os_message(&e)))
+            }
         }
     }
 
     pub fn flush(&mut self) -> std::io::Result<()> {
-        self.w.flush()
+        drain(&mut *self.w, &mut lock(self.pending))
     }
 }
 
