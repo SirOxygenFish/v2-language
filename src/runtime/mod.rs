@@ -62,7 +62,9 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     // Program output comes before the error that ended it (5.10). Output that can't be written
     // at the end is reported, and a run that would have exited 0 exits 1 (6.5).
     let flushed = interp.out.flush();
-    if let Err(e) = &flushed {
+    // Not said again after the `IOError` that a write raised, unless the run would succeed.
+    let said = interp.out.failed && !matches!(result, Ok(()) | Err(Flow::Exit(0)));
+    if let (Err(e), false) = (&flushed, said) {
         stderrln!("v2: cannot write to stdout: {}", os_message(e));
     }
     let code = match result {
@@ -85,7 +87,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     // kill and reap; late output is flushed too (6.5, 8.7).
     interp.shutdown_sessions();
     let late = interp.out.flush();
-    if let (Ok(()), Err(e)) = (&flushed, &late) {
+    if let (Ok(()), Err(e), false) = (&flushed, &late, said) {
         stderrln!("v2: cannot write to stdout: {}", os_message(e));
     }
     if (flushed.is_err() || late.is_err()) && code == 0 {

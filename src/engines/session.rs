@@ -161,7 +161,32 @@ impl Interp {
     ) -> Exec<SessionId> {
         self.check_depth(at)?;
         let key = engine.spec.session_of.clone().unwrap_or_else(|| engine.spec.id.clone());
-        let spawned = ChildProc::spawn(&Spawn { argv, env, stdin: Pipe::Piped, stdout: Pipe::Piped, stderr: Pipe::Inherit });
+        // Unix, for an adapter without `dup2`: the protocol on two pipes of its own (9.9).
+        let fds = (cfg!(unix) && engine.spec.protocol_fds).then(|| Ok::<_, std::io::Error>((std::io::pipe()?, std::io::pipe()?))).transpose();
+        // No pipes is a worker that couldn't start.
+        let (fds, no_pipes) = match fds {
+            Ok(fds) => (fds, None),
+            Err(e) => (None, Some(e)),
+        };
+        #[cfg(unix)]
+        let keep: Vec<i32> = fds.iter().flat_map(|((to_worker, _), (_, from_worker))| {
+            use std::os::fd::AsRawFd;
+            [to_worker.as_raw_fd(), from_worker.as_raw_fd()]
+        }).collect();
+        #[cfg(not(unix))]
+        let keep: Vec<i32> = Vec::new();
+        let mut env = env.to_vec();
+        if let [to_worker, from_worker] = keep[..] {
+            env.push(("V2_VEP_FDS".into(), format!("{to_worker},{from_worker}").into()));
+        }
+        let (stdin, stdout) = if fds.is_some() { (Pipe::Null, Pipe::Stderr) } else { (Pipe::Piped, Pipe::Piped) };
+        let spawned = match no_pipes {
+            Some(e) => {
+                let reason = crate::syntax::span::os_message(&e);
+                Err(process::SpawnError { message: format!("could not start '{}': {reason}", argv[0].to_string_lossy()), reason })
+            }
+            None => ChildProc::spawn(&Spawn { argv, env: &env, stdin, stdout, stderr: Pipe::Inherit, keep: &keep }),
+        };
         let mut child = match spawned {
             Ok(c) => c,
             Err(spawn) => {
@@ -171,11 +196,21 @@ impl Interp {
                 return Err(self.raise(Flow::Error(e), at));
             }
         };
-        let pipe = child.take_stdout().expect("piped stdout");
-        #[cfg(unix)]
-        let pipe = crate::engines::process::UntilExit::new(pipe, child.kill_handle());
-        let reader: Box<dyn Read + Send> = Box::new(pipe);
-        let writer: Box<dyn Write> = Box::new(child.take_stdin().expect("piped stdin"));
+        let (reader, writer): (Box<dyn Read + Send>, Box<dyn Write>) = match fds {
+            // The child's ends close here, so the host sees the worker's end of input.
+            Some(((to_worker, writer), (reader, from_worker))) => {
+                drop((to_worker, from_worker));
+                #[cfg(unix)]
+                let reader = crate::engines::process::UntilExit::new(reader, child.kill_handle());
+                (Box::new(reader), Box::new(writer))
+            }
+            None => {
+                let pipe = child.take_stdout().expect("piped stdout");
+                #[cfg(unix)]
+                let pipe = crate::engines::process::UntilExit::new(pipe, child.kill_handle());
+                (Box::new(pipe), Box::new(child.take_stdin().expect("piped stdin")))
+            }
+        };
         let parkable = timeouts.call.is_none().then(|| child.kill_handle());
         let s = self.new_session(key, engine, Some(reader), Some(writer), Some(child), timeouts);
         self.handshake(s, at)?;

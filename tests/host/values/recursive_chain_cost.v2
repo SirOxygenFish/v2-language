@@ -1,0 +1,12 @@
+// timeout: 30
+// A chain of closures built by recursion costs the same per level however long it gets: a frame
+// checked before with a big group isn't walked again from the next (INTERNALS 5.1).
+func compose(n) {
+    if n == 0 {
+        return func(x) => x
+    }
+    let rest = compose(n - 1)
+    return func(x) => rest(x) + 1
+}
+let f = compose(8000)
+print(f(0))

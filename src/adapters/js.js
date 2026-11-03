@@ -25,18 +25,21 @@ const LIMIT = 64 * 1024 * 1024; // bytes per frame, both directions (9.1)
 const MAX_DEPTH = 256; // nested lists/dicts (10.5)
 const OUT_CHUNK = 1024 * 1024; // characters per `out` frame, well below LIMIT
 const FLUSH_AT = 64 * 1024; // buffered characters that force a flush during a request
-// fn stubs made since the last collection that force one at the next idle turn: 200, or one per
-// 128 KB of heap, so a collection of a big heap costs each stub no more than of a small one (11.9)
-const GC_AFTER = 200;
-const GC_HEAP_PER_STUB = 128 * 1024;
+const GC_AFTER = 200; // fn stubs made since the last collection that force one at the next idle turn (11.9)
 const KINDS = ['ForeignError', 'ImportError', 'NameError', 'ValueError', 'MarshalError', 'ProtocolError', 'Error'];
 const MAX_CAUSES = 8; // chained causes sent (9.6)
 const ADAPTER = __filename;
 
-// The protocol's own channel: frames go out only through the original fs.writeSync(1, ...) and
-// come in through fs.readSync(0, ...); everything else that reaches fds 0-2 is wrapped below.
+// The protocol's own channel: frames go out only through the original fs.writeSync and come in
+// through fs.readSync, on fds 0 and 1, or on Unix the two V2 names in V2_VEP_FDS (then fd 0 is the
+// null device and fd 1 stderr, 9.9); everything else that reaches fds 0-2 is wrapped below.
 const rawWriteSync = fs.writeSync;
 const rawReadSync = fs.readSync;
+const [IN_FD, OUT_FD] = (() => {
+  const named = String(process.env.V2_VEP_FDS ?? '').split(',').map(Number);
+  delete process.env.V2_VEP_FDS;
+  return named.length === 2 && named.every((fd) => Number.isInteger(fd) && fd > 2) ? named : [0, 1];
+})();
 const rawExit = process.exit.bind(process);
 const rawKill = process.kill.bind(process);
 
@@ -131,7 +134,7 @@ function recv() {
     }
     let n;
     try {
-      n = rawReadSync(0, chunk, 0, chunk.length, null);
+      n = rawReadSync(IN_FD, chunk, 0, chunk.length, null);
     } catch (e) {
       if (e.code === 'EAGAIN') continue;
       n = 0; // EOF (Windows reports a closed pipe as an error)
@@ -171,7 +174,7 @@ function writeFrame(obj) {
   let off = 0;
   while (off < data.length) {
     try {
-      off += rawWriteSync(1, data, off, data.length - off);
+      off += rawWriteSync(OUT_FD, data, off, data.length - off);
     } catch (e) {
       if (e.code === 'EAGAIN') continue;
       gone();
@@ -265,6 +268,24 @@ function writeOut(s, text) {
   if (active() && (text.endsWith('\n') || outSize >= FLUSH_AT)) drainOut();
 }
 
+// Write callbacks, run in one tick: `console.log` passes one per line, and a tick each would hold
+// a loop's every line in memory until it ends. A run of the same callback is kept as a count.
+let callbacks = null;
+function later(cb) {
+  if (callbacks) {
+    const last = callbacks[callbacks.length - 1];
+    if (last[0] === cb) last[1] += 1;
+    else callbacks.push([cb, 1]);
+    return;
+  }
+  callbacks = [[cb, 1]];
+  process.nextTick(() => {
+    const due = callbacks;
+    callbacks = null;
+    for (const [f, n] of due) for (let i = 0; i < n; i++) f();
+  });
+}
+
 function outputStream(name) {
   // process.stdout and process.stderr: text sent as `out` frames in program order (9.9).
   const decoder = new StringDecoder('utf8');
@@ -280,7 +301,7 @@ function outputStream(name) {
     if (typeof encoding === 'function') [cb, encoding] = [encoding, undefined];
     const text = typeof data === 'string' ? data : decoder.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
     writeOut(name, text);
-    if (typeof cb === 'function') process.nextTick(cb);
+    if (typeof cb === 'function') later(cb);
     return true;
   };
   w.isTTY = false;
@@ -472,19 +493,29 @@ process.exit = function (code) {
 process.on('SIGINT', () => {});
 if (process.platform === 'win32') process.on('SIGBREAK', () => {});
 function printUnattached(prefix, e) {
-  // With the frames 12.6 keeps; an error from V2 also says its type and where V2 raised it.
-  let lines;
-  try {
+  // With the frames 12.6 keeps, by line (a frame's column is the body's, not the file's), and its
+  // causes as V2 prints them; an error from V2 also says its type and where V2 raised it.
+  const lines = [];
+  const describe = (e, head, indent) => {
     const fromV2 = e instanceof V2Error;
-    lines = [`${prefix}${errorName(e)}: ${fromV2 ? `${e.type}: ` : ''}${errorMessage(e)}`];
+    lines.push(`${indent}${head}${errorName(e)}: ${fromV2 ? `${e.type}: ` : ''}${errorMessage(e)}`);
     const raised = fromV2 && e._v2 && Array.isArray(e._v2.trace) ? e._v2.trace[0] : null;
-    if (typeof raised === 'string') lines.push(`    at ${raised}`);
-    for (const f of frames(e)) {
-      const at = `${f.file}:${f.line}${f.col === null ? '' : `:${f.col}`}`;
-      lines.push(`    at ${f.func ? `${f.func} (${at})` : at}`);
+    if (typeof raised === 'string') lines.push(`${indent}    at ${raised}`);
+    for (const f of frames(e)) lines.push(`${indent}    at ${f.func ? `${f.func} (${f.file}:${f.line})` : `${f.file}:${f.line}`}`);
+    if (e instanceof AggregateError && Array.isArray(e.errors)) {
+      for (const inner of e.errors.slice(0, MAX_CAUSES)) describe(inner, '', indent + '  ');
+    }
+  };
+  try {
+    describe(e, prefix, '');
+    let cause = e;
+    for (let i = 0; i < MAX_CAUSES; i++) {
+      cause = cause !== null && typeof cause === 'object' ? (cause instanceof V2Error ? cause._cause : cause.cause) : undefined;
+      if (cause === undefined || cause === null) break;
+      describe(cause, 'caused by: ', '');
     }
   } catch {
-    lines = [`${prefix}<an error that can't be printed>`]; // a revoked Proxy, a throwing trap
+    lines.push(`${prefix}<an error that can't be printed>`); // a revoked Proxy, a throwing trap
   }
   writeOut('stderr', lines.join('\n') + '\n');
 }
@@ -853,9 +884,17 @@ function errorName(e) {
   try {
     const C = e.constructor;
     const own = typeof C === 'function' && typeof C.name === 'string' ? C.name : '';
-    if (own && own !== name && !Object.hasOwn(e, 'name') && C.prototype && !Object.hasOwn(C.prototype, 'name')) return own;
+    if (own && own !== name && !Object.hasOwn(e, 'name') && C.prototype && !Object.hasOwn(C.prototype, 'name') && plainName(e)) return own;
   } catch {} // a `constructor` getter or Proxy trap that throws
   return name;
+}
+
+function plainName(e) {
+  // `name` is a base class's plain value, not computed for this error (DOMException's getter).
+  let p = Object.getPrototypeOf(e);
+  while (p && !Object.hasOwn(p, 'name')) p = Object.getPrototypeOf(p);
+  const d = p && Object.getOwnPropertyDescriptor(p, 'name');
+  return !!d && 'value' in d;
 }
 
 function errorMessage(e) {
@@ -1695,7 +1734,7 @@ async function main() {
       // keeps WeakRef targets (every new stub) until the job ends, so a collection for many new
       // stubs comes after the turn, and its finalizers run in one more.
       await new Promise((r) => setImmediate(r));
-      if (stubsSinceGc > GC_AFTER && stubsSinceGc > v8.getHeapStatistics().used_heap_size / GC_HEAP_PER_STUB) {
+      if (stubsSinceGc > GC_AFTER) {
         gc();
         await new Promise((r) => setImmediate(r));
         stubsSinceGc = 0;

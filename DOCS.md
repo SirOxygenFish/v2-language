@@ -1164,7 +1164,7 @@ Python calls the V2 function once per item; each call crosses back into V2 and r
 A V2 function that foreign code keeps (a listener, a callback stored on an object) keeps the
 function that made it alive, with all its variables, until the foreign side lets go. Python lets
 go at once; JavaScript when its garbage collector next runs, which V2 asks for after every 200 or
-so V2 functions it hands over (more when JavaScript holds a lot of memory). If one of
+so V2 functions it hands over. If one of
 those variables holds the foreign object that keeps the callback, neither side can let go: make
 such a callback in a small helper function that holds only what it needs.
 
@@ -1746,7 +1746,7 @@ to run a script with such a name, write it as a path: `v2 ./doctor`.
 | `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error            |
 | `2`       | usage or configuration error                                             |
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
-| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped |
+| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped, what was printed is still written |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 
 ---

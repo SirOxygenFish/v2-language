@@ -650,17 +650,30 @@ if __name__ == "__main__":
     def internal(fs):
         return fs.filename.startswith("<frozen ") or os.path.normcase(os.path.abspath(fs.filename)) == ADAPTER
 
+    def by_line(fs):
+        # A block's frame loses its column: Python would put the caret under the dedented text.
+        if fs.filename in _lines:
+            return traceback.FrameSummary(fs.filename, fs.lineno, fs.name, line=fs.line)
+        return fs
+
     def print_unattached(header, e):
         """An exception with no V2 call to attach to (1.1), as Python prints it, with the frames
         12.6 keeps."""
         te = traceback.TracebackException.from_exception(e)
-        todo, seen = [te], set()
+        todo, seen = [(te, e)], set()
         while todo:
-            t = todo.pop()
+            t, x = todo.pop()
             if t is not None and id(t) not in seen:
                 seen.add(id(t))
-                t.stack = traceback.StackSummary.from_list([fs for fs in t.stack if not internal(fs)])
-                todo += [t.__cause__, t.__context__, *(getattr(t, "exceptions", None) or ())]
+                t.stack = traceback.StackSummary.from_list([by_line(fs) for fs in t.stack if not internal(fs)])
+                # One from V2 says its V2 type and where V2 raised it, as on the way back (9.6).
+                if isinstance(x, V2Error) and isinstance(x._v2, dict) and hasattr(t, "_str"):
+                    t._str = "%s: %s" % (x.type, t._str)
+                    trace = x._v2.get("trace") or []
+                    if trace and isinstance(trace[0], str):
+                        t.__notes__ = list(getattr(t, "__notes__", None) or []) + ["raised in V2 at " + trace[0]]
+                todo += [(t.__cause__, getattr(x, "__cause__", None)), (t.__context__, getattr(x, "__context__", None))]
+                todo += list(zip(getattr(t, "exceptions", None) or (), getattr(x, "exceptions", None) or ()))
         sys.stderr.write(header + "".join(te.format()))
 
     def thread_hook(a):

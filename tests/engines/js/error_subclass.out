@@ -1,2 +1,2 @@
 AppErr CustomName Error TypeError
-SubType Error CustomName Error
+SubType Error CustomName Error AbortError

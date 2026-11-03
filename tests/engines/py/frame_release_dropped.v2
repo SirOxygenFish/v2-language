@@ -1,0 +1,30 @@
+// requires: py
+// A frame cycle that a dropped dict lets go of is freed by a collection, and collections come as
+// the program makes values, whatever the frame looked like when it was left: here what it holds
+// was shared then (INTERNALS 5.1).
+@py pk {
+    freed = [0]
+    class Tracked:
+        def __del__(self):
+            freed[0] += 1
+    def track():
+        return Tracked()
+    def n():
+        return freed[0]
+    @export { track, n }
+}
+@import { track, n } from pk
+func make(big) {
+    let t = track()
+    let box = {}
+    box.f = func() => len(big)
+    return box
+}
+n()
+let before = n()
+for i in 0..500 {
+    let big = range(0, 2000)
+    let r = make(big)
+}
+n()
+print(n() - before >= 450)

@@ -933,8 +933,8 @@ fn a_run_that_used_fetch_ends_quietly() {
 
 #[test]
 fn a_js_error_with_no_call_to_attach_to_keeps_only_user_frames() {
-    // INTERNALS 1.1 and 12.6: printed with the frames an error reaching V2 keeps; one from V2 says
-    // its type and where V2 raised it.
+    // INTERNALS 1.1, 12.6 and 14.4: printed with the frames an error reaching V2 keeps, by line,
+    // and its causes; one from V2 says its type and where V2 raised it.
     if !needs("js", "a_js_error_with_no_call_to_attach_to_keeps_only_user_frames") {
         return;
     }
@@ -947,25 +947,34 @@ func boom() {
     async function wait_on_timer() {
         return await new Promise(res => setTimeout(() => res(boom()), 5));
     }
-    @export { wait_on_timer }
+    async function with_cause() {
+        setTimeout(() => { throw new Error(\"outer\", { cause: new TypeError(\"inner\") }) }, 1);
+        return await new Promise(res => setTimeout(() => res(1), 50));
+    }
+    @export { wait_on_timer, with_cause }
 }
-@import { wait_on_timer } from J
+@import { wait_on_timer, with_cause } from J
 try {
     wait_on_timer()
 } catch (e) {
     print(\"caught\", e.type)
 }
+print(with_cause())
 ";
     let (code, stdout, stderr, _home) = run_with_files(&[("timer.v2", src)], &["timer.v2"]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "caught Error\n"));
+    assert_eq!((code, stdout.as_str()), (Some(0), "caught Error\n1\n"));
     assert!(stderr.starts_with("V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
-    assert!(stderr.contains("timer.v2:7:"), "{stderr}");
+    // By line: a frame's column is the body's, not the file's.
+    assert!(stderr.contains("timer.v2:7)\n"), "{stderr}");
+    assert!(stderr.contains("Error: outer\n") && stderr.contains("caused by: TypeError: inner\n"), "{stderr}");
     assert!(!stderr.contains("js.js") && !stderr.contains("node:"), "{stderr}");
 }
 
 #[test]
 fn a_python_thread_error_keeps_only_user_frames() {
-    // INTERNALS 1.1 and 12.6: the refusal a thread gets is printed without the adapter's frames.
+    // INTERNALS 1.1, 12.6 and 14.3: the refusal a thread gets is printed without the adapter's
+    // frames and without carets (Python would put them under the dedented line); a V2 error that
+    // a `__del__` lets out says its V2 type.
     if !needs("py", "a_python_thread_error_keeps_only_user_frames") {
         return;
     }
@@ -973,13 +982,20 @@ fn a_python_thread_error_keeps_only_user_frames() {
 func boom() {
     return 1
 }
+func bad() {
+    throw error(\"ValueError\", \"from v2\")
+}
 @py P {
     import threading
-    @import { boom } from v2
+    @import { boom, bad } from v2
+    class D:
+        def __del__(self):
+            bad()
     def go():
         t = threading.Thread(target=lambda: boom())
         t.start()
         t.join()
+        D()
         return 2
     @export { go }
 }
@@ -988,9 +1004,66 @@ print(go())
 ";
     let (code, stdout, stderr, _home) = run_with_files(&[("thread.v2", src)], &["thread.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "2\n"));
-    assert!(stderr.contains("line 8, in <lambda>"), "{stderr}");
+    assert!(stderr.contains("line 14, in <lambda>"), "{stderr}");
     assert!(stderr.contains("V2Error: V2 function 'boom' called from another thread"), "{stderr}");
-    assert!(!stderr.contains("py.py"), "{stderr}");
+    assert!(stderr.contains("V2Error: ValueError: from v2"), "{stderr}");
+    assert!(!stderr.contains("py.py") && !stderr.contains("^^"), "{stderr}");
+}
+
+#[test]
+fn a_closed_stdout_is_reported_once() {
+    // INTERNALS 6.5: the IOError that a write raised says it; the end of the run doesn't again.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("flood.v2"), "while true {\n    print(\"x\")\n}\n").unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("flood.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    drop(child.stdout.take()); // close the read end
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(err.matches("cannot write to stdout").count(), 1, "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn js_blocks_cannot_reach_the_protocol_through_dev_stdout() {
+    // INTERNALS 9.9: on Unix the js worker's protocol is on pipes of its own, so /dev/stdout is
+    // the host's stderr and /dev/stdin the null device, as for Python.
+    if !needs("js", "js_blocks_cannot_reach_the_protocol_through_dev_stdout") {
+        return;
+    }
+    let src = "\
+print(\"start\")
+@js {
+    require(\"fs\").writeFileSync(\"/dev/stdout\", \"hello\\n\")
+}
+print(@js { require(\"fs\").readFileSync(\"/dev/stdin\", \"utf8\").length })
+print(\"end\")
+";
+    let (code, stdout, stderr, _home) = run_with_files(&[("fds.v2", src)], &["fds.v2"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "start\n0\nend\n", "hello\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_name_that_isnt_utf8_is_a_usage_error() {
+    // INTERNALS 19.1: said so, exit 2, not "no such file".
+    use std::os::unix::ffi::OsStrExt;
+    let home = TempHome::new();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.v2");
+    std::fs::write(home.0.join(name), "print(1)\n").unwrap();
+    for args in [vec![name], vec![std::ffi::OsStr::new("check"), name]] {
+        let out = v2_command(&home.0).args(&args).current_dir(&home.0).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{err}");
+        assert!(err.contains("is not valid UTF-8"), "{err}");
+    }
 }
 
 #[test]
@@ -1339,6 +1412,41 @@ fn an_interrupt_during_a_py_block_exits_130_and_cleans_up() {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(names_in(&tmp), Vec::<String>::new(), "signal {signal}: the run dir was left");
+    }
+}
+
+#[test]
+fn an_interrupt_still_writes_what_was_printed() {
+    // INTERNALS 6.5: output into a pipe or a file waits in `Out`; an interrupt writes it out
+    // before the run ends, the program's own and a block's.
+    let cases = [
+        ("print(\"before\")\nlet n = 0\nwhile true { n += 1 }\n", "before\n", None),
+        (
+            "print(\"before\")\n@py {\n    import time\n    print(\"from py\", flush=True)\n    open(\"ready\", \"w\").write(\"1\")\n    time.sleep(30)\n}\n",
+            "before\nfrom py\n",
+            Some("py"),
+        ),
+    ];
+    for (src, want, engine) in cases {
+        if engine.is_some_and(|tag| !needs(tag, "an_interrupt_still_writes_what_was_printed")) {
+            continue;
+        }
+        let home = TempHome::new();
+        std::fs::write(home.0.join("printed.v2"), src).unwrap();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("printed.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        interruptible(&mut cmd);
+        let child = cmd.spawn().expect("start v2");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while engine.is_some() && !home.0.join("ready").exists() {
+            assert!(Instant::now() < deadline, "the block never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        interrupt(&child);
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended after the interrupt");
+        assert_eq!(out.status.code(), Some(130));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want);
     }
 }
 
