@@ -1060,8 +1060,11 @@ impl Interp {
         }
         if let Value::Dict(d) = o {
             let f = d.borrow().get(&name.text).cloned();
-            if let Some(f @ (Value::Func(_) | Value::Handle(_))) = f {
-                return Ok(MethodTarget::Func(f));
+            // A function, or a foreign one got as a value (DOCS 3.6); other handles are data.
+            match f {
+                Some(f @ Value::Func(_)) => return Ok(MethodTarget::Func(f)),
+                Some(Value::Handle(h)) if h.callable => return Ok(MethodTarget::Func(Value::Handle(h))),
+                _ => {}
             }
         }
         let Some(table) = methods::table(o) else {

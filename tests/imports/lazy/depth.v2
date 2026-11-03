@@ -23,7 +23,7 @@ func at_depth(n) {
     try {
         return dive(n, func() => j())
     } catch (e) {
-        return e.message
+        return e.type + " | " + e.message
     }
 }
 print(at_depth(32))

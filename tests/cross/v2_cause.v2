@@ -1,0 +1,36 @@
+// requires: py js
+// A V2 error a block raised its own exception from comes back as e.cause with its V2 type, message
+// and data (DOCS 3.9 e.cause, DOCS 10, INTERNALS 9.6).
+func bad() {
+    throw error("KeyError", "inner v2", {z: 1})
+}
+@py p {
+    @import { bad } from v2
+    def pwrap():
+        try:
+            bad()
+        except V2Error as e:
+            raise RuntimeError("py outer") from e
+    @export { pwrap }
+}
+@js j {
+    @import { bad } from v2
+    function jwrap() {
+        try {
+            bad()
+        } catch (e) {
+            throw new Error("js outer", { cause: e })
+        }
+    }
+    @export { jwrap }
+}
+@import { pwrap } from p
+@import { jwrap } from j
+for w in [pwrap, jwrap] {
+    try {
+        w()
+    } catch (e) {
+        print(e.type, e.foreign_type, e.message)
+        print(e.cause.type, e.cause.message, e.cause.data, e.cause.lang)
+    }
+}

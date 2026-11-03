@@ -1,0 +1,31 @@
+// requires: py js
+// An @import whose name is read as a value, in an f-string or as a default parameter, runs at its
+// own line and starts its language there; one that is only called waits (DOCS 5, INTERNALS 13.4).
+@py a {
+    print("a loads")
+    def fa(xs):
+        return len(xs)
+    @export { fa }
+}
+@js b {
+    console.log("b loads")
+    function fb(xs) { return xs.reduce((s, x) => s + x, 0) }
+    @export { fb }
+}
+@py c {
+    print("c loads")
+    def fc(xs):
+        return max(xs)
+    @export { fc }
+}
+@import { fc } from c
+print("after c")
+@import { fa } from a
+print("after a")
+@import { fb } from b
+print("after b")
+print(f"${type(fa)}")
+func g(f = fb) {
+    return f([1, 5])
+}
+print(g(), fc([2, 3]))

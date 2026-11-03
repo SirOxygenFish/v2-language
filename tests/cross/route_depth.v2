@@ -1,0 +1,31 @@
+// requires: py js
+// A call from one block's language straight into another's goes through V2 and counts as two
+// levels of the 64 (DOCS 8.4, INTERNALS 9.7): unbounded py<->js recursion ends in RecursionError
+// after 32 hops, and the program goes on.
+@py a {
+    @import { g, down_js } from b
+    def f(n):
+        return g(n + 1)
+    def down_py(n):
+        return "bottom" if n == 0 else down_js(n - 1)
+    @export { f, down_py }
+}
+@js b {
+    @import { f, down_py } from a
+    function g(n) { return f(n + 1) }
+    function down_js(n) { return n === 0 ? "bottom" : down_py(n - 1) }
+    @export { g, down_js }
+}
+@import { f, down_py } from a
+try {
+    f(0)
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(down_py(31))
+try {
+    down_py(32)
+} catch (e) {
+    print(e.type)
+}
+print("survived")

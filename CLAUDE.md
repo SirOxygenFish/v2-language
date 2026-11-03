@@ -25,10 +25,11 @@ it is loaded automatically into every session and every subagent.
 - Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
   (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
   test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.14, the loop. Sweep rounds 1-15 are committed; every round so far found real defects, so
-  two clean rounds in a row are still needed before closing 1.14 (ROADMAP boxes and log, final
-  report). After that the owner wants "a serious chat". Whether to go on looping is the owner's
-  call (cost); I asked after round 15. Keep reviews lean: two reviewer agents a
+- Now: 1.14, the loop. Sweep rounds 1-15 and the phase 0-1 audit (every R/ch. 21 row has a real
+  test, every DOCS example and promise checked) are committed. The owner (2026-11-03): "do
+  everything planned for phases 0 to 1 and check everything works as intended", then the chat
+  before Phase 2. So: review rounds until two in a row find nothing, then close 1.14 (ROADMAP
+  boxes and log, final report). New angles: oracle fuzzers written from DOCS, not old-vs-new. Keep reviews lean: two reviewer agents a
   round, each from a new angle; a differential fuzz finds a lot for little.
 - Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
   v2 and its workers past 2 GB together or the time limit; a test ran away to 47 GB on

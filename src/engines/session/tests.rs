@@ -156,6 +156,9 @@ fn handshake_and_init() {
 fn handshake_failures() {
     let cases: Vec<Case> = vec![
         (|w| w.send(json!({"t":"ret","id":1,"value":null})), "ProtocolError", "engine 'py' sent 'ret' before hello"),
+        // ch. 21: `out` too, the frame a worker might plausibly send early.
+        (|w| w.send(json!({"t":"out","stream":"stdout","text":"x"})), "ProtocolError", "engine 'py' sent 'out' before hello"),
+        (|w| w.send(json!({"t":"hello","vep":1})), "ProtocolError", "engine 'py' broke the protocol: 'hello' frame without 'caps'"),
         (
             |w| w.send(json!({"t":"hello","vep":2,"version":"1","pid":1,"caps":[]})),
             "ProtocolError",
@@ -1082,7 +1085,8 @@ fn a_dict_key_holding_a_handle_wins_over_the_dict_methods() {
     it.handshake(s, at()).unwrap();
     let env = crate::runtime::env::new_frame(&crate::syntax::ast::Layout::from([]), None);
     let releases = it.sessions[s].releases.clone();
-    let h = Value::Handle(Rc::new(crate::engines::handles::HandleRef::new(s, "py".into(), 1, "function".into(), releases)));
+    // A function arrives callable (the `h` tag's `callable`, 11.1); other handles are data (DOCS 3.6).
+    let h = Value::Handle(Rc::new(crate::engines::handles::HandleRef::new(s, "py".into(), 1, "function".into(), releases).with_callable(true)));
     let d = Value::dict([("keys".into(), h)].into_iter().collect());
     crate::runtime::env::declare(&env, "d".into(), d, false);
     let prog = crate::syntax::parser::parse_str("d.keys()").unwrap();

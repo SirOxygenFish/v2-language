@@ -818,6 +818,45 @@ mod tests {
     }
 
     #[test]
+    fn r67_a_real_alias_is_never_cached_as_a_placeholder() {
+        // R67's last part: an alias that runs a real Python is cached as usable, one that fails
+        // another way isn't cached, and a cached placeholder whose alias file changed (the Store
+        // app was installed) is probed again and used.
+        let apps = temp("r67alias").join("WindowsApps");
+        std::fs::create_dir_all(&apps).unwrap();
+        let alias = exe(&apps, "python3");
+        let l = lookup(&[&apps], Some(&apps));
+        let cfg = Config::default();
+        let runs = |home: &Path, p: &Fake| {
+            (0..2)
+                .map(|_| {
+                    let mut c = ProbeCache::open(Some(home), CacheMode::ReadWrite);
+                    let ok = resolve_with(&cfg, &l, p, &mut c, "py").is_ok();
+                    c.save();
+                    ok
+                })
+                .collect::<Vec<_>>()
+        };
+        let home = temp("r67alias-real");
+        let real = fake(|_| says("Python 3.12.1"));
+        assert_eq!(runs(&home, &real), [true, true]);
+        assert_eq!(real.calls.get(), 1, "the second run is served from the cache");
+        let saved: Json = serde_json::from_slice(&std::fs::read(home.join(".v2/cache/toolchains.json")).unwrap()).unwrap();
+        let entry = saved["entries"].as_object().unwrap().values().next().unwrap();
+        assert_eq!((&entry["ok"], &entry["version"], entry.get("placeholder")), (&Json::Bool(true), &Json::from("3.12.1"), None), "{saved}");
+        let broken = fake(|_| ProbeOutcome::Exited { code: Some(1), output: String::new() });
+        assert_eq!(runs(&temp("r67alias-broken"), &broken), [false, false]);
+        assert_eq!(broken.calls.get(), 2, "a failure other than 9009 is never remembered");
+        let home = temp("r67alias-installed");
+        let placeholder = fake(|_| ProbeOutcome::Exited { code: Some(9009), output: "Python was not found".into() });
+        assert_eq!(runs(&home, &placeholder), [false, false]);
+        assert_eq!(placeholder.calls.get(), 1);
+        std::fs::write(&alias, b"installed").unwrap();
+        assert_eq!(runs(&home, &real), [true, true]);
+        assert_eq!(real.calls.get(), 2, "the changed alias is probed again, once");
+    }
+
+    #[test]
     fn r41_store_alias_with_real_python_kept() {
         let root = temp("r41b");
         let apps = root.join("WindowsApps");

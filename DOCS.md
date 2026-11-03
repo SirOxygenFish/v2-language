@@ -576,12 +576,13 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 `argv` is a non-empty list of strings; a program name without a path separator is searched on
 `PATH` like engine commands. A `str` or `bytes` `input` becomes the program's standard input
 (with `null` it is empty). The result is a dict `{code, stdout, stderr}`, both outputs captured
-whole and decoded as UTF-8 (invalid bytes become U+FFFD), so `exec` returns when they end: a
-background process the program leaves holding them open makes it wait for that too. A non-zero `code` is not an error; on
+whole and decoded as UTF-8 (invalid bytes become U+FFFD). A non-zero `code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
-directory and environment with no timeout; what it started is stopped when `exec` returns or on
-Ctrl+C.
+directory and environment with no timeout. `exec` returns when the program exits, and what the
+program started is stopped then, or on Ctrl+C; only a process that escapes that
+([chapter 16](#16-security-and-trust)) and keeps the outputs open makes `exec` wait until it closes
+them.
 
 ---
 
@@ -847,8 +848,9 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
 - `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"`) instead
   of ending your program. In blocks, `__name__` is not `"__main__"`.
-- `multiprocessing` can't pickle functions defined in `@py` blocks: put them in a `.py` file next
-  to the `.v2` file and import them from there.
+- `multiprocessing` workers that are started rather than forked (the default on Windows and macOS,
+  and on Linux from Python 3.14) can't load functions defined in `@py` blocks, and a pool using
+  them never finishes: put them in a `.py` file next to the `.v2` file and import them from there.
 
 ### JavaScript — `@js`
 
@@ -1189,7 +1191,9 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
 
 ### 8.4 Rules
 
-- Calls may nest (V2 → Python → V2 → JavaScript …) up to 64 levels deep.
+- Calls may nest (V2 → Python → V2 → JavaScript …) up to 64 levels deep. A call from one block's
+  language straight into another's (an `@import` inside a block) goes through V2, so it counts as
+  two.
 - Each hop between processes costs roughly a tenth of a millisecond: keep tight loops inside one
   language.
 - A JavaScript function that returns a Promise is awaited, except while JavaScript is itself
@@ -1247,7 +1251,8 @@ your V2 list. Return the new value instead. One value crossing between processes
 coming back that deep stays a handle from the 257th level on.
 
 Numbers keep their kind: `1.0` stays a float in Python. JavaScript cannot tell `1.0` from `1`, so
-a whole-number JS `number` arrives in V2 as an `int`. Integers are range-checked when they go into
+a whole-number JS `number` arrives in V2 as an `int` (beyond the 64-bit range, as a `float`).
+Integers are range-checked when they go into
 compiled code (`MarshalError` if 300 is passed as a `uint8_t`).
 
 ### 9.2 Handles: everything else

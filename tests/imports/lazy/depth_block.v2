@@ -24,6 +24,6 @@ func dive(n, f) {
 try {
     print(dive(32, late))
 } catch (e) {
-    print(e.message)
+    print(e.type, "|", e.message)
 }
 print(late())

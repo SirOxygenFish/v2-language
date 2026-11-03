@@ -1,0 +1,20 @@
+// requires: js ts
+// Named args to a js or ts function raise ArityError before anything is sent: the function never
+// runs (INTERNALS 10.8, ch. 21 "nothing sent").
+@js j {
+    let n = 0
+    function bump(x) { n += 1; return n }
+    function count() { return n }
+    @export { bump, count }
+}
+@ts t {
+    let m: number = 0
+    function tbump(x: number): number { m += 1; return m }
+    function tcount(): number { return m }
+    @export { tbump, tcount }
+}
+@import { bump, count } from j
+@import { tbump, tcount } from t
+try { bump(1, by: 2) } catch (e) { print(e.type, "|", e.message) }
+try { tbump(1, by: 2) } catch (e) { print(e.type, "|", e.message) }
+print(count(), tcount())

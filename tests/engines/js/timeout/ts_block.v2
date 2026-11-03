@@ -1,0 +1,14 @@
+// requires: js ts
+// A @ts block runs on the js engine under [engines.js] call_timeout; past it the engine stops for
+// the rest of the run, @js included (DOCS 5 TypeScript, DOCS 14, INTERNALS 8.5).
+let t0 = time()
+try {
+    @ts { const end: number = Date.now() + 30000; while (Date.now() < end) {} }
+} catch (e) {
+    print(e.type, "|", e.message, "|", time() - t0 < 5)
+}
+try {
+    @js { 1 }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
