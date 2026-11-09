@@ -1,0 +1,4 @@
+inner (trace_nested.v2:6, in @js j)
+mid (trace_nested.v2:11)
+outer (trace_nested.v2:5, in @js j)
+trace_nested.v2:14

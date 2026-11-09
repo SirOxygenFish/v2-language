@@ -1,0 +1,25 @@
+// requires: py
+// A waiting block that fails when its language starts is reported at what needed the language: the
+// V2 frames below its own are the calls they are executing (INTERNALS 2.5, 12.7; DOCS 5).
+@py waits {
+    raise ValueError("fails")
+    def wf():
+        return 1
+    @export { wf }
+}
+@py other {
+    def of():
+        return 2
+    @export { of }
+}
+@import { of } from other
+func need() {
+    return of()
+}
+try {
+    need()
+} catch (e) {
+    for f in e.trace {
+        print(f)
+    }
+}

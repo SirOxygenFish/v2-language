@@ -1,0 +1,19 @@
+// requires: js
+// An error in a JS call that V2 made while another JS call waits below it carries only its own
+// frames; V2 places the waiting call's frames itself (INTERNALS 9.6, 12.6).
+@js j {
+    function outer(cb) { return cb() }
+    function inner() { throw new Error("boom") }
+    @export { outer, inner }
+}
+@import { outer, inner } from j
+func mid() {
+    return inner()
+}
+try {
+    outer(mid)
+} catch (e) {
+    for f in e.trace {
+        print(f)
+    }
+}

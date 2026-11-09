@@ -1565,11 +1565,19 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 - **Adapters** compile with the `.v2` path as filename and the block's line offset (12.3, 12.4), so frames inside blocks
   already carry the `.v2` file and line. V8 also counts U+2028 and U+2029 as line breaks, even in strings, so the js
   adapter maps its lines in a body holding them back to `.v2` lines. Frames go innermost first, in 9.6's shape; adapter frames and engine
-  internals (`<frozen importlib._bootstrap…>`, `node:internal/…`, `node:vm`) are dropped; library frames stay.
+  internals (`<frozen importlib._bootstrap…>`, `node:internal/…`, `node:vm`) are dropped; library frames stay. A
+  worker sends only the frames of the request it answers: Python's traceback starts at its handler, and the js adapter
+  stops at its request dispatch (`handle`, `handleSync`), so the frames of a request still waiting below a nested one
+  are left to the host (9.6). JS frames come from the stack after the message, so another error's stack quoted in a
+  message is not read as frames, and a line ending in `)` is `at NAME (LOC)`, any other `at LOC`, so a path holding
+  ` (` stays a path.
 - **`col`** is 1-based code points relative to the body text line (kept by `remember_source`), sent only for frames in
   `.v2` files, else `null`. Python 3.11+: `FrameSummary.colno` (0-based UTF-8 bytes) converted; 3.10: `null`. JS:
   parsed from `err.stack` (`at fn (file:line:col)`, UTF-16 units) and converted. Syntax errors: Python `e.offset` (the compiler's, unlike the
-  parser's, is in UTF-8 bytes and converted); V8's caret line; ts type stripping: the stripper's position, which gives the line too (12.5).
+  parser's, is in UTF-8 bytes and converted; the parser runs under a name CPython can't open, since given the `.v2`
+  path it counts the column on that file's line, not the body's); V8's caret line; ts type stripping: the stripper's
+  position, which gives the line too (12.5), its caret laid out for a terminal (a tab and a wide character two columns,
+  a combining mark none) and converted back.
 - **Host:** a frame in a known `.v2` file whose line lies in a block body gets body line `line − loc.body_first_line + 1`
   and its column from `UnitLoc::col` (2.3; a `null` col becomes the line's first non-blank column), and prints as 2.5 says
   (`in @py risky`).
@@ -1583,7 +1591,7 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 A language has no process and costs nothing until something needs it. `Interp.line` holds what would have run in a language by now: one line for all languages, in program order, each place with its engine key (ts is js).
 
 - **Running** means a session exists, `Dead` included, so a dead engine's blocks raise as 8.2 says and never wait.
-- **What waits** while its language isn't running: a definition block that is a direct statement of its file, with no args and no inner `@import … from v2`, and an eligible `@import` (13.4). Everything else runs when reached: action blocks, and blocks and imports nested in `if`, `try`, loops or functions, so `try` around them works as it always did.
+- **What waits** while its language isn't running: a definition block that is a direct statement of its file, with no args and no inner `@import … from v2`, and an eligible `@import` (13.4) whose every name 13.3 finds in a `Waiting` block. One that names a block not reached yet, a failed or loading one, or nothing, runs at its statement and raises there, starting nothing (13.3). Everything else runs when reached: action blocks, and blocks and imports nested in `if`, `try`, loops or functions, so `try` around them works as it always did.
 - **At reach**, 12.1's step 3 runs first, on the spec from `registry.canonical`, with no probe: an unknown tag raises `EngineUnknown`, a run engine with `@export` raises its `ImportError`. Then the unit becomes `Waiting` and joins the line.
 - **First need:** a block reached that can't wait, a waiting reference used, a route resolved, or an `@import` that can't wait. Before a block counts as started (`Loading`), the depth limit is checked if its language isn't running, and whatever waits for that language runs, so neither failure is stored as that block's. `session_for` starts the session and runs the line before returning to what needed it.
 - **Running the line.** Again and again, the first place in program order whose language is running. While a place runs, only places before it may go: a language started by that place runs what came earlier, and what comes after the place comes after it in the program too, so it runs once the place is done. `xdepth` is saved, zeroed and restored around each place, because the depth limit (9.7) belongs to the caller's chain and must not fail a block forever.
@@ -1591,7 +1599,7 @@ A language has no process and costs nothing until something needs it. `Interp.li
 - **Failures.** A block that fails is `Failed` as at any load, and a failed `@import` leaves its references waiting, so they retry at their next use. Neither stops the line: the rest still runs, and the first error then goes to what needed the language. `exit()` ends the line at once. A use after a failure raises 13.3's `failed to load`.
 - **References.** A waiting `@import` joins the line and binds each local name to a `Callable::Waiting`, which names no process, so it can exist before one does. The blocks reached by its statement are kept with it: it finds what it would have found there, so a block further down can't make it ambiguous or supply a name. A call, or the member and method steps of a chain (5.5), settle it: start the language at that use, then run the `@import` as 13.3 and 13.5 say, raising what it would have raised, and go on with what came back, which can be a Proxy, a constant, a handle or `null`. A failure leaves it waiting. Once a Proxy exists its session does too, and sessions are never replaced (8.1), so no reference can dangle. 13.4's rule guarantees nothing else meets a `Waiting`, so `==`, the encoders and printing never do.
 - **Compiled blocks** have no process and no line: a definition block is `Waiting` until the first call into it (15.1).
-- **The visible difference** (DOCS 5): a block in the line runs when its language starts, so its top-level effects come later than its position, or never, and it sees V2 state from then. Its errors surface at that later point.
+- **The visible difference** (DOCS 5): a block in the line runs when its language starts, so its top-level effects come later than its position, or never, and it sees V2 state from then. Its errors surface at that later point, with the V2 frames of what needed the language below its own. A start that fails leaves its engine dead, which counts as running, so the line runs then and what waited for that engine fails at that need, not at another language's.
 
 ## 13. Import resolution and routing
 
