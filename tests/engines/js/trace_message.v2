@@ -1,0 +1,23 @@
+// requires: js
+// An error whose message quotes another error's stack is located where it was raised, and its
+// trace has only its own frames (DOCS 3.9, INTERNALS 12.6).
+@js j {
+    function inner() {
+        throw new Error("inner failed")
+    }
+    function outer() {
+        try {
+            inner()
+        } catch (e) {
+            throw new Error("outer failed: " + e.stack)
+        }
+    }
+    @export { outer }
+}
+@import { outer } from j
+try {
+    outer()
+} catch (e) {
+    print(e.line, e.col)
+    print(e.trace)
+}

@@ -319,6 +319,42 @@ fn named_items(items: &[ImportItem]) -> Vec<Item> {
 
 impl Interp {
     /// The selector as written, for messages (13.1).
+    /// Where a selector is written: the caret for its own errors (2.2).
+    fn selector_span(&self, sel: &Selector) -> Span {
+        match sel {
+            Selector::Union { tag } => tag.span,
+            Selector::Exact { tag, label } => tag.span.to(label.span),
+            Selector::Label { label } => label.span,
+            Selector::Module { lang, path } => lang.span.to(path.last().map_or(lang.span, |p| p.span)),
+            Selector::V2 { span } => *span,
+        }
+    }
+
+    /// A block selector's own errors, before any name's: an unknown tag, or nothing it matches
+    /// (13.3 steps 1-2), at the selector.
+    fn check_selector(&self, file: FileId, sel: &Selector) -> Exec<()> {
+        let at = self.selector_span(sel);
+        if self.candidates(file, sel).map_err(|f| self.raise(f, at))?.is_empty() {
+            let msg = format!("No engine exports found for selector '{}'", self.selector_text(sel));
+            return Err(self.raise(import_error(msg), at));
+        }
+        Ok(())
+    }
+
+    /// 13.3: what follows already fails for `name` whatever loads now: its provider is neither
+    /// loaded nor waiting (not reached, failed, loading), and no waiting `*` block could take
+    /// its place. Nothing starts for that error.
+    fn certain_failure(&self, file: FileId, sel: &Selector, name: &str, seen: Seen) -> Option<Rc<EngineBlock>> {
+        let waits = |b: &EngineBlock| matches!(self.units.get(&b.unit_id), Some(UnitState::Waiting));
+        let b = self.provider(file, sel, name, seen).ok()?;
+        if self.loaded_for(&b, seen).is_some() || waits(&b) {
+            return None;
+        }
+        let star = |b: &EngineBlock| b.directives.exports.as_ref().is_some_and(|e| e.star.is_some());
+        let star_waits = self.candidates(file, sel).ok()?.iter().any(|c| star(c) && waits(c));
+        (!star_waits).then_some(b)
+    }
+
     fn selector_text(&self, sel: &Selector) -> String {
         let (first, last) = match sel {
             Selector::Union { tag } => (tag.span, tag.span),
@@ -502,7 +538,7 @@ impl Interp {
     fn wait_import(&mut self, imp: &Rc<EngineImport>, key: Rc<str>) -> Exec<Vec<(Rc<str>, Value)>> {
         if let Selector::Module { path, .. } = &imp.selector {
             let joined = path.iter().map(|n| &*n.text).collect::<Vec<_>>().join(".");
-            self.module_unit(imp.span.file, &key, &joined).map_err(|f| self.raise(f, imp.span))?;
+            self.module_unit(imp.span.file, &key, &joined).map_err(|f| self.raise(f, self.selector_span(&imp.selector)))?;
         }
         let blocks = &self.files[&imp.span.file].blocks;
         let seen: Rc<[UnitId]> = blocks.iter().map(|b| b.unit_id).filter(|id| self.units.contains_key(id)).collect();
@@ -526,7 +562,7 @@ impl Interp {
                     ImportItems::Names(list) => json!(list.iter().map(|i| &*i.name).collect::<Vec<_>>()),
                     ImportItems::Module(_) => Json::Null,
                 };
-                let (value, exports, missing) = self.import_module(file, &imp.selector, names, imp.span)?;
+                let (value, exports, missing) = self.import_module(file, &imp.selector, names, self.selector_span(&imp.selector))?;
                 let text = self.selector_text(&imp.selector);
                 match items {
                     ImportItems::Module(alias) => bound.push((alias.text.clone(), value)),
@@ -544,9 +580,14 @@ impl Interp {
                 }
             }
             (sel, ImportItems::Names(list)) => {
-                // A name nothing can provide needs no language to find that out.
+                // A name nothing can provide, or whose block can't have loaded by then, needs no
+                // language to find that out (13.3).
+                self.check_selector(file, sel)?;
                 for (name, _, span) in named_items(list) {
                     self.provider(file, sel, &name, seen).map_err(|f| self.raise(f, span))?;
+                    if let Some(b) = self.certain_failure(file, sel, &name, seen) {
+                        return Err(self.raise(self.state_error(&b, None), span));
+                    }
                 }
                 for (name, alias, span) in named_items(list) {
                     let v = self.resolve_name(file, sel, &name, seen, span).map_err(|f| self.raise(f, span))?;
@@ -672,12 +713,13 @@ impl Interp {
                     }
                 }
                 Selector::Module { lang, path } => {
-                    let target = self.selector_key(lang).map_err(|f| self.raise(f, imp.span))?;
+                    let at = self.selector_span(&imp.selector);
+                    let target = self.selector_key(lang).map_err(|f| self.raise(f, at))?;
                     let ImportItems::Names(list) = &imp.items else { unreachable!("a static error in blocks") };
                     if *target != *key {
                         // Another session's module is imported when first called (13.6).
                         let joined = path.iter().map(|n| &*n.text).collect::<Vec<_>>().join(".");
-                        self.module_unit(file, &target, &joined).map_err(|f| self.raise(f, imp.span))?;
+                        self.module_unit(file, &target, &joined).map_err(|f| self.raise(f, at))?;
                         for (name, alias, _) in named_items(list) {
                             let r = self.route(b.unit_id, i, &name, pending(&name));
                             entries.push(json!({"as": &*alias, "route": r}));
@@ -685,7 +727,7 @@ impl Interp {
                         continue;
                     }
                     let names = json!(list.iter().map(|i| &*i.name).collect::<Vec<_>>());
-                    let (_, exports, missing) = self.import_module(file, &imp.selector, names, imp.span)?;
+                    let (_, exports, missing) = self.import_module(file, &imp.selector, names, at)?;
                     let text = self.selector_text(&imp.selector);
                     for (name, alias, span) in named_items(list) {
                         let found = find(&exports, &name).filter(|_| !missing.contains(&name));
@@ -703,6 +745,7 @@ impl Interp {
                 }
                 sel => {
                     let ImportItems::Names(list) = &imp.items else { unreachable!("a static error in blocks") };
+                    self.check_selector(file, sel)?;
                     for (name, alias, span) in named_items(list) {
                         let hit = self.provider(file, sel, &name, None).map_err(|f| self.raise(f, span))?;
                         match self.units.get(&hit.unit_id) {
@@ -768,6 +811,11 @@ impl Interp {
                 Some(_) if !missing.contains(name) => Err(constant_error(name)),
                 _ => Err(import_error(format!("'{name}' is not exported by '{}'", self.selector_text(&imp.selector)))),
             };
+        }
+        // What can only fail starts nothing (13.3).
+        self.provider(file, &imp.selector, name, None)?;
+        if let Some(b) = self.certain_failure(file, &imp.selector, name, None) {
+            return Err(self.state_error(&b, Some(name)));
         }
         self.start_waiting(file, &imp.selector, at)?;
         let hit = self.provider(file, &imp.selector, name, None)?;

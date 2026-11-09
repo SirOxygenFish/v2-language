@@ -1,0 +1,5 @@
+before
+block 'P9' has not run yet — move this @import below it
+js caught block 'P9' has not run yet — 'f_P9' can't be called before it loads
+load P1
+py now

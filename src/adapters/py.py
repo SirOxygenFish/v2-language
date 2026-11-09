@@ -1018,8 +1018,11 @@ if __name__ == "__main__":
             g[check_name(k)] = decode(v)
         bind_imports(g, m.get("imports") or [], m["kind"] != "action")
         try:
-            tree = ast.parse("\n" * (first - 1) + m["source"], path, "exec")
+            # Under a name CPython can't open: given the .v2 path it rereads the error's line from
+            # that file and counts the column on it, not on the body line it parsed (2.3).
+            tree = ast.parse("\n" * (first - 1) + m["source"], "<v2 block>", "exec")
         except SyntaxError as e:
+            e.filename = path
             raise e.with_traceback(None)  # its frame is the .v2 line, not ast's or ours (12.6)
         tail = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):

@@ -57,6 +57,9 @@ pub struct Line {
     places: VecDeque<Place>,
     next: u64,
     running: Option<u64>,
+    /// What needed the language, while a waiting block of the line loads: the V2 frames below
+    /// its foreign ones are the need's (2.5, 12.7).
+    need: Option<Span>,
 }
 
 /// `startup_timeout` when the config gives none, in seconds (DOCS 14).
@@ -170,7 +173,7 @@ impl Interp {
     /// after it in the program too. A failed place doesn't stop the rest; the first error is
     /// returned at the end. The depth limit belongs to the caller's chain, so each place starts
     /// from zero.
-    fn run_line(&mut self) -> Exec<()> {
+    fn run_line(&mut self, need: Span) -> Exec<()> {
         let mut outcome = Ok(());
         loop {
             let limit = self.line.running;
@@ -182,7 +185,10 @@ impl Interp {
                 Waiting::Block(b) => {
                     self.units.remove(&b.unit_id);
                     let frame = self.files[&b.unit_id.file].frame.clone();
-                    self.exec_block(b, &frame, false).map(|_| ())
+                    self.line.need = Some(need);
+                    let done = self.exec_block(b, &frame, false).map(|_| ());
+                    self.line.need = None;
+                    done
                 }
                 Waiting::Import(imp, seen) => self.resolve_import(imp, Some(seen)).map(|_| ()),
             };
@@ -203,6 +209,7 @@ impl Interp {
     /// 12.1 steps 2-8 for one run of the unit.
     fn run_unit(&mut self, b: &Rc<EngineBlock>, env: &Env, want_value: bool) -> Exec<(Value, Vec<Export>)> {
         let at = b.tag.span;
+        let need = self.line.need.take();
         let engine = self.registry.resolve_tag(&b.tag.text).map_err(|f| self.raise(f, at))?;
         let mut args = Vec::with_capacity(b.args.len());
         for (name, expr) in &b.args {
@@ -246,7 +253,7 @@ impl Interp {
             Some(label) => format!("block '{}'", label.text),
             None => format!("a @{} block", engine.spec.id),
         };
-        let reply = self.request(s, frame, &during, at)?;
+        let reply = self.request(s, frame, &during, need.unwrap_or(at))?;
         // Only a definition's reply lists missing names (12.2); an action's are ignored.
         if let (Some(missing), Some(ex)) = (reply.missing.first(), b.directives.exports.as_ref()) {
             let span = ex.items.iter().find(|i| i.text == *missing).map_or(ex.at.unwrap_or(at), |i| i.span);
@@ -279,17 +286,25 @@ impl Interp {
                 };
                 let (argv, env) = worker_command(&engine, &adapter);
                 let timeouts = self.timeouts(&key);
-                self.start_session(engine, &argv, &env, timeouts, at)?
+                match self.start_session(engine, &argv, &env, timeouts, at) {
+                    Ok(s) => s,
+                    Err(flow) => {
+                        // A dead engine counts as running: what waited for it fails at this need,
+                        // not at another language's (12.7). The start's error is the one raised.
+                        let _ = self.run_line(at);
+                        return Err(flow);
+                    }
+                }
             }
         };
-        self.run_line().map_err(|f| self.raise(f, at))?;
+        self.run_line(at).map_err(|f| self.raise(f, at))?;
         Ok(s)
     }
 
     /// The session of the engine that `tag` runs on, started if needed: its first need (12.7).
     pub(crate) fn start_engine(&mut self, tag: &str, at: Span) -> Exec<SessionId> {
         if let Some(s) = self.engine_key(tag).and_then(|key| self.sessions.iter().position(|s| s.key == key)) {
-            self.run_line().map_err(|f| self.raise(f, at))?;
+            self.run_line(at).map_err(|f| self.raise(f, at))?;
             return Ok(s);
         }
         let engine = self.registry.resolve_tag(tag).map_err(|f| self.raise(f, at))?;

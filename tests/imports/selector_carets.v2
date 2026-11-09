@@ -1,0 +1,25 @@
+// requires: py js
+// An @import's errors about its selector point at the selector, at V2 level and in a block; an
+// error about one name points at that name (INTERNALS 2.2).
+func probe(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, e.line, e.col)
+    }
+}
+@py stats {
+    def mean(xs):
+        return sum(xs) / len(xs)
+    @export { mean }
+}
+probe(func() { @import { x } from nolabel })
+probe(func() { @import { x } from py.no_such_mod })
+probe(func() { @import { x } from py."a-b" })
+probe(func() { @import { x } from js."no-such-pkg" })
+probe(func() { @import { zz } from stats })
+probe(func() {
+    @py {
+        @import { x } from nolabel
+    }
+})

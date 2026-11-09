@@ -1,0 +1,19 @@
+// requires: js
+// In a folder named like "New folder (2)", frames without a function name (a block's top level,
+// an arrow) still map to their .v2 line and column (INTERNALS 12.6).
+try {
+    @js {
+        [1].map(() => { throw new Error("arrow") })
+    }
+} catch (e) {
+    print(e.line, e.col)
+    print(e.trace[0])
+}
+try {
+    @js {
+        throw new Error("top")
+    }
+} catch (e) {
+    print(e.line, e.col)
+    print(e.trace[0])
+}
