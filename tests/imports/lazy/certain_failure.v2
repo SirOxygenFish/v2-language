@@ -1,0 +1,26 @@
+// requires: py js
+// An @import whose block can't have loaded by the time it runs (not reached yet) fails without
+// starting Python, through a union selector at V2 level and through a JS block's import; Python
+// starts at its first real need (INTERNALS 13.3, DOCS 5).
+@py P1 {
+    print("load P1")
+    def f_P1():
+        return "r_P1"
+    @export { f_P1 }
+}
+print("before")
+try {
+    @import { f_P9 } from @py
+} catch (e) {
+    print(e.message)
+}
+@js {
+    @import { f_P9 } from @py
+    try { f_P9() } catch (e) { console.log("js caught", e.message) }
+}
+@py P9 {
+    def f_P9():
+        return "r_P9"
+    @export { f_P9 }
+}
+print(@py { "py now" })

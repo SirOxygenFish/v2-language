@@ -1,0 +1,21 @@
+// requires: js py
+// A JS start that fails leaves js dead, and what waited for it fails at that need: a Python
+// block and call after it run as if js had never been there (INTERNALS 12.7, DOCS 5).
+@js J {
+    function f() { return 1 }
+    @export { f }
+}
+@py P {
+    def fp():
+        return 2
+    @export { fp }
+}
+@import { f } from J
+@import { fp } from P
+try {
+    f()
+} catch (e) {
+    print("caught", e.type)
+}
+@py { print("py runs") }
+print(fp())

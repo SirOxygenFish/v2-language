@@ -914,18 +914,30 @@ function codePointCol(text, utf16col) {
   return [...text.slice(0, Math.max(0, utf16col - 1))].length + 1;
 }
 
-const FRAME = /^\s*at (?:(.*?) \()?(.+?):(\d+):(\d+)\)?$/;
+// V8's frame lines: `at NAME (LOC)` ends with `)`, `at LOC` doesn't, so a path holding ` (`
+// (`New folder (2)`) stays a path.
+const NAMED_FRAME = /^\s*at (.+?) \((.+):(\d+):(\d+)\)$/;
+const BARE_FRAME = /^\s*at (.+):(\d+):(\d+)$/;
+const DISPATCH = new Set(['handle', 'handleSync']); // where the request being answered starts
 
 function frames(e) {
+  // This request's frames only: those of a request still waiting below it are V2's to place
+  // (9.6), and frame-like text in the message (another error's stack) is not a frame.
   let stack = '';
+  let message = '';
   try {
     if (e && typeof e.stack === 'string') stack = e.stack;
+    if (e && typeof e.message === 'string') message = e.message;
   } catch {} // a `message` getter that throws, read by Node to format the stack
+  const header = message ? stack.indexOf(message) : -1;
+  if (header >= 0) stack = stack.slice(header + message.length);
   const out = [];
   for (const line of stack.split('\n')) {
-    const m = FRAME.exec(line);
+    const named = NAMED_FRAME.exec(line);
+    const m = named || BARE_FRAME.exec(line);
     if (!m) continue;
-    let [, func, file, lineNo, col] = m;
+    let [func, file, lineNo, col] = named ? m.slice(1) : [undefined, ...m.slice(1)];
+    if (file === ADAPTER && func && DISPATCH.has(func.replace(/^async /, ''))) break;
     if (file.startsWith('node:') || file === ADAPTER || file.startsWith('evalmachine.')) continue;
     if (file.startsWith('file://')) file = url.fileURLToPath(file);
     const [real, cp] = realPosition(file, Number(lineNo), Number(col));
@@ -1102,6 +1114,23 @@ function compileOrExplain(src, m) {
   }
 }
 
+// Node shows the stripper's source line laid out for a terminal: a tab as two columns, a wide
+// character (CJK, emoji) as two, a combining mark as none.
+const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}/u;
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200B-\u200F]/u;
+
+function codePointAtWidth(text, width) {
+  // The 1-based code-point column under a caret `width` display columns in.
+  let at = 0;
+  let col = 1;
+  for (const ch of text) {
+    if (at >= width) break;
+    at += ch === '\t' ? 2 : ZERO_WIDTH.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1;
+    col += 1;
+  }
+  return col;
+}
+
 function stripTypes(src, m) {
   try {
     return Module.stripTypeScriptTypes(src, { mode: 'strip' });
@@ -1116,7 +1145,7 @@ function stripTypes(src, m) {
     let line = null;
     let col = null;
     if (marker) [line, col] = [Number(marker[1]), Number(marker[2])];
-    else if (header) [line, col] = [Number(header[1]), [...header[2]].length + 1];
+    else if (header) [line, col] = [Number(header[1]), codePointAtWidth(src.split('\n')[Number(header[1]) - 1] ?? '', header[2].length)];
     if (line !== null) err.v2Frame = { file: m.file, line: m.line + line - 1, col, func: null };
     err.stack = stack || 'SyntaxError: ' + err.message;
     throw err;

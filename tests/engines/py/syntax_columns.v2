@@ -1,0 +1,37 @@
+// requires: py ts
+// A block's syntax error points at its code point on the .v2 line, whatever comes before it: a
+// one-line block after text with an accent, CJK in a dedented line, and for TypeScript's
+// stripper an emoji, a tab and CJK (INTERNALS 2.2, 2.3, 12.6).
+try {
+    let v = @py { s = "é"; t = (1, }
+} catch (e) {
+    print(e.line, e.col)
+}
+try {
+    @py {
+            s = "日本語"; t = (1,
+    }
+} catch (e) {
+    print(e.line, e.col)
+}
+try {
+    @ts {
+        const s = "😀"; enum E { A }
+    }
+} catch (e) {
+    print(e.line, e.col)
+}
+try {
+    @ts {
+        let x = 1;	enum F { A }
+    }
+} catch (e) {
+    print(e.line, e.col)
+}
+try {
+    @ts {
+        const s = "日本"; enum G { A }
+    }
+} catch (e) {
+    print(e.line, e.col)
+}
