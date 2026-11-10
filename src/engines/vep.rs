@@ -300,9 +300,13 @@ pub fn parse_frame(line: &[u8], caps: Caps) -> Result<Frame, String> {
 // ---------------------------------------------------------------------------------------------
 // Host → worker frames (9.2)
 
-/// `init`: the project root (9.3).
+/// What this host supports beyond VEP/1's core, announced in `init` (9.3): nothing yet. The
+/// `buffer` cap is reserved for zero-copy data.
+pub const HOST_CAPS: [&str; 0] = [];
+
+/// `init`: the project root and the host's caps (9.3).
 pub fn init(id: u64, project_root: &str) -> Json {
-    json!({"t": "init", "id": id, "project_root": project_root})
+    json!({"t": "init", "id": id, "project_root": project_root, "caps": HOST_CAPS})
 }
 
 /// What a `load` frame carries (9.4, 12.2); `request` gives it its id.

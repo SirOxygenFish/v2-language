@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Phases 0 and 1 done, the 1.11-1.14 rework included; Phase 2 waits for the owner's go-ahead |
-| **Next task** | The owner's review of Phases 0-1, then 2.1 Process helper once the owner says go |
-| **Last update** | 2026-11-10: 1.14 closed by the owner after sweep round 18, without the two clean rounds its rule asked for (progress log) |
+| **Current phase** | Release gate before Phase 2 (approved by the owner 2026-11-10) |
+| **Next task** | The gate's boxes below; merging and tagging wait for the owner's explicit OK |
+| **Last update** | 2026-11-10: the owner's review of Phases 0-1: the release gate, the Phase 2 and 3 order, VEP/1's reserved names and freeze (progress log) |
 
 ## Rules
 
@@ -241,9 +241,33 @@ fast V2 runs.
 
 ---
 
+## Release gate (before Phase 2)
+
+The owner's decision of 2026-11-10: Phases 0-1 go public as a pre-release before Phase 2 starts,
+so CI, the minimum versions and macOS are proven on what exists.
+
+- [ ] `s += piece` appends in place when V2 holds the string alone, and `dict.remove` doesn't shift
+      every later entry: both stay as the docs say, only no longer quadratic (DOCS 3.3, 3.6)
+- [ ] Every runnable DOCS example of Phases 0-1 runs as a test, with fixtures
+- [ ] CI green on Windows and Linux, the minimum versions (Python 3.10, Node 22.13) included, with
+      `V2_TEST_REQUIRE=py,js,ts`; macOS on the owner's Mac Mini where possible, and CI's macOS job
+- [ ] A short `README.md`; DOCS and INTERNALS say plainly which chapters aren't built yet
+- [ ] VEP/1 reserves room for zero-copy data: `init` carries the host's caps, and the `buffer` cap
+      and `$v2` tag names are reserved, nothing more (§9.3, §10.3)
+- [ ] On the owner's explicit OK: `old/` removed, `v2-reboot` merged into `main`, tag
+      `v0.1.0-alpha.1` (`v0.1.0` stays for the release after Phase 3)
+- After the gate: `llms.txt`, a condensed spec of a few hundred lines for coding agents, its
+  examples run as tests like DOCS's
+
+---
+
 ## Phase 2: Compiled blocks and native libraries
 
 C, C++ and Rust blocks compiled to cached libraries, and `extern` for existing libraries.
+
+**Order** (the owner, 2026-11-10): 2.2 `extern` first (no toolchain); then 2.1 with 2.3, C blocks on
+gcc and clang, with `cl` right after (Windows accepts only `cl`, 7.6); then 2.5 Rust and 2.6; 2.4
+C++ last; 2.7.
 
 ### 2.1 Process helper
 - [ ] `engines/runonly` on `engines/process`: what compiled programs use (§17.3 steps 3–5 and
@@ -309,6 +333,18 @@ R50, R51, R56 and R57 pass.
 ## Phase 3: Custom engines
 
 How any other language gets in.
+
+**Order** (the owner, 2026-11-10): VEP/1 is frozen, the minimal adapter profile and its conformance
+kit come first and are proven by a Lua adapter written only from the spec; the built-in run engines
+come after.
+
+- [ ] VEP/1 frozen before any third-party adapter is invited: frames, tags, caps and their
+      meanings change only in a VEP/2
+- [ ] The minimal adapter profile: what a bridged adapter must do, with every cap optional
+      (modules, handles, kwargs, reverse), and the stdio rules it must keep (§9.9, §14.5, §17.5)
+- [ ] A conformance kit: a test runner any adapter can be checked with, beside
+      `examples/fake_adapter.rs` (§17.6, §22.3)
+- [ ] A Lua bridged adapter written only from the spec, passing the kit
 
 - [ ] Custom `[engines.<tag>]` tables in `v2.toml`: spec and tag validation, registration,
       resolving only `command[0]`, `V2_ENGINE_<TAG>` replacing `command[0]`, config errors, one
@@ -400,3 +436,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-11-03 | The phase 0-1 audit: every R-test and ch. 21 row of Phases 0-1 has a test that checks what it says, and every DOCS example and promise was run on Windows and Linux. One wrong result (a dict key holding a non-callable foreign object overrode the dict method), five DOCS sentences fixed, 25 tests added for promises that held but had none; CI got Phase 1's columns |
 | 2026-11-03 to 11-10 | Rounds 16-18 with oracle fuzzers written from the docs: the host language (62,500 programs, nothing found), values and errors across the boundary (a V2 error passing through JS came back altered; errors now count as a nesting level), traces and the waiting line (10: JS frames of a waiting request, a failed start's line, columns and carets), output order and modules (3: Python's search order across module folders, half characters held past a reply) |
 | 2026-11-10 | 1.14 closed by the owner after round 18: every round still found something, lately rare edges. Windows: 232 unit, 318 `.v2`, 70 CLI tests; Linux: 230, 321, 75; clippy clean on both. Release numbers on 2026-11-10: `fib(32)` 1.30 s, 10M loop 1.04 s (3.5 s and 3.2 s before 1.13); first Python block 106 ms, first Node block 63 ms (every build since round 12 measures the same today, so it is the machine, not the code: 1.12 recorded 79 ms and 42 ms); an idle worker 19 MB (Python) and 52 MB (Node), 0 once parked, state kept. **Phases 0 and 1 complete**; Phase 2 waits for the owner |
+| 2026-11-10 | The owner's review of Phases 0-1, with a second assistant from the owner's chat: processes stay the only transport (no embedded runtimes), DOCS 9.1's value model is the boundary type system (no new record or result types), no restart. Approved: a release gate before Phase 2 (the two quadratic operations, DOCS examples as tests, CI on Windows, Linux and the minimum versions, macOS on the owner's Mac Mini, a README, labels on what isn't built; pushing `v2-reboot` for CI; merging and the `v0.1.0-alpha.1` tag on the owner's OK, `old/` removed at the merge); VEP/1 reserves the `buffer` cap and tag and is frozen before Phase 3 invites adapters; Phase 2 order `extern`, C (gcc and clang, then `cl`), Rust, C++ last; Phase 3 starts with the adapter profile, a conformance kit and a Lua adapter, then the built-in run engines; `llms.txt` after the gate |

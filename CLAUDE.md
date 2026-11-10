@@ -22,9 +22,14 @@ it is loaded automatically into every session and every subagent.
   the owner's go-ahead after that.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
-- Phases 0 and 1 are done (1.14 closed by the owner on 2026-11-10 after sweep round 18; the
-  final report went to the owner, who wants a review chat before Phase 2). Nothing in flight:
-  wait for the owner. Phase 2 needs the owner's go-ahead.
+- Phases 0 and 1 are done (1.14 closed 2026-11-10). Now: the release gate (ROADMAP "Release
+  gate", approved 2026-11-10 with the decisions in its progress log). Pushing `v2-reboot` for CI
+  is approved; merging into `main`, removing `old/` and the `v0.1.0-alpha.1` tag wait for the
+  owner's explicit OK. Phase 2 starts only after the gate, in the ROADMAP's order.
+- `готово/` in the repo root is the owner's video folder (1.83 GB, not V2): never touch, delete
+  or commit it; it is in `.git/info/exclude`.
+- The Mac Mini (macOS box): don't probe SSH hosts or users; ask the owner for host, user and
+  permission (a guessing attempt was refused on 2026-11-10).
 - Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
   finders a round, each with a refuter. Keep them lean.
 - Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
