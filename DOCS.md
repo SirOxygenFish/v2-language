@@ -1,7 +1,10 @@
 # V2 — one script, every language
 
-> **Status:** being built; [ROADMAP.md](ROADMAP.md) "Where we are" says which parts work. How it
-> works under the hood is specified in [INTERNALS.md](INTERNALS.md).
+> **Status:** being built; [ROADMAP.md](ROADMAP.md) "Where we are" says which parts work. Built:
+> the host language, Python, JavaScript and TypeScript blocks, `@export`/`@import` across them,
+> packages, handles, callbacks and errors. Not built yet, and marked where they appear: compiled
+> blocks (`@c`, `@cpp`, `@rust`), `extern`, custom and built-in run engines. How it works under the
+> hood is specified in [INTERNALS.md](INTERNALS.md).
 
 ---
 
@@ -54,7 +57,7 @@ does something well, V2 borrows it instead of reinventing it.
     @export { spread }
 }
 
-// A Rust block, compiled once and cached, for the hot path.
+// A Rust block, compiled once and cached, for the hot path (not built yet: ROADMAP Phase 2).
 @rust fast {
     fn sum_squares(n: i64) -> i64 {
         (1..=n).map(|i| i * i).sum()
@@ -882,6 +885,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 
 ### C — `@c`, C++ — `@cpp`, Rust — `@rust`
 
+> **Not built yet** (ROADMAP Phase 2): these tags raise `EngineUnknown` for now.
+
 - On Linux and macOS, found as `cc`/`gcc`/`clang` (C) and `c++`/`g++`/`clang++` (C++). On
   Windows, C and C++ use MSVC `cl` only (found even outside a Developer Prompt, through the Visual
   Studio installer). Rust is `rustc`; on Windows it needs the same Visual Studio Build Tools.
@@ -890,6 +895,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - See [chapter 11](#11-compiled-blocks-c-c-rust) for how compiled blocks work.
 
 ### Built-in run engines
+
+> **Not built yet** (ROADMAP Phase 3): these tags raise `EngineUnknown` for now.
 
 These work exactly like a custom `run` engine ([13.1](#131-run-engines-execute-a-file): output
 printed, or the block's value as a `str`; args as `V2_ARG_<name>` variables; no `@export` or
@@ -1173,6 +1180,8 @@ such a callback in a small helper function that holds only what it needs.
 
 ### 8.3 Compiled code calling other languages
 
+> **Not built yet** (ROADMAP Phase 2): it comes with compiled blocks.
+
 Compiled blocks can import too. Because C, C++ and Rust have no common dynamic data type,
 imported functions there take and return **JSON text** (see [11.6](#116-calling-other-languages-from-compiled-code)):
 
@@ -1379,6 +1388,9 @@ if engine_available("rust") {
 
 ## 11. Compiled blocks: C, C++, Rust
 
+> **Not built yet** (ROADMAP Phase 2): `@c`, `@cpp` and `@rust` raise `EngineUnknown`, and `v2 cache clean`
+> says it isn't implemented, for now.
+
 A compiled block is built into a native library the first time it is needed, cached, loaded into
 the V2 process and called directly — no worker process, no per-call overhead beyond converting
 arguments.
@@ -1533,6 +1545,9 @@ block's language; rename it with `as` otherwise. Breaking these rules is a `Synt
 
 ## 12. Native libraries: `extern`
 
+> **Not built yet** (ROADMAP Phase 2): `extern` raises `Error: extern (roadmap phase 2) doesn't run yet in this
+> build` for now.
+
 `extern` calls functions in an **existing** native library (a `.dll`, `.so` or `.dylib`) with no
 compiler involved. You describe the functions with ordinary C declarations — copy them straight
 from the library's header.
@@ -1590,6 +1605,9 @@ function not in the library), `MarshalError` (argument or result doesn't fit), a
 ---
 
 ## 13. Custom engines
+
+> **Not built yet** (ROADMAP Phase 3): a custom tag raises `EngineUnknown` and `define_engine` is a
+> `NameError` for now.
 
 Any language can be added as a custom engine, declared in an `[engines.<tag>]` table in
 `v2.toml` ([chapter 14](#14-project-file-v2toml)) or with `define_engine` in the script
@@ -1857,6 +1875,8 @@ for region, total in to_v2(by_region) {      // to_dict() -> V2 dict
 ```
 
 ### 17.3 A hot loop in Rust
+
+> **Not built yet** (ROADMAP Phase 2): it needs `@rust`.
 
 ```v2
 @rust sim {

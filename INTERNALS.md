@@ -1,6 +1,6 @@
 # V2 Internals — how everything works
 
-> **Status: being built;** [`ROADMAP.md`](ROADMAP.md) "Where we are" says which parts work. [`DOCS.md`](DOCS.md) defines what V2 does and this file how it works; where the two disagree, DOCS.md wins and this file is fixed.
+> **Status: being built;** [`ROADMAP.md`](ROADMAP.md) "Where we are" says which parts work. Phases 0 and 1 are: the host, py, js and ts. Chapters 15 (compiled blocks), 16 (`extern`) and 17 (custom engines) and the parts of others about them specify Phases 2 and 3. [`DOCS.md`](DOCS.md) defines what V2 does and this file how it works; where the two disagree, DOCS.md wins and this file is fixed.
 
 ## Contents
 
@@ -975,7 +975,7 @@ Example: a `py` block imports the V2 function `log_line` (route 1) and exports `
 
 ```json
 {"t":"hello","vep":1,"version":"3.12.4","pid":4242,"caps":["modules","handles","kwargs","reverse"]}
-{"t":"init","id":1,"project_root":"C:\\work"}
+{"t":"init","id":1,"project_root":"C:\\work","caps":[]}
 {"t":"ret","id":1,"value":null}
 {"t":"load","id":2,"unit":"0:812","kind":"definition","lang":"py","file":"C:\\work\\main.v2","line":3,"source":"\ndef ratio(a, b):\n    log_line(\"dividing\")\n    return a / b\n\n","args":{},"imports":[{"as":"log_line","route":1}],"exports":["ratio"],"want_value":false}
 {"t":"ret","id":2,"value":null,"exports":[{"name":"ratio","kind":"func"}],"missing":[]}
@@ -992,7 +992,7 @@ Example: a `py` block imports the V2 function `log_line` (route 1) and exports `
 - `caps` is a list of strings. The host gates features on `modules`, `handles`, `kwargs` and `reverse` (what each enables and the error without it: 17.5) and ignores unknown caps. The py adapter sends `["modules","handles","kwargs","reverse"]`; the js adapter sends `["modules","handles","reverse"]` (no `kwargs`: JS functions take positional arguments only, 10.8).
 - **Preload noise.** Code can run before the adapter owns fd 1 (`sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`). Before `hello`, a stdout line that is not a JSON object is copied to the host's stderr and startup continues. Noise with no newline of its own shares `hello`'s line, so anything in front of `{"t":"hello"` on a line is noise too (`t` is the frame's first member). The first JSON object must be a valid `hello`; any other frame, an `out` frame included, is fatal: `ProtocolError: engine 'py' sent 'ret' before hello`. From `hello` on, every line must be a frame (9.11). EOF before `hello` is a failed start (8.4).
 
-**`init`** is always the first request; the adapter answers `ret` with `value: null` (an `err` kills the worker, 8.4). Its `project_root` is the canonical folder (2.1) holding `v2.toml`, or the entry script's folder. py prepends it to `sys.path`, and at each `load`/`module` of a `.v2` file puts that file's folder first and the root second (14.3), moving entries an inherited `PYTHONPATH` or another file's load already put there, which gives DOCS 7's order for every file. js does not use it: Node's own lookup from each `.v2` file's folder (12.4, 13.5), plus any inherited `NODE_PATH`, finds packages.
+**`init`** is always the first request; the adapter answers `ret` with `value: null` (an `err` kills the worker, 8.4). Its `caps` lists what the host supports beyond VEP/1's core, as `hello`'s do for the worker, so a side sends an optional tag only to one that announced its cap; this host sends `[]`. **Reserved:** the cap `buffer` and the `$v2` tag `buffer`, for data shared without copying (an array's memory); VEP/1 defines neither yet, and no side sends them. Its `project_root` is the canonical folder (2.1) holding `v2.toml`, or the entry script's folder. py prepends it to `sys.path`, and at each `load`/`module` of a `.v2` file puts that file's folder first and the root second (14.3), moving entries an inherited `PYTHONPATH` or another file's load already put there, which gives DOCS 7's order for every file. js does not use it: Node's own lookup from each `.v2` file's folder (12.4, 13.5), plus any inherited `NODE_PATH`, finds packages.
 
 ### 9.4 Units: `load` and `module`
 
@@ -1203,6 +1203,7 @@ An object with a `"$v2"` member is a tag in a value position: `args`, `kwargs` v
 | `float` | `v`: `"nan"`, `"inf"` or `"-inf"` | a non-finite float |
 | `error` | `type`, `message`, `data`, `lang`, `foreign_type`, `file`, `line`, `col`, `trace` (strings), `cause` (tag or `null`); in an `err`'s `v2`, also `ref` (9.6), which adapters keep and decoders ignore | a V2 error value |
 | `dict` | `v`: object | a real dict that has a `"$v2"` key: the keys of `v` are literal, its values are decoded normally |
+| `buffer` | reserved | not sent in VEP/1; only to a side whose `hello` or `init` announces the cap `buffer` once it is defined (9.3) |
 
 An unknown tag or a missing member is a fatal `ProtocolError` on the host (9.11); adapters answer it with `err` `ProtocolError`.
 
