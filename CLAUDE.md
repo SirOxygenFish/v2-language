@@ -22,21 +22,11 @@ it is loaded automatically into every session and every subagent.
   the owner's go-ahead after that.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
-- Plan of 2026-10-30 (`~/.claude/plans/wild-wobbling-creek.md`): redesign, then the loop. Steps: A spec
-  (done) → 1.11 language lifetime → 1.12 parking and startup → 1.13 variable slots → 1.14 `.v2`
-  test-and-fix loop → report and stop. Phase 2 needs the owner's go-ahead afterwards.
-- Now: 1.14, the loop. Committed: sweep rounds 1-16 and the phase 0-1 audit (every R/ch. 21 row
-  has a real test, every DOCS example and promise checked). The owner (2026-11-03): "do
-  everything planned for phases 0 to 1 and check everything works as intended", then the chat
-  before Phase 2. So: review rounds until two in a row find nothing, then close 1.14 (ROADMAP
-  boxes and log, final report). New angles: oracle fuzzers written from DOCS, not old-vs-new.
-- Rounds 16-17 used oracle fuzzers (core language: clean; boundary: 4; traces: 7; waiting line:
-  3; all fixed and committed). Round 18: output order across languages, and V2 modules. Rounds
-  still find things, so two clean ones in a row are not reached yet.
-  Still to do at the end: re-measure release numbers (first py/js block, fib, loop; last: fib
-  1.26 s, loop 1.04 s; parking and idle RAM were re-checked on 2026-11-03: Python 19 MB, Node
-  52 MB, both 0 once parked, state kept), ROADMAP 1.14 boxes and progress log, final report. Keep reviews lean: two reviewer agents a
-  round, each from a new angle; a differential fuzz finds a lot for little.
+- Phases 0 and 1 are done (1.14 closed by the owner on 2026-11-10 after sweep round 18; the
+  final report went to the owner, who wants a review chat before Phase 2). Nothing in flight:
+  wait for the owner. Phase 2 needs the owner's go-ahead.
+- Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
+  finders a round, each with a refuter. Keep them lean.
 - Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
   v2 and its workers past 2 GB together or the time limit; a test ran away to 47 GB on
   2026-11-02; in WSL `~/v2snap/capped.py`, a /proc version, with snapshots `~/v2snap/v2*`), never
@@ -44,9 +34,9 @@ it is loaded automatically into every session and every subagent.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
-- For the owner in the final report (spec, documented, not fixed): `s += piece` is quadratic (1 MB
-  string: 12 s), `dict.remove` is O(n) (100k: 15 s), imported classes have no static members;
-  also `#!` lines and narrower closure capture.
+- Proposals given to the owner on 2026-11-10 (spec, documented, not fixed; await their answer):
+  `s += piece` is quadratic (1 MB string: 12 s), `dict.remove` is O(n) (100k: 15 s), imported
+  classes have no static members; also `#!` lines and narrower closure capture.
 - Scratchpad helpers are session-local and can vanish (the app crash of 2026-11-02 wiped them):
   bench/measure.py re-measures release numbers; rewrite fuzzers if needed. Never generate a sweep
   test's .out from the binary: its output comes from DOCS.
