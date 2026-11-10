@@ -246,13 +246,15 @@ fast V2 runs.
 The owner's decision of 2026-11-10: Phases 0-1 go public as a pre-release before Phase 2 starts,
 so CI, the minimum versions and macOS are proven on what exists.
 
-- [ ] `s += piece` appends in place when V2 holds the string alone, and `dict.remove` doesn't shift
-      every later entry: both stay as the docs say, only no longer quadratic (DOCS 3.3, 3.6)
+- [x] `s += piece` appends in place when V2 holds the string alone, and `dict.remove` doesn't shift
+      every later entry: both stay as the docs say, only no longer quadratic (DOCS 3.3, 3.6). Release:
+      100,000 appends 9.8 s to 0.02 s, removing 100,000 keys 14.2 s to 0.13 s
 - [x] Every runnable DOCS example of Phases 0-1 runs as a test, with fixtures: 25 of DOCS.md's 41
       and README's run (run.rs `docs_examples_run_as_documented`, tests/docs/), `skip.txt` says why
       the other 17 don't
 - [ ] CI green on Windows and Linux, the minimum versions (Python 3.10, Node 22.13) included, with
-      `V2_TEST_REQUIRE=py,js,ts`; macOS on the owner's Mac Mini where possible, and CI's macOS job
+      `V2_TEST_REQUIRE=py,js,ts`; macOS on the owner's Mac Mini (macOS 26.5, Apple Silicon): green
+      without Node on 2026-11-10 (js and ts skipped until it's installed)
 - [x] A short `README.md`; DOCS and INTERNALS say plainly which chapters aren't built yet
 - [x] VEP/1 reserves room for zero-copy data: `init` carries the host's caps, and the `buffer` cap
       and `$v2` tag names are reserved, nothing more (§9.3, §10.3)
