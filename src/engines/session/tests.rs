@@ -676,7 +676,8 @@ fn init_is_the_project_root_and_the_minimums_hold() {
         let init = w.recv_t("init");
         let mut keys: Vec<&String> = init.as_object().unwrap().keys().collect();
         keys.sort();
-        assert_eq!(keys, ["id", "project_root", "t"], "init carries only the project root (9.3)");
+        assert_eq!(keys, ["caps", "id", "project_root", "t"], "init carries the project root and the host's caps (9.3)");
+        assert_eq!(init["caps"], json!([]), "this host announces no optional caps yet");
         w.ret(&init, Json::Null);
         w.recv_t("bye");
     });
