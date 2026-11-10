@@ -8,8 +8,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use indexmap::IndexMap;
-
 use super::builtins::{Out, BUILTINS, POSITIONAL_ONLY};
 use super::call::{bind, bind_spec, Named, Param};
 use super::env::{self, declare_at, lookup, new_frame, AssignError, Env, WriteError};
@@ -18,7 +16,7 @@ use super::methods::{self, index_error, key_error, normalize};
 use super::module::{self, Parsed};
 use super::ops::{self, MAX_VALUE_DEPTH};
 use super::strings::CharCache;
-use super::value::{bytes_repr, float_str, quoted, Callable, Value};
+use super::value::{bytes_repr, float_str, quoted, Callable, Dict, DictMap, Str, Value};
 use crate::engines::handles::HandleRef;
 use crate::engines::imports::{FileScope, Route};
 use crate::engines::process::stop_if_interrupted;
@@ -100,6 +98,23 @@ fn no_member(o: &Value, what: &str, n: &str) -> String {
             format!("{msg} — an imported class is only a function here; @import its module as m to reach m.{}.{n}", f.name())
         }
         _ => msg,
+    }
+}
+
+/// `x += piece` with a str `x` and `piece` (5.3): `append` puts `piece` on the target's string
+/// in place where it can (`env::grow`). `Err` gives `old` back for `x = x + piece`.
+fn in_place(op: BinOp, old: Value, rhs: &Value, append: impl FnOnce(Str, &str) -> Result<(), Str>) -> Result<(), Value> {
+    match (old, rhs) {
+        (Value::Str(s), Value::Str(piece)) if op == BinOp::Add => append(s, piece).map_err(Value::Str),
+        (old, _) => Err(old),
+    }
+}
+
+/// `d[key] += piece` in place, when `key` is there (`env::grow`).
+fn grow_entry(d: &Dict, key: &str, old: Str, piece: &str) -> Result<(), Str> {
+    match d.borrow_mut().get_mut(key) {
+        Some(v) => env::grow(v, old, piece),
+        None => Err(old),
     }
 }
 
@@ -200,8 +215,8 @@ impl Interp {
                 let data = diags
                     .iter()
                     .map(|d| {
-                        let mut m = IndexMap::new();
-                        m.insert(Rc::from("file"), Value::Str(d.display.clone()));
+                        let mut m = DictMap::new();
+                        m.insert(Rc::from("file"), Value::Str(d.display.clone().into()));
                         m.insert(Rc::from("line"), Value::Int(d.line as i64));
                         m.insert(Rc::from("col"), Value::Int(d.col as i64));
                         m.insert(Rc::from("message"), Value::str(&d.message));
@@ -227,7 +242,7 @@ impl Interp {
         match r {
             Ok(frame) => {
                 // The namespace: a snapshot of the module's bindings, without `_` names (6.4 step 3).
-                let ns: IndexMap<Rc<str>, Value> = env::bindings(&frame).into_iter().filter(|(k, _)| !k.starts_with('_')).collect();
+                let ns: DictMap = env::bindings(&frame).into_iter().filter(|(k, _)| !k.starts_with('_')).collect();
                 let ns = Value::dict(ns);
                 self.modules.insert(path, ModuleState::Done(ns.clone()));
                 env::leave(frame);
@@ -457,7 +472,7 @@ impl Interp {
         };
         let err = match v {
             Value::Error(err) => err,
-            Value::Str(m) => Rc::new(ErrorValue::new("Error", m)),
+            Value::Str(m) => Rc::new(ErrorValue::new("Error", &m)),
             other => {
                 let msg = format!("throw expects an error or a str, got {}", other.type_name());
                 Rc::new(ErrorValue::new("TypeError", msg))
@@ -500,7 +515,7 @@ impl Interp {
     }
 
     /// `target = value` / `target op= value`: the target's container and key are evaluated once,
-    /// before the value (5.3).
+    /// before the value (5.3). `+=` on two strs grows the target's string in place where it can.
     fn assign(&mut self, target: &Target, op: Option<(BinOp, Span)>, value: &Expr, env: &Env) -> Exec<()> {
         match target {
             Target::Name(n, loc) => {
@@ -509,6 +524,13 @@ impl Interp {
                     Some((op, op_span)) => {
                         let Some(old) = self.read(&n.text, *loc, env) else { return self.not_declared(&n.text, n.span, env, true) };
                         let rhs = self.eval(value, env)?;
+                        let old = match in_place(op, old, &rhs, |s, piece| match *loc {
+                            Loc::Slot { hops, index } => env::append_at(env, hops, index, s, piece),
+                            _ => Err(s),
+                        }) {
+                            Ok(()) => return Ok(()),
+                            Err(old) => old,
+                        };
                         self.at(ops::binop(op, &old, &rhs), op_span)?
                     }
                 };
@@ -528,6 +550,13 @@ impl Interp {
                         let old = self.member(&o, name);
                         let old = self.at(old, name.span)?;
                         let rhs = self.eval(value, env)?;
+                        let old = match in_place(op, old, &rhs, |s, piece| match &o {
+                            Value::Dict(d) => grow_entry(d, &name.text, s, piece),
+                            _ => Err(s),
+                        }) {
+                            Ok(()) => return Ok(()),
+                            Err(old) => old,
+                        };
                         self.at(ops::binop(op, &old, &rhs), op_span)?
                     }
                 };
@@ -543,6 +572,20 @@ impl Interp {
                         let old = self.index(&o, &k, *bracket);
                         let old = self.at(old, *bracket)?;
                         let rhs = self.eval(value, env)?;
+                        let old = match in_place(op, old, &rhs, |s, piece| match (&o, &k) {
+                            (Value::List(l), Value::Int(i)) => {
+                                let mut items = l.borrow_mut();
+                                match normalize(*i, items.len()) {
+                                    Some(n) => env::grow(&mut items[n], s, piece),
+                                    None => Err(s),
+                                }
+                            }
+                            (Value::Dict(d), Value::Str(key)) => grow_entry(d, key, s, piece),
+                            _ => Err(s),
+                        }) {
+                            Ok(()) => return Ok(()),
+                            Err(old) => old,
+                        };
                         self.at(ops::binop(op, &old, &rhs), op_span)?
                     }
                 };
@@ -609,8 +652,8 @@ impl Interp {
                     let entries: Vec<(Rc<str>, Value)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                     for (k, v) in entries {
                         let vars = match second {
-                            Some(s) => vec![(first, Value::Str(k)), (s, v)],
-                            None => vec![(first, Value::Str(k))],
+                            Some(s) => vec![(first, Value::Str(k.into())), (s, v)],
+                            None => vec![(first, Value::Str(k.into()))],
                         };
                         if !self.iteration(body, env, &vars)? {
                             break;
@@ -764,7 +807,7 @@ impl Interp {
             ExprKind::Bool(b) => Value::Bool(*b),
             ExprKind::Int(n) => Value::Int(*n),
             ExprKind::Float(x) => Value::Float(*x),
-            ExprKind::Str(s) => Value::Str(s.clone()),
+            ExprKind::Str(s) => Value::Str(s.clone().into()),
             ExprKind::Bytes(b) => Value::Bytes(b.clone()),
             ExprKind::Name(n, loc) => match self.read(n, *loc, env) {
                 Some(v) => v,
@@ -779,12 +822,12 @@ impl Interp {
                 Value::list(out)
             }
             ExprKind::Dict(entries) => {
-                let mut map = IndexMap::with_capacity(entries.len());
+                let mut map = DictMap::with_capacity(entries.len());
                 for (k, x) in entries {
                     let key = match k {
                         DictKey::Str(s, _) => s.clone(),
                         DictKey::Computed(ke) => match self.eval(ke, env)? {
-                            Value::Str(s) => s,
+                            Value::Str(s) => Rc::from(&s),
                             other => return self.fail_at("TypeError", format!("dict keys must be str, got {}", other.type_name()), ke.span),
                         },
                     };
@@ -1117,15 +1160,15 @@ impl Interp {
     fn error_field(&self, e: &ErrorValue, n: &str) -> Exec<Value> {
         let span = e.span.get();
         Ok(match n {
-            "type" => Value::Str(e.kind.clone()),
-            "message" => Value::Str(e.message.clone()),
-            "file" => span.map_or(Value::Null, |s| Value::Str(self.sm.file(s.file).display.clone())),
+            "type" => Value::Str(e.kind.clone().into()),
+            "message" => Value::Str(e.message.clone().into()),
+            "file" => span.map_or(Value::Null, |s| Value::Str(self.sm.file(s.file).display.clone().into())),
             "line" => span.map_or(Value::Null, |s| Value::Int(s.line as i64)),
             "col" => span.map_or(Value::Null, |s| Value::Int(s.col as i64)),
-            "trace" => Value::list(e.trace.get().map_or_else(Vec::new, |t| t.iter().map(|f| Value::Str(f.clone())).collect())),
+            "trace" => Value::list(e.trace.get().map_or_else(Vec::new, |t| t.iter().map(|f| Value::Str(f.clone().into())).collect())),
             "data" => e.data.clone(),
-            "lang" => e.lang.clone().map_or(Value::Null, Value::Str),
-            "foreign_type" => e.foreign_type.clone().map_or(Value::Null, Value::Str),
+            "lang" => e.lang.clone().map_or(Value::Null, |s| Value::Str(s.into())),
+            "foreign_type" => e.foreign_type.clone().map_or(Value::Null, |s| Value::Str(s.into())),
             "cause" => e.cause.clone(),
             _ => {
                 const FIELDS: [&str; 10] = ["type", "message", "file", "line", "col", "trace", "data", "lang", "foreign_type", "cause"];
@@ -1219,7 +1262,7 @@ impl Interp {
             }
             Value::Dict(d) => match k {
                 Value::Str(key) => {
-                    if d.borrow_mut().insert(key.clone(), v).is_none() {
+                    if d.borrow_mut().insert(key.into(), v).is_none() {
                         env::made(1);
                     }
                     Ok(())

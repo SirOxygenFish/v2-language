@@ -1,0 +1,62 @@
+// `d.remove(k)` returns the value and keeps the other keys in order; a key put back goes last,
+// and a key set again keeps its place (DOCS 3.2, 3.6; INTERNALS 5.5).
+let d = {a: 1, b: 2, c: 3, e: 5}
+print(d.remove("b"), d)
+d.b = 22
+print(d, d.keys(), d.values())
+d.a = 11
+print(d, len(d))
+print("b" in d, "x" in d, d.get("c"), d.get("x", "none"))
+// A `for` loop walks a snapshot, so removing keys inside it still visits each key once.
+let m = {}
+for i in 0..20 {
+    m[str(i)] = i
+}
+let seen = 0
+for k, v in m {
+    seen += 1
+    if v % 2 == 0 {
+        m.remove(k)
+    }
+}
+print(seen, len(m), m)
+for k in m.keys() {
+    m.remove(k)
+}
+print(m, len(m), m.keys(), m == {})
+m.z = 1
+m.y = 2
+print(m)
+// Did-you-mean takes the first of equally close keys, in order.
+try {
+    m.remove("x")
+} catch (err) {
+    print(err.type + ": " + err.message)
+}
+try {
+    m.remove("y")
+    m.remove("y")
+} catch (err) {
+    print(err.type + ": " + err.message)
+}
+print(m)
+// After many removals printing, keys(), values(), lookups, JSON and copy() see the rest in order.
+let big = {}
+for i in 0..1000 {
+    big[f"k${i}"] = i
+}
+for i in 0..1000 {
+    if i % 100 != 0 {
+        big.remove(f"k${i}")
+    }
+}
+big.k5 = 5
+print(big)
+print(big.keys(), big.values())
+print(big.k500, big["k900"], big.get("k5"), "k1" in big, len(big))
+print(json_stringify(big))
+let copy = big.copy()
+copy.remove("k0")
+copy.k0 = 0
+print(copy.keys(), len(big), big.keys()[0])
+print(json_parse(json_stringify(copy)).keys())

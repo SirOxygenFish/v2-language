@@ -5,14 +5,13 @@
 
 use std::rc::Rc;
 
-use indexmap::IndexMap;
 use serde_json::{json, Map, Number, Value as Json};
 
 use crate::engines::handles::{CallableTable, HandleRef, ReleaseQueue};
 use crate::engines::imports::Route;
 use crate::engines::vep::Caps;
 use crate::runtime::error::{fail, ErrorValue, Exec};
-use crate::runtime::value::{Callable, Value};
+use crate::runtime::value::{Callable, DictMap, Value};
 use crate::syntax::span::SourceMap;
 
 /// Lists and dicts nest at most this deep on the wire (10.5).
@@ -239,7 +238,7 @@ impl Wire<'_> {
         if depth >= MAX_DEPTH {
             return Err(format!("value nested deeper than {MAX_DEPTH} levels"));
         }
-        let mut out = IndexMap::with_capacity(m.len());
+        let mut out = DictMap::with_capacity(m.len());
         for (k, v) in m {
             out.insert(Rc::from(k.as_str()), self.decode_at(v, depth + 1)?);
         }
@@ -489,7 +488,7 @@ mod tests {
         assert_eq!(enc(&Value::str("\r\n\u{2028}\0\"")), "\"\\r\\n\u{2028}\\u0000\\\"\"");
         assert_eq!(enc(&Value::Bytes(b"\x00A\xff".to_vec().into())), r#"{"$v2":"bytes","b64":"AEH/"}"#);
         assert!(matches!(dec(r#"{"$v2":"bytes","b64":"AEH/"}"#), Ok(Value::Bytes(b)) if &*b == b"\x00A\xff"));
-        let mut m = IndexMap::new();
+        let mut m = DictMap::new();
         m.insert(Rc::from("$v2"), Value::Int(1));
         m.insert(Rc::from("b"), Value::Null);
         assert_eq!(enc(&Value::dict(m)), r#"{"$v2":"dict","v":{"$v2":1,"b":null}}"#);
@@ -546,7 +545,7 @@ mod tests {
         let mut fx = Fixture::new();
         let h = Value::Handle(Rc::new(HandleRef::new(0, "py".into(), 9, "datetime.date".into(), fx.releases.clone())));
         let js = Value::Handle(Rc::new(HandleRef::new(1, "js".into(), 3, "Date".into(), fx.releases.clone())));
-        let mut m = IndexMap::new();
+        let mut m = DictMap::new();
         m.insert(Rc::from("when"), js);
         let args = Value::list(vec![Value::dict(m)]);
         assert_eq!(fx.wire(ALL).encode(&h, "args[0]").unwrap().to_string(), r#"{"$v2":"h","id":9}"#);
@@ -662,7 +661,7 @@ mod tests {
         // 140 dicts keyed "$v2" are 140 levels but 280 brackets: frames allow 1,000 (10.1).
         let mut v = Value::Null;
         for _ in 0..140 {
-            let mut m = IndexMap::new();
+            let mut m = DictMap::new();
             m.insert(Rc::from("$v2"), v);
             v = Value::dict(m);
         }
@@ -676,7 +675,7 @@ mod tests {
     #[test]
     fn fn_ids_count_tags_not_user_keys() {
         let print = Value::Func(Func::new(Callable::Builtin(BUILTINS.iter().find(|b| b.name == "print").unwrap())));
-        let mut lookalike = IndexMap::new();
+        let mut lookalike = DictMap::new();
         lookalike.insert(Rc::from("$v2"), Value::str("fn"));
         lookalike.insert(Rc::from("id"), Value::Int(99));
         lookalike.insert(Rc::from("f"), print.clone());

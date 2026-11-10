@@ -1,0 +1,10 @@
+// requires: py
+// A dict crosses to Python and back in its order after removals: a key put back is last
+// (DOCS 3.6, 9.1).
+let d = {a: 1, b: 2, c: 3, e: 4}
+d.remove("a")
+d.remove("c")
+d.a = 5
+print(@py(d) { list(d.keys()) })
+let back = @py(d) { d }
+print(back, back.keys())

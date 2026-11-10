@@ -1,0 +1,94 @@
+// `x += y` means `x = x + y` (DOCS 3.3), whether the string grows in place or is copied: every
+// other holder of the string keeps the old text.
+let a = "ab"
+let b = a
+b += "c"
+print(a, b)
+let big = "x" * 100
+let saved = [big]
+big += "y"
+print(len(saved[0]), len(big), saved[0][-1], big[-1])
+func add(s) {
+    s += "!"
+    return s
+}
+let p = "hi"
+print(add(p), p)
+let twice = "ab"
+twice += twice
+print(twice)
+// Positions in a long string are remembered between len() and indexing; appending still counts.
+let u = "é" * 70
+print(len(u), u[69])
+u += "ü"
+print(len(u), u[70], u[69])
+let w = ""
+for i in 0..100 {
+    w += "€"
+    if len(w) != i + 1 {
+        print("wrong length after", i + 1, "appends:", len(w))
+    }
+}
+print(len(w), w[99], w[0:2])
+// The target is read before the right side runs.
+let t = "a"
+func change() {
+    t = "zzz"
+    return "b"
+}
+t += change()
+print(t)
+let g = "a"
+func grow() {
+    g += "X"
+    return "b"
+}
+g += grow()
+print(g)
+// A `for` loop walks the string it started with.
+let s = "abc"
+for ch in s {
+    s += ch
+}
+print(s)
+// A dict entry and a list item.
+let d = {k: "a", n: 1}
+let keep = d.k
+d["k"] += "x"
+d.k += "y"
+d.n += 1
+print(d, keep)
+let l = ["p", "q"]
+let first = l[0]
+l[0] += "x"
+l[-1] += "z"
+print(l, first)
+let e = {k: "a"}
+func swap() {
+    e.k = "new"
+    return "b"
+}
+e.k += swap()
+print(e)
+let doc = {text: ""}
+let rows = ["", "-"]
+for i in 0..300 {
+    doc.text += "ab"
+    doc["text"] += "c"
+    rows[1] += "d"
+}
+print(len(doc.text), doc.text[0:6], len(rows[1]), rows[1][0:3], rows[0] == "")
+// The errors of `+` and of assignment are unchanged.
+try {
+    let n = "a"
+    n += 1
+} catch (err) {
+    print(err.type + ": " + err.message)
+}
+const NAME = "v"
+try {
+    NAME += "2"
+} catch (err) {
+    print(err.type + ": " + err.message)
+}
+print(NAME)

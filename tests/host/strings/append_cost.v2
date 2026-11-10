@@ -1,0 +1,18 @@
+// timeout: 60
+// `s += piece` grows a string in place when nothing else holds it (DOCS 3.3), so building a long
+// string that way takes linear time: a variable, a dict entry by `.` and by `[]` and a list item
+// each get 100,000 appends here (1 MB each). Copying the string each time took ~10 s for each.
+let t0 = time()
+let s = ""
+let doc = {text: "", "other key": ""}
+let rows = ["", ""]
+for i in 0..100000 {
+    s += "0123456789"
+    doc.text += "0123456789"
+    doc["other key"] += "abcdefghij"
+    rows[1] += "9876543210"
+}
+let took = time() - t0
+print(len(s), len(doc.text), len(doc["other key"]), len(rows[1]), rows[0] == "")
+print(s[0:12], doc.text[-3:], doc["other key"][0:3], rows[-1][999990:])
+print(took < 10)

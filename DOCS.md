@@ -242,9 +242,10 @@ count += 1             // also -=, *=, /=, %=
   belong to, so `func f(x) { let x = 1 }` is an error.
 - Lists and dicts that point at each other (a parent pointer, a doubly linked list, a list holding
   itself) are not freed: V2 has no general cycle collector. Break the link when you are done.
-- `x += y` always means `x = x + y`, a full copy each time, so build long strings and lists with
-  `push` and `join` rather than `+=` in a loop. For lists that makes a **new** list: other names for the old
-  list don't see the change (use `.push()` to change a list in place).
+- `x += y` always means `x = x + y`. On a list that makes a **new** list, a full copy each time:
+  other names for the old list don't see the change, so build long lists with `.push()`, which
+  changes a list in place. On a string `+=` is cheap: a string no other name holds grows in place,
+  so building a long one with `s += piece` in a loop is fine, and other names keep the old text.
 - `const` stops reassignment of the name. A `const` list can still be changed with `.push()`.
 - Assigning to a name that was never declared is an error — there are no accidental globals.
 

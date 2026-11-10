@@ -8,7 +8,7 @@ use super::call::ParamSpec;
 use super::error::{fail, type_error, value_error, Exec};
 use super::interp::Interp;
 use super::ops::{eq, sort_key_cmp};
-use super::value::{Dict, List, Value};
+use super::value::{Dict, List, Str, Value};
 use crate::syntax::span::Span;
 
 pub type MethodFn = fn(&mut Interp, &Value, Vec<Value>, Span) -> Exec<Value>;
@@ -142,7 +142,7 @@ pub static LIST_METHODS: &[MethodDef] = &[
 ];
 
 pub static DICT_METHODS: &[MethodDef] = &[
-    m("keys", NONE, |_, r, _, _| Ok(Value::list(the_dict(r).borrow().keys().map(|k| Value::Str(k.clone())).collect()))),
+    m("keys", NONE, |_, r, _, _| Ok(Value::list(the_dict(r).borrow().keys().map(|k| Value::Str(k.clone().into())).collect()))),
     m("values", NONE, |_, r, _, _| Ok(Value::list(the_dict(r).borrow().values().cloned().collect()))),
     m("get", &[ParamSpec::req("k"), ParamSpec::opt("default", || Value::Null)], |_, r, mut a, _| {
         let k = str_arg(&a[0], "dict.get", "k")?;
@@ -151,7 +151,7 @@ pub static DICT_METHODS: &[MethodDef] = &[
     }),
     m("remove", &[ParamSpec::req("k")], |_, r, a, _| {
         let k = str_arg(&a[0], "dict.remove", "k")?;
-        let removed = the_dict(r).borrow_mut().shift_remove(&k);
+        let removed = the_dict(r).borrow_mut().remove(&k);
         match removed {
             Some(v) => Ok(v),
             None => key_error(&k, the_dict(r)),
@@ -171,7 +171,7 @@ pub fn table(v: &Value) -> Option<&'static [MethodDef]> {
     }
 }
 
-fn the_str(v: &Value) -> &Rc<str> {
+fn the_str(v: &Value) -> &Str {
     match v {
         Value::Str(s) => s,
         _ => unreachable!("str method on a str"),
