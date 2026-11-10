@@ -45,8 +45,10 @@ if __name__ == "__main__":
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 
-    # 3. The adapter's own folder leaves sys.path; init puts the project root on it (9.3).
-    if sys.path and os.path.normcase(os.path.abspath(sys.path[0] or ".")) == os.path.dirname(ADAPTER):
+    # 3. The adapter's own folder leaves sys.path; init puts the project root on it (9.3). Python
+    # resolves symlinks in sys.path[0] (macOS's temp folder is one), so both sides are resolved.
+    same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    if sys.path and same(sys.path[0] or ".", os.path.dirname(ADAPTER)):
         del sys.path[0]
     ORIGINAL_PATH = list(sys.path)
 

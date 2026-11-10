@@ -102,11 +102,11 @@ try {
 } catch (e) {
     print(e.foreign_type, e.line, e.col)
 }
-// When one-line blocks of two engines share a line, the error is in the one whose engine raised it.
-try {
-    let a = @js { 1 }; let b = @py(x: 0) { 10 / x }
-} catch (e) {
-    print(e.foreign_type, e.lang, e.col, e.trace[0])
+// Two engines' one-line blocks sharing a line need js, so that case is in
+// tests/cross/shared_line.v2; these six lines keep the line numbers below as they were.
+let moved_case = 0
+if moved_case != 0 {
+    print("never")
 }
 // An `@@export` escape loses one `@`; the column still points at the .v2 text.
 try {

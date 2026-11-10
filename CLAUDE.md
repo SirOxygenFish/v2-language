@@ -28,8 +28,9 @@ it is loaded automatically into every session and every subagent.
   owner's explicit OK. Phase 2 starts only after the gate, in the ROADMAP's order.
 - `готово/` in the repo root is the owner's video folder (1.83 GB, not V2): never touch, delete
   or commit it; it is in `.git/info/exclude`.
-- The Mac Mini (macOS box): don't probe SSH hosts or users; ask the owner for host, user and
-  permission (a guessing attempt was refused on 2026-11-10).
+- macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
+  2026-11-10); run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14) from `~/v2-test`,
+  copied with tar excluding target, old, .git, .claude. Node isn't installed there yet.
 - Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
   finders a round, each with a refuter. Keep them lean.
 - Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
@@ -64,7 +65,7 @@ it is loaded automatically into every session and every subagent.
   mangle backslashes** — for any edit containing `\` write a Python script with the Write tool
   and run it, or use the Edit tool.
 - Linux check: WSL Ubuntu has cargo (nightly 1.93):
-  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude old --exclude .git '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
+  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude old --exclude .git --exclude .claude '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
   (the repo lives in `Desktop\My Stuff\v2-language`; quote the path, it has a space)
   (also `cargo clippy --all-targets` there: nightly has extra lints, and cfg(unix) code only
   compiles there).

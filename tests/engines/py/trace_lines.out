@@ -10,5 +10,4 @@ SyntaxError 73 30
 ValueError 86 ["t (trace_lines.v2:81, in @py thrower)", "go (trace_lines.v2:86)", "trace_lines.v2:89"]
 RuntimeError true true
 SyntaxError 101 5
-ZeroDivisionError py 44 trace_lines.v2:107, in @py block at trace_lines.v2:107
 NameError 114 11

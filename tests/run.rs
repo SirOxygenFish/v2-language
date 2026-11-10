@@ -886,9 +886,10 @@ fn sleep_flushes_what_was_printed() {
     assert!(took < Duration::from_secs(10), "{took:?}");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn no_interpreter_thread_is_not_an_internal_error() {
+    // Linux only: there RLIMIT_NPROC also counts threads, so `ulimit -u 1` stops the thread.
     // A process limit (a container's pids limit) is the system's, not a V2 bug (INTERNALS 21).
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
@@ -1029,7 +1030,14 @@ print(go())
     assert!(stderr.contains("line 14, in <lambda>"), "{stderr}");
     assert!(stderr.contains("V2Error: V2 function 'boom' called from another thread"), "{stderr}");
     assert!(stderr.contains("V2Error: ValueError: from v2"), "{stderr}");
-    assert!(!stderr.contains("py.py") && !stderr.contains("^^"), "{stderr}");
+    assert!(!stderr.contains("py.py"), "{stderr}");
+    // No caret under a .v2 line (Python 3.13+ underlines library lines, which stay as Python shows them).
+    let lines: Vec<&str> = stderr.lines().collect();
+    for (i, l) in lines.iter().enumerate() {
+        if l.contains("thread.v2\", line") {
+            assert!(!lines.get(i + 2).is_some_and(|n| n.trim_start().starts_with(['^', '~'])), "{stderr}");
+        }
+    }
 }
 
 #[test]
@@ -1213,7 +1221,8 @@ fn a_file_name_that_isnt_utf8_is_a_usage_error() {
     use std::os::unix::ffi::OsStrExt;
     let home = TempHome::new();
     let name = std::ffi::OsStr::from_bytes(b"caf\xe9.v2");
-    std::fs::write(home.0.join(name), "print(1)\n").unwrap();
+    // macOS's APFS refuses the name itself; V2 refuses the argument before looking for a file.
+    let _ = std::fs::write(home.0.join(name), "print(1)\n");
     for args in [vec![name], vec![std::ffi::OsStr::new("check"), name]] {
         let out = v2_command(&home.0).args(&args).current_dir(&home.0).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
@@ -1379,6 +1388,27 @@ fn with_temp(cmd: &mut Command, tmp: &Path) {
 
 fn names_in(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_adapters_folder_leaves_sys_path_under_a_symlinked_temp_folder() {
+    // INTERNALS 9.3: Python resolves symlinks in sys.path[0], and macOS's temp folder is one; the
+    // adapter's own folder still leaves sys.path, so a block's `import py` can't find the adapter.
+    if !needs("py", "the_adapters_folder_leaves_sys_path_under_a_symlinked_temp_folder") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("real")).unwrap();
+    std::os::unix::fs::symlink(home.0.join("real"), home.0.join("link")).unwrap();
+    let src = "print(@py { import sys; any(p.rstrip('/').endswith('adapters') for p in sys.path) })\n";
+    std::fs::write(home.0.join("main.v2"), src).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("main.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    with_temp(&mut cmd, &home.0.join("link"));
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(0), "false\n"), "{stderr}");
 }
 
 #[test]
@@ -2046,8 +2076,11 @@ fn doctor_reports_configured_problems() {
     assert_eq!((rows["js"][0].as_str(), rows["js"][3].as_str()), ("broken", "V2_ENGINE_JS"), "{stdout}");
     assert!(stdout.contains("js: engine 'js' command '") && stdout.contains("not found (set by V2_ENGINE_JS)"), "{stdout}");
     assert_eq!(rows["ts"][0], "broken", "ts follows js:\n{stdout}");
-    let toml = home.0.join("v2.toml");
-    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", home.0.join("missing/python.exe").display(), toml.display())), "{stdout}");
+    // The folder as the OS reports the working directory: resolved on Unix (macOS's temp folder
+    // is a symlink), as given on Windows.
+    let real = if cfg!(unix) { std::fs::canonicalize(&home.0).unwrap() } else { home.0.clone() };
+    let toml = real.join("v2.toml");
+    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing/python.exe").display(), toml.display())), "{stdout}");
     assert!(stdout.contains(&format!("config file: {}", toml.display())), "{stdout}");
 }
 
@@ -2185,6 +2218,9 @@ fn run_in_home(home: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> 
 
 #[test]
 fn runs_use_the_probe_cache_and_doctor_probes_afresh() {
+    if !needs("py", "runs_use_the_probe_cache_and_doctor_probes_afresh") || !needs("js", "runs_use_the_probe_cache_and_doctor_probes_afresh") {
+        return;
+    }
     let home = TempHome::new();
     std::fs::write(home.0.join("probe.v2"), "print(engine_available(\"py\"), engine_available(\"js\"))\n").unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["probe.v2"], &[]);
