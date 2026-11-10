@@ -2665,3 +2665,123 @@ fn children_of_blocks_end_with_the_run_unless_they_left() {
     }
     assert_eq!(running(js[1]), cfg!(unix), "a detached Node child lives on only on Linux and macOS");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The docs' examples (ROADMAP release gate)
+
+/// The ```v2 examples of a Markdown file, each keyed by its last numbered heading and its place
+/// under it (`3.6-1`), or `prefix-N` when a prefix is given.
+fn doc_examples(text: &str, prefix: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut section = "0".to_string();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut fence: Option<Vec<&str>> = None;
+    for line in text.lines() {
+        if fence.is_some() {
+            if line.starts_with("```") {
+                let body = fence.take().unwrap_or_default();
+                let n = counts.entry(section.clone()).or_insert(0);
+                *n += 1;
+                let key = if prefix.is_empty() { format!("{section}-{n}") } else { format!("{prefix}-{n}") };
+                out.push((key, body.join("\n") + "\n"));
+            } else if let Some(body) = fence.as_mut() {
+                body.push(line);
+            }
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("### ").or_else(|| line.strip_prefix("## ")) {
+            let num: String = h.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            let num = num.trim_end_matches('.');
+            if num.starts_with(|c: char| c.is_ascii_digit()) {
+                section = num.to_string();
+            }
+        }
+        if line.starts_with("```v2") {
+            fence = Some(Vec::new());
+        }
+    }
+    out
+}
+
+#[test]
+fn docs_examples_run_as_documented() {
+    // ROADMAP release gate: every runnable example of DOCS.md and README.md runs and prints what
+    // tests/docs/<key>.out says, written from the docs; tests/docs/skip.txt says why the others
+    // don't. An example in neither, or a file there naming no example, fails, so they can't drift.
+    // Next to `<key>.out` (or `<key>.<os>.out`): `.args` (one per line), `.before` (V2 code put
+    // before the example), `.uses` (`file key`: another example written as that file), and
+    // fixtures/<key>/ (files copied next to it).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = root.join("tests").join("docs");
+    let mut examples = doc_examples(&std::fs::read_to_string(root.join("DOCS.md")).unwrap(), "");
+    examples.extend(doc_examples(&std::fs::read_to_string(root.join("README.md")).unwrap(), "readme"));
+    let code_of: HashMap<&str, &str> = examples.iter().map(|(k, c)| (k.as_str(), c.as_str())).collect();
+    let skip_text = std::fs::read_to_string(dir.join("skip.txt")).unwrap();
+    let skips: Vec<&str> = skip_text.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split_whitespace().next()).collect();
+    let os = if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
+    let available = engine_availability(&["py".to_string(), "js".to_string(), "ts".to_string()]).unwrap_or_else(|e| panic!("{e}"));
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default();
+    let read = |name: String| std::fs::read_to_string(dir.join(name)).ok();
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for (key, code) in &examples {
+        if skips.contains(&key.as_str()) {
+            continue;
+        }
+        let Some(want) = read(format!("{key}.{os}.out")).or_else(|| read(format!("{key}.out"))) else {
+            failures.push(format!("{key}: no tests/docs/{key}.out (write it from the docs) and not in skip.txt"));
+            continue;
+        };
+        let needs: Vec<&str> = ["py", "js", "ts"].into_iter().filter(|t| code.contains(&format!("@{t}")) || code.contains(&format!(" {t}."))).collect();
+        if let Some(t) = needs.iter().find(|t| !available[**t]) {
+            if required.split(',').any(|r| r.trim() == *t) {
+                failures.push(format!("{key}: engine {t} not available, and V2_TEST_REQUIRE requires it"));
+            } else {
+                let _ = writeln!(std::io::stderr(), "SKIP docs example {key} (engine {t} not available)");
+            }
+            continue;
+        }
+        let home = TempHome::new();
+        std::fs::write(home.0.join("main.v2"), read(format!("{key}.before")).unwrap_or_default() + code).unwrap();
+        for line in read(format!("{key}.uses")).unwrap_or_default().lines() {
+            let (file, other) = line.split_once(' ').expect("`file key` lines");
+            std::fs::write(home.0.join(file), code_of[other.trim()]).unwrap();
+        }
+        for entry in std::fs::read_dir(dir.join("fixtures").join(key)).into_iter().flatten().flatten() {
+            std::fs::copy(entry.path(), home.0.join(entry.file_name())).unwrap();
+        }
+        let args: Vec<String> = read(format!("{key}.args")).unwrap_or_default().lines().map(str::to_string).collect();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("main.v2").args(&args).current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+        if out.status.code() != Some(0) || stdout != normalize(&want) {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            failures.push(format!("{key}: exit {:?}\n--- want\n{want}--- got\n{stdout}--- stderr\n{stderr}", out.status.code()));
+        }
+        ran += 1;
+    }
+    let names_an_example = |key: &str| code_of.contains_key(key);
+    for key in &skips {
+        if !names_an_example(key) {
+            failures.push(format!("tests/docs/skip.txt names no example: {key}"));
+        }
+    }
+    let suffixes = [".windows.out", ".linux.out", ".macos.out", ".out", ".args", ".before", ".uses"];
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "skip.txt" || name == "fixtures" {
+            continue;
+        }
+        if !suffixes.iter().find_map(|s| name.strip_suffix(s)).is_some_and(names_an_example) {
+            failures.push(format!("tests/docs/{name} names no example"));
+        }
+    }
+    for entry in std::fs::read_dir(dir.join("fixtures")).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !names_an_example(&name) {
+            failures.push(format!("tests/docs/fixtures/{name} names no example"));
+        }
+    }
+    assert!(failures.is_empty(), "{} of {ran} docs examples:\n{}", failures.len(), failures.join("\n"));
+}
