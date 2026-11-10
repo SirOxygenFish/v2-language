@@ -97,7 +97,9 @@ it is loaded automatically into every session and every subagent.
   frame; stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
   `call_value(f, pos, named, at)` calls any V2 value from Rust; `line`: 12.7), `value` (`Callable` = Closure |
   Builtin | Proxy {session, unit, name} | Route {route, name} | Waiting {import, local, seen,
-  resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`),
+  resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`;
+  `Str`: an `Rc<str>` until `+=` grows it in place (`env::grow`); `DictMap`: dicts in order with
+  holes, O(1) remove),
   `env` (`Frame` = layout + slots, by position; an empty slot means not declared yet, so reads
   and writes fall back by name; a spare-array pool; the frame cycle collector of 5.1: `walk`
   (lazy for `leave` and `recheck`, everything for `collect`); `closure_dropped` from `Func::drop`
