@@ -1,0 +1,7 @@
+// requires: py
+// Each .v2 file finds a Python module in its own folder first, whatever folders other .v2 files
+// used Python from before it (DOCS 7, INTERNALS 9.3).
+import "./fixtures/a/m.v2" as a
+import "./fixtures/b/m.v2" as b
+@import { who } from py.helper_m
+print(b.who(), who())

@@ -992,7 +992,7 @@ Example: a `py` block imports the V2 function `log_line` (route 1) and exports `
 - `caps` is a list of strings. The host gates features on `modules`, `handles`, `kwargs` and `reverse` (what each enables and the error without it: 17.5) and ignores unknown caps. The py adapter sends `["modules","handles","kwargs","reverse"]`; the js adapter sends `["modules","handles","reverse"]` (no `kwargs`: JS functions take positional arguments only, 10.8).
 - **Preload noise.** Code can run before the adapter owns fd 1 (`sitecustomize`, `.pth` files, `NODE_OPTIONS=--require`). Before `hello`, a stdout line that is not a JSON object is copied to the host's stderr and startup continues. Noise with no newline of its own shares `hello`'s line, so anything in front of `{"t":"hello"` on a line is noise too (`t` is the frame's first member). The first JSON object must be a valid `hello`; any other frame, an `out` frame included, is fatal: `ProtocolError: engine 'py' sent 'ret' before hello`. From `hello` on, every line must be a frame (9.11). EOF before `hello` is a failed start (8.4).
 
-**`init`** is always the first request; the adapter answers `ret` with `value: null` (an `err` kills the worker, 8.4). Its `project_root` is the canonical folder (2.1) holding `v2.toml`, or the entry script's folder. py prepends it to `sys.path` and inserts each `.v2` file's folder before it at that file's first `load`/`module` (14.3), moving an entry that an inherited `PYTHONPATH` already put there, which gives DOCS 7's order. js does not use it: Node's own lookup from each `.v2` file's folder (12.4, 13.5), plus any inherited `NODE_PATH`, finds packages.
+**`init`** is always the first request; the adapter answers `ret` with `value: null` (an `err` kills the worker, 8.4). Its `project_root` is the canonical folder (2.1) holding `v2.toml`, or the entry script's folder. py prepends it to `sys.path`, and at each `load`/`module` of a `.v2` file puts that file's folder first and the root second (14.3), moving entries an inherited `PYTHONPATH` or another file's load already put there, which gives DOCS 7's order for every file. js does not use it: Node's own lookup from each `.v2` file's folder (12.4, 13.5), plus any inherited `NODE_PATH`, finds packages.
 
 ### 9.4 Units: `load` and `module`
 
@@ -1101,7 +1101,7 @@ The host cannot enforce either rule: it reads a worker's frames only while a req
 - Output is buffered and flushed (as `out` frames, by 14.2's `send`) at: a write ending in `\n`, the size threshold, an explicit flush, right before any other frame, and at `bye`. JavaScript has no flush, so during a request its writes go out at once, as Node's own stdout does. `out` text is sent in chunks below the frame limit. Queued releases go out as one `release` frame just before the next frame.
 - An adapter writes frames only while it is executing a host request or handling `bye`; during a request any thread may flush `out` under the send lock.
 - Output produced while idle (Python non-dispatch threads, signal handlers, JS timers) stays buffered and goes out with the next frame. Once 1 MiB of it is buffered, a Python non-dispatch thread that writes more waits until the next request starts.
-- Lone surrogates in output become U+FFFD (10.4).
+- Lone surrogates in output become U+FFFD (10.4). Output still unfinished when a request answers or calls (a JS write ending in a high surrogate, bytes written to Python's `sys.stdout.buffer` that are not a whole UTF-8 sequence) goes out then as U+FFFD, not with a later request's text; so do held bytes before a text write to the same stream.
 
 **Host side.**
 - `out` text for `"stdout"` goes through `Out`, the writer of V2's `print` (5.10); `"stderr"` text goes to the host's stderr after `Out` is flushed. A failed write to stdout (a closed pipe) is raised as `print`'s `IOError` when the request that wrote it gets its `ret`, so a program whose reader has gone stops there like one using `print`; if that request gets an `err`, that error wins. The worker can't be stopped mid-request, so a block runs to its end first.
@@ -1739,7 +1739,7 @@ the imported name).
   (step 4); a target block that is already `Failed` (step 5's `failed to load`); no candidate providing the name (step
   6); an invalid module name (13.5); a `v2` name not declared at the
   file's top level (`func`, `let`, `const`, `import`, `extern`, `@import`): `ImportError: 'x' is not a top-level name in
-  main.v2`; a constant one (`const`, `import`, `@import`) that holds something other than a function:
+  main.v2`; a constant one (`const`, `@import`; 5.6) that holds something other than a function:
   `ImportError: 'x' is a constant — pass it in as a block arg` (a `let` may still get a function before the first call).
 - A name the target exports as a constant → `ImportError: 'VERSION' is a constant — pass it in as a block arg`: at load
   when the target is `Loaded` or a module of this session (imported then), else at the first call.
