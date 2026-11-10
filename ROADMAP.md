@@ -248,11 +248,13 @@ so CI, the minimum versions and macOS are proven on what exists.
 
 - [ ] `s += piece` appends in place when V2 holds the string alone, and `dict.remove` doesn't shift
       every later entry: both stay as the docs say, only no longer quadratic (DOCS 3.3, 3.6)
-- [ ] Every runnable DOCS example of Phases 0-1 runs as a test, with fixtures
+- [x] Every runnable DOCS example of Phases 0-1 runs as a test, with fixtures: 25 of DOCS.md's 41
+      and README's run (run.rs `docs_examples_run_as_documented`, tests/docs/), `skip.txt` says why
+      the other 17 don't
 - [ ] CI green on Windows and Linux, the minimum versions (Python 3.10, Node 22.13) included, with
       `V2_TEST_REQUIRE=py,js,ts`; macOS on the owner's Mac Mini where possible, and CI's macOS job
-- [ ] A short `README.md`; DOCS and INTERNALS say plainly which chapters aren't built yet
-- [ ] VEP/1 reserves room for zero-copy data: `init` carries the host's caps, and the `buffer` cap
+- [x] A short `README.md`; DOCS and INTERNALS say plainly which chapters aren't built yet
+- [x] VEP/1 reserves room for zero-copy data: `init` carries the host's caps, and the `buffer` cap
       and `$v2` tag names are reserved, nothing more (§9.3, §10.3)
 - [ ] On the owner's explicit OK: `old/` removed, `v2-reboot` merged into `main`, tag
       `v0.1.0-alpha.1` (`v0.1.0` stays for the release after Phase 3)

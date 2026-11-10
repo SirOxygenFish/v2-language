@@ -1,0 +1,19 @@
+# DOCS.md and README.md examples that tests/run.rs `docs_examples_run_as_documented` doesn't run,
+# and why. Every other example needs its tests/docs/<key>.out, written from the docs.
+1-1      needs @rust (Phase 2); README's example covers the rest
+3.11-1   runs git: what it prints depends on the repository it runs in
+4.5-1    prints today's year
+5-2      @sh is a built-in run engine (Phase 3)
+7-1      needs the npm package lodash, which the CI matrix doesn't install
+7-2      needs numpy, which the CI matrix doesn't install
+8.3-1    needs @rust (Phase 2)
+9.2-1    needs pandas, which the CI matrix doesn't install
+11.1-1   compiled blocks (Phase 2)
+11.4-1   compiled blocks (Phase 2)
+12-1     extern (Phase 2)
+12-2     extern (Phase 2)
+13.1-1   custom engines (Phase 3)
+13.3-1   define_engine (Phase 3)
+17.2-1   needs pandas, which the CI matrix doesn't install
+17.3-1   needs @rust (Phase 2)
+17.4-1   needs the npm package slugify, which the CI matrix doesn't install

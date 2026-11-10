@@ -1,0 +1,5 @@
+let score = 80
+let queue = [1, 2]
+func handle(x) {
+    print("handled", x)
+}
