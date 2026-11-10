@@ -1,5 +1,5 @@
-# Build and test V2 on every platform (INTERNALS 22.5). The C/C++ and @rust columns of the matrix
-# are added when roadmap Phase 2 lands.
+# Build and test V2 on Windows and Linux (INTERNALS 22.5). macOS is tested on the owner's Mac (the
+# owner's choice, 2026-11-10). The C/C++ and @rust columns are added when roadmap Phase 2 lands.
 name: CI
 
 on:
@@ -16,7 +16,6 @@ jobs:
         include:
           - { name: windows-latest, os: windows-latest, python: '3.13', node: '22' }
           - { name: ubuntu-latest, os: ubuntu-latest, python: '3.13', node: '22' }
-          - { name: macos-latest, os: macos-latest, python: '3.13', node: '22' }
           - { name: minimum versions, os: ubuntu-22.04, python: '3.10', node: '22.13.0' }
     env:
       V2_TEST_REQUIRE: py,js,ts
