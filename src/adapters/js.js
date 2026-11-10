@@ -246,8 +246,9 @@ function drainOut(final = false) {
 }
 
 function send(frame) {
-  // Buffered output, then queued releases as one frame, then `frame` (14.2).
-  drainOut();
+  // Buffered output, then queued releases as one frame, then `frame` (14.2). A lone high surrogate
+  // a write ended with goes too, as U+FFFD: what a request wrote is out before its reply or call.
+  drainOut(true);
   if (fnReleases.length) writeFrame({ t: 'release', fn: fnReleases.splice(0) });
   try {
     writeFrame(frame);

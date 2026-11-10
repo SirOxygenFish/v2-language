@@ -30,10 +30,9 @@ it is loaded automatically into every session and every subagent.
   everything planned for phases 0 to 1 and check everything works as intended", then the chat
   before Phase 2. So: review rounds until two in a row find nothing, then close 1.14 (ROADMAP
   boxes and log, final report). New angles: oracle fuzzers written from DOCS, not old-vs-new.
-- PAUSED 2026-11-03 by the owner (credits needed elsewhere) during round 17, which was stopped
-  before it reported: rerun it (two oracle fuzzers: error/trace layout across languages, and the
-  waiting line's start order; workflow script under the session's workflows/ folder, or rewrite
-  it). Round 16 found 4 (fixed); the core-language oracle (62,500 programs) found nothing.
+- Rounds 16-17 used oracle fuzzers (core language: clean; boundary: 4; traces: 7; waiting line:
+  3; all fixed and committed). Round 18: output order across languages, and V2 modules. Rounds
+  still find things, so two clean ones in a row are not reached yet.
   Still to do at the end: re-measure release numbers (first py/js block, fib, loop; last: fib
   1.26 s, loop 1.04 s; parking and idle RAM were re-checked on 2026-11-03: Python 19 MB, Node
   52 MB, both 0 once parked, state kept), ROADMAP 1.14 boxes and progress log, final report. Keep reviews lean: two reviewer agents a

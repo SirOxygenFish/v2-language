@@ -217,6 +217,8 @@ if __name__ == "__main__":
         with _send_lock:
             _send_owner[0] = threading.get_ident()
             try:
+                for b in _byte_streams:
+                    b.finish()
                 drain_out()
                 ids = []
                 while _fn_releases:
@@ -291,6 +293,10 @@ if __name__ == "__main__":
                 raise TypeError("write() argument must be str, not " + type(s).__name__)
             if not s:
                 return 0
+            self.buffer.finish()  # bytes before this text that never became a character
+            return self._put(s)
+
+        def _put(self, s):
             if forked[0]:
                 # A forked child writes at the fd level, like any child of a block (9.9), also
                 # through a stream saved before the fork (a logging handler).
@@ -326,15 +332,19 @@ if __name__ == "__main__":
 
         def write(self, b):
             data = bytes(b)
-            self._text.write(self._decoder.decode(data))
+            text = self._decoder.decode(data)
+            if text:
+                self._text._put(text)
             return len(data)
 
         def flush(self):
             self._text.flush()
 
         def finish(self):
-            """At exit: a sequence left incomplete becomes U+FFFD."""
-            self._text.write(self._decoder.decode(b"", final=True))
+            """A sequence left incomplete becomes U+FFFD: before a text write to the stream, a
+            reply or call, and at exit, so it stays in program order (9.9)."""
+            if self._decoder.getstate()[0]:
+                self._text._put(self._decoder.decode(b"", final=True))
 
     _byte_streams = []
 
@@ -842,21 +852,18 @@ if __name__ == "__main__":
     # Requests
 
     _root = [None]
-    _file_dirs = set()
     units = {}  # wire unit id -> (namespace, {name: kind}); modules: (module, None) (14.2)
 
     def add_file_dir(path):
-        """A .v2 file's folder goes before the project root on sys.path at its first load (9.3)."""
+        """A .v2 file's folder, then the project root, lead sys.path at each load and module of
+        that file, so its own folder wins over another .v2 file's (9.3, DOCS 7)."""
         d = os.path.dirname(path)
-        if d in _file_dirs:
-            return
-        _file_dirs.add(d)
         root = _root[0]
-        if d == root:
-            return
-        while d in sys.path:
-            sys.path.remove(d)
-        sys.path.insert(sys.path.index(root) if root in sys.path else 0, d)
+        lead = [d] if root is None or d == root else [d, root]
+        for p in lead:
+            while p in sys.path:
+                sys.path.remove(p)
+        sys.path[0:0] = lead
 
     def check_name(k, what="block arg"):
         if not k.isidentifier() or keyword.iskeyword(k) or (k.startswith("__") and k.endswith("__")):

@@ -1,0 +1,18 @@
+// requires: js
+// A JS write that ends in a lone high surrogate goes out as U+FFFD before the block's reply or
+// a call to V2, so it keeps its place in program order and never joins a later request's text;
+// within one request a pair split across two writes still joins (INTERNALS 9.9).
+@js { process.stdout.write("A\ud83d") }
+print("B")
+@js { process.stdout.write("C\ud83d") }
+print("|v2|")
+@js { process.stdout.write("\ude00D\n") }
+@js(cb: func() { print("v2 in callback") }) {
+    process.stdout.write("E\ud83d")
+    cb()
+    process.stdout.write("\ude00F\n")
+}
+@js {
+    process.stdout.write("G\ud83d")
+    process.stdout.write("\ude00H\n")
+}
