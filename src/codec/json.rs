@@ -3,11 +3,10 @@
 
 use std::rc::Rc;
 
-use indexmap::IndexMap;
 use serde_json::{Map, Number};
 
 use crate::runtime::error::{type_error, value_error, Exec};
-use crate::runtime::value::{float_str, quoted, Value};
+use crate::runtime::value::{float_str, quoted, DictMap, Value};
 
 /// Past this many nested brackets the codec refuses input and values (10.1).
 pub const MAX_JSON_DEPTH: usize = 1_000;
@@ -130,7 +129,7 @@ fn from_json(v: serde_json::Value) -> Value {
         serde_json::Value::String(s) => Value::Str(s.into()),
         serde_json::Value::Array(items) => Value::list(items.into_iter().map(from_json).collect()),
         serde_json::Value::Object(map) => {
-            let mut out: IndexMap<Rc<str>, Value> = IndexMap::with_capacity(map.len());
+            let mut out = DictMap::with_capacity(map.len());
             for (k, v) in map {
                 out.insert(k.into(), from_json(v));
             }
@@ -350,7 +349,7 @@ mod tests {
 
     #[test]
     fn stringify_rejects_what_json_cannot_hold() {
-        let l = Value::list(vec![Value::Int(1), Value::dict(IndexMap::from([("k".into(), Value::Bytes(Rc::from(&b"x"[..])))]))]);
+        let l = Value::list(vec![Value::Int(1), Value::dict(DictMap::from_iter([("k".into(), Value::Bytes(Rc::from(&b"x"[..])))]))]);
         assert_eq!(json(&l), r#"cannot convert bytes to JSON at [1]["k"]"#);
         assert_eq!(json(&Value::Float(f64::NAN)), "cannot convert the float nan to JSON");
         let cyc = Value::list(vec![]);

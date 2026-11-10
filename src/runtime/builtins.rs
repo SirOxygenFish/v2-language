@@ -8,14 +8,12 @@ use std::rc::Rc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use indexmap::IndexMap;
-
 use super::call::ParamSpec;
 use super::error::{fail, type_error, value_error, ErrorValue, Exec, Flow};
 use super::interp::Interp;
 use super::methods::int_arg;
 use super::ops::{binop, is_handle, order, HANDLE_HINT};
-use super::value::{float_str, Value};
+use super::value::{float_str, DictMap, Str, Value};
 use crate::codec::json;
 use crate::engines::process::{self, stop_if_interrupted};
 use crate::engines::resolve::{first_program, is_drive_relative, Lookup};
@@ -518,7 +516,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         (Some(code), None) => code as i64,
         (None, None) => -1,
     };
-    let mut result = IndexMap::new();
+    let mut result = DictMap::new();
     result.insert(Rc::from("code"), Value::Int(code));
     result.insert(Rc::from("stdout"), Value::str(&String::from_utf8_lossy(&c.stdout)));
     result.insert(Rc::from("stderr"), Value::str(&String::from_utf8_lossy(&c.stderr)));
@@ -659,7 +657,7 @@ fn assert(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     if args[0].truthy() {
         Ok(Value::Null)
     } else {
-        fail("AssertionError", message)
+        fail("AssertionError", &message)
     }
 }
 
@@ -685,7 +683,7 @@ fn exit(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 }
 
 /// A `str` argument, or `TypeError: print() argument 'sep' must be a str, got int`.
-pub fn str_arg(v: &Value, func: &str, param: &str) -> Exec<Rc<str>> {
+pub fn str_arg(v: &Value, func: &str, param: &str) -> Exec<Str> {
     match v {
         Value::Str(s) => Ok(s.clone()),
         other => type_error(format!("{func}() argument '{param}' must be a str, got {}", other.type_name())),
@@ -737,5 +735,5 @@ fn error(_it: &mut Interp, mut args: Vec<Value>, _at: Span) -> Exec<Value> {
     }
     let message = str_arg(&args[1], "error", "message")?;
     let data = args.pop().unwrap_or(Value::Null);
-    Ok(Value::Error(Rc::new(ErrorValue::with_data(kind, message, data))))
+    Ok(Value::Error(Rc::new(ErrorValue::with_data((&kind).into(), (&message).into(), data))))
 }
