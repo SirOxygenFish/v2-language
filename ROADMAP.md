@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Phase 1 rework: language lifetime and speed (1.11-1.14, go-ahead 2026-10-30); Phase 2 waits for the owner after that |
-| **Next task** | 1.14 The `.v2` test-and-fix loop |
-| **Last update** | 2026-10-30: the owner paused Phase 2 to redesign language lifetime; the approved design is in DOCS 5 and INTERNALS 5.6, 8.8, 12.7, 13.4 and 15.6 |
+| **Current phase** | Phases 0 and 1 done, the 1.11-1.14 rework included; Phase 2 waits for the owner's go-ahead |
+| **Next task** | The owner's review of Phases 0-1, then 2.1 Process helper once the owner says go |
+| **Last update** | 2026-11-10: 1.14 closed by the owner after sweep round 18, without the two clean rounds its rule asked for (progress log) |
 
 ## Rules
 
@@ -47,8 +47,9 @@ until 1.1 registered py, the placeholder of rule 2 since).
 - [x] **0.1 Project skeleton:** the crate (`[workspace] exclude = ["old"]`), the §1.4
       dependencies (the vendored libffi builds under MSVC), the §1.2 module tree, the §1.3
       threads, the §19.1 argument grammar, the `tests/run.rs` harness (§22.2)
-  - [~] CI on GitHub Actions (§22.5): written, runs once the branch is pushed; the engine
-        columns of the matrix are added as Phases 1 and 2 land
+  - [~] CI on GitHub Actions (§22.5): written, runs once the branch is pushed; Phase 1's
+        Python and Node columns, `V2_TEST_REQUIRE` and the minimum-versions job are in, the
+        C/C++ and Rust columns come with Phase 2
 - [x] **0.2 Walking skeleton:** source map, spans and diagnostics (§2.1, §2.2, §2.4, §2.5);
       `print("hi")` end to end
 - [x] **0.3 Lexer:** tokens, numbers, strings, bytes, f-strings, comments (§3.1–3.5)
@@ -229,11 +230,14 @@ fast V2 runs.
   1.13 s on Linux. About 3x faster; the estimate of 5-10x was not reached
 
 ### 1.14 The `.v2` test-and-fix loop
-- [ ] `tests/sweep/`, one folder per DOCS area, expected output taken from DOCS (§22.1)
-- [ ] Every mismatch fixed at its root, with a regression test (rules 3 and 4)
-- [ ] Reviewers' hostile programs against a snapshot binary, until two rounds in a row find nothing
+- [x] `tests/sweep/`, one folder per DOCS area, expected output taken from DOCS (§22.1)
+- [x] Every mismatch fixed at its root, with a regression test (rules 3 and 4)
+- [~] Reviewers' hostile programs against a snapshot binary, until two rounds in a row find nothing:
+      18 rounds and a phase audit ran, and every one found something; the owner closed 1.14 after
+      round 18
 - **Done when:** both rounds are clean on Windows and Linux. Compiled blocks, `extern`, run engines
-  and custom engines aren't built yet, so they aren't covered
+  and custom engines aren't built yet, so they aren't covered — **closed by the owner 2026-11-10**
+  (Windows and Linux green; the two clean rounds were not reached)
 
 ---
 
@@ -392,3 +396,7 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-10-30 | 1.11: a language starts at first need. `Callable::Waiting` exists before its process does; one line in program order across languages holds top-level definition blocks and eligible `@import`s; `@import { * }` is gone. The review confirmed 22 findings with 5 root causes, all fixed: per-language lines ran blocks out of order, a block looked at its imports before the line ran, a failed line stored its error on the wrong block, a waiting `@import` saw blocks below it, and a name no block exported went unnoticed. A failure no longer stops the line. Also fixed, from Phase 1: a language refused at the depth limit could never start. A differential fuzz (each program against a copy that starts both languages first) gave 0 differences in 1,200 programs when blocks call only their own language |
 | 2026-10-30 | 1.12: an idle worker gives back its RAM, and starting languages takes half the time. First Python block 181 ms to 79 ms, first Node block 92 ms to 42 ms: child start no longer snapshots every thread on the machine, the Store placeholder is remembered, and Node loads no lazy global until a block uses it. The review found 3 problems, all fixed: a trim stalled the watchdog, a worker with over 255 processes was never trimmed, and a replaced global became enumerable. Also fixed, older: `@export { * }` skipped a function named like a Node global |
 | 2026-10-30 | 1.13: names go by position. `syntax/resolve` gives each scope a layout and each use a frame and slot; a body that needs no frame gets none; an empty slot falls back to the by-name walk, so behaviour is unchanged. `eval` and `exec` keep only the common cases, with an int fast path and arguments going straight into the frame. `fib(32)` 3.5 s to 1.23 s, 10M loop 3.2 s to 1.15 s: about 3x, short of the 5-10x estimated; link-time optimization and a smaller `Flow` gave nothing and were dropped. Old and new binaries gave byte-identical output on 3,000 random programs |
+| 2026-10-30 to 11-03 | 1.14 sweep rounds 1-15: `tests/sweep/` written from DOCS, then hostile reviewers on snapshot binaries each round. Fixed with tests that fail without them, among many smaller ones: a frame cycle collector replacing per-call checks (closures over their own frame leaked up to 312 MB per 100,000 calls; INTERNALS 5.1), errors with no V2 call to attach to printed with the user's frames, a forked Python child closing the protocol, Node's console and writes kept in program order with Node's own semantics, a worker daemon hiding a crash, `exec` 141 ms to 1 ms on WSL, interrupts that keep what was printed, probe limits that follow `startup_timeout` |
+| 2026-11-03 | The phase 0-1 audit: every R-test and ch. 21 row of Phases 0-1 has a test that checks what it says, and every DOCS example and promise was run on Windows and Linux. One wrong result (a dict key holding a non-callable foreign object overrode the dict method), five DOCS sentences fixed, 25 tests added for promises that held but had none; CI got Phase 1's columns |
+| 2026-11-03 to 11-10 | Rounds 16-18 with oracle fuzzers written from the docs: the host language (62,500 programs, nothing found), values and errors across the boundary (a V2 error passing through JS came back altered; errors now count as a nesting level), traces and the waiting line (10: JS frames of a waiting request, a failed start's line, columns and carets), output order and modules (3: Python's search order across module folders, half characters held past a reply) |
+| 2026-11-10 | 1.14 closed by the owner after round 18: every round still found something, lately rare edges. Windows: 232 unit, 318 `.v2`, 70 CLI tests; Linux: 230, 321, 75; clippy clean on both. Release numbers on 2026-11-10: `fib(32)` 1.30 s, 10M loop 1.04 s (3.5 s and 3.2 s before 1.13); first Python block 106 ms, first Node block 63 ms (every build since round 12 measures the same today, so it is the machine, not the code: 1.12 recorded 79 ms and 42 ms); an idle worker 19 MB (Python) and 52 MB (Node), 0 once parked, state kept. **Phases 0 and 1 complete**; Phase 2 waits for the owner |
