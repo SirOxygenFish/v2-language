@@ -1,0 +1,17 @@
+// requires: py
+// Bytes written to sys.stdout.buffer that are not yet a whole UTF-8 sequence end as U+FFFD before
+// the block's reply or a text write to the stream, so they keep their place in program order; a
+// sequence split across two buffer writes still joins (INTERNALS 9.9).
+@py {
+    import sys
+    sys.stdout.buffer.write(b"A\xf0\x9f")
+}
+print("B")
+@py {
+    import sys
+    sys.stdout.buffer.write(b"[\xf0\x9f")
+    sys.stdout.write("x")
+    sys.stdout.buffer.write(b"\x98\x80]\n")
+    sys.stdout.buffer.write(b"\xf0\x9f")
+    sys.stdout.buffer.write(b"\x98\x80 joined\n")
+}
