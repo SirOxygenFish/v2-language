@@ -1,0 +1,17 @@
+ab abc
+100 101 x y
+hi! hi
+abab
+70 é
+71 ü é
+100 € €€
+ab
+ab
+abcabc
+{"k": "axy", "n": 2} a
+["px", "qz"] p
+{"k": "ab"}
+900 abcabc 301 -dd true
+TypeError: unsupported operand types for +: 'str' and 'int' — use f"...${x}" or str(x)
+TypeError: cannot assign to constant 'NAME'
+v

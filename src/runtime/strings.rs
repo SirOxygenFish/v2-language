@@ -3,7 +3,7 @@
 //! User-visible string positions are code-point indexes. An 8-slot round-robin cache of
 //! `CharIndex` keeps `s[i]`, `len(s)`, slices and `index_of` from being O(n) per call.
 
-use std::rc::{Rc, Weak};
+use super::value::{Str, WeakStr};
 
 /// Strings shorter than this are counted directly, without an index.
 const SHORT: usize = 64;
@@ -11,8 +11,9 @@ const SHORT: usize = 64;
 const STEP: usize = 64;
 
 struct CharIndex {
-    /// The indexed string; the `Weak` keeps the allocation, so its address can't be reused.
-    s: Weak<str>,
+    /// The indexed string; the `Weak` keeps the allocation, so its address can't be reused, and
+    /// it stops `s += piece` from growing the string in place, which would make the entry wrong.
+    s: WeakStr,
     ascii: bool,
     chars: usize,
     /// Byte offsets of chars 0, 64, 128, …
@@ -26,16 +27,16 @@ pub struct CharCache {
 }
 
 impl CharCache {
-    fn index(&mut self, s: &Rc<str>) -> &CharIndex {
+    fn index(&mut self, s: &Str) -> &CharIndex {
         // A `Weak` keeps the whole allocation, so an entry for a string no one holds any more
         // goes now, and its memory with it.
         for slot in &mut self.slots {
-            if slot.as_ref().is_some_and(|ix| ix.s.strong_count() == 0) {
+            if slot.as_ref().is_some_and(|ix| !ix.s.alive()) {
                 *slot = None;
             }
         }
-        let ptr = Rc::as_ptr(s) as *const u8;
-        if let Some(i) = self.slots.iter().position(|slot| matches!(slot, Some(ix) if Weak::as_ptr(&ix.s) as *const u8 == ptr)) {
+        let ptr = s.addr();
+        if let Some(i) = self.slots.iter().position(|slot| matches!(slot, Some(ix) if ix.s.addr() == ptr)) {
             return self.slots[i].as_ref().expect("found above");
         }
         let ascii = s.is_ascii();
@@ -54,12 +55,12 @@ impl CharCache {
         };
         let i = self.next;
         self.next = (self.next + 1) % self.slots.len();
-        self.slots[i] = Some(CharIndex { s: Rc::downgrade(s), ascii, chars, marks });
+        self.slots[i] = Some(CharIndex { s: s.downgrade(), ascii, chars, marks });
         self.slots[i].as_ref().expect("just stored")
     }
 
     /// The number of chars.
-    pub fn len(&mut self, s: &Rc<str>) -> usize {
+    pub fn len(&mut self, s: &Str) -> usize {
         if s.len() < SHORT {
             return s.chars().count();
         }
@@ -67,7 +68,7 @@ impl CharCache {
     }
 
     /// The byte offset of char `i` (`i >= len` gives `s.len()`).
-    pub fn byte_of(&mut self, s: &Rc<str>, i: usize) -> usize {
+    pub fn byte_of(&mut self, s: &Str, i: usize) -> usize {
         if s.len() < SHORT {
             return s.char_indices().nth(i).map_or(s.len(), |(b, _)| b);
         }
@@ -83,7 +84,7 @@ impl CharCache {
     }
 
     /// The char index at byte offset `b` (a char boundary).
-    pub fn char_of(&mut self, s: &Rc<str>, b: usize) -> usize {
+    pub fn char_of(&mut self, s: &Str, b: usize) -> usize {
         if s.len() < SHORT {
             return s[..b].chars().count();
         }
@@ -103,13 +104,13 @@ mod tests {
     #[test]
     fn a_dropped_string_doesnt_stay_in_the_cache() {
         let mut cache = CharCache::default();
-        let big: Rc<str> = "x".repeat(1000).into();
+        let big: Str = "x".repeat(1000).into();
         assert_eq!(cache.len(&big), 1000);
         drop(big);
-        let other: Rc<str> = "y".repeat(1000).into();
+        let other: Str = "y".repeat(1000).into();
         cache.len(&other);
         // Each entry left points at a live string; the dropped one's allocation went with its entry.
-        assert!(cache.slots.iter().flatten().all(|ix| ix.s.strong_count() > 0));
+        assert!(cache.slots.iter().flatten().all(|ix| ix.s.alive()));
         assert_eq!(cache.slots.iter().flatten().count(), 1);
     }
 
@@ -117,7 +118,7 @@ mod tests {
     fn positions_match_a_plain_char_walk() {
         let mut cache = CharCache::default();
         for text in ["", "héllo", &"aé€😀".repeat(100), &"x".repeat(300), &format!("{}é", "a".repeat(200))] {
-            let s: Rc<str> = text.into();
+            let s: Str = text.into();
             let chars: Vec<(usize, char)> = text.char_indices().collect();
             assert_eq!(cache.len(&s), chars.len());
             for (i, (b, _)) in chars.iter().enumerate() {
@@ -132,11 +133,11 @@ mod tests {
     #[test]
     fn the_cache_tells_strings_apart() {
         let mut cache = CharCache::default();
-        let a: Rc<str> = "é".repeat(100).into();
-        let b: Rc<str> = "aé".repeat(100).into();
+        let a: Str = "é".repeat(100).into();
+        let b: Str = "aé".repeat(100).into();
         assert_eq!((cache.len(&a), cache.len(&b)), (100, 200));
         for k in 0..20 {
-            let s: Rc<str> = "€".repeat(70 + k).into();
+            let s: Str = "€".repeat(70 + k).into();
             assert_eq!(cache.len(&s), 70 + k);
         }
         assert_eq!(cache.byte_of(&a, 3), 6);

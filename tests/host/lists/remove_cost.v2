@@ -1,0 +1,18 @@
+// timeout: 60
+// `d.remove(k)` doesn't move the entries after `k` (DOCS 3.6): removing 100,000 keys from the
+// front takes well under a second, where shifting the rest each time took ~15 s or more.
+let d = {}
+for i in 0..100000 {
+    d[f"k${i}"] = i
+}
+let t0 = time()
+for i in 0..100000 {
+    if i % 10000 != 0 {
+        d.remove(f"k${i}")
+    }
+}
+let took = time() - t0
+print(len(d), d)
+d.k1 = 1
+print(d.keys()[-2:], d.k90000)
+print(took < 10)

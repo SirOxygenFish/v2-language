@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use super::error::ErrorValue;
-use super::value::{release, Callable, Dict, Func, List, Value};
+use super::value::{release, Callable, Dict, Func, List, Str, Value};
 use crate::syntax::ast::Layout;
 
 /// A frame and the frames it can see. Builtins frame ← module frame ← call frames ← block
@@ -149,6 +149,29 @@ pub fn write(env: &Env, hops: u32, index: u32, value: Value) -> Result<(), Write
     };
     drop(old);
     Ok(())
+}
+
+/// `s += piece` on the variable at a position, in place: see `grow`. `old` comes back when the
+/// slot is a constant or empty, for the usual path and its errors.
+pub fn append_at(env: &Env, hops: u32, index: u32, old: Str, piece: &str) -> Result<(), Str> {
+    match &mut frame_at(env, hops).slots.borrow_mut()[index as usize] {
+        Some(slot) if !slot.is_const => grow(&mut slot.value, old, piece),
+        _ => Err(old),
+    }
+}
+
+/// `x += piece` where `x` was `old` before `piece` was evaluated (5.3): when `target` still holds
+/// that string, `old` goes first, so the string grows in place if `target` was its only other
+/// holder. Otherwise `old` comes back.
+pub fn grow(target: &mut Value, old: Str, piece: &str) -> Result<(), Str> {
+    match target {
+        Value::Str(s) if Str::ptr_eq(s, &old) => {
+            drop(old);
+            s.append(piece);
+            Ok(())
+        }
+        _ => Err(old),
+    }
 }
 
 /// Where `name` is declared by now in `f` itself.
@@ -523,7 +546,7 @@ const HANDLE_WEIGHT: usize = 1_000;
 /// alone later.
 fn weight(v: &Value) -> Option<(usize, usize)> {
     match v {
-        Value::Str(s) if s.len() >= 16 => Some((Rc::as_ptr(s) as *const u8 as usize, s.len() / 16)),
+        Value::Str(s) if s.len() >= 16 => Some((s.addr(), s.len() / 16)),
         Value::Bytes(b) if b.len() >= 16 => Some((Rc::as_ptr(b) as *const u8 as usize, b.len() / 16)),
         Value::Handle(h) => Some((Rc::as_ptr(h) as usize, HANDLE_WEIGHT)),
         _ => None,
