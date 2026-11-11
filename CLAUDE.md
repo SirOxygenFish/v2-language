@@ -30,7 +30,8 @@ it is loaded automatically into every session and every subagent.
   or commit it; it is in `.git/info/exclude`.
 - macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
   2026-11-10); run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14) from `~/v2-test`,
-  copied with tar excluding target, old, .git, .claude. Node isn't installed there yet.
+  copied with tar excluding target, old, .git, .claude. Node 22 (owner-approved brew `node@22`) is
+  keg-only: `export PATH=/opt/homebrew/opt/node@22/bin:$PATH` first.
 - Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
   finders a round, each with a refuter. Keep them lean.
 - Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
@@ -187,4 +188,5 @@ it is loaded automatically into every session and every subagent.
 ## Reminders for later phases
 - Interrupt path (6.5): once `INTERRUPTED` is set the interpreter prints nothing, runs no
   catch/finally, spawns nothing and sends no `bye` (`shutdown_sessions` skips it).
-- CI (`.github/workflows/ci.yml`) has never run (nothing pushed); macOS is untested.
+- CI runs on pushes to `v2-reboot` (Windows, Linux, minimum versions); read results in the
+  built-in browser (the owner is signed in to GitHub there). macOS is the owner's Mac, not CI.
