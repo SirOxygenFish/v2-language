@@ -1120,33 +1120,53 @@ function compileOrExplain(src, m) {
 const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}/u;
 const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200B-\u200F]/u;
 
-function codePointAtWidth(text, width) {
+function codePointAtWidth(text, width, tab = 2) {
   // The 1-based code-point column under a caret `width` display columns in.
   let at = 0;
   let col = 1;
   for (const ch of text) {
     if (at >= width) break;
-    at += ch === '\t' ? 2 : ZERO_WIDTH.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1;
+    at += ch === '\t' ? tab : ZERO_WIDTH.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1;
     col += 1;
   }
   return col;
+}
+
+function snippetPosition(message) {
+  // Node 22's stripper reports like swc: `  x what`, then numbered source lines (` 2 | code`)
+  // with a caret line under the one that failed (`   :   ^^^`), a tab drawn 4 wide. The body
+  // line, and the caret's display width into its code.
+  const lines = message.split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    const code = /^\s*(\d+) [|\u2502] ?/.exec(lines[i - 1]);
+    const caret = lines[i].indexOf('^');
+    if (code && caret >= 0 && /^\s*[:\u00b7]/.test(lines[i])) return [Number(code[1]), Math.max(0, caret - code[0].length)];
+  }
+  return null;
 }
 
 function stripTypes(src, m) {
   try {
     return Module.stripTypeScriptTypes(src, { mode: 'strip' });
   } catch (e) {
-    const message = String(e && e.message ? e.message : e);
+    const full = String(e && e.message ? e.message : e);
+    // Node 22 puts a source snippet under a first line `  x what`; the message is that line.
+    const snippet = snippetPosition(full);
+    const what = /^\s*[x\u00d7] (.+)$/m.exec(full);
+    const message = snippet && what ? what[1].trim() : full;
     const err = new SyntaxError(e && e.code ? `${message} (${e.code})` : message);
-    // The body position: a `[line:col]` marker, or (Node 24) the stack's first line `:line`,
-    // then source lines (the one before too) and a caret under the column.
+    // The body position: the snippet's caret (Node 22), a `[line:col]` marker, or (Node 24) the
+    // stack's first line `:line`, then source lines (the one before too) and a caret under the
+    // column.
     const stack = e && typeof e.stack === 'string' ? e.stack : '';
     const marker = /\[(\d+):(\d+)\]/.exec(message);
     const header = /^[^\n]*:(\d+)\r?\n(?:[^\n]*\r?\n)*?([ \t]*)\^+[ \t]*(?:\r?\n|$)/.exec(stack);
+    const bodyLine = (n) => src.split('\n')[n - 1] ?? '';
     let line = null;
     let col = null;
-    if (marker) [line, col] = [Number(marker[1]), Number(marker[2])];
-    else if (header) [line, col] = [Number(header[1]), codePointAtWidth(src.split('\n')[Number(header[1]) - 1] ?? '', header[2].length)];
+    if (snippet) [line, col] = [snippet[0], codePointAtWidth(bodyLine(snippet[0]), snippet[1], 4)];
+    else if (marker) [line, col] = [Number(marker[1]), Number(marker[2])];
+    else if (header) [line, col] = [Number(header[1]), codePointAtWidth(bodyLine(Number(header[1])), header[2].length)];
     if (line !== null) err.v2Frame = { file: m.file, line: m.line + line - 1, col, func: null };
     err.stack = stack || 'SyntaxError: ' + err.message;
     throw err;
@@ -1407,9 +1427,11 @@ function doModule(m) {
     mod = req(m.name);
   } catch (e) {
     // Top-level await in the module or its ES module graph; when a CommonJS module it loads
-    // requires one, Node names that module on the "From" line, and the module has already run.
+    // requires one, that module has already run: Node 24 names it on a "From" line, and before
+    // that (Node 22) its code is on the error's stack.
     const from = /\n\s*From (.*\S)\s*(\n|$)/.exec(String(e && e.message));
-    if (e && e.code === 'ERR_REQUIRE_ASYNC_MODULE' && (!from || from[1] === m.from)) {
+    const ran = from ? from[1] !== m.from : frames(e).length > 0;
+    if (e && e.code === 'ERR_REQUIRE_ASYNC_MODULE' && !ran) {
       return settle(import(entryUrl(m.name, m.from)), loaded, `the module '${m.name}' uses top-level await, so its import is a Promise`);
     }
     throw e;

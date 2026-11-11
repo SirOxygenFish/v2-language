@@ -850,6 +850,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - Output is UTF-8 on every platform.
 - The value of a block is its last expression, like in a Jupyter cell
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
+- On Python 3.10 an error's column (`e.col`, the caret) is the start of its line: 3.10 doesn't
+  report columns, 3.11 and later do.
 - `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"`) instead
   of ending your program. In blocks, `__name__` is not `"__main__"`.
 - `multiprocessing` workers that are started rather than forked (the default on Windows and macOS,
@@ -880,7 +882,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   stripping. Settings go in `[engines.js]`; `ts` has none of its own.
 - Types are **not checked** — run `tsc` yourself if you want checking.
 - Stripping only removes type syntax. `enum`, `namespace` and constructor parameter properties
-  raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`): write TypeScript without them, or
+  raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on Node 22
+  `ERR_INVALID_TYPESCRIPT_SYNTAX`): write TypeScript without them, or
   use `@js`.
 - `@js` and `@ts` blocks can import from each other directly.
 

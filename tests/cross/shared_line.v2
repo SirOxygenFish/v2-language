@@ -1,8 +1,10 @@
 // requires: py js
 // When one-line blocks of two engines share a line, the error is in the one whose engine raised
-// it, at its column (INTERNALS 12.6).
+// it, at its column (INTERNALS 12.6); Python 3.10 reports no columns, so there it is the line's
+// first character.
+let cols = @py { import sys; sys.version_info >= (3, 11) }
 try {
     let a = @js { 1 }; let b = @py(x: 0) { 10 / x }
 } catch (e) {
-    print(e.foreign_type, e.lang, e.col, e.trace[0])
+    print(e.foreign_type, e.lang, e.col == (cols ? 44 : 5), e.trace[0])
 }

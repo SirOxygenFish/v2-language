@@ -1,6 +1,6 @@
 // requires: py
 // exit: 1
-// stderr: uncaught_py.v2:8:16: ForeignError: ZeroDivisionError: division by zero
+// stderr: ForeignError: ZeroDivisionError: division by zero
 // stderr: at ratio (uncaught_py.v2:8, in @py risky)
 // stderr: at uncaught_py.v2:13
 @py risky {

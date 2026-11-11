@@ -70,6 +70,6 @@ try {
         enum E { A }
     }
 } catch (e) {
-    print(e.type, e.foreign_type == "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX" || e.message.index_of("ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") >= 0)
+    print(e.type, e.message.index_of("ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") >= 0 || e.message.index_of("ERR_INVALID_TYPESCRIPT_SYNTAX") >= 0)
 }
 print(@ts { const x: number = 2; x * 2 })
