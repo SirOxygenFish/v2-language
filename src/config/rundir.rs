@@ -174,9 +174,13 @@ mod tests {
         }
         #[cfg(windows)]
         {
+            // One entry, for this user only: a SID, or its two-letter alias (`LA` when the user
+            // is the built-in Administrator, as on CI).
             let dacl = dacl_of(&dir);
-            assert!(dacl.starts_with("D:P(A;OICI;FA;;;S-1-"), "{dacl}");
-            assert_eq!(dacl.matches("(A;").count(), 1, "one entry, for this user only: {dacl}");
+            let who = dacl.strip_prefix("D:P(A;OICI;FA;;;").and_then(|r| r.strip_suffix(')')).unwrap_or_default();
+            let alias = who.len() == 2 && who.bytes().all(|b| b.is_ascii_uppercase());
+            assert!(who.starts_with("S-1-") || alias, "{dacl}");
+            assert_eq!(dacl.matches("(A;").count(), 1, "{dacl}");
         }
         std::fs::write(dir.join("file"), "x").unwrap();
         remove();

@@ -1,12 +1,12 @@
 // requires: py
 // R16: foreign frames carry .v2 lines and columns (INTERNALS 2.3, 2.5, 12.6). Lines 10-14 are
 // the block `risky`; its error is raised on line 12.
-func show(e) {
-    print(e.type, e.foreign_type, e.lang, e.line, e.col)
+func show(e, full, start) {
+    print(e.type, e.foreign_type, e.lang, e.line, col(e, full, start))
     print(e.trace)
 }
-
-
+let cols = @py { import sys; sys.version_info >= (3, 11) }  // 3.10 has no columns (12.6)
+func col(e, full, start) { return cols || e.col != start ? e.col : full }
 @py risky {
     def boom(x):
         raise ValueError(f"bad {x}")
@@ -16,13 +16,13 @@ func show(e) {
 try {
     boom(1)
 } catch (e) {
-    show(e)
+    show(e, 9, 9)
 }
 // At a block's top level, in an unlabeled block: no function name.
 try {
     @py { raise KeyError("k") }
 } catch (e) {
-    show(e)
+    show(e, 11, 5)
 }
 // Columns count characters, not UTF-8 bytes.
 @py wide {
@@ -34,7 +34,7 @@ try {
 try {
     plus(1)
 } catch (e) {
-    print(e.foreign_type, e.line, e.col)
+    print(e.foreign_type, e.line, col(e, 26, 9))
 }
 // An error inside a library: no frame maps into a block, so it points at the V2 call.
 @import { mean } from py.statistics
@@ -116,5 +116,5 @@ try {
             pass
     }
 } catch (e) {
-    print(e.foreign_type, e.line, e.col)
+    print(e.foreign_type, e.line, col(e, 11, 9))
 }

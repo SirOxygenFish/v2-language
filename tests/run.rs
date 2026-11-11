@@ -2301,8 +2301,18 @@ fn an_uncaught_foreign_error_prints_like_docs_10() {
     // columns; 3.10 would put the caret at the line's first character.
     let py = "@py risky {\n    def ratio(a, b):\n        return a / b\n    @export { ratio }\n}\n@import { ratio } from risky\n\n\nratio(1, 0)\n";
     let js = "@js calc {\n    function ratio(a, b) {\n        if (b === 0) throw new RangeError(\"division by zero\");\n        return a / b;\n    }\n    @export { ratio }\n}\n@import { ratio } from calc\nfunc go() {\n    return ratio(1, 0)\n}\ngo()\n";
+    let has_cols = needs("py", "an_uncaught_foreign_error_prints_like_docs_10") && {
+        let (code, out, err) = run_generated("cols.v2", "print(@py { import sys; sys.version_info >= (3, 11) })\n");
+        assert_eq!(code, Some(0), "{err}");
+        out == "true\n"
+    };
+    let py_expected = if has_cols {
+        "main.v2:3:16: ForeignError: ZeroDivisionError: division by zero\n    return a / b\n           ^\n  at ratio (main.v2:3, in @py risky)\n  at main.v2:9\n"
+    } else {
+        "main.v2:3:9: ForeignError: ZeroDivisionError: division by zero\n    return a / b\n    ^\n  at ratio (main.v2:3, in @py risky)\n  at main.v2:9\n"
+    };
     let cases = [
-        ("py", py, "main.v2:3:16: ForeignError: ZeroDivisionError: division by zero\n    return a / b\n           ^\n  at ratio (main.v2:3, in @py risky)\n  at main.v2:9\n"),
+        ("py", py, py_expected),
         ("js", js, "main.v2:3:28: ForeignError: RangeError: division by zero\n    if (b === 0) throw new RangeError(\"division by zero\");\n                       ^\n  at ratio (main.v2:3, in @js calc)\n  at go (main.v2:10)\n  at main.v2:12\n"),
     ];
     for (tag, src, expected) in cases {

@@ -44,3 +44,5 @@ The binary is `target/release/v2` (`v2.exe` on Windows). Blocks need Python 3.10
 - [DOCS.md](DOCS.md): the language, from the first script to the cookbook
 - [INTERNALS.md](INTERNALS.md): how it works, for contributors
 - [ROADMAP.md](ROADMAP.md): what's done and what's next
+
+V2 is under the [MIT license](LICENSE).

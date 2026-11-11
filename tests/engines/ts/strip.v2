@@ -14,11 +14,12 @@ print(typed)
 // ts and js blocks share one process.
 @ts { (process as any).v2FromTs = "set in ts"; }
 print(@js { process.v2FromTs })
-// Syntax TypeScript can't erase is a ForeignError SyntaxError naming Node's code (DOCS 5).
+// Syntax TypeScript can't erase is a ForeignError SyntaxError naming Node's code (DOCS 5), which
+// Node 22 calls ERR_INVALID_TYPESCRIPT_SYNTAX.
 try {
     @ts { enum Color { Red } }
 } catch (e) {
-    print(e.type, e.foreign_type, e.message)
+    print(e.type, e.foreign_type, e.message.replace("ERR_INVALID_TYPESCRIPT_SYNTAX", "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX"))
 }
 try {
     @ts { let x: = 1 }
