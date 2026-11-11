@@ -1555,13 +1555,15 @@ and the explicit ones, each name once.
 ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 
 - `module.stripTypeScriptTypes(src, { mode: 'strip' })` blanks types with whitespace, so positions stay exact. `enum`, value `namespace` and parameter properties are
-  not erasable and fail with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; such code is written in erasable TypeScript or in
+  not erasable and fail with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` (`ERR_INVALID_TYPESCRIPT_SYNTAX` on Node 22); such code is written in erasable TypeScript or in
   `@js`. The stripper parses the whole block, so it also throws on any syntax error, before V8 compiles anything. On
   any stripping failure the adapter sends `err` `ForeignError` (foreign_type `SyntaxError`) with one trace frame
-  `{file: m.file, line: m.line + L − 1, col: C}`, where L:C is the 1-based body position the stripper reports (a
-  `[line:col]` marker in its message, or, on Node 24, its stack's first line `:L` and a caret under column C); with no
-  readable position it sends no frame, so the error stays at the block's `@ts` (12.6). The message ends with Node's
-  code: `TypeScript enum is not supported in strip-only mode (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX)`. A `process.emitWarning` filter drops the one `ExperimentalWarning` it prints.
+  `{file: m.file, line: m.line + L − 1, col: C}`, where L:C is the 1-based body position the stripper reports (on Node 22, the caret under the
+  numbered source line of the snippet in its message, a tab drawn 4 wide, the message then being the snippet's first
+  line `x …`; a `[line:col]` marker in its message; or, on Node 24, its stack's first line `:L` and a caret under column
+  C); with no readable position it sends no frame, so the error stays at the block's `@ts` (12.6). The message ends with
+  Node's code: `TypeScript enum is not supported in strip-only mode (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX)`
+  (`ERR_INVALID_TYPESCRIPT_SYNTAX` on Node 22). A `process.emitWarning` filter drops the one `ExperimentalWarning` it prints.
 
 ### 12.6 Foreign positions to .v2 positions
 
