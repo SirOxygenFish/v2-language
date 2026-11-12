@@ -1,4 +1,0 @@
-# registry entry for std.dns
-name = "std.dns"
-path = "packages/std-dns"
-version = "0.1.0"

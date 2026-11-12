@@ -1,4 +1,0 @@
-# registry entry for std.ml.vision
-name = "std.ml.vision"
-path = "packages/std-ml_vision"
-version = "0.1.0"

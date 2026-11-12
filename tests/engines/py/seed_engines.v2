@@ -1,5 +1,5 @@
 // requires: py
-// The seed test (ROADMAP 1.9): lines 1-111 of old/v2/testsuite/test_engines.v2, ported.
+// The seed test (ROADMAP 1.9): lines 1-111 of the old implementation's test_engines.v2, ported.
 // Embedded language engine tests (@py blocks + @export/@import bridge).
 
 let passed = 0
