@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Release gate before Phase 2 (approved by the owner 2026-11-10) |
-| **Next task** | The gate's boxes below; merging and tagging wait for the owner's explicit OK |
-| **Last update** | 2026-11-10: the owner's review of Phases 0-1: the release gate, the Phase 2 and 3 order, VEP/1's reserved names and freeze (progress log) |
+| **Current phase** | Released `v0.1.0-alpha.1` (2026-11-12); Phase 2 waits for the owner's go-ahead |
+| **Next task** | `llms.txt`, then Phase 2 in the order below, when the owner says go |
+| **Last update** | 2026-11-12: the release gate is done: `v2-reboot` merged into `main`, `old/` removed, tagged `v0.1.0-alpha.1` |
 
 ## Rules
 
@@ -258,8 +258,8 @@ so CI, the minimum versions and macOS are proven on what exists.
 - [x] A short `README.md`; DOCS and INTERNALS say plainly which chapters aren't built yet
 - [x] VEP/1 reserves room for zero-copy data: `init` carries the host's caps, and the `buffer` cap
       and `$v2` tag names are reserved, nothing more (§9.3, §10.3)
-- [ ] On the owner's explicit OK: `old/` removed, `v2-reboot` merged into `main`, tag
-      `v0.1.0-alpha.1` (`v0.1.0` stays for the release after Phase 3)
+- [x] On the owner's explicit OK (2026-11-12): `old/` removed, `v2-reboot` merged into `main`, tag
+      `v0.1.0-alpha.1` (`v0.1.0` stays for the release after Phase 3), CI green on `main`
 - After the gate: `llms.txt`, a condensed spec of a few hundred lines for coding agents, its
   examples run as tests like DOCS's
 
@@ -442,3 +442,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-11-10 | 1.14 closed by the owner after round 18: every round still found something, lately rare edges. Windows: 232 unit, 318 `.v2`, 70 CLI tests; Linux: 230, 321, 75; clippy clean on both. Release numbers on 2026-11-10: `fib(32)` 1.30 s, 10M loop 1.04 s (3.5 s and 3.2 s before 1.13); first Python block 106 ms, first Node block 63 ms (every build since round 12 measures the same today, so it is the machine, not the code: 1.12 recorded 79 ms and 42 ms); an idle worker 19 MB (Python) and 52 MB (Node), 0 once parked, state kept. **Phases 0 and 1 complete**; Phase 2 waits for the owner |
 | 2026-11-10 | The owner's review of Phases 0-1, with a second assistant from the owner's chat: processes stay the only transport (no embedded runtimes), DOCS 9.1's value model is the boundary type system (no new record or result types), no restart. Approved: a release gate before Phase 2 (the two quadratic operations, DOCS examples as tests, CI on Windows, Linux and the minimum versions, macOS on the owner's Mac Mini, a README, labels on what isn't built; pushing `v2-reboot` for CI; merging and the `v0.1.0-alpha.1` tag on the owner's OK, `old/` removed at the merge); VEP/1 reserves the `buffer` cap and tag and is frozen before Phase 3 invites adapters; Phase 2 order `extern`, C (gcc and clang, then `cl`), Rust, C++ last; Phase 3 starts with the adapter profile, a conformance kit and a Lua adapter, then the built-in run engines; `llms.txt` after the gate |
 | 2026-11-11 | Release gate: everything but the merge is done. The first CI runs, and the owner's Mac Mini, found what Windows and WSL couldn't: Node 22.13 reports TypeScript strip errors with a snippet and says nothing about which module awaited in a `require()` of a TLA graph (a CommonJS module ran twice), Python 3.10 has no columns, the CI runner is an Administrator, and on macOS the adapter's own folder stayed on `sys.path` (a symlinked temp folder). All fixed with tests; `s +=` and `dict.remove` are linear (9.8 s to 0.02 s, 14.2 s to 0.13 s); the DOCS examples run as tests; MIT license. Merging, removing `old/` and the `v0.1.0-alpha.1` tag wait for the owner |
+| 2026-11-12 | On the owner's OK: `v2-reboot` fast-forwarded into `main`, `old/` removed (it stays in git history before this tag), the crate's version set to `0.1.0-alpha.1` to match the tag, CI green on `main`, tagged `v0.1.0-alpha.1`. Phase 2 waits for the owner |
