@@ -1,4 +1,0 @@
-# registry entry for std.i18n
-name = "std.i18n"
-path = "packages/std-i18n"
-version = "0.1.0"

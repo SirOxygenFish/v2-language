@@ -16,21 +16,21 @@ it is loaded automatically into every session and every subagent.
   and `bridged`), `extern`, compiled blocks, cross-language `@import`/`@export`, handles. That
   reach is the language (owner, 2026-10-24: "2 and 3 are the main base of the language").
   Bloat to trim is elsewhere: host-language extras, tooling, config, over-detailed spec text.
-- `old/` = the archived previous implementation. Reference only; never build on it.
-- Branch `v2-reboot`. Never push or merge to main unless the owner asks.
-- Status: ROADMAP "Where we are". Phase 1 was reopened on 2026-10-30 for 1.11-1.14; Phase 2 needs
-  the owner's go-ahead after that.
+- `old/` (the previous implementation) was removed at the `v0.1.0-alpha.1` release; it is in git
+  history before that tag. Never build on it.
+- Work on branch `v2-reboot` (fast-forwarded to `main` at the release). Never push or merge to
+  main unless the owner asks.
+- Status: ROADMAP "Where we are". Phase 2 needs the owner's go-ahead.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
-- Phases 0 and 1 are done (1.14 closed 2026-11-10). Now: the release gate (ROADMAP "Release
-  gate", approved 2026-11-10 with the decisions in its progress log). Pushing `v2-reboot` for CI
-  is approved; merging into `main`, removing `old/` and the `v0.1.0-alpha.1` tag wait for the
-  owner's explicit OK. Phase 2 starts only after the gate, in the ROADMAP's order.
-- `готово/` in the repo root is the owner's video folder (1.83 GB, not V2): never touch, delete
-  or commit it; it is in `.git/info/exclude`.
+- Released `v0.1.0-alpha.1` on 2026-11-12 (`main`, CI green; the crate version matches the tag).
+  The owner said to stop after the release. Next, only when the owner says go: `llms.txt`, then
+  Phase 2 in the ROADMAP's order.
+- `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
+  commit it; it is in `.git/info/exclude`.
 - macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
   2026-11-10); run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14) from `~/v2-test`,
-  copied with tar excluding target, old, .git, .claude. Node 22 (owner-approved brew `node@22`) is
+  copied with tar excluding target, .git, .claude. Node 22 (owner-approved brew `node@22`) is
   keg-only: `export PATH=/opt/homebrew/opt/node@22/bin:$PATH` first.
 - Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
   finders a round, each with a refuter. Keep them lean.
@@ -41,9 +41,8 @@ it is loaded automatically into every session and every subagent.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
   clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
   with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
-- Proposals given to the owner on 2026-11-10 (spec, documented, not fixed; await their answer):
-  `s += piece` is quadratic (1 MB string: 12 s), `dict.remove` is O(n) (100k: 15 s), imported
-  classes have no static members; also `#!` lines and narrower closure capture.
+- Open proposals from 2026-11-10 (not decided): imported classes have no static members, `#!`
+  lines, narrower closure capture. (`s +=` and `dict.remove` were fixed at the release gate.)
 - Scratchpad helpers are session-local and can vanish (the app crash of 2026-11-02 wiped them):
   bench/measure.py re-measures release numbers; rewrite fuzzers if needed. Never generate a sweep
   test's .out from the binary: its output comes from DOCS.
@@ -66,7 +65,7 @@ it is loaded automatically into every session and every subagent.
   mangle backslashes** — for any edit containing `\` write a Python script with the Write tool
   and run it, or use the Edit tool.
 - Linux check: WSL Ubuntu has cargo (nightly 1.93):
-  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude old --exclude .git --exclude .claude '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
+  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude .git --exclude .claude '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
   (the repo lives in `Desktop\My Stuff\v2-language`; quote the path, it has a space)
   (also `cargo clippy --all-targets` there: nightly has extra lints, and cfg(unix) code only
   compiles there).

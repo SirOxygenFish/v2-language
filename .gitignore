@@ -6,8 +6,6 @@ __pycache__/
 
 # Rust build artifacts
 /target/
-/old/v2/target/
-/old/v2/v2_modules
 v2.lock
 
 # OS / editor cruft
