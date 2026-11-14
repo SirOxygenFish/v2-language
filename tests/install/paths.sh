@@ -196,11 +196,11 @@ result "a damaged archive"
 
 # A startup file that can't be written is named, with the line to add; the others are written.
 fresh
-mkdir "$h/.profile"
+mkdir "$h/$login"
 install /bin/bash
 ok=yes
 expect "$code" 1 "exit code"
-says "install.sh: could not write ~/.profile, so new terminals may not find v2: add this line to it yourself:" || { echo "    no message"; ok=no; }
+says "install.sh: could not write ~/$login, so new terminals may not find v2: add this line to it yourself:" || { echo "    no message"; ok=no; }
 says "already put" && { echo "    an 'already' line"; ok=no; }
 expect "$(count "$h/.bashrc" "$line")" 1 ".bashrc lines"
 result "a startup file that can't be written"
