@@ -129,6 +129,29 @@ try {
     Exists "$h\.v2" $false 'a .v2 folder'
     Result 'a damaged archive' $r
 
+    # A folder named v2.exe where v2.exe goes is left alone; a .tar.gz names the file Windows needs.
+    $h = Fresh
+    New-Item -ItemType Directory -Force -Path "$h\.v2\bin\v2.exe" | Out-Null
+    Set-Content -LiteralPath "$h\.v2\bin\v2.exe\keep.txt" -Value 'x'
+    $r = Install $h
+    Want $r.code 1 'exit code'
+    Says $r "install.ps1: $h\.v2\bin\v2.exe is a folder, so v2.exe can't go there: move it away, then run this again"
+    Exists "$h\.v2\bin\v2.exe\keep.txt" $true 'the folder''s file'
+    Set-Content -LiteralPath "$h\v2-x86_64-unknown-linux-gnu.tar.gz" -Value 'x'
+    $r2 = Install $h @{ V2_ARCHIVE = "$h\v2-x86_64-unknown-linux-gnu.tar.gz" }
+    Want $r2.code 1 'exit code for a .tar.gz'
+    Says $r2 'install.ps1: v2-x86_64-unknown-linux-gnu.tar.gz is the download for Linux or macOS: Windows needs v2-x86_64-pc-windows-msvc.zip'
+    Result 'a folder named v2.exe, and a .tar.gz' $r
+
+    # A trailing backslash: the folder as PATH spells it.
+    $h = Fresh
+    $r = Install $h @{ V2_INSTALL_DIR = "$h\tools\" }
+    Want $r.code 0 'exit code'
+    Says $r "Installed v2 "
+    Says $r " as $h\tools\v2.exe"
+    Says $r "Add $h\tools to your PATH"
+    Result 'a trailing backslash' $r
+
     # A running v2.exe is replaced, twice while it still runs; then the old copies are removed.
     $h = Fresh
     Set-Content -LiteralPath "$h\wait.v2" -Value 'input()' -Encoding ASCII

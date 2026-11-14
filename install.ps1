@@ -48,6 +48,8 @@
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("v2-install-" + [Guid]::NewGuid().ToString('N'))
     try {
         $dir = if ($env:V2_INSTALL_DIR) { FullPath $env:V2_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.v2\bin' }
+        # As PATH spells a folder: without a trailing separator (C:\ keeps its own).
+        if ($dir.Length -gt 3) { $dir = $dir.TrimEnd('\', '/') }
         if (Test-Path -LiteralPath $dir -PathType Leaf) { Fail "V2_INSTALL_DIR names a file, not a folder: $dir" }
 
         # 1. Which binary: x64 (Windows on Arm runs it too, emulated).
@@ -63,6 +65,7 @@
             $shownArchive = Split-Path -Leaf $archive
             $again = "download $shownArchive and its .sha256 again"
             if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { Fail "V2_ARCHIVE names no file: $archive" }
+            if ($shownArchive -match '\.(tar\.gz|tgz)$') { Fail "$shownArchive is the download for Linux or macOS: Windows needs $name" }
             Copy-Item -LiteralPath $archive -Destination $zip
             if (Test-Path -LiteralPath "$archive.sha256" -PathType Leaf) {
                 Copy-Item -LiteralPath "$archive.sha256" -Destination "$zip.sha256"
@@ -106,7 +109,8 @@
         # renamed, so the old one moves aside first, to a name no other running v2.exe has.
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $dest = Join-Path $dir 'v2.exe'
-        Get-ChildItem -LiteralPath $dir -Filter 'v2.exe.old*' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $dest -PathType Container) { Fail "$dest is a folder, so v2.exe can't go there: move it away, then run this again" }
+        Get-ChildItem -LiteralPath $dir -Filter 'v2.exe.old*' -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
         $old = "$dest.old"
         if (Test-Path -LiteralPath $old) { $old = "$dest.old-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) }
         $moved = $false

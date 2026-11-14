@@ -617,7 +617,7 @@ impl Resolver<'_> {
         let Some(path) = first_program(name, self.lookup) else {
             return Err(NotFound::broken(
                 format!("engine '{}' command '{name}' not found (set by {})", spec.id, set_by(from)),
-                command.join(" "),
+                join(&command.iter().map(OsString::from).collect::<Vec<_>>()),
                 from,
             ));
         };
