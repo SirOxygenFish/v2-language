@@ -44,9 +44,10 @@ result() { # NAME, after a test that set ok
 }
 expect() { [ "$1" = "$2" ] || { echo "    $3: got '$1', want '$2'"; ok=no; }; }
 # finds SHELL FLAG [SETUP]: that shell, started with FLAG from HOME's startup files, finds this
-# v2 (after SETUP).
+# v2 (after SETUP). With a UTF-8 locale, as in a terminal: fish 3.3 misreads a non-ASCII home
+# folder in the C locale.
 finds() {
-    found=$(env -i HOME="$h" PATH="$sys" "$1" "$2" "${3:-}command -v v2" 2>/dev/null || true)
+    found=$(env -i HOME="$h" PATH="$sys" LANG=C.UTF-8 "$1" "$2" "${3:-}command -v v2" 2>/dev/null || true)
     expect "$found" "$h/.v2/bin/v2" "$1 $2 finds"
 }
 
@@ -121,7 +122,10 @@ fresh
 code=0
 out=$(cd "$h" && env -i HOME="$h" PATH="$sys" V2_ARCHIVE="$archive" sh "$root/install.sh" 2>&1) || code=$?
 expect "$code" 0 "exit code without SHELL"
-expect "$(count "$h/.profile" "$line")" 1 ".profile lines without SHELL"
+# bash as sh (macOS) sets SHELL to the user's login shell when it is unset, and install.sh follows it.
+if [ -z "$(env -i HOME="$h" PATH="$sys" sh -c 'printf %s "${SHELL:-}"')" ]; then
+    expect "$(count "$h/.profile" "$line")" 1 ".profile lines without SHELL"
+fi
 result "other shells: .profile"
 
 # V2_NO_MODIFY_PATH: 1, true, yes (any case) change nothing; other values are no.
