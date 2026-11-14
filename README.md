@@ -339,7 +339,7 @@ packages installed for them.
 **`v2` is not recognized, or `command not found`.** Open a new terminal: the PATH change reaches
 only terminals opened after the install. Still not found? Check that the folder is on your PATH
 (Windows: `$env:Path -split ';'`; macOS and Linux: `echo $PATH`), or run V2 by its full path
-(`~/.v2/bin/v2`, or `%USERPROFILE%\.v2\bin\v2.exe`).
+(`~/.v2/bin/v2`; in PowerShell, `& "$env:USERPROFILE\.v2\bin\v2.exe"`).
 
 **`EngineNotFound: engine 'py' (Python) not found`** (or `'js'`, Node.js). Install it with the
 command the message shows, open a new terminal, and run `v2 doctor`. On Windows, if Python is

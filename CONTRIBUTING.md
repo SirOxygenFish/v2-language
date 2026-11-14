@@ -31,8 +31,9 @@ cargo clippy --all-targets     # must print no warnings
 print its `.out` file; the command-line tests; and every example in DOCS.md and README.md, which
 must print what the docs say (`tests/docs/`). CI runs the same on Windows and Linux, and with the
 oldest supported Python and Node.js, for every push. `tests/install/smoke.sh` and `smoke.ps1`
-install a release archive into a fresh home folder and follow README.md's quickstart word for word
-(the release workflow runs them).
+install a release archive into a fresh home folder and follow README.md's quickstart word for word;
+`paths.sh` and `paths.ps1` check what the install scripts do with shells, settings and odd inputs
+(the release workflow runs all four; `paths.ps1` changes your user PATH only with `-ModifyPath`).
 
 ## Changing V2
 

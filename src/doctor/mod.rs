@@ -223,7 +223,8 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                         .iter()
                         .find(|(_, why)| why.starts_with(&format!("too old: {v} ")) || why.starts_with(&format!("not supported: {v} ")))
                         .map(|(p, _)| p.display().to_string()),
-                    (Status::Broken, None) => nf.skipped.iter().map(|(p, _)| p.display().to_string()).next(),
+                    // A Store placeholder isn't a program that doesn't run (7.8).
+                    (Status::Broken, None) => nf.skipped.iter().find(|(_, why)| why != "Microsoft Store placeholder").map(|(p, _)| p.display().to_string()),
                     _ => None,
                 };
                 let host = spec.session_of.as_ref().and_then(|h| rows.iter().find(|r| *r[0] == **h)).filter(|r| r[1] != "missing").map(|r| (r[2].clone(), r[4].clone()));
@@ -233,21 +234,24 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     _ => (nf.command.clone().unwrap_or_else(dash), nf.from.clone().unwrap_or_else(dash)),
                 };
                 rows.push([id.clone(), status.into(), command, version, from]);
-                skipped(&nf.skipped, &mut notes);
                 // ts is held to js's minimum (7.6).
                 let rule = spec.session_of.as_ref().and_then(|host| reg.specs().iter().find(|s| &s.id == host)).unwrap_or(spec);
-                match (nf.status, rule.min_version, &nf.command) {
-                    (Status::Missing, _, _) => notes.push(format!("{id}: not found; install: {}", install_hint(&id))),
-                    (Status::Old(v), Some(min), None) if v >= min => notes.push(format!(
-                        "{id}: not supported: found {v}, which has no type stripping; V2 needs {}; install: {}",
-                        rule.needs(min),
-                        install_hint(&id)
-                    )),
-                    (Status::Old(v), Some(min), None) => {
-                        notes.push(format!("{id}: too old: found {v}, V2 needs {}; install: {}", rule.needs(min), install_hint(&id)))
+                let note = match (nf.status, rule.min_version, &nf.command) {
+                    (Status::Missing, _, _) => format!("not found; install: {}", install_hint(&id)),
+                    (Status::Old(v), Some(min), None) if v >= min => {
+                        format!("not supported: found {v}, which has no type stripping; V2 needs {}; install: {}", rule.needs(min), install_hint(&id))
                     }
-                    _ => notes.push(format!("{id}: {}", nf.message.lines().next().unwrap_or_default())),
-                }
+                    (Status::Old(v), Some(min), None) => format!("too old: found {v}, V2 needs {}; install: {}", rule.needs(min), install_hint(&id)),
+                    _ => nf.message.lines().next().unwrap_or_default().to_string(),
+                };
+                // The note, then the programs skipped, which its "(see why below)" points at; ts's
+                // reasons are js's, listed above it.
+                let note = match (&spec.session_of, nf.skipped.is_empty()) {
+                    (Some(host), true) => note.replace(" (see why below)", &format!(" (see {host} above)")),
+                    _ => note,
+                };
+                notes.push(format!("{id}: {note}"));
+                skipped(&nf.skipped, &mut notes);
                 not_ready.push(id);
             }
         }

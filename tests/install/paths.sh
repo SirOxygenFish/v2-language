@@ -194,6 +194,71 @@ expect "$(ls -A "$h")" "v2.tar.gz
 v2.tar.gz.sha256" "files written"
 result "a damaged archive"
 
+# A startup file that can't be written is named, with the line to add; the others are written.
+fresh
+mkdir "$h/.profile"
+install /bin/bash
+ok=yes
+expect "$code" 1 "exit code"
+says "install.sh: could not write ~/.profile, so new terminals may not find v2: add this line to it yourself:" || { echo "    no message"; ok=no; }
+says "already put" && { echo "    an 'already' line"; ok=no; }
+expect "$(count "$h/.bashrc" "$line")" 1 ".bashrc lines"
+result "a startup file that can't be written"
+
+# Only the exact line counts: one commented out is not there.
+fresh
+printf '# %s\n' "$line" >"$h/.bashrc"
+install /bin/bash
+ok=yes
+expect "$(grep -cxF "$line" "$h/.bashrc")" 1 "exact .bashrc lines"
+result "a commented-out line"
+
+# The folder as PATH spells it: a trailing slash or a . changes nothing.
+fresh
+mkdir "$h/tools"
+install /bin/bash V2_INSTALL_DIR="$h/tools/"
+ok=yes
+says " as $h/tools/v2" || { echo "    not installed as $h/tools/v2"; ok=no; }
+install /bin/bash V2_INSTALL_DIR="$h/tools"
+expect "$(count "$h/.bashrc" 'export PATH="$HOME/tools:$PATH"')" 1 ".bashrc lines"
+expect "$(grep -c 'tools/:' "$h/.bashrc")" 0 "lines with tools/"
+install /bin/bash V2_INSTALL_DIR="$h/tools/" PATH="$h/tools:$sys" V2_NO_MODIFY_PATH=1
+says "Note:" && { echo "    a note about this v2"; ok=no; }
+says "Add " && { echo "    an 'Add' line though the folder is on PATH"; ok=no; }
+mkdir "$h/dot"
+(cd "$h/dot" && env -i HOME="$h" SHELL=/bin/bash PATH="$sys" V2_ARCHIVE="$archive" V2_INSTALL_DIR=. V2_NO_MODIFY_PATH=1 sh "$root/install.sh" >/dev/null 2>&1) || ok=no
+expect "$([ -x "$h/dot/v2" ] && echo yes || echo no)" yes "V2_INSTALL_DIR=. installs there"
+result "a trailing slash and ."
+
+# A folder named v2 where v2 goes is left alone.
+fresh
+mkdir -p "$h/.v2/bin/v2"
+install /bin/bash
+ok=yes
+expect "$code" 1 "exit code"
+says "$h/.v2/bin/v2 is a folder, so v2 can't go there: move it away, then run this again" || { echo "    no message"; ok=no; }
+expect "$(ls -A "$h/.v2/bin/v2")" "" "the folder's files"
+result "a folder named v2"
+
+# An archive for another computer, or for Windows, names the file this computer needs.
+case "$os" in
+Darwin) mine=v2-aarch64-apple-darwin.tar.gz other=x86_64-unknown-linux-gnu ;;
+*) mine=v2-x86_64-unknown-linux-gnu.tar.gz other=aarch64-apple-darwin ;;
+esac
+fresh
+mkdir -p "$h/stage/v2-$other"
+printf '#!/bin/sh\n' >"$h/stage/v2-$other/v2"
+tar -czf "$h/v2-$other.tar.gz" -C "$h/stage" "v2-$other"
+install /bin/bash V2_ARCHIVE="$h/v2-$other.tar.gz"
+ok=yes
+expect "$code" 1 "exit code"
+says "v2-$other.tar.gz is the download for another computer ($other): this one needs $mine" || { echo "    no message"; ok=no; }
+cp "$archive" "$h/v2-x86_64-pc-windows-msvc.zip"
+install /bin/bash V2_ARCHIVE="$h/v2-x86_64-pc-windows-msvc.zip"
+expect "$code" 1 "exit code for a .zip"
+says "v2-x86_64-pc-windows-msvc.zip is the download for Windows: this computer needs $mine" || { echo "    no message for a .zip"; ok=no; }
+result "an archive for another computer"
+
 # Another v2 that comes first.
 fresh
 mkdir "$h/old"
