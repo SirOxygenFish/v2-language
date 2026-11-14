@@ -264,6 +264,10 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     self.push(Tok::Semi, m);
                 }
+                // A `#!` first line, as Unix scripts start, isn't read either (3.2).
+                '#' if self.pos == 0 && self.src[self.pos..].starts_with("#!") => {
+                    return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint("V2 doesn't read #! lines: delete it, and run the script with v2 FILE"))
+                }
                 '#' => {
                     return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint("comments start with //"))
                 }
@@ -479,7 +483,12 @@ impl<'a> Lexer<'a> {
             }
         }
         let c = self.peek().unwrap_or(' ');
-        Err(Diag::new(format!("unexpected character '{c}'"), self.span_here(1)))
+        let (shown, hint) = shown_char(c);
+        let d = Diag::new(format!("unexpected character {shown}"), self.span_here(1));
+        Err(match hint {
+            Some(h) => d.hint(h),
+            None => d,
+        })
     }
 
     // -- words: identifiers, keywords, string prefixes ----------------------------------------
@@ -1258,6 +1267,24 @@ impl<'a> Lexer<'a> {
 }
 
 /// `_` only between two digits (3.4).
+/// A character as `unexpected character …` names it (3.2), with a hint for the ones that come
+/// from copying code out of a web page, a chat or a word processor: invisible ones by code point,
+/// look-alikes of a quote, a minus or a space with what to type instead.
+pub fn shown_char(c: char) -> (String, Option<&'static str>) {
+    let code = format!("U+{:04X}", c as u32);
+    match c {
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' => (format!("{code} (a no-break space)"), Some("type a plain space instead")),
+        '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => (format!("{code} (an invisible zero-width character)"), Some("delete it")),
+        '\u{0000}' => (format!("{code} (a NUL byte)"), Some("is this a text file? V2 scripts are plain UTF-8 text")),
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => {
+            (format!("'{c}' (a curly quote)"), Some("use a straight quote: \" or '"))
+        }
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), Some("use a plain minus sign: -")),
+        c if c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') => (code, None),
+        c => (format!("'{c}'"), None),
+    }
+}
+
 fn check_underscores(digits: &str) -> Result<(), &'static str> {
     if digits.starts_with('_') || digits.ends_with('_') || digits.contains("__") {
         return Err("`_` in a number must sit between two digits");
@@ -1581,6 +1608,21 @@ let n = names
         assert_eq!(kinds("a /* c\n */ b"), "a NL b EOF");
         assert_eq!(err("/* never"), "unterminated /* comment");
         assert_eq!(err("# c"), "unexpected character '#'");
+    }
+
+    #[test]
+    fn pasted_characters_are_named() {
+        // What copying code out of a web page, a chat or a word processor brings in (3.2).
+        assert_eq!(err("print(\u{201C}hi\u{201D})"), "unexpected character '\u{201C}' (a curly quote)");
+        assert_eq!(err("let\u{A0}x = 1"), "unexpected character U+00A0 (a no-break space)");
+        assert_eq!(err("let x = 5 \u{2013} 3"), "unexpected character '\u{2013}' (a dash)");
+        assert_eq!(err("x\u{200B}"), "unexpected character U+200B (an invisible zero-width character)");
+        assert_eq!(err("\u{0}"), "unexpected character U+0000 (a NUL byte)");
+        assert_eq!(err("x = 1\u{1B}[31m"), "unexpected character U+001B");
+        assert_eq!(err("\u{202E}"), "unexpected character U+202E");
+        assert_eq!(shown_char('\u{201C}').1, Some("use a straight quote: \" or '"));
+        assert_eq!(shown_char('\u{A0}').1, Some("type a plain space instead"));
+        assert_eq!(shown_char('$'), ("'$'".to_string(), None));
     }
 
     #[test]

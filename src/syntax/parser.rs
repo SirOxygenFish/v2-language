@@ -26,11 +26,97 @@ pub const COMPILED_TAGS: &[&str] = &["c", "cpp", "cxx", "rust", "rs"];
 
 pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag> {
     let mut p = Parser { sm, toks, pos: 0, depth: 0, links: 0, peak: 0 };
-    let stmts = p.stmts(false)?;
-    if !matches!(p.peek(), Tok::Eof) {
-        return Err(Diag::new(format!("unexpected {}", p.peek()), p.span()));
+    let result = p.stmts(false).and_then(|stmts| match p.peek() {
+        Tok::Eof => Ok(stmts),
+        other => Err(Diag::new(format!("unexpected {other}"), p.span())),
+    });
+    result.map_err(|d| match d.hint {
+        None => match habit(&p.toks, d.span) {
+            Some(h) => d.hint(h),
+            None => d,
+        },
+        Some(_) => d,
+    })
+}
+
+/// What V2 writes for Python or JavaScript written out of habit, from the tokens where a syntax
+/// error stopped (4.3): `def f(`, `var x`, `and`, `x is None`, `x => …`, `i++`, `i--`, `===`,
+/// `if x:`, `function(x) {`.
+fn habit(toks: &[Token], at: Span) -> Option<String> {
+    let i = toks.iter().position(|t| t.span.file == at.file && t.span.lo == at.lo)?;
+    let tok = |back: usize| i.checked_sub(back).map(|j| &toks[j].tok);
+    let word = |back: usize| match tok(back) {
+        Some(Tok::Ident(w)) => Some(&**w),
+        _ => None,
+    };
+    let op = |back: usize| match tok(back) {
+        Some(Tok::Op(o)) => Some(*o),
+        _ => None,
+    };
+    let ends_line = matches!(tok(0), Some(Tok::Newline | Tok::Semi | Tok::Eof | Tok::RBrace));
+    let hint = match (word(1), word(0), op(0)) {
+        (Some("fn" | "def" | "function" | "fun" | "sub"), Some(name), _) => format!("V2 writes functions as func {name}(a, b) {{ ... }}"),
+        (Some("var"), Some(_), _) => "V2 declares variables with let: let x = 1".into(),
+        (_, Some("and" | "or"), _) => "V2 writes and, or and not as &&, || and !".into(),
+        (_, Some("is"), _) => "V2 compares with == and !=, as in x == null".into(),
+        (_, _, Some(Op::FatArrow)) => "V2 writes an anonymous function as func(x) => x * 2".into(),
+        (_, _, Some(Op::Plus)) if op(1) == Some(Op::Plus) => "V2 has no ++: write x += 1".into(),
+        _ if ends_line && op(1) == Some(Op::Minus) && op(2) == Some(Op::Minus) => "V2 has no --: write x -= 1".into(),
+        (_, _, Some(Op::Eq)) if op(1) == Some(Op::DotDot) => "a..b leaves out b: for 1, 2 and 3 write 1..4".into(),
+        (_, _, Some(Op::Eq)) if word(1).is_some() && matches!(op(2), Some(Op::Comma | Op::LParen)) => {
+            format!("V2 writes a named argument as name: value, as in f(x, {}: 2)", word(1).unwrap_or("name"))
+        }
+        (_, Some(_), _) if matches!(tok(1), Some(Tok::Kw(Kw::Catch))) => "V2 writes catch (e) { ... }".into(),
+        (_, _, Some(Op::Eq)) if op(1) == Some(Op::EqEq) => "V2 compares with == (there is no ===)".into(),
+        (_, _, Some(Op::Eq)) if op(1) == Some(Op::Ne) => "V2 compares with != (there is no !==)".into(),
+        // `:` continues its line (3.3), so the next token is on a later line.
+        (_, _, Some(Op::Colon)) if toks.get(i + 1).is_none_or(|t| matches!(t.tok, Tok::Eof) || t.span.line > at.line) => {
+            "V2 puts a block in { }, not after a colon: if x > 1 { ... }".into()
+        }
+        _ if matches!(tok(0), Some(Tok::LBrace(_))) && anonymous_function_before(toks, i) => {
+            "V2 writes an anonymous function as func(x) { ... }".into()
+        }
+        _ => return None,
+    };
+    Some(hint)
+}
+
+/// `{name}` (or `{a.b}`) in an f-string's text, Python's placeholder for V2's `${name}`: the
+/// name, unless the braces are doubled (`{{name}}`, a template for something else).
+fn python_placeholder(parts: &[FPartTok]) -> Option<String> {
+    for part in parts {
+        let FPartTok::Lit(s) = part else { continue };
+        let b = s.as_bytes();
+        let mut i = 0;
+        while let Some(off) = s[i..].find('{') {
+            let open = i + off;
+            let Some(len) = s[open + 1..].find('}') else { break };
+            let inner = &s[open + 1..open + 1 + len];
+            // `{{x}}` is a template for something else, and `${x}` here was written `\${x}`.
+            let doubled = (open > 0 && matches!(b[open - 1], b'{' | b'$')) || b.get(open + 2 + len) == Some(&b'}');
+            if !doubled && !inner.is_empty() && inner.split('.').all(super::lexer::is_plain_name) {
+                return Some(inner.to_string());
+            }
+            i = open + 1;
+        }
     }
-    Ok(stmts)
+    None
+}
+
+/// Whether the line before `toks[i]` (a `{`) is `function(…)` or `fn(…)`, another language's
+/// anonymous function.
+fn anonymous_function_before(toks: &[Token], i: usize) -> bool {
+    let line = toks[i].span.line;
+    let mut j = i;
+    while j > 0 && toks[j - 1].span.line == line {
+        j -= 1;
+        if let (Tok::Ident(w), Some(Tok::Op(Op::LParen))) = (&toks[j].tok, toks.get(j + 1).map(|t| &t.tok)) {
+            if matches!(&**w, "function" | "fn") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A parameter list: the parameters with their defaults, and `...rest`.
@@ -607,11 +693,25 @@ impl<'a> Parser<'a> {
             Ok(EngineImport { items, selector, span: start.to(self.prev_span()) })
         } else {
             let selector = self.selector()?;
+            // `@import math from py.math`: names go in braces (Python's `from m import x` habit).
+            if let (Selector::Label { label }, true) = (&selector, self.at_kw(Kw::From)) {
+                let name = label.text.clone();
+                return Err(Diag::new("expected `{` before the names to import", label.span)
+                    .hint(format!("write @import {{ {name} }} from …, or @import py.{name} as {name} for a whole module")));
+            }
             if !matches!(selector, Selector::Module { .. }) {
                 return Err(Diag::new("only a package selector (py.name, js.name) can be imported as a whole module", self.prev_span()));
             }
             if !self.at_kw(Kw::As) {
-                return Err(Diag::new("expected `as NAME` after the package selector", self.span()));
+                let d = Diag::new("expected `as NAME` after the package selector", self.span());
+                return Err(match &selector {
+                    Selector::Module { lang, path } => {
+                        let alias = path.last().map(|n| n.text.to_string()).filter(|n| super::lexer::is_plain_name(n)).unwrap_or_else(|| "m".into());
+                        let dotted: Vec<&str> = path.iter().map(|n| &*n.text).collect();
+                        d.hint(format!("@import {}.{} as {alias}", lang.text, dotted.join(".")))
+                    }
+                    _ => d,
+                });
             }
             self.bump();
             let alias = self.expect_name("a name after `as`")?;
@@ -1123,7 +1223,13 @@ impl<'a> Parser<'a> {
             Tok::Float(x) => ExprKind::Float(x),
             Tok::Str(s) => ExprKind::Str(s),
             Tok::Bytes(b) => ExprKind::Bytes(b),
-            Tok::FStr(parts) => ExprKind::FStr(self.fstring(parts)?),
+            Tok::FStr(parts) => {
+                if let Some(name) = python_placeholder(&parts) {
+                    return Err(Diag::new(format!("{{{name}}} in an f-string is printed as it is"), t.span)
+                        .hint(format!("V2's placeholders are ${{{name}}}")));
+                }
+                ExprKind::FStr(self.fstring(parts)?)
+            }
             Tok::Ident(n) if &*n == "lambda" && self.lambda_follows() => {
                 return Err(Diag::new("V2 has no lambda keyword", t.span).hint("anonymous functions are written func(x) => …"));
             }
@@ -1438,6 +1544,39 @@ extern "m" as m { double cos(double x); }
         let id = sm.add(std::path::PathBuf::from("t.v2"), "t.v2".into(), src);
         let toks = super::super::lexer::lex(&sm, id).unwrap();
         parse_program(&sm, toks).unwrap_err()
+    }
+
+    #[test]
+    fn python_and_javascript_habits_get_hints() {
+        // 2.4: what V2 writes instead, from the tokens where the parser stopped.
+        let hint = |src: &str| diag(src).hint.unwrap_or_else(|| panic!("no hint for {src:?}"));
+        assert_eq!(hint("def add(a, b):\n    return a"), "V2 writes functions as func add(a, b) { ... }");
+        assert_eq!(hint("function add(a, b) {\n}"), "V2 writes functions as func add(a, b) { ... }");
+        assert_eq!(hint("fn add(a) {\n}"), "V2 writes functions as func add(a, b) { ... }");
+        assert_eq!(hint("var x = 1"), "V2 declares variables with let: let x = 1");
+        assert_eq!(hint("print(a and b)"), "V2 writes and, or and not as &&, || and !");
+        assert_eq!(hint("if a or b {\n}"), "V2 writes and, or and not as &&, || and !");
+        assert_eq!(hint("if x is null {\n}"), "V2 compares with == and !=, as in x == null");
+        assert_eq!(hint("let f = x => x * 2"), "V2 writes an anonymous function as func(x) => x * 2");
+        assert_eq!(hint("i++"), "V2 has no ++: write x += 1");
+        assert_eq!(hint("i--\n"), "V2 has no --: write x -= 1");
+        assert_eq!(hint("print(1 === 1)"), "V2 compares with == (there is no ===)");
+        assert_eq!(hint("print(1 !== 2)"), "V2 compares with != (there is no !==)");
+        assert_eq!(hint("for i in 1..=3 {\n}"), "a..b leaves out b: for 1, 2 and 3 write 1..4");
+        assert_eq!(hint("dumps(d, indent=2)"), "V2 writes a named argument as name: value, as in f(x, indent: 2)");
+        assert_eq!(hint("try {\n} catch e {\n}"), "V2 writes catch (e) { ... }");
+        assert_eq!(hint("if x > 1:\n    print(x)"), "V2 puts a block in { }, not after a colon: if x > 1 { ... }");
+        assert_eq!(hint("let f = function(x) {\n    return x\n}"), "V2 writes an anonymous function as func(x) { ... }");
+        // Python's f-string braces, and the import forms.
+        let d = diag("let n = 1\nprint(f\"hello {n}\")");
+        assert_eq!((d.message.as_str(), d.hint.as_deref()), ("{n} in an f-string is printed as it is", Some("V2's placeholders are ${n}")));
+        assert!(parse_str("print(f\"{{n}} and \\${n} and ${1}\")").is_ok(), "doubled and escaped braces are text");
+        let d = diag("@import math from py.math");
+        assert_eq!(d.message, "expected `{` before the names to import");
+        assert_eq!(d.hint.as_deref(), Some("write @import { math } from …, or @import py.math as math for a whole module"));
+        assert_eq!(diag("@import py.os.path").hint.as_deref(), Some("@import py.os.path as path"));
+        // An error with nothing of the kind keeps no hint.
+        assert_eq!(diag("let = 1").hint, None);
     }
 
     #[test]

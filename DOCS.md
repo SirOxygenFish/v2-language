@@ -325,6 +325,10 @@ sits on its own line, and its indentation is removed from every line. The result
 Escapes: `\n` `\t` `\r` `\\` `\"` `\'` `\0` `\$` `\xNN` `\u{1F600}`. Any other escape is a syntax
 error (so a typo like `"\d"` is caught instead of silently kept).
 
+In an f-string, `{name}` without the `$` is Python's spelling, and a `SyntaxError`
+(`{name} in an f-string is printed as it is`, hint `V2's placeholders are ${name}`), so it can't
+print its braces by mistake. Doubled braces (`{{name}}`) and an escaped `\${name}` are text.
+
 Strings are indexed by character: `"héllo"[1]` is `"é"`, `"hello"[-1]` is `"o"`,
 `"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`.
 
@@ -866,8 +870,9 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
 - On Python 3.10 an error's column (`e.col`, the caret) is the start of its line: 3.10 doesn't
   report columns, 3.11 and later do.
-- `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"`) instead
-  of ending your program. In blocks, `__name__` is not `"__main__"`.
+- `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"` and the
+  message `sys.exit(3) can't end V2's Python engine; raise an error instead`) instead of ending
+  your program; V2's own `exit(3)` ends it. In blocks, `__name__` is not `"__main__"`.
 - `multiprocessing` workers that are started rather than forked (the default on Windows and macOS,
   and on Linux from Python 3.14) can't load functions defined in `@py` blocks, and a pool using
   them never finishes: put them in a `.py` file next to the `.v2` file and import them from there.
@@ -1054,6 +1059,7 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 | -------------------------------------- | ----------------------------------------------------------- |
 | name not exported                      | `'x' is not exported by 'stats' (did the block @export it?)` |
 | selector matches nothing               | `No engine exports found for selector 'stats'`              |
+| the block has no `@export`             | `block 'stats' exports nothing: add @export { mean } inside it` |
 | block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
 | block not loaded yet when a block calls `x` | `block 'stats' has not run yet — 'x' can't be called before it loads` |
 | block failed to load                   | `block 'stats' failed to load: <the original error>`        |
@@ -1190,6 +1196,11 @@ print(by_age.map(func(p) => p.name))      // ["Linus", "Ada", "Grace"]
 ```
 
 Python calls the V2 function once per item; each call crosses back into V2 and returns.
+
+JavaScript calls a callback with everything it has (`xs.map(f)` passes the item, its index and the
+array), and a JavaScript function ignores what it doesn't take. A V2 function called from
+JavaScript does the same, so `xs.map(f)` and `xs.forEach(f)` work with `func f(x)`; one with
+`...rest` gets them all. From Python, extra arguments are an `ArityError`, as they are in Python.
 
 A V2 function that foreign code keeps (a listener, a callback stored on an object) keeps the
 function that made it alive, with all its variables, until the foreign side lets go. Python lets
@@ -1565,8 +1576,8 @@ block's language; rename it with `as` otherwise. Breaking these rules is a `Synt
 
 ## 12. Native libraries: `extern`
 
-> **Not built yet** (ROADMAP Phase 2): `extern` raises `Error: extern (roadmap phase 2) doesn't run yet in this
-> build` for now.
+> **Not built yet** (ROADMAP Phase 2): `extern` raises `Error: extern (native libraries) isn't in
+> this version of V2 yet` for now.
 
 `extern` calls functions in an **existing** native library (a `.dll`, `.so` or `.dylib`) with no
 compiler involved. You describe the functions with ordinary C declarations — copy them straight
@@ -1795,6 +1806,7 @@ saved).
 | `2`       | usage or configuration error                                             |
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
 | `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped, what was printed is still written |
+| `141`     | the output's reader went away (`v2 x.v2 \| head`): the run stops quietly, like Ctrl+C but with nothing more to show |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 
 ---

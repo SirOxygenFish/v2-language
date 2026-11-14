@@ -94,11 +94,48 @@ fn stack_here() -> usize {
 fn no_member(o: &Value, what: &str, n: &str) -> String {
     let msg = format!("{} has no {what} '{n}'", o.type_name());
     match o {
+        // A block's unit is `file:offset`; a package's is `py:name` (13.5), which can be imported
+        // whole.
+        Value::Func(f) if matches!(&**f, Callable::Proxy { unit, .. } if unit.starts_with(|c: char| c.is_ascii_digit())) => {
+            format!("{msg} — an imported class is only a function here; @export a function from the block that uses {}.{n}", f.name())
+        }
         Value::Func(f) if matches!(**f, Callable::Proxy { .. }) => {
             format!("{msg} — an imported class is only a function here; @import its module as m to reach m.{}.{n}", f.name())
         }
-        _ => msg,
+        _ => match habit(o, n) {
+            Some(h) => format!("{msg} — {h}"),
+            None => msg,
+        },
     }
+}
+
+/// What V2 writes for a Python or JavaScript method or field name on its own values (5.9):
+/// `xs.append` is `xs.push`, `s.length` is `len(s)`.
+fn habit(o: &Value, n: &str) -> Option<&'static str> {
+    let sized = matches!(o, Value::Str(_) | Value::List(_) | Value::Dict(_) | Value::Bytes(_));
+    let seq = matches!(o, Value::Str(_) | Value::List(_));
+    Some(match n {
+        "length" | "size" | "len" | "__len__" if sized => "V2 writes len(x)",
+        "includes" | "contains" | "__contains__" if seq => "V2 writes item in x",
+        "indexOf" | "index" | "find" if seq => "did you mean 'index_of'?",
+        "toString" | "__str__" | "to_string" => "V2 writes str(x)",
+        "append" | "add" if matches!(o, Value::List(_)) => "did you mean 'push'?",
+        "extend" | "concat" if matches!(o, Value::List(_)) => "V2 joins lists with +",
+        "forEach" | "each" if matches!(o, Value::List(_)) => "V2 loops with for item in x { ... }",
+        "sorted" if matches!(o, Value::List(_)) => "did you mean 'sort'?",
+        "reversed" if matches!(o, Value::List(_)) => "did you mean 'reverse'?",
+        "toUpperCase" if matches!(o, Value::Str(_)) => "did you mean 'upper'?",
+        "toLowerCase" if matches!(o, Value::Str(_)) => "did you mean 'lower'?",
+        "strip" | "trimStart" | "trimEnd" | "lstrip" | "rstrip" if matches!(o, Value::Str(_)) => "did you mean 'trim'?",
+        "startsWith" | "startswith" if matches!(o, Value::Str(_)) => "did you mean 'starts_with'?",
+        "endsWith" | "endswith" if matches!(o, Value::Str(_)) => "did you mean 'ends_with'?",
+        "splitlines" if matches!(o, Value::Str(_)) => "did you mean 'lines'?",
+        "format" if matches!(o, Value::Str(_)) => "V2 formats with f-strings: f\"${x}\"",
+        "items" | "entries" if matches!(o, Value::Dict(_)) => "V2 loops over a dict with for key, value in d { ... }",
+        "has" | "has_key" | "hasOwnProperty" | "containsKey" if matches!(o, Value::Dict(_)) => "V2 writes key in d",
+        "pop" | "delete" if matches!(o, Value::Dict(_)) => "did you mean 'remove'?",
+        _ => return None,
+    })
 }
 
 /// `x += piece` with a str `x` and `piece` (5.3): `append` puts `piece` on the target's string
@@ -311,9 +348,10 @@ impl Interp {
         self.calls.len()
     }
 
-    /// Temporary until the roadmap milestone named in `what` lands.
+    /// Temporary until the roadmap milestone of `what` lands: said the way the user sees it, as
+    /// for the tags of later phases (7.3).
     pub(crate) fn not_yet(&self, what: &str, span: Span) -> Flow {
-        let msg = format!("{what} doesn't run yet in this build");
+        let msg = format!("{what} isn't in this version of V2 yet");
         self.raise(Flow::Error(Rc::new(ErrorValue::new("Error", msg))), span)
     }
 
@@ -442,7 +480,7 @@ impl Interp {
                 declare_at(env, alias.slot, ns, false);
             }
             StmtKind::EngineImport(imp) => self.exec_import(imp, env)?,
-            StmtKind::Extern(_) => return Err(self.not_yet("extern (roadmap phase 2)", Span { hi: s.span.lo + 6, ..s.span })),
+            StmtKind::Extern(_) => return Err(self.not_yet("extern (native libraries)", Span { hi: s.span.lo + 6, ..s.span })),
             StmtKind::Block(b) => {
                 self.exec_block(b, env, false)?;
             }
@@ -484,6 +522,17 @@ impl Interp {
     fn not_declared<T>(&self, name: &str, span: Span, env: &Env, assigning: bool) -> Exec<T> {
         let names = env::visible_names(env);
         let base = format!("'{name}' is not declared");
+        // Python's and JavaScript's names for what V2 spells differently (5.9).
+        let habit = match name {
+            "True" | "False" => Some(format!("V2 writes {}", name.to_lowercase())),
+            "None" | "undefined" | "nil" | "NULL" => Some("V2 writes null".to_string()),
+            "console" | "System" => Some("V2 prints with print(...)".to_string()),
+            "require" => Some("V2 imports a package with @import { name } from js.package".to_string()),
+            _ => None,
+        };
+        if let Some(h) = habit {
+            return self.fail_at("NameError", format!("{base} — {h}"), span);
+        }
         let msg = match (super::error::did_you_mean(name, names.iter().map(|n| &**n)), assigning) {
             (Some(s), false) => format!("{base} — did you mean '{s}'?"),
             (Some(s), true) => format!("{base} — did you mean '{s}'? (or declare it with let)"),
@@ -1119,7 +1168,10 @@ impl Interp {
         };
         let Some(def) = table.iter().find(|m| *m.name == *name.text) else {
             let msg = format!("{} has no method '{}'", o.type_name(), name.text);
-            let msg = with_suggestion(msg, &name.text, table.iter().map(|m| m.name));
+            let msg = match habit(o, &name.text) {
+                Some(h) => format!("{msg} — {h}"),
+                None => with_suggestion(msg, &name.text, table.iter().map(|m| m.name)),
+            };
             return self.fail_at("TypeError", msg, name.span);
         };
         Ok(MethodTarget::Method(def))

@@ -19,7 +19,7 @@ use super::vep::{self, Caps, Frame, FrameReader, Hello, ReadErr, Stream, Target,
 use crate::codec::vep::Wire;
 use crate::runtime::error::{fail, ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
-use crate::runtime::value::Value;
+use crate::runtime::value::{Callable, Value};
 use crate::syntax::span::Span;
 
 pub type SessionId = usize;
@@ -691,6 +691,18 @@ impl Interp {
             _ if self.xdepth >= MAX_XDEPTH => Err(depth_error()),
             Target::Fn(n) => match self.sessions[s].callables.get(n) {
                 Some(f) => {
+                    // JavaScript calls a callback with all it has (`xs.map(f)` passes the item,
+                    // its index and the array) and a JS function ignores the extras: so does a
+                    // V2 function called from JavaScript (DOCS 8.2).
+                    if &*self.sessions[s].key == "js" {
+                        if let Value::Func(func) = &f {
+                            if let Callable::Closure { decl, .. } = &**func {
+                                if decl.rest.is_none() && pos.len() > decl.params.len() {
+                                    pos.truncate(decl.params.len());
+                                }
+                            }
+                        }
+                    }
                     self.xdepth += 1;
                     let r = self.call_value(&f, pos, named, at);
                     self.xdepth -= 1;

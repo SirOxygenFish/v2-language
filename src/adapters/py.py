@@ -776,6 +776,10 @@ if __name__ == "__main__":
             message = e.msg if isinstance(e, SyntaxError) and isinstance(e.msg, str) else str(e)
         except Exception:
             message = "<unprintable %s>" % type(e).__name__
+        if isinstance(e, SystemExit):
+            # As for JavaScript's process.exit() (DOCS 5).
+            arg = "" if e.code is None else repr(e.code)
+            message = "sys.exit(%s) can't end V2's Python engine; raise an error instead" % arg
         out = {"type": "ForeignError", "message": well_formed(message), "foreign_type": type(e).__name__,
                "trace": trace}
         if e.__cause__ is not None and depth < MAX_CAUSES:

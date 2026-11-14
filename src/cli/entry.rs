@@ -11,30 +11,42 @@ const NOT_COMMANDS: &[&str] = &[
     "upgrade",
 ];
 
-/// The message for an entry FILE that is missing or is a folder, ending with what to do next;
-/// `None` when FILE is a file (the loader reports anything else). `next` is the argument after
-/// FILE, for `v2 run hello.v2`.
-pub fn entry_error(file: &str, next: Option<&str>) -> Option<String> {
+/// A file with another extension over this size is data given to V2 by mistake (`v2 data.csv`
+/// for `v2 script.v2 data.csv`), refused before it is read whole.
+const DATA_LIMIT: u64 = 1 << 20;
+
+/// The message for an entry FILE that is missing, a folder, not a regular file, or a large file
+/// that isn't a script, ending with what to do next; `None` when FILE is fine (the loader reports
+/// anything else). `next` is the argument after FILE, for `v2 run hello.v2`; `command` is how the
+/// suggestions start (`v2`, or `v2 check`).
+pub fn entry_error(file: &str, next: Option<&str>, command: &str) -> Option<String> {
     // Windows's usual help switch; `?` can't be in a Windows file name.
     if file == "/?" {
         return Some("'/?' isn't a V2 command\nfor help, type: v2 --help".into());
     }
     let path = Path::new(file);
     match std::fs::metadata(path) {
-        Ok(m) if m.is_dir() => Some(folder_message(file, path)),
+        Ok(m) if m.is_dir() => Some(folder_message(file, path, command)),
+        Ok(m) if !m.is_file() => Some(format!("'{file}' is a pipe or a device, not a file: V2 runs scripts saved as .v2 files")),
+        Ok(m) if m.len() > DATA_LIMIT && path.extension().is_some_and(|x| !x.eq_ignore_ascii_case("v2")) => Some(format!(
+            "'{file}' is {} MB and isn't a .v2 script\nto give it to a script, type: v2 SCRIPT.v2 {}",
+            m.len().div_ceil(1 << 20),
+            quoted(file)
+        )),
         Ok(_) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(missing_message(file, path, next)),
         Err(_) => None,
     }
 }
 
-fn folder_message(file: &str, path: &Path) -> String {
+fn folder_message(file: &str, path: &Path, command: &str) -> String {
     let scripts = v2_files(path);
     let pick = scripts.iter().find(|n| n.eq_ignore_ascii_case("main.v2")).or(scripts.first());
     match pick {
         Some(name) => {
             let sep = if file.ends_with('/') || file.ends_with(std::path::MAIN_SEPARATOR) { "" } else { std::path::MAIN_SEPARATOR_STR };
-            format!("'{file}' is a folder, not a script\nrun one of its .v2 files, for example: v2 {}", quoted(&format!("{file}{sep}{name}")))
+            let what = if command == "v2" { "run" } else { "check" };
+            format!("'{file}' is a folder, not a script\n{what} one of its .v2 files, for example: {command} {}", quoted(&format!("{file}{sep}{name}")))
         }
         None => format!("'{file}' is a folder, not a script, and it has no .v2 files"),
     }
@@ -81,6 +93,9 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, next: Option<&str>) -> S
     }
     if folder.join(format!("{name}.txt")).is_file() {
         return format!("there is a '{name}.txt': your editor added '.txt', so rename it to '{name}'");
+    }
+    if path.extension().is_none() && folder.join(format!("{name}.v2.txt")).is_file() {
+        return format!("there is a '{name}.v2.txt': your editor added '.txt', so rename it to '{name}.v2'");
     }
     let scripts = v2_files(folder);
     if let Some(close) = did_you_mean(&name, scripts.iter().map(String::as_str)) {
@@ -166,25 +181,31 @@ mod tests {
         }
         let at = |f: &str| d.join(f).to_string_lossy().into_owned();
         let hint = |f: &str, next: Option<&str>| {
-            let m = entry_error(&at(f), next).expect("missing");
+            let m = entry_error(&at(f), next, "v2").expect("missing");
             m.lines().nth(1).unwrap().to_string()
         };
-        assert!(entry_error(&at("hello.v2"), None).is_none());
+        assert!(entry_error(&at("hello.v2"), None, "v2").is_none());
         // `at("")` is the folder with a separator at the end.
         let dir = at("");
         assert_eq!(hint("hello", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("notes.v2", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         assert_eq!(hint("helo.v2", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("zzzzzz.v2", None), "the .v2 files there: b.v2, hello.v2");
+        // `v2 notes` when only Notepad's notes.v2.txt is there.
+        assert_eq!(hint("notes", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
+        // Data given to V2 by mistake is refused before it is read.
+        std::fs::write(d.join("data.csv"), vec![b'1'; (DATA_LIMIT + 1) as usize]).unwrap();
+        let m = entry_error(&at("data.csv"), None, "v2").unwrap();
+        assert!(m.starts_with(&format!("'{}' is 2 MB and isn't a .v2 script\nto give it to a script, type: v2 SCRIPT.v2 ", at("data.csv"))), "{m}");
         let empty = temp("empty");
-        let m = entry_error(&empty.join("x.v2").to_string_lossy(), None).unwrap();
+        let m = entry_error(&empty.join("x.v2").to_string_lossy(), None, "v2").unwrap();
         assert!(m.ends_with("there are no .v2 files there: cd to the folder that holds your script, or give its full path"), "{m}");
     }
 
     #[test]
     fn command_words_point_to_the_command() {
         // Run from a folder that has none of these files (the test binary's cwd is the crate).
-        let hint = |f: &str, next: Option<&str>| entry_error(f, next).map(|m| m.lines().nth(1).unwrap().to_string());
+        let hint = |f: &str, next: Option<&str>| entry_error(f, next, "v2").map(|m| m.lines().nth(1).unwrap().to_string());
         assert_eq!(hint("run", Some("hello.v2")).unwrap(), "there is no 'run' command: to run hello.v2, type: v2 hello.v2");
         assert_eq!(hint("run", Some("my file.v2")).unwrap(), "there is no 'run' command: to run my file.v2, type: v2 \"my file.v2\"");
         assert_eq!(hint("help", None).unwrap(), "for help, type: v2 --help");
@@ -196,13 +217,16 @@ mod tests {
     fn a_folder_names_a_script_in_it() {
         let d = temp("folder");
         let shown = d.to_string_lossy().into_owned();
-        assert!(entry_error(&shown, None).unwrap().ends_with("is a folder, not a script, and it has no .v2 files"));
+        assert!(entry_error(&shown, None, "v2").unwrap().ends_with("is a folder, not a script, and it has no .v2 files"));
         std::fs::write(d.join("util.v2"), "").unwrap();
         std::fs::write(d.join("main.v2"), "").unwrap();
-        let m = entry_error(&shown, None).unwrap();
+        let m = entry_error(&shown, None, "v2").unwrap();
         let sep = std::path::MAIN_SEPARATOR;
         let want = format!("{shown}{sep}main.v2");
-        assert!(m.ends_with(&format!("for example: v2 {}", quoted(&want))), "{m}");
+        assert!(m.ends_with(&format!("run one of its .v2 files, for example: v2 {}", quoted(&want))), "{m}");
+        // `v2 check folder` suggests checking, not running.
+        let m = entry_error(&shown, None, "v2 check").unwrap();
+        assert!(m.ends_with(&format!("check one of its .v2 files, for example: v2 check {}", quoted(&want))), "{m}");
     }
 
     #[test]

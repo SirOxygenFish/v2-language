@@ -1,0 +1,35 @@
+// requires: js py
+// A V2 function called from JavaScript ignores the arguments it does not take, as a JS function
+// would (`xs.map(f)` passes item, index and array); `...rest` gets them all; Python stays strict
+// (DOCS 8.2).
+@js util {
+    function mapAll(xs, f) { return xs.map(f) }
+    function each(xs, f) { xs.forEach(f) }
+    function callOne(f) { return f(1, 2, 3) }
+    @export { mapAll, each, callOne }
+}
+@import { mapAll, each, callOne } from util
+func inc(x) {
+    return x + 1
+}
+print(mapAll([1, 2, 3], inc))
+each(["a", "b"], func(s) { print(s) })
+func count(...all) {
+    return len(all)
+}
+print(mapAll([7, 8], count))
+func two(a, b = 10) {
+    return a + b
+}
+print(callOne(two))
+@py p {
+    def call_two(f):
+        return f(1, 2)
+    @export { call_two }
+}
+@import { call_two } from p
+try {
+    call_two(inc)
+} catch (e) {
+    print(e.type)
+}

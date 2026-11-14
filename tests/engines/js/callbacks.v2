@@ -23,7 +23,7 @@ print(@js(f: outer) { f(1) + f(10) })
 print(@js(twice) {
     let r;
     try {
-        twice(1, 2);
+        twice();
     } catch (e) {
         r = [e.type, e.message];
     }

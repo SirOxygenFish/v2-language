@@ -81,6 +81,27 @@ pub fn wire_unit(id: UnitId) -> String {
     format!("{}:{}", id.file.0, id.offset)
 }
 
+/// A block whose code names a V2 variable gets Python's NameError or JavaScript's ReferenceError:
+/// the hint says how to pass the variable in (DOCS 4.4). Only for a name the block's scope has
+/// and that isn't one of its args.
+fn hint_v2_variable(b: &EngineBlock, env: &Env, e: &ErrorValue) {
+    if &*e.kind != "ForeignError" {
+        return;
+    }
+    let first = e.message.lines().next().unwrap_or_default();
+    let name = match e.foreign_type.as_deref() {
+        Some("NameError") => first.strip_prefix("name '").and_then(|rest| rest.split('\'').next()),
+        Some("ReferenceError") => first.strip_suffix(" is not defined"),
+        _ => None,
+    };
+    let Some(name) = name.filter(|n| crate::syntax::lexer::is_plain_name(n)) else { return };
+    if b.args.iter().any(|(arg, _)| &*arg.text == name) || crate::runtime::env::lookup(env, name).is_none() {
+        return;
+    }
+    let tag = &b.tag.text;
+    let _ = e.hint.set(format!("'{name}' is a V2 variable, and blocks don't see V2 variables: pass it in, @{tag}({name}) {{ ... }}").into());
+}
+
 fn error(kind: &str, message: String) -> Flow {
     Flow::Error(Rc::new(ErrorValue::new(kind, message)))
 }
@@ -133,6 +154,7 @@ impl Interp {
             }
             // Steps 2-7 fail the unit for good (12.1).
             Err(Flow::Error(e)) => {
+                hint_v2_variable(b, env, &e);
                 if definition {
                     self.units.insert(b.unit_id, UnitState::Failed(e.clone()));
                 }

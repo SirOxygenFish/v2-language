@@ -108,6 +108,19 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
             lines[i].text.remove(lead); // the escape loses one `@`
             escapes.push((i, lead));
         } else if let Some((at, word)) = stray_directive(t).filter(|_| lines[i].in_code) {
+            // Indented with no-break spaces (code copied from a web page): name that character,
+            // as the lexer does (3.2), rather than the directive's place.
+            let before = &t[..at];
+            let blank = |c: char| c.is_whitespace() || matches!(c, '\u{200B}' | '\u{FEFF}');
+            if let Some((k, c)) = before.char_indices().next().filter(|_| before.chars().all(blank)) {
+                let lo = (lines[i].offset + lead + k) as u32;
+                let (shown, hint) = super::lexer::shown_char(c);
+                let d = Diag::new(format!("unexpected character {shown}"), sm.span(file, lo, lo + c.len_utf8() as u32));
+                return Err(match hint {
+                    Some(h) => d.hint(h),
+                    None => d,
+                });
+            }
             let lo = (lines[i].offset + lead + at) as u32;
             return Err(Diag::new(format!("{word} goes on a line of its own"), sm.span(file, lo, lo + word.len() as u32)));
         }
@@ -334,7 +347,7 @@ impl<'a> DirParser<'a> {
                         (kind, n)
                     }
                     other => {
-                        lex_error.get_or_insert(Diag::new(format!("unexpected character '{other}' in a directive"), span(col, col + len)));
+                        lex_error.get_or_insert(Diag::new(format!("unexpected character {} in a directive", crate::syntax::lexer::shown_char(other).0), span(col, col + len)));
                         break 'lines;
                     }
                 };
