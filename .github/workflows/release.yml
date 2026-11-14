@@ -1,7 +1,8 @@
 # Build the prebuilt binaries (INTERNALS 22.6) and put them on a DRAFT GitHub release; a person
-# publishes it. Run it by hand (Actions > Release > Run workflow) with the tag the release will
-# get, or push that tag. The tag must be `v` + Cargo.toml's version, and install.sh and
-# install.ps1 must name it. A draft creates no tag: publishing it does, at the commit it names.
+# publishes it. Three ways to run it: Actions > Release > Run workflow (once this file is on the
+# default branch), pushing a `v*` tag, or, before that, a push to v2-reboot whose commit message
+# contains [release]. The tag must be `v` + Cargo.toml's version, and install.sh and install.ps1
+# must name it. A draft creates no tag: publishing it does, at the commit it targets.
 name: Release
 
 on:
@@ -12,16 +13,35 @@ on:
         required: true
   push:
     tags: ["v*"]
+    branches: [v2-reboot]
 
 permissions:
   contents: write
 
-env:
-  TAG: ${{ inputs.tag || github.ref_name }}
-
 jobs:
+  version:
+    # A branch push builds only when asked to, with [release] in its commit message.
+    if: github.event_name != 'push' || github.ref_type == 'tag' || contains(github.event.head_commit.message, '[release]')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: tag
+        name: The tag, and the version names that must match it
+        env:
+          WANTED: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tag="${WANTED:-v$crate}"
+          [ "$tag" = "v$crate" ] || { echo "the tag $tag is not v$crate (Cargo.toml)"; exit 1; }
+          grep -q "V2_VERSION:-$tag}" install.sh || { echo "install.sh doesn't install $tag"; exit 1; }
+          grep -q "else { '$tag' }" install.ps1 || { echo "install.ps1 doesn't install $tag"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -34,13 +54,6 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin, rustflags: "" }
     steps:
       - uses: actions/checkout@v5
-      - name: Check the version names
-        shell: bash
-        run: |
-          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          [ "$TAG" = "v$crate" ] || { echo "the tag $TAG is not v$crate (Cargo.toml)"; exit 1; }
-          grep -q "V2_VERSION:-$TAG}" install.sh || { echo "install.sh doesn't install $TAG"; exit 1; }
-          grep -q "else { '$TAG' }" install.ps1 || { echo "install.ps1 doesn't install $TAG"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         shell: bash
@@ -63,7 +76,7 @@ jobs:
           fi
           if command -v sha256sum >/dev/null; then sha256sum "$asset" > "$asset.sha256"; else shasum -a 256 "$asset" > "$asset.sha256"; fi
           echo "ASSET=$asset" >> "$GITHUB_ENV"
-      # The smoke check follows README.md's quickstart with the packaged binary on a fresh runner.
+      # The install check follows README.md's quickstart with the packaged binary on a fresh runner.
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -85,7 +98,7 @@ jobs:
             ${{ env.ASSET }}.sha256
 
   draft:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -96,8 +109,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          notes="V2 ${TAG#v}, an alpha. Install it with the one-line command for your system in README.md, or download the file for your system below. Python and Node.js blocks need Python 3.10+ and Node.js 22.13+. What works and what doesn't yet: README.md \"Known limitations\"."
+          notes="V2 ${TAG#v}, an alpha. Install it with the one-line command for your system in README.md, or download the file for your computer below. Python blocks need Python 3.10+, JavaScript and TypeScript blocks Node.js 22.13+. What isn't built yet: README.md, \"Known limitations\"."
           if gh release view "$TAG" >/dev/null 2>&1; then
             [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ] || { echo "$TAG is already published: not touching it"; exit 1; }
             gh release edit "$TAG" --target "$GITHUB_SHA"
