@@ -15,7 +15,13 @@ $name = Split-Path -Leaf $Archive
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("v2-paths-" + [Guid]::NewGuid().ToString('N'))
 $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $sysPath = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+# The user Path as the registry holds it, unexpanded: an expanded one depends on this process's
+# USERPROFILE, which the cases change.
+function RawUserPath {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    try { [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $key.Close() }
+}
+$userPath = RawUserPath
 $script:failed = $false
 $script:problems = @()
 $script:n = 0
@@ -191,18 +197,19 @@ try {
         Want $r.code 0 'exit code'
         Says $r "Added $h\.v2\bin to your user PATH"
         Says $r "Open a new window to use v2 (or, in this one, run: `$env:Path = `"$h\.v2\bin;`" + `$env:Path)"
-        $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $user = RawUserPath
         Want (($user -split ';')[0]) "$h\.v2\bin" 'the user PATH starts with'
         $r2 = Install $h @{ V2_NO_MODIFY_PATH = $null }
-        Want ([Environment]::GetEnvironmentVariable('Path', 'User')) $user 'the user PATH after a second install'
-        [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')
+        Want (RawUserPath) $user 'the user PATH after a second install'
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        try { $key.SetValue('Path', $userPath, [Microsoft.Win32.RegistryValueKind]::ExpandString) } finally { $key.Close() }
         Result 'the user PATH' $r
     }
 } finally {
     foreach ($p in $script:procs) { if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit(5000) | Out-Null } }
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
-if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $userPath) {
+if ((RawUserPath) -cne $userPath) {
     Write-Host "FAIL the user PATH changed"
     $script:failed = $true
 }
