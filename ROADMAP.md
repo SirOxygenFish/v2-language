@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Released `v0.1.0-alpha.1` (2026-11-12); Phase 2 waits for the owner's go-ahead |
-| **Next task** | `llms.txt`, then Phase 2 in the order below, when the owner says go |
-| **Last update** | 2026-11-12: the release gate is done: `v2-reboot` merged into `main`, `old/` removed, tagged `v0.1.0-alpha.1` |
+| **Current phase** | Pre-publish (approved by the owner 2026-11-14), before Phase 2 |
+| **Next task** | The pre-publish boxes below; merging, the `v0.1.0-alpha.2` tag and publishing the draft release wait for the owner's OK |
+| **Last update** | 2026-11-14: pre-publish started (progress log) |
 
 ## Rules
 
@@ -22,8 +22,9 @@ says *in what order* and *what's done*.
    `NameError`, an engine that isn't registered yet is `EngineUnknown`. The registry holds py, js
    and ts in Phase 1 (so `@c` is `EngineUnknown` there); c, cpp and rust join in Phase 2 with
    their toolchains, and custom engines and the built-in run engines in Phase 3. EngineUnknown's
-   list of known engines names only the registered ones, and its `declare it in [engines.<tag>]
-   in v2.toml, or with define_engine` hint comes with custom engines. The only placeholders: a
+   list of known engines names only the registered ones (a tag of a later phase says it isn't in
+   this version yet, §7.3), and its `declare it in [engines.<tag>] in v2.toml, or with
+   define_engine` hint comes with custom engines. The only placeholders: a
    block of a registered engine, `@import` and `extern` raise `Error: … doesn't run yet in this
    build` until their milestone, and `v2 cache clean` prints "not implemented yet" until 2.3.
 3. **The docs are the spec.** If code and docs disagree, decide which one is wrong and fix it on
@@ -262,6 +263,33 @@ so CI, the minimum versions and macOS are proven on what exists.
       `v0.1.0-alpha.1` (`v0.1.0` stays for the release after Phase 3), CI green on `main`
 - After the gate: `llms.txt`, a condensed spec of a few hundred lines for coding agents, its
   examples run as tests like DOCS's
+
+---
+
+## Pre-publish (before Phase 2)
+
+The owner's goal of 2026-11-14: a friend who opens the repository can read it and succeed without
+asking anyone. No bug in a newcomer's first 15 minutes, and docs that answer every question before
+it's asked. Merging, new tags and publishing the release wait for the owner's OK; the release is
+prepared as a draft.
+
+- [ ] README.md for a newcomer: what V2 is in three lines, what it needs, install per OS, a
+      quickstart of three examples that run as written (plain V2, Python, JavaScript; tests/docs),
+      troubleshooting, FAQ, known limitations, uninstall, the alpha label
+- [ ] Prebuilt binaries for Windows, Linux and macOS from CI (`release.yml`, §22.6), with
+      `install.sh` and `install.ps1` one-liners; nobody needs Rust
+- [ ] `v2 doctor` says what is missing, how to install it, and what is ready; every first-run
+      error says what to do next: a missing script or a folder (§19.1), a file that isn't UTF-8
+      (§3.1), a Python or JavaScript file given to V2, an engine not found or too old (§7.8), a
+      tag of a later phase (§7.3)
+- [ ] Clean machines follow the README literally: a fresh Linux (a new WSL distro), Windows (a
+      fresh profile and PATH; the CI runners), macOS (a temp HOME on the owner's Mac Mini); the
+      release workflow's install check on each fresh runner (§22.6)
+- [ ] A newcomer test: fresh agents that only get the README install V2, run the quickstart and
+      try to break it, round after round until a round finds nothing; every question they have to
+      ask is a docs bug, every crash or cryptic message a code bug, each fixed with a test
+- [ ] A bug-report issue template and CONTRIBUTING.md
+- [ ] The draft release `v0.1.0-alpha.2`; on the owner's OK: merge, tag, publish
 
 ---
 

@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in V2 doesn't do what the docs say, crashes, or gives a message you can't act on.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! The smallest script that shows the problem helps most.
+  - type: textarea
+    id: script
+    attributes:
+      label: The script
+      description: The smallest .v2 script that shows the problem, and any .py or .js files it uses.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: How you ran it
+      placeholder: v2 main.v2
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Everything V2 printed, the whole error message included.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `v2 doctor`
+      description: It shows V2's version, your system, and which Python and Node.js V2 found.
+      render: text
+    validations:
+      required: true

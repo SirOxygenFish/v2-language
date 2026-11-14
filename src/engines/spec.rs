@@ -182,12 +182,12 @@ pub fn node_supported(node: Version) -> bool {
 /// The install line of an `EngineNotFound` message, for this OS (7.8).
 pub fn install_hint(id: &str) -> &'static str {
     match (id, std::env::consts::OS) {
-        ("py", "windows") => "winget install -e --id Python.Python.3.12",
-        ("py", "macos") => "brew install python",
-        ("py", _) => "sudo apt install python3 / sudo dnf install python3",
-        (_, "windows") => "winget install -e --id OpenJS.NodeJS.LTS",
-        (_, "macos") => "brew install node",
-        _ => "https://nodejs.org (distro packages may be older than 22.13)",
+        ("py", "windows") => "winget install -e --id Python.Python.3.13 (or https://www.python.org/downloads/), then open a new terminal",
+        ("py", "macos") => "brew install python (or https://www.python.org/downloads/)",
+        ("py", _) => "sudo apt install python3 / sudo dnf install python3 (or https://www.python.org/downloads/)",
+        (_, "windows") => "winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal",
+        (_, "macos") => "brew install node (or https://nodejs.org)",
+        _ => "https://nodejs.org/en/download (distro packages may be older than 22.13)",
     }
 }
 
@@ -263,9 +263,15 @@ mod tests {
     #[test]
     fn install_hints_are_7_8s_table() {
         let (py, node) = match std::env::consts::OS {
-            "windows" => ("winget install -e --id Python.Python.3.12", "winget install -e --id OpenJS.NodeJS.LTS"),
-            "macos" => ("brew install python", "brew install node"),
-            _ => ("sudo apt install python3 / sudo dnf install python3", "https://nodejs.org (distro packages may be older than 22.13)"),
+            "windows" => (
+                "winget install -e --id Python.Python.3.13 (or https://www.python.org/downloads/), then open a new terminal",
+                "winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal",
+            ),
+            "macos" => ("brew install python (or https://www.python.org/downloads/)", "brew install node (or https://nodejs.org)"),
+            _ => (
+                "sudo apt install python3 / sudo dnf install python3 (or https://www.python.org/downloads/)",
+                "https://nodejs.org/en/download (distro packages may be older than 22.13)",
+            ),
         };
         assert_eq!((install_hint("py"), install_hint("js"), install_hint("ts")), (py, node, node));
     }

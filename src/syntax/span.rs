@@ -76,8 +76,19 @@ pub struct SourceFile {
 pub enum LoadError {
     /// The file can't be read (missing, unreadable): a startup error, exit 2.
     Io(String),
-    /// The bytes aren't UTF-8: a `SyntaxError` at the line of the first bad byte.
-    NotUtf8 { display: Rc<str>, line: u32 },
+    /// The bytes aren't UTF-8: a `SyntaxError` at the line of the first bad byte; `message` says
+    /// so and how to fix it (2.1).
+    NotUtf8 { display: Rc<str>, line: u32, message: &'static str },
+}
+
+/// The message for a file that isn't UTF-8 (2.1). A UTF-16 file (a byte-order mark first) is
+/// named as such: Windows PowerShell 5's `>` and `Out-File` write UTF-16.
+pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        "file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"
+    } else {
+        "file is not valid UTF-8: save it as UTF-8"
+    }
 }
 
 #[derive(Default)]
@@ -114,7 +125,7 @@ impl SourceMap {
                     .filter(|&(i, &b)| b == b'\n' || (b == b'\r' && good.get(i + 1) != Some(&b'\n')))
                     .count();
                 let line = breaks as u32 + 1;
-                return Err(LoadError::NotUtf8 { display, line });
+                return Err(LoadError::NotUtf8 { display, line, message: not_utf8_message(e.as_bytes()) });
             }
         };
         Ok(self.add(canonical, display, &text))
