@@ -112,6 +112,27 @@ pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
     search(name, l, usize::MAX)
 }
 
+/// The hits of several bare names in `PATH` order, each folder tried with every name in turn:
+/// the name's index and the hit (7.5, 7.6).
+pub fn find_programs(names: &[&str], l: &Lookup) -> Vec<(usize, PathBuf)> {
+    let mut hits: Vec<(usize, PathBuf)> = Vec::new();
+    let path = l.path.clone().unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() || dir.is_relative() {
+            continue;
+        }
+        for (k, name) in names.iter().enumerate() {
+            let one = Lookup { path: Some(dir.clone().into_os_string()), ..l.clone() };
+            for hit in search(name, &one, usize::MAX) {
+                if !hits.iter().any(|(_, h)| *h == hit) {
+                    hits.push((k, hit));
+                }
+            }
+        }
+    }
+    hits
+}
+
 /// The first of `find_program`'s hits, with no walk past it: a long `PATH` can be slow to stat.
 pub fn first_program(name: &str, l: &Lookup) -> Option<PathBuf> {
     search(name, l, 1).pop()
@@ -233,7 +254,12 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<D
                 return Judged::Skipped(PLACEHOLDER.into());
             }
             if *code != Some(0) {
-                return Judged::Skipped(format!("version probe failed ({})", ExitInfo { code: *code, signal: None }.describe()));
+                // What the program said, first line, so a missing library shows (7.6).
+                let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| {
+                    let cut: String = l.chars().take(160).collect();
+                    format!(": {cut}")
+                });
+                return Judged::Skipped(format!("version probe failed ({}){}", ExitInfo { code: *code, signal: None }.describe(), said.unwrap_or_default()));
             }
             let Some((args, pattern)) = &spec.probe else { return Judged::Skipped("no version probe".into()) };
             let Some(version) = pattern.find(output) else {
@@ -472,8 +498,15 @@ impl ResolvedEngine {
     }
 }
 
+/// A command as doctor and messages show it: space-joined, and when it has more than one item,
+/// the items with a space quoted, so `["C:/Program", "Files/…"]` can't pass for one path (19.2).
 fn join(argv: &[OsString]) -> String {
-    argv.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
+    let items: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    if items.len() > 1 {
+        items.iter().map(|i| if i.contains(' ') { format!("\"{i}\"") } else { i.clone() }).collect::<Vec<_>>().join(" ")
+    } else {
+        items.join(" ")
+    }
 }
 
 /// Doctor's STATUS for an engine that is not usable (19.2).
@@ -623,8 +656,22 @@ impl Resolver<'_> {
         // /usr/bin) or another candidate name, with the same arguments, isn't probed or listed
         // twice (7.6).
         let mut seen: std::collections::HashSet<(PathBuf, Vec<String>)> = std::collections::HashSet::new();
-        for candidate in &spec.candidates {
-            for hit in find_program(&candidate[0], self.lookup) {
+        // A hit that is installed but doesn't run (its probe failed or timed out, the wrong
+        // target), as opposed to a placeholder: the engine is then broken, not missing (7.8).
+        let mut failed = false;
+        // The names that take no arguments (`python3`, `python`) are looked for folder by folder,
+        // so the first PATH folder that has any of them wins: an activated virtual environment's
+        // `python.exe` before a `python3.exe` further down. Then the others (`py -3`) (7.6).
+        let plain: Vec<&str> = spec.candidates.iter().filter(|c| c.len() == 1).map(|c| &*c[0]).collect();
+        let mut hits: Vec<(&[Rc<str>], PathBuf)> = find_programs(&plain, self.lookup)
+            .into_iter()
+            .map(|(k, hit)| (&spec.candidates.iter().filter(|c| c.len() == 1).nth(k).expect("a plain candidate")[..], hit))
+            .collect();
+        for candidate in spec.candidates.iter().filter(|c| c.len() > 1) {
+            hits.extend(find_program(&candidate[0], self.lookup).into_iter().map(|hit| (&candidate[..], hit)));
+        }
+        {
+            for (candidate, hit) in hits {
                 let file = std::fs::canonicalize(&hit).unwrap_or_else(|_| hit.clone());
                 if !seen.insert((file, candidate[1..].iter().map(|a| a.to_string()).collect())) {
                     continue;
@@ -643,12 +690,19 @@ impl Resolver<'_> {
                         newest_old = newest_old.max(Some(v));
                         skipped.push((hit, reason));
                     }
-                    Judged::Skipped(reason) => skipped.push((hit, reason)),
+                    Judged::Skipped(reason) => {
+                        failed |= reason != PLACEHOLDER;
+                        skipped.push((hit, reason));
+                    }
                 }
             }
         }
-        let status = newest_old.map_or(Status::Missing, Status::Old);
-        Err(NotFound { status, message: not_found_message(spec, &skipped, newest_old), command: None, from: None, skipped })
+        let status = match newest_old {
+            Some(v) => Status::Old(v),
+            None if failed => Status::Broken,
+            None => Status::Missing,
+        };
+        Err(NotFound { status, message: not_found_message(spec, &skipped, newest_old, failed), command: None, from: None, skipped })
     }
 
     /// macOS: whether the Command Line Tools are installed, so the `xcrun` shims can run
@@ -684,7 +738,7 @@ impl Resolver<'_> {
 
 /// 7.8's message: what was found (nothing, or only versions that are too old), what was tried,
 /// what was skipped and why, how to install, how to configure.
-fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>) -> String {
+fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>, failed: bool) -> String {
     let tried: Vec<String> = spec.candidates.iter().map(|c| c.join(" ")).collect();
     let head = match (newest_old, spec.min_version) {
         // Node 23.0 and 23.1: newer than the minimum, but without type stripping (7.6).
@@ -692,6 +746,7 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
             format!("engine '{}' ({}) is not supported: found {v}, which has no type stripping; V2 needs {}", spec.id, spec.language, spec.needs(min))
         }
         (Some(v), Some(min)) => format!("engine '{}' ({}) is too old: found {v}, V2 needs {}", spec.id, spec.language, spec.needs(min)),
+        (None, _) if failed => format!("engine '{}' ({}) was found but doesn't run (see why below)", spec.id, spec.language),
         _ => format!("engine '{}' ({}) not found", spec.id, spec.language),
     };
     let mut m = format!("{head}\ntried: {} on PATH", tried.join(", "));
@@ -945,6 +1000,28 @@ mod tests {
     }
 
     #[test]
+    fn the_first_folder_with_either_name_wins() {
+        // 7.6: an activated virtual environment puts its folder, with only `python` (Windows:
+        // python.exe), first on PATH; a `python3` further down must not win over it.
+        let root = temp("pathorder");
+        let (venv, other) = (root.join("venv"), root.join("other"));
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let venv_python = exe(&venv, "python");
+        exe(&other, "python3");
+        let p = fake(|_| says("Python 3.12.1"));
+        let e = resolve_with(&Config::default(), &lookup(&[&venv, &other], None), &p, &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!(e.argv, [venv_python.into_os_string()]);
+        // In one folder the names keep their order: python3 first.
+        let both = root.join("both");
+        std::fs::create_dir_all(&both).unwrap();
+        let both3 = exe(&both, "python3");
+        exe(&both, "python");
+        let e = resolve_with(&Config::default(), &lookup(&[&both], None), &p, &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!(e.argv, [both3.into_os_string()]);
+    }
+
+    #[test]
     fn the_same_file_twice_on_path_is_probed_once() {
         // Ubuntu's /bin is a link to /usr/bin, so one old node is met twice (7.6).
         let root = temp("samefile");
@@ -999,11 +1076,18 @@ mod tests {
             (ProbeOutcome::TimedOut, "version probe timed out (10 s)"),
             (ProbeOutcome::SpawnFailed("could not start 'x': boom".into()), "could not start 'x': boom"),
             (ProbeOutcome::Exited { code: Some(1), output: String::new() }, "version probe failed (exit code 1)"),
+            // What the program said: a node built for another system, missing a library.
+            (
+                ProbeOutcome::Exited { code: Some(127), output: "\nnode: error while loading shared libraries: libatomic.so.1: cannot open shared object file\n".into() },
+                "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file",
+            ),
             (says("node, but no version"), "no version in its --version output"),
         ] {
             let p = fake(move |_| outcome.clone());
             let nf = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
-            assert_eq!(nf.status, Status::Missing);
+            // Installed but not running is broken, not missing (7.8).
+            assert_eq!(nf.status, Status::Broken);
+            assert!(nf.message.starts_with("engine 'js' (JavaScript) was found but doesn't run (see why below)\n"), "{}", nf.message);
             assert_eq!(nf.skipped[0].1, reason);
         }
     }

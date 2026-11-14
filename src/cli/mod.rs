@@ -1,9 +1,9 @@
 //! Command-line parsing (INTERNALS 19.1).
 //!
 //! `v2 FILE [ARGS...]`, `v2 check FILE`, `v2 doctor`, `v2 cache clean`, `v2 --version`,
-//! `v2 --help`. `--version` and `--help` are the only flags, and only as the first word. A first
-//! word that is exactly `check`, `doctor` or `cache` is a subcommand; any other word is the
-//! script, and everything after it goes to `args()` untouched.
+//! `v2 --help`. `--version` and `--help` (or `-h`) are the only flags, and only as the first
+//! word. A first word that is exactly `check`, `doctor` or `cache` is a subcommand; any other
+//! word is the script, and everything after it goes to `args()` untouched.
 
 mod entry;
 pub use entry::{entry_error, foreign_file_note};
@@ -60,16 +60,17 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     };
     let rest = &args[1..];
     match word.as_str() {
-        "--help" | "--version" => match rest {
-            [] if word == "--help" => Ok(Command::Help),
-            [] => Ok(Command::Version),
+        // `-h` is help too, as nearly every command has it; the other spellings say what to type.
+        "--help" | "-h" | "--version" => match rest {
+            [] if word == "--version" => Ok(Command::Version),
+            [] => Ok(Command::Help),
             [extra, ..] => Err(UsageError(format!("unexpected argument `{extra}` after `v2 {word}`"))),
         },
-        "-h" | "-help" | "-?" | "--h" | "-H" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--help`?)"))),
+        "-help" | "-?" | "--h" | "-H" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--help`?)"))),
         "-v" | "-V" | "-version" | "--v" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--version`?)"))),
         s if s.starts_with('-') => Err(UsageError(format!("unknown flag `{s}`"))),
         // `--help` after a command is a request for help, not a file or a typo.
-        "check" | "doctor" | "cache" if rest.first().is_some_and(|w| w == "--help") => Ok(Command::Help),
+        "check" | "doctor" | "cache" if rest.first().is_some_and(|w| w == "--help" || w == "-h") => Ok(Command::Help),
         "check" => match rest {
             [file] => Ok(Command::Check { file: file.clone() }),
             [] => Err(UsageError("`v2 check` needs a FILE".into())),
@@ -145,7 +146,8 @@ mod tests {
         assert!(p(&["cache", "nuke"]).is_err());
         assert_eq!(p(&["cache", "clean", "x"]).unwrap_err().0, "unexpected argument `x` after `v2 cache clean`");
         assert_eq!(p(&[]).unwrap_err().0, "no script given: run one with `v2 FILE`, for example `v2 hello.v2`");
-        assert_eq!(p(&["-h"]).unwrap_err().0, "unknown flag `-h` (did you mean `--help`?)");
+        assert_eq!(cmd(&["-h"]), Command::Help);
+        assert_eq!(p(&["-H"]).unwrap_err().0, "unknown flag `-H` (did you mean `--help`?)");
         assert_eq!(p(&["-V"]).unwrap_err().0, "unknown flag `-V` (did you mean `--version`?)");
         assert!(p(&["--", "x.v2"]).is_err());
         assert_eq!(p(&["-"]).unwrap_err().0, "unknown flag `-`");

@@ -44,7 +44,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         name: "error",
-        params: &[ParamSpec::req("type"), ParamSpec::req("message"), ParamSpec::opt("data", || Value::Null)],
+        // `message` is checked in `error`, so `error("text")` (JavaScript's `new Error("text")`)
+        // can say what the two arguments are.
+        params: &[ParamSpec::req("type"), ParamSpec::opt("message", || Value::Null), ParamSpec::opt("data", || Value::Null)],
         f: error,
     },
     BuiltinDef { name: "input", params: &[ParamSpec::opt("prompt", || Value::str(""))], f: input },
@@ -276,6 +278,12 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
         if line.last() == Some(&b'\r') {
             line.pop();
         }
+    }
+    // Windows PowerShell 5 starts text it pipes with a byte-order mark: the first line drops it,
+    // as a script file's first line does (5.10).
+    thread_local!(static FIRST_LINE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
+    if FIRST_LINE.with(|f| f.replace(false)) && line.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        line.drain(..3);
     }
     match String::from_utf8(line) {
         Ok(s) => Ok(Value::Str(s.into())),
@@ -736,6 +744,9 @@ fn error(_it: &mut Interp, mut args: Vec<Value>, _at: Span) -> Exec<Value> {
     let kind = str_arg(&args[0], "error", "type")?;
     if kind.is_empty() {
         return fail("ValueError", "error() argument 'type' must not be empty");
+    }
+    if matches!(args[1], Value::Null) {
+        return fail("ArityError", format!("error() needs a type and a message, as in error(\"ValueError\", \"{kind}\"); throw \"{kind}\" throws a plain Error"));
     }
     let message = str_arg(&args[1], "error", "message")?;
     let data = args.pop().unwrap_or(Value::Null);

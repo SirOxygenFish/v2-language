@@ -4,7 +4,7 @@ dollar arrow 5
 1
 ImportError: '_two' is not exported by 'star' (did the block @export it?)
 ImportError: 'x' is not exported by 'geometry' (did the block @export it?)
-ImportError: No engine exports found for selector 'nothing_here'
+ImportError: no block in this file is labeled 'nothing_here': a Python module is imported with py.nothing_here, an npm package with js.nothing_here
 ImportError | @export lists 'g' but block 'broken' does not define it
 ImportError: block 'broken' failed to load: @export lists 'g' but block 'broken' does not define it
 true t t

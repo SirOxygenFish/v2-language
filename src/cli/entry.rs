@@ -63,7 +63,45 @@ fn missing_message(file: &str, path: &Path, next: Option<&str>) -> String {
         let shown = std::env::current_dir().map(|cwd| shown_folder(&cwd.join(&folder))).unwrap_or_else(|_| folder.display().to_string());
         format!("cannot find '{file}' in {shown}")
     };
+    // A folder on the way that isn't there: say so, with the one it probably meant.
+    if !folder.is_dir() {
+        let mut missing = folder.clone();
+        while let Some(parent) = missing.parent().filter(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
+            missing = parent.to_path_buf();
+        }
+        let shown = std::env::current_dir().map(|cwd| absolute_shown(&cwd.join(&missing))).unwrap_or_else(|_| missing.display().to_string());
+        let name = missing.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent = missing.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let folders: Vec<String> = std::fs::read_dir(&parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        let hint = match did_you_mean(&name, folders.iter().map(String::as_str)) {
+            Some(close) => format!("there is no folder {shown}: did you mean '{close}'?"),
+            None => format!("there is no folder {shown}"),
+        };
+        return format!("cannot find '{file}'\n{hint}");
+    }
     format!("{first}\n{}", missing_hint(file, path, &folder, next))
+}
+
+/// A path as messages show it, made absolute against the current folder and with `.` and `..`
+/// resolved where they can be, but not required to exist.
+fn absolute_shown(p: &Path) -> String {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    crate::syntax::span::strip_verbatim(&out).display().to_string()
 }
 
 /// The one hint for a missing FILE: the command it looks like, the file it probably meant, or
@@ -191,6 +229,10 @@ mod tests {
         assert_eq!(hint("notes.v2", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         assert_eq!(hint("helo.v2", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("zzzzzz.v2", None), "the .v2 files there: b.v2, hello.v2");
+        // A folder on the way that isn't there, with the one it probably meant.
+        std::fs::create_dir_all(d.join("examples")).unwrap();
+        let m = entry_error(&at("exmaples/x.v2"), None, "v2").unwrap();
+        assert!(m.ends_with(&format!("there is no folder {}: did you mean 'examples'?", d.join("exmaples").display())), "{m}");
         // `v2 notes` when only Notepad's notes.v2.txt is there.
         assert_eq!(hint("notes", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         // Data given to V2 by mistake is refused before it is read.

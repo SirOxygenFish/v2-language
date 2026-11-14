@@ -1280,6 +1280,7 @@ pub fn shown_char(c: char) -> (String, Option<&'static str>) {
             (format!("'{c}' (a curly quote)"), Some("use a straight quote: \" or '"))
         }
         '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), Some("use a plain minus sign: -")),
+        '`' => ("'`'".to_string(), Some("V2 writes a template string as f\"text ${x}\"")),
         c if c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') => (code, None),
         c => (format!("'{c}'"), None),
     }

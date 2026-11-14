@@ -4,3 +4,4 @@ tests/engines/py/bom_crlf.v2 -text
 
 # Shell scripts keep LF endings on every OS: install.sh is run by sh, also from a Windows checkout.
 *.sh text eol=lf
+tests/host/builtins/input_bom.in -text
