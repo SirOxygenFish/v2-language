@@ -209,7 +209,7 @@ main.v2:3:16: ForeignError: ZeroDivisionError: division by zero
 ## 3. Lexer
 ### 3.1 Input
 `SourceMap::load` does three things:
-- It rejects invalid UTF-8 (`file is not valid UTF-8`, at the line of the first bad byte).
+- It rejects invalid UTF-8 at the line of the first bad byte: `file is not valid UTF-8: save it as UTF-8`, or, when the file starts with a UTF-16 byte-order mark (Windows PowerShell 5's `>` and `Out-File` write UTF-16), `file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8`.
 - It strips one leading U+FEFF, which Windows editors and PowerShell add.
 - It turns every CRLF and every lone CR into LF.
 
@@ -778,6 +778,7 @@ The Run rows are the built-in run engines (17.3, 17.4; configuration 18.2), with
 
 - **Canonical tags.** `canonical(tag)` maps an id or alias to `spec.id` everywhere: block headers (`@python stats` is a `py` block), selectors (`@python.stats` = `@py.stats`, `python.os.path` = `py.os.path`), `engine_available` and `[engines.<tag>]`; `V2_ENGINE_<TAG>` takes canonical tags only (18.4). Messages print the canonical form (2.5).
 - **Profiles are static.** The lexer takes a tag's scanning profile from the fixed built-in table; every other tag, declared or not, is Plain (3.8). The parser never rejects a tag as unknown.
+- **Later tags.** Until their milestone registers them, the tags of DOCS 5 that this build doesn't have (`c`, `cpp`/`cxx`, `rust`/`rs` in Phase 2; the built-in run engines' tags and aliases in Phase 3) raise `EngineUnknown: unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts`, checked before did-you-mean (so `@rs` isn't taken for a typo of `@ts`). Each row goes when its engine joins the registry (`registry.rs` `later_language`).
 - **EngineUnknown.** `resolve_tag(tag, span)` runs when a block is reached or a selector is bound. A miss raises `EngineUnknown: unknown engine '@pyhton' (did you mean '@py'?)` (did-you-mean per 5.9, over ids and aliases); with no close match, `unknown engine '@perl' — known engines: py, js, ts, c, cpp, rust, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.perl] in v2.toml` (the list is the registry's engines); the text ends `in v2.toml, or with define_engine` (17.2). Custom tags have 17.1's lowercase shape, so a tag the lexer accepts outside it (`@PY`) is simply unknown.
 - **`engine_available(tag)`:** `false` for an unknown tag (no error); otherwise `true` iff resolution succeeds (7.4, 7.6). It may run probes (cached, 7.7) but never starts a session or compiles, and a later crash (8.2) does not change its answer.
 
@@ -797,7 +798,7 @@ A Windows drive-relative name (`C:tool`, relative to that drive's own current fo
 
 ### 7.6 Per-engine rules
 
-**Order.** The configured command or `[python] venv` (whichever 18.3 picks), else the candidates. A configured value never falls back to auto-detection: a missing one is `EngineNotFound: engine 'py' command 'C:/Python312/python.exe' not found (set by C:\proj\v2.toml)`, and a failing probe is an error too (doctor `broken`; too old: `old`): `engine 'py' command 'C:\x\python.exe' (set by C:\proj\v2.toml) is not usable: version probe failed (exit code 1)`. "Set by" names the file's full path or the `V2_ENGINE_<TAG>` variable. Skip reasons: `Microsoft Store placeholder`, `too old: 3.9.6 < 3.10`, `version probe failed (exit code 1)`, `version probe timed out (10 s)`, `no version in its --version output`, `targets x86 but V2 is x86_64`, or 8.3's `could not start '…': …`. Each auto-detected hit is probed (7.7); a hit whose probe fails, times out or matches no version, that is below the minimum, or that has the wrong target is skipped (kept in `skipped`) and the search goes on (next `PATH` entry, then next candidate). Probes of `PATH` hits always pass arguments: an App Execution Alias run without arguments opens the Microsoft Store.
+**Order.** The configured command or `[python] venv` (whichever 18.3 picks), else the candidates. A configured value never falls back to auto-detection: a missing one is `EngineNotFound: engine 'py' command 'C:/Python312/python.exe' not found (set by C:\proj\v2.toml)`, and a failing probe is an error too (doctor `broken`; too old: `old`): `engine 'py' command 'C:\x\python.exe' (set by C:\proj\v2.toml) is not usable: version probe failed (exit code 1)`. "Set by" names the file's full path or the `V2_ENGINE_<TAG>` variable. Skip reasons: `Microsoft Store placeholder`, `too old: 3.9.6 < 3.10`, `version probe failed (exit code 1)`, `version probe timed out (10 s)`, `no version in its --version output`, `targets x86 but V2 is x86_64`, or 8.3's `could not start '…': …`. Each auto-detected hit is probed (7.7); a hit whose probe fails, times out or matches no version, that is below the minimum, or that has the wrong target is skipped (kept in `skipped`) and the search goes on (next `PATH` entry, then next candidate). A hit that is the same file as an earlier one (both canonicalized; a path that can't be, as itself) with the same prefix arguments is passed over unprobed and unlisted: on most Linux systems `/bin` is a link to `/usr/bin`, and `python` may be a link to `python3`. Probes of `PATH` hits always pass arguments: an App Execution Alias run without arguments opens the Microsoft Store.
 
 - **py.** venv: `<venv>\Scripts\python.exe` on Windows, `<venv>/bin/python` then `bin/python3` elsewhere; missing: `EngineNotFound: [python] venv 'C:\proj\.venv' has no Scripts\python.exe (create it: python -m venv C:\proj\.venv)`. A hit under `%LOCALAPPDATA%\Microsoft\WindowsApps` (case-insensitive) is an alias: a real Store or Install Manager Python, or the placeholder that prints "Python was not found" and exits 9009 (skipped: `Microsoft Store placeholder`). `py -3` (`find_program("py")` + `-3`) is Windows-only and last. It and a Windows venv `python.exe` are launchers that run the real interpreter as a child, and aliases change target without their file changing; so the version is re-checked from `hello` (8.4) and every kill is a tree kill (8.3).
 - **macOS.** `/usr/bin/python3`, `cc`, `gcc`, `g++`, `clang` and `clang++` are `xcrun` shims that open an install dialog when the Command Line Tools are missing; V2 first runs `/usr/bin/xcode-select -p`, and a non-zero exit skips them (`Command Line Tools missing`).
@@ -832,14 +833,16 @@ Ch. 15 receives the compiled engines' `argv`, `version`, `target` (cl's folder n
 EngineNotFound: engine 'py' (Python) not found
   tried: python3, python, py -3 on PATH
   skipped: C:\Users\me\AppData\Local\Microsoft\WindowsApps\python.exe (Microsoft Store placeholder)
-  install: winget install -e --id Python.Python.3.12
+  install: winget install -e --id Python.Python.3.13 (or https://www.python.org/downloads/), then open a new terminal
   or set [engines.py] command in v2.toml, or V2_ENGINE_PY
 ```
 
+When every hit was too old, the first line says what was found and what V2 needs instead of "not found": `engine 'py' (Python) is too old: found 3.9.6, V2 needs 3.10+` (the newest version found; Node: `V2 needs 22.13+, not 23.0 or 23.1`), and ts's is `engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and engine 'js' (JavaScript) is too old: …`. The other lines are as above.
+
 | engine | Windows | Linux | macOS |
 |---|---|---|---|
-| py | `winget install -e --id Python.Python.3.12` | `sudo apt install python3` / `sudo dnf install python3` | `brew install python` |
-| js, ts | `winget install -e --id OpenJS.NodeJS.LTS` | https://nodejs.org (distro packages may be older than 22.13) | `brew install node` |
+| py | `winget install -e --id Python.Python.3.13 (or https://www.python.org/downloads/), then open a new terminal` | `sudo apt install python3 / sudo dnf install python3 (or https://www.python.org/downloads/)` | `brew install python (or https://www.python.org/downloads/)` |
+| js, ts | `winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal` | `https://nodejs.org/en/download (distro packages may be older than 22.13)` | `brew install node (or https://nodejs.org)` |
 | c, cpp | `winget install -e --id Microsoft.VisualStudio.2022.BuildTools` (workload "Desktop development with C++") | `sudo apt install build-essential` / `sudo dnf install gcc gcc-c++` | `xcode-select --install` |
 | rust | `winget install -e --id Rustlang.Rustup` | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | as Linux |
 
@@ -2463,6 +2466,12 @@ Built-in defaults < the project's `v2.toml` < `V2_ENGINE_<TAG>` (DOCS 14).
 
 `--version` and `--help` are the only flags. A first word that is exactly `check`, `doctor` or `cache` is a subcommand, else the script (`v2 ./doctor` runs a file named doctor); everything after FILE goes to `args()` untouched. No arguments, any other first word starting with `-`, a missing or extra argument after a subcommand (`v2 doctor py`), or a missing or unreadable FILE, or one whose name isn't valid UTF-8: a message on stderr, exit 2.
 
+Each of these messages ends with what to do next (`cli/entry.rs` for FILE):
+- No arguments: `no script given: run one with `v2 FILE`, for example `v2 hello.v2``; `-h`, `-help`, `-?`, `--h`, `-H` add `(did you mean `--help`?)`, `-v`, `-V`, `-version`, `--v` add `(did you mean `--version`?)`. A usage error's second line is `run `v2 --help` for usage`.
+- FILE missing (`v2 FILE` and `v2 check FILE`): `cannot find 'FILE' in <folder>` (the canonical folder it would be in; an absolute FILE: just `cannot find 'FILE'`), then one hint, the first that applies: for a bare word, `run`/`exec`/`start` → `there is no 'run' command: to run hello.v2, type: v2 hello.v2` (the next argument, quoted when it has a space; none: `type: v2 FILE (for example: v2 hello.v2)`), `help` → `for help, type: v2 --help`, `version` → `for the version, type: v2 --version`, a word people expect to be a command (`build`, `compile`, `format`, `fmt`, `init`, `install`, `lint`, `new`, `repl`, `setup`, `test`, `uninstall`, `update`, `upgrade`) → `'install' isn't a V2 command; the commands are check, doctor and cache clean (see v2 --help)`; FILE without an extension and FILE`.v2` there → `did you mean 'hello.v2'?`; FILE`.txt` there → `there is a 'hello.v2.txt': your editor added '.txt', so rename it to 'hello.v2'`; a `.v2` file of that folder within 5.9's did-you-mean distance → `did you mean 'hello.v2'?`; else the folder's `.v2` files, sorted, five at most (`the .v2 files there: a.v2, b.v2, …`), or `there are no .v2 files there: cd to the folder that holds your script, or give its full path`. `/?` is `'/?' isn't a V2 command` with the help hint.
+- FILE a folder: `'proj' is a folder, not a script`, then `run one of its .v2 files, for example: v2 proj\main.v2` (`main.v2` if there, else the first by name; the platform's separator; quoted when it has a space), or `, and it has no .v2 files`.
+- FILE ending `.py`, `.js`/`.mjs`/`.cjs`, `.ts`/`.mts`/`.cts`, `.c`/`.h`, `.cpp`/`.cc`/`.cxx`/`.hpp` or `.rs`: after the error that ends the run (a SyntaxError, a static-check error or an uncaught error), one more line: `note: 'app.js' is a JavaScript file, and V2 runs .v2 scripts: put JavaScript code in a @js { } block in a .v2 file`; for the compiled languages, `… V2 runs .v2 scripts (C blocks aren't in this version of V2 yet)`.
+
 | Exit | Meaning |
 |---|---|
 | 0 | success: the entry file ran to its end; check found no errors; doctor and `cache clean` finished |
@@ -2477,15 +2486,18 @@ Built-in defaults < the project's `v2.toml` < `V2_ENGINE_<TAG>` (DOCS 14).
 
 1. Load config from the cwd (18.1; error: exit 2); the registry is the built-ins (7.2, the built-in run engines included), then the config's custom engines, one row each (doctor runs no script, so `define_engine` engines are not listed). Resolve every engine with fresh probes (7.7), rewriting the probe cache. Doctor executes toolchain commands, including project-configured ones (`v2.toml` commands, the venv python, vswhere and vcvarsall), so it is not safe on an untrusted project (20.2).
 2. Print a table to stdout, columns `ENGINE STATUS COMMAND VERSION FROM`, each as wide as its longest cell + 2 (DOCS 2). COMMAND: `shown` plus prefix args (a built-in run engine's: the rest of its template, `{file}` included), space-joined, unquoted; ts: `(js engine, built-in type stripping)`; custom: the argv template. VERSION: the probed version (ts: Node's); `-` for `cmd` and custom engines, which have no probe. FROM: `PATH`, `vswhere`, `venv`, `git`, `v2.toml`, `V2_ENGINE_<TAG>` or `-` (ts: js's; bash on Windows: `git`, 7.6). STATUS: `ok`; `missing` (other columns `-`; also `cmd` off Windows); `old` (only too-old versions, 7.6; VERSION the newest); `broken` (probe failed or timed out, wrong target, or a configured command or venv missing).
-3. Then `notes:` (skipped hits, such as Store placeholders; cl's and rustc's targets; a line for each engine that is not `ok`) and the config file used (`config file: <path>`, or `config file: none`). Exit 0: missing engines are information, not failure. For example:
+3. Then `notes:` (skipped hits, such as Store placeholders; cl's and rustc's targets; a line for each engine that is not `ok`), the config file used (`config file: <path>`, or `config file: none`), the version line for bug reports (`--version`'s text, then the OS and architecture), and a summary: `ready: ` and the `ok` engines in table order (none: `none`), then, if any engine is not `ok`, `not ready: js, ts (see the notes); scripts that don't use them still run` (`plain V2 scripts still run` when none is ready). Exit 0: missing engines are information, not failure. For example:
    ```text
    notes:
      py: skipped C:\Users\me\AppData\Local\Microsoft\WindowsApps\python3.exe (Microsoft Store placeholder)
-     js: not found; install: winget install -e --id OpenJS.NodeJS.LTS
-     ts: not found; install: winget install -e --id OpenJS.NodeJS.LTS
+     js: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal
+     ts: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal
    config file: none
+   v2 0.1.0 (VEP/1), windows x86_64
+   ready: py
+   not ready: js, ts (see the notes); scripts that don't use them still run
    ```
-   A `missing` engine's note is `not found; install: …` with 7.8's hint (run engines have none: `not found`; `cmd` off Windows: `cmd is Windows only`); a `broken` or `old` one gets the first line of its `EngineNotFound` message.
+   A `missing` engine's note is `not found; install: …` with 7.8's hint (run engines have none: `not found`; `cmd` off Windows: `cmd is Windows only`); an auto-detected `old` one is `too old: found 3.9.6, V2 needs 3.10+; install: …` (ts with js's minimum); a `broken` one, or a configured command that is too old, gets the first line of its `EngineNotFound` message.
 
 ### 19.3 v2 check
 
@@ -2608,6 +2620,8 @@ tests/
   engines/py/ js/ ts/     bridged engines, each with fixtures/
   cross/  imports/        multi-engine programs; selectors, ambiguity, aliases, the waiting line
   sweep/                  one folder per DOCS area: expected output taken from DOCS, not the binary (roadmap 1.14)
+  docs/                   expected output of the DOCS.md and README.md examples (run.rs)
+  install/                smoke.sh, smoke.ps1: install a release archive and follow README.md (22.6)
   compiled/c/ cpp/ rust/
   ffi/
   custom/                 run and bridged custom engines; custom/builtin/ for the built-in run engines
@@ -2724,3 +2738,11 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 
 - **Build and test.** Every job builds V2 with stable Rust and runs `cargo test`. On Windows the host target is `x86_64-pc-windows-msvc`, which also proves that libffi builds with MSVC. `@rust` blocks compile with that column's toolchain: the minimum-versions job installs Rust 1.56 beside stable and sets `V2_TEST_RUST_TOOLCHAIN=1.56` (22.2).
 - **Unusual paths.** A run.rs test runs a script from a folder whose path has a space and a non-ASCII character (`v2 tést`).
+
+### 22.6 Release builds and the install check
+
+- **The workflow.** `.github/workflows/release.yml` runs by hand with the release's tag, or when a `v*` tag is pushed. The tag must be `v` + the crate version, and `install.sh` and `install.ps1` must name it as their default `V2_VERSION`; otherwise nothing is built.
+- **Builds**, `--release --locked`: `x86_64-pc-windows-msvc` on windows-latest with `-C target-feature=+crt-static` (the C runtime linked in, because a fresh Windows may have no `VCRUNTIME140.dll`); `x86_64-unknown-linux-gnu` on ubuntu-22.04, the oldest runner, so the binary needs only glibc 2.35; `aarch64-apple-darwin` on macos-latest. Each is packed as `v2-<target>.zip` (Windows) or `v2-<target>.tar.gz`, with `v2` (`v2.exe`), README.md and LICENSE at the top, plus a `.sha256` file in `sha256sum` format.
+- **The install check**, on each fresh runner before anything is uploaded: `tests/install/smoke.sh` (`smoke.ps1` in Windows PowerShell) installs the archive with the install script (`V2_ARCHIVE`) into a fresh home whose path has a space and a non-ASCII letter, checks the PATH change (the shell startup file; the user `Path` in the registry), then saves each README quickstart file (a "Save this as `X.v2`:" line and the next `v2` fence), runs it from a new shell with plain `v2`, and compares what it prints with the next `text` fence.
+- **The draft.** Then the six files go on a draft prerelease named `V2 <version>` that targets the built commit; an existing draft gets its files replaced and its target moved; a published release is never touched. Publishing it is a person's step, and creates the tag.
+- **The install scripts.** `install.sh` (POSIX sh; Linux x86-64 and macOS arm64) and `install.ps1` (Windows PowerShell 5.1 and 7) download the pinned release's archive and `.sha256` (curl or wget; `Invoke-WebRequest` with TLS 1.2), or take `V2_ARCHIVE`; check the SHA-256; install into `V2_INSTALL_DIR` (default `~/.v2/bin`, `%USERPROFILE%\.v2\bin`) by renaming, so a running v2 is never overwritten; run `v2 --version` (a glibc error names the Linux versions that work); unless `V2_NO_MODIFY_PATH=1`, put the folder on PATH: one line in the shell's startup file (zsh `.zshrc`; bash `.bashrc`, on macOS `.bash_profile`; fish `conf.d/v2.fish`; else `.profile`), or in front of the user `Path` in the registry, kept unexpanded, plus this window's `$env:Path`; then say if another v2 comes first. `install.ps1` runs in a script block and never calls `exit`, so `irm … | iex` can't close the user's window.

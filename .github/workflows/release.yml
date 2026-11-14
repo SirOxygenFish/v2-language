@@ -1,0 +1,107 @@
+# Build the prebuilt binaries (INTERNALS 22.6) and put them on a DRAFT GitHub release; a person
+# publishes it. Run it by hand (Actions > Release > Run workflow) with the tag the release will
+# get, or push that tag. The tag must be `v` + Cargo.toml's version, and install.sh and
+# install.ps1 must name it. A draft creates no tag: publishing it does, at the commit it names.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag, e.g. v0.1.0-alpha.2 (created only when the draft is published)"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows: the C runtime linked in, so a fresh Windows needs no Visual C++ package.
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, rustflags: "-C target-feature=+crt-static" }
+          # Linux: built on the oldest runner, so the binary needs only glibc 2.35.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, rustflags: "" }
+          - { os: macos-latest, target: aarch64-apple-darwin, rustflags: "" }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the version names
+        shell: bash
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          [ "$TAG" = "v$crate" ] || { echo "the tag $TAG is not v$crate (Cargo.toml)"; exit 1; }
+          grep -q "V2_VERSION:-$TAG}" install.sh || { echo "install.sh doesn't install $TAG"; exit 1; }
+          grep -q "else { '$TAG' }" install.ps1 || { echo "install.ps1 doesn't install $TAG"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        run: |
+          mkdir stage
+          cp LICENSE README.md stage/
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/release/v2.exe stage/
+            asset="v2-${{ matrix.target }}.zip"
+            (cd stage && 7z a -tzip "../$asset" . >/dev/null)
+          else
+            cp target/release/v2 stage/
+            asset="v2-${{ matrix.target }}.tar.gz"
+            tar -czf "$asset" -C stage v2 LICENSE README.md
+          fi
+          if command -v sha256sum >/dev/null; then sha256sum "$asset" > "$asset.sha256"; else shasum -a 256 "$asset" > "$asset.sha256"; fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      # The smoke check follows README.md's quickstart with the packaged binary on a fresh runner.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install and follow the README (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: sh tests/install/smoke.sh "$ASSET"
+      - name: Install and follow the README (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\smoke.ps1 $env:ASSET
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          notes="V2 ${TAG#v}, an alpha. Install it with the one-line command for your system in README.md, or download the file for your system below. Python and Node.js blocks need Python 3.10+ and Node.js 22.13+. What works and what doesn't yet: README.md \"Known limitations\"."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ] || { echo "$TAG is already published: not touching it"; exit 1; }
+            gh release edit "$TAG" --target "$GITHUB_SHA"
+            gh release upload "$TAG" assets/* --clobber
+          else
+            gh release create "$TAG" assets/* --draft --prerelease --target "$GITHUB_SHA" --title "V2 ${TAG#v}" --notes "$notes"
+          fi

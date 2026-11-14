@@ -11,6 +11,27 @@ use crate::runtime::error::{did_you_mean, fail, Exec};
 
 type Resolution = Result<Rc<ResolvedEngine>, Rc<NotFound>>;
 
+/// The language of a tag that DOCS 5 lists but this build doesn't register yet: compiled blocks
+/// (roadmap Phase 2) and the built-in run engines (Phase 3). Each row goes when its engine joins
+/// the registry (7.3).
+fn later_language(tag: &str) -> Option<&'static str> {
+    Some(match tag {
+        "c" => "C",
+        "cpp" | "cxx" => "C++",
+        "rust" | "rs" => "Rust",
+        "bash" | "sh" => "shell",
+        "pwsh" | "powershell" => "PowerShell",
+        "cmd" => "cmd",
+        "lua" => "Lua",
+        "ruby" => "Ruby",
+        "go" => "Go",
+        "java" => "Java",
+        "zig" => "Zig",
+        "cs" | "csharp" => "C#",
+        _ => return None,
+    })
+}
+
 /// The engines of this run. Resolution is lazy and memoized per id, failures included (7.1).
 pub struct Registry {
     specs: Vec<Rc<EngineSpec>>,
@@ -87,15 +108,17 @@ impl Registry {
         }
     }
 
-    /// `unknown engine '@pyhton' (did you mean '@py'?)`, or the list of known engines (7.3).
+    /// `unknown engine '@pyhton' (did you mean '@py'?)`, or the list of known engines (7.3). A tag
+    /// of a later roadmap phase says so first, so `@rs` is not taken for a typo of `@ts`.
     pub fn unknown_message(&self, tag: &str) -> String {
+        let ids: Vec<&str> = self.specs.iter().map(|s| &*s.id).collect();
+        if let Some(language) = later_language(tag) {
+            return format!("unknown engine '@{tag}': {language} blocks aren't in this version of V2 yet — known engines: {}", ids.join(", "));
+        }
         let names = self.specs.iter().flat_map(|s| std::iter::once(&s.id).chain(&s.aliases)).map(|n| &**n);
         match did_you_mean(tag, names).and_then(|n| self.canonical(n)) {
             Some(spec) => format!("unknown engine '@{tag}' (did you mean '@{}'?)", spec.id),
-            None => {
-                let ids: Vec<&str> = self.specs.iter().map(|s| &*s.id).collect();
-                format!("unknown engine '@{tag}' — known engines: {}", ids.join(", "))
-            }
+            None => format!("unknown engine '@{tag}' — known engines: {}", ids.join(", ")),
         }
     }
 
@@ -149,8 +172,12 @@ mod tests {
         assert_eq!(reg.unknown_message("pyhton"), "unknown engine '@pyhton' (did you mean '@py'?)");
         assert_eq!(reg.unknown_message("javscript"), "unknown engine '@javscript' (did you mean '@js'?)");
         assert_eq!(reg.unknown_message("PY"), "unknown engine '@PY' (did you mean '@py'?)");
-        assert_eq!(reg.unknown_message("lua"), "unknown engine '@lua' — known engines: py, js, ts");
-        assert_eq!(reg.unknown_message("c"), "unknown engine '@c' — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("lua"), "unknown engine '@lua': Lua blocks aren't in this version of V2 yet — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("c"), "unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts");
+        // A later tag one edit away from a known one is not a typo of it.
+        assert_eq!(reg.unknown_message("rs"), "unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("cs"), "unknown engine '@cs': C# blocks aren't in this version of V2 yet — known engines: py, js, ts");
         let Err(crate::runtime::error::Flow::Error(e)) = reg.resolve_tag("nosuch") else { panic!("an error") };
         assert_eq!(&*e.kind, "EngineUnknown");
     }

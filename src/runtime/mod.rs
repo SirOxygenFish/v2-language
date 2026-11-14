@@ -24,6 +24,17 @@ use interp::Interp;
 
 /// `v2 FILE [ARGS...]` on the interpreter thread; returns the exit code (6.1, 6.5).
 pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>) -> i32 {
+    // A missing FILE or a folder: what to do next (19.1).
+    if let Some(msg) = crate::cli::entry_error(path, args.first().map(String::as_str)) {
+        stderrln!("v2: {msg}");
+        return 2;
+    }
+    // A Python or JS file given to V2 gets a note after its errors.
+    let note = || {
+        if let Some(note) = crate::cli::foreign_file_note(path) {
+            stderrln!("{note}");
+        }
+    };
     let mut sm = SourceMap::new();
     let file = match sm.load(Path::new(path)) {
         Ok(id) => id,
@@ -31,8 +42,8 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
             stderrln!("v2: {msg}");
             return 2;
         }
-        Err(LoadError::NotUtf8 { display, line }) => {
-            stderrln!("{display}:{line}:1: SyntaxError: file is not valid UTF-8");
+        Err(LoadError::NotUtf8 { display, line, message }) => {
+            stderrln!("{display}:{line}:1: SyntaxError: {message}");
             return 1;
         }
     };
@@ -40,6 +51,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
         Ok(p) => p,
         Err(d) => {
             stderr!("{}", render_diag(&sm, &d));
+            note();
             return 1;
         }
     };
@@ -49,6 +61,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
         for d in &diags {
             stderr!("{}", render_diag(&sm, d));
         }
+        note();
         return 1;
     }
     crate::syntax::resolve::resolve(&mut program);
@@ -74,6 +87,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
         Ok(()) => 0,
         Err(Flow::Error(e)) => {
             stderr!("{}", render_error(&interp.sm, &e));
+            note();
             // No usable toolchain is exit 3 (6.5, 19.1).
             if &*e.kind == "EngineNotFound" {
                 3
