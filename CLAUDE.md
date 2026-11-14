@@ -33,9 +33,9 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 and 2 found and fixed (bf4327c and the next commit, ROADMAP log); round 3 next, on a
-  new distro and sandbox (round 2's: v2new24b, scratchpad/newcomer/linux2, `win2 ü`). Loop until
-  a round finds nothing new. Installer tests: tests/install/paths.{sh,ps1} (paths.ps1 never
+  Rounds 1 and 2 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 3 next,
+  on a new distro and sandbox (prompts: scratchpad/newcomer/prompt-*-r3.md). Loop until a round
+  finds nothing new. Installer tests: tests/install/paths.{sh,ps1} (paths.ps1 never
   changes the user PATH without -ModifyPath, CI only).
   Newcomer prompts: scratchpad/newcomer/prompt-{linux,windows}.md (session-local; rewrite if gone).
   Owner decisions still open: `#!` lines, static members of imported classes.

@@ -31,7 +31,7 @@ pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag
         other => Err(Diag::new(format!("unexpected {other}"), p.span())),
     });
     result.map_err(|d| match d.hint {
-        None => match habit(&p.toks, d.span) {
+        None => match habit(&p.toks, d.span, sm) {
             Some(h) => d.hint(h),
             None => d,
         },
@@ -42,7 +42,7 @@ pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag
 /// What V2 writes for Python or JavaScript written out of habit, from the tokens where a syntax
 /// error stopped (4.3): `def f(`, `var x`, `and`, `x is None`, `x => …`, `i++`, `i--`, `===`,
 /// `if x:`, `function(x) {`.
-fn habit(toks: &[Token], at: Span) -> Option<String> {
+fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
     let i = toks.iter().position(|t| t.span.file == at.file && t.span.lo == at.lo)?;
     let tok = |back: usize| i.checked_sub(back).map(|j| &toks[j].tok);
     let word = |back: usize| match tok(back) {
@@ -63,19 +63,12 @@ fn habit(toks: &[Token], at: Span) -> Option<String> {
         (Some("print"), _, _) if matches!(tok(0), Some(Tok::Str(_) | Tok::FStr(_) | Tok::Ident(_) | Tok::Int(_) | Tok::Float(_))) => {
             "print is a function in V2: print(\"hello\")".into()
         }
-        (Some("import"), Some(name), _) => format!("V2 imports a name from a Python module with @import {{ {name} }} from py.module"),
         _ if matches!(tok(0), Some(Tok::Kw(Kw::From))) && matches!(tok(1), None | Some(Tok::Newline | Tok::Semi)) => {
-            "V2 imports names with @import { mean } from py.statistics".into()
+            from_import_hint(&toks[i + 1..]).unwrap_or_else(|| "V2 imports names with @import { mean } from py.statistics".into())
         }
         // `js.date-fns`: a package name with `-` goes in quotes, the whole name as written.
         (_, _, Some(Op::Minus)) if word(1).is_some() && op(2) == Some(Op::Dot) && matches!(word(3), Some("js" | "py" | "ts")) => {
-            let mut name = word(1).unwrap_or("name").to_string();
-            let mut j = i;
-            while let (Some(Tok::Op(Op::Minus)), Some(Tok::Ident(w))) = (toks.get(j).map(|t| &t.tok), toks.get(j + 1).map(|t| &t.tok)) {
-                name.push('-');
-                name.push_str(w);
-                j += 2;
-            }
+            let name = dashed_name(&sm.file(toks[i - 1].span.file).text, toks[i - 1].span.lo as usize);
             format!("a package name with - goes in quotes: {}.\"{name}\"", word(3).unwrap_or("js"))
         }
         (_, _, Some(Op::FatArrow)) => "V2 writes an anonymous function as func(x) => x * 2".into(),
@@ -98,6 +91,97 @@ fn habit(toks: &[Token], at: Span) -> Option<String> {
         _ => return None,
     };
     Some(hint)
+}
+
+/// Python's `from os.path import join, exists as e` as V2 writes it:
+/// `V2 imports names with @import { join, exists as e } from py.os.path`; `None` for another shape.
+fn from_import_hint(toks: &[Token]) -> Option<String> {
+    let mut it = toks.iter().map(|t| &t.tok).peekable();
+    let Some(Tok::Ident(first)) = it.next() else { return None };
+    let mut module = first.to_string();
+    while matches!(it.peek(), Some(Tok::Op(Op::Dot))) {
+        it.next();
+        let Some(Tok::Ident(seg)) = it.next() else { return None };
+        module.push('.');
+        module.push_str(seg);
+    }
+    if !matches!(it.next(), Some(Tok::Kw(Kw::Import))) {
+        return None;
+    }
+    let mut names = Vec::new();
+    while let Some(Tok::Ident(n)) = it.next() {
+        let mut item = n.to_string();
+        if matches!(it.peek(), Some(Tok::Kw(Kw::As))) {
+            it.next();
+            let Some(Tok::Ident(alias)) = it.next() else { return None };
+            item = format!("{item} as {alias}");
+        }
+        names.push(item);
+        if !matches!(it.peek(), Some(Tok::Op(Op::Comma))) {
+            break;
+        }
+        it.next();
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!("V2 imports names with @import {{ {} }} from py.{module}", names.join(", ")))
+}
+
+/// The package name written at byte `lo` of `text`, with its dashes and digits (`date-fns`,
+/// `utf-8-validate`, `is-in-browser`), up to a space or a character no package name has.
+fn dashed_name(text: &str, lo: usize) -> String {
+    let rest = &text[lo..];
+    let end = rest.find(|c: char| c.is_whitespace() || "{}()[],;\"'".contains(c)).unwrap_or(rest.len());
+    rest[..end].trim_end_matches('.').to_string()
+}
+
+/// A package selector as V2 writes it, from the text after `from` (2.4): `py.os.path`,
+/// `js."date-fns"` (a name V2 can't read bare goes in quotes), and a quoted name, JavaScript's
+/// `from "dayjs"` or a selector quoted whole, as `js.dayjs`; `None` for anything else (a block
+/// label, `@py`).
+fn package_selector(text: &str) -> Option<String> {
+    let inner = text.strip_prefix('"').and_then(|t| t.strip_suffix('"'));
+    let (lang, rest) = match (inner, inner.unwrap_or(text).split_once('.')) {
+        (_, Some((lang @ ("py" | "js" | "ts"), rest))) if !rest.is_empty() => (lang, rest),
+        (Some(name), _) if !name.is_empty() => ("js", name),
+        _ => return None,
+    };
+    let quote = |name: &str| {
+        if name.starts_with('"') || super::lexer::is_plain_name(name) {
+            name.to_string()
+        } else {
+            format!("\"{name}\"")
+        }
+    };
+    if lang != "py" {
+        // An npm name is one segment, dots and all.
+        return Some(format!("{lang}.{}", quote(rest)));
+    }
+    let (mut segments, mut cur, mut quoted) = (Vec::new(), String::new(), false);
+    for c in rest.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                cur.push(c);
+            }
+            '.' if !quoted => segments.push(quote(&std::mem::take(&mut cur))),
+            _ => cur.push(c),
+        }
+    }
+    segments.push(quote(&cur));
+    Some(format!("py.{}", segments.join(".")))
+}
+
+/// A name for `@import js."date-fns" as …`: the package's last part, with other characters as `_`.
+fn alias_for(package: &str) -> String {
+    let last = package.rsplit('/').next().unwrap_or(package);
+    let alias: String = last.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    if alias.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        alias
+    } else {
+        format!("m_{alias}")
+    }
 }
 
 /// `{name}` (or `{a.b}`) in an f-string's text, Python's placeholder for V2's `${name}`: the
@@ -510,11 +594,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let t = self.bump();
                 let Tok::Str(path) = t.tok else {
-                    // Python's `import numpy as np` imports a module: V2's form says the language.
-                    let hint = match &t.tok {
-                        Tok::Ident(m) => format!("a Python module is imported with @import py.{m} as {m}; another .v2 file with import \"./util.v2\" as util"),
-                        _ => "import \"./util.v2\" as util".to_string(),
-                    };
+                    let hint = self.import_habit(&t.tok);
                     return Err(Diag::new(format!("expected a path string after import, found {}", t.tok), t.span).hint(hint));
                 };
                 if !self.at_kw(Kw::As) {
@@ -722,20 +802,19 @@ impl<'a> Parser<'a> {
             // `@import math from py.math`: names go in braces (Python's `from m import x` habit).
             if let (Selector::Label { label }, true) = (&selector, self.at_kw(Kw::From)) {
                 let name = label.text.clone();
-                // The selector after `from`, as written, for the hint.
                 self.bump();
-                let from = self.selector().ok().map(|sel| match sel {
-                    Selector::Module { lang, path } => {
-                        let parts: Vec<String> = path.iter().map(|p| if super::lexer::is_plain_name(&p.text) { p.text.to_string() } else { format!("\"{}\"", p.text) }).collect();
-                        format!("{}.{}", lang.text, parts.join("."))
+                // The selector after `from` as written: a package also has the whole-module form.
+                let written = self.written_selector();
+                let hint = match package_selector(&written) {
+                    Some(sel) => {
+                        let js = sel.starts_with("js.") || sel.starts_with("ts.");
+                        let default = if js { format!(" (a default export: @import {{ \"default\" as {name} }} from {sel})") } else { String::new() };
+                        format!("write @import {{ {name} }} from {sel}{default}, or @import {sel} as {name} for the whole module")
                     }
-                    _ => format!("py.{name}"),
-                });
-                let from = from.unwrap_or_else(|| format!("py.{name}"));
-                let js = from.starts_with("js.") || from.starts_with("ts.");
-                let default = if js { format!(" (a default export: @import {{ \"default\" as {name} }} from {from})") } else { String::new() };
-                return Err(Diag::new("expected `{` before the names to import", label.span)
-                    .hint(format!("write @import {{ {name} }} from {from}{default}, or @import {from} as {name} for the whole module")));
+                    None if written.is_empty() => format!("write @import {{ {name} }} from a block's label or a package (py.module, js.package)"),
+                    None => format!("write @import {{ {name} }} from {written}"),
+                };
+                return Err(Diag::new("expected `{` before the names to import", label.span).hint(hint));
             }
             if !matches!(selector, Selector::Module { .. }) {
                 return Err(Diag::new("only a package selector (py.name, js.name) can be imported as a whole module", self.prev_span()));
@@ -743,6 +822,21 @@ impl<'a> Parser<'a> {
             if !self.at_kw(Kw::As) {
                 let d = Diag::new("expected `as NAME` after the package selector", self.span());
                 return Err(match &selector {
+                    // `js.date-fns`: the whole name, in quotes.
+                    Selector::Module { lang, path } if self.at_op(Op::Minus) && path.len() == 1 => {
+                        let name = dashed_name(&self.sm.file(path[0].span.file).text, path[0].span.lo as usize);
+                        // The user's own `as NAME` later on the line, if there is one.
+                        let line = path[0].span.line;
+                        let alias = self.toks[self.pos..]
+                            .windows(2)
+                            .take_while(|w| w[0].span.line == line)
+                            .find_map(|w| match (&w[0].tok, &w[1].tok) {
+                                (Tok::Kw(Kw::As), Tok::Ident(a)) => Some(a.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| alias_for(&name));
+                        d.hint(format!("a package name with - goes in quotes: @import {}.\"{name}\" as {alias}", lang.text))
+                    }
                     Selector::Module { lang, path } => {
                         let alias = path.last().map(|n| n.text.to_string()).filter(|n| super::lexer::is_plain_name(n)).unwrap_or_else(|| "m".into());
                         let dotted: Vec<&str> = path.iter().map(|n| &*n.text).collect();
@@ -755,6 +849,86 @@ impl<'a> Parser<'a> {
             let alias = self.expect_name("a name after `as`")?;
             Ok(EngineImport { items: ImportItems::Module(alias), selector, span: start.to(self.prev_span()) })
         }
+    }
+
+    /// The hint for `import` followed by `t`, something other than a path (2.4): Python's
+    /// `import numpy as np`, JavaScript's `import dayjs from "dayjs"`, `import { a } from "x"` and
+    /// `import * as m from "x"`, as V2 writes them. The parser stands after `t`.
+    fn import_habit(&self, t: &Tok) -> String {
+        // The package of a JavaScript `from "x"` at `k` tokens ahead.
+        let from_at = |k: usize| match (self.peek_at(k), self.peek_at(k + 1)) {
+            (Tok::Kw(Kw::From), Tok::Str(p)) => package_selector(&format!("\"{p}\"")),
+            _ => None,
+        };
+        match t {
+            Tok::Ident(m) if self.at_kw(Kw::From) => {
+                let sel = from_at(0).unwrap_or_else(|| "js.package".into());
+                format!("V2 imports a JavaScript default export with @import {{ \"default\" as {m} }} from {sel}")
+            }
+            Tok::Ident(m) => {
+                let mut module = m.to_string();
+                let mut k = 0;
+                while let (Tok::Op(Op::Dot), Tok::Ident(seg)) = (self.peek_at(k), self.peek_at(k + 1)) {
+                    module.push('.');
+                    module.push_str(seg);
+                    k += 2;
+                }
+                let alias = match (self.peek_at(k), self.peek_at(k + 1)) {
+                    (Tok::Kw(Kw::As), Tok::Ident(a)) => a.to_string(),
+                    _ => module.rsplit('.').next().unwrap_or_default().to_string(),
+                };
+                format!("a Python module is imported with @import py.{module} as {alias}; another .v2 file with import \"./util.v2\" as util")
+            }
+            Tok::LBrace(_) => {
+                let mut names = Vec::new();
+                let mut k = 0;
+                while let Tok::Ident(n) = self.peek_at(k) {
+                    let mut item = n.to_string();
+                    k += 1;
+                    if let (Tok::Kw(Kw::As), Tok::Ident(a)) = (self.peek_at(k), self.peek_at(k + 1)) {
+                        item = format!("{item} as {a}");
+                        k += 2;
+                    }
+                    names.push(item);
+                    if !matches!(self.peek_at(k), Tok::Op(Op::Comma)) {
+                        break;
+                    }
+                    k += 1;
+                }
+                let sel = matches!(self.peek_at(k), Tok::RBrace).then(|| from_at(k + 1)).flatten();
+                match (names.is_empty(), sel) {
+                    (false, Some(sel)) => format!("V2 imports names with @import {{ {} }} from {sel}", names.join(", ")),
+                    _ => "V2 imports names with @import { a, b } from js.package (or py.module, or a block's label)".into(),
+                }
+            }
+            Tok::Op(Op::Star) => match (self.peek_at(0), self.peek_at(1), from_at(2)) {
+                (Tok::Kw(Kw::As), Tok::Ident(a), Some(sel)) => format!("V2 imports a whole package with @import {sel} as {a}"),
+                _ => "V2 imports a whole package with @import js.package as name".into(),
+            },
+            _ => "import \"./util.v2\" as util".into(),
+        }
+    }
+
+    /// What was written from the next token to the first space outside quotes (or a `//`
+    /// comment): the selector as the user typed it, for hints.
+    fn written_selector(&self) -> String {
+        let t = &self.toks[self.pos.min(self.toks.len() - 1)];
+        if matches!(t.tok, Tok::Eof | Tok::Newline | Tok::Semi) {
+            return String::new();
+        }
+        let text = &self.sm.file(t.span.file).text;
+        let rest = &text[t.span.lo as usize..];
+        let mut quoted = false;
+        let mut end = rest.len();
+        for (i, c) in rest.char_indices() {
+            if c == '"' {
+                quoted = !quoted;
+            } else if !quoted && (c.is_whitespace() || rest[i..].starts_with("//")) {
+                end = i;
+                break;
+            }
+        }
+        rest[..end].to_string()
     }
 
     /// `@tag`, `@tag.label`, `label`, `lang.seg.seg`, `v2` (4.1).
@@ -791,8 +965,13 @@ impl<'a> Parser<'a> {
             }
             // `from "py.statistics"`: the package selector, quoted whole by mistake.
             Tok::Str(s) if ["py.", "js.", "ts."].iter().any(|p| s.starts_with(p)) => {
-                let (lang, name) = s.split_at(2);
-                Err(Diag::new("a block label can't be a string", t.span).hint(format!("a package is written {lang}{name} (with quotes only around a name like {lang}.\"date-fns\")")))
+                let sel = package_selector(&format!("\"{s}\"")).unwrap_or_else(|| s.to_string());
+                let hint = if sel.contains('"') {
+                    format!("a package is written {sel}: the quotes go around the name only")
+                } else {
+                    format!("a package is written {sel}, without quotes")
+                };
+                Err(Diag::new("a block label can't be a string", t.span).hint(hint))
             }
             Tok::Str(_) => Err(Diag::new("a block label can't be a string", t.span).hint(LABEL_HINT)),
             other => Err(Diag::new(format!("expected a selector (@py, a block label, or py.module), found {other}"), t.span)),
@@ -1623,11 +1802,32 @@ extern "m" as m { double cos(double x); }
         );
         assert_eq!(hint("let f = lambda x: x * 2"), "V2 writes an anonymous function as func(x) => x * 2");
         assert_eq!(hint("print \"hi\""), "print is a function in V2: print(\"hello\")");
-        assert_eq!(hint("import numpy as np"), "a Python module is imported with @import py.numpy as numpy; another .v2 file with import \"./util.v2\" as util");
+        assert_eq!(hint("import numpy as np"), "a Python module is imported with @import py.numpy as np; another .v2 file with import \"./util.v2\" as util");
+        assert_eq!(hint("import os.path"), "a Python module is imported with @import py.os.path as path; another .v2 file with import \"./util.v2\" as util");
+        // JavaScript's import forms.
+        assert_eq!(hint("import dayjs from \"dayjs\""), "V2 imports a JavaScript default export with @import { \"default\" as dayjs } from js.dayjs");
+        assert_eq!(hint("import x from \"./x.js\""), "V2 imports a JavaScript default export with @import { \"default\" as x } from js.\"./x.js\"");
+        assert_eq!(hint("import { chunk, zip as z } from \"lodash\""), "V2 imports names with @import { chunk, zip as z } from js.lodash");
+        assert_eq!(hint("import * as fs from \"node:fs\""), "V2 imports a whole package with @import js.\"node:fs\" as fs");
         assert_eq!(hint("from statistics import mean"), "V2 imports names with @import { mean } from py.statistics");
-        assert_eq!(hint("@import { f } from \"py.statistics\""), "a package is written py.statistics (with quotes only around a name like py.\"date-fns\")");
+        assert_eq!(hint("from os.path import join, exists as e"), "V2 imports names with @import { join, exists as e } from py.os.path");
+        // The selector as written: a label, a tag, JavaScript's quoted package, a dashed name.
+        assert_eq!(hint("@import mean from stats"), "write @import { mean } from stats");
+        assert_eq!(hint("@import mean from @py.stats // the block"), "write @import { mean } from @py.stats");
+        assert_eq!(
+            hint("@import dayjs from \"dayjs\""),
+            "write @import { dayjs } from js.dayjs (a default export: @import { \"default\" as dayjs } from js.dayjs), or @import js.dayjs as dayjs for the whole module"
+        );
+        assert!(hint("@import format from js.date-fns").starts_with("write @import { format } from js.\"date-fns\" (a default export"));
+        assert_eq!(hint("@import { f } from \"py.statistics\""), "a package is written py.statistics, without quotes");
+        assert_eq!(hint("@import { f } from \"js.date-fns\""), "a package is written js.\"date-fns\": the quotes go around the name only");
         assert_eq!(hint("@import { format } from js.date-fns"), "a package name with - goes in quotes: js.\"date-fns\"");
         assert_eq!(hint("@import { x } from js.left-pad-x\n"), "a package name with - goes in quotes: js.\"left-pad-x\"");
+        for (src, name) in [("js.utf-8-validate", "utf-8-validate"), ("js.is-in-browser", "is-in-browser"), ("js.deep-for-each", "deep-for-each"), ("js.lodash-4", "lodash-4")] {
+            assert_eq!(hint(&format!("@import {{ f }} from {src}")), format!("a package name with - goes in quotes: js.\"{name}\""), "{src}");
+        }
+        assert_eq!(hint("@import js.date-fns as dfns"), "a package name with - goes in quotes: @import js.\"date-fns\" as dfns");
+        assert_eq!(hint("@import js.date-fns"), "a package name with - goes in quotes: @import js.\"date-fns\" as date_fns");
         assert_eq!(hint("func greet(name, greeting: \"hello\") {\n}"), "V2 has no type annotations; a default is written with =, as in func f(x, key = 1)");
         assert_eq!(diag("@import py.os.path").hint.as_deref(), Some("@import py.os.path as path"));
         // An error with nothing of the kind keeps no hint.

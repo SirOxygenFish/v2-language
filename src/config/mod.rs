@@ -185,32 +185,56 @@ fn home_relative(text: &str) -> Option<PathBuf> {
     Some(home_dir()?.join(rest))
 }
 
-/// A `command` written as one string, as the array it means (18.2): the program stays whole when
-/// its path has spaces (`C:/Program Files/…/python.exe`, an existing file, or a path up to its
-/// first `-flag` or `{file}`), and the rest splits at spaces.
-fn command_words(s: &str) -> Vec<String> {
+/// A `command` written as one string, as the array it means (18.2): the string's words, except
+/// that a program path with spaces stays one element: in quotes (`"C:\Program Files\…\python.exe"
+/// -X utf8`, without them), the shortest run of words that is a path to an existing file (`exists`),
+/// a path with spaces up to `.exe`, `.cmd` or `.bat`, or a path and the words that continue it.
+fn command_words(s: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
     let s = s.trim();
-    let split = |program: &str, rest: &str| std::iter::once(program.trim().to_string()).chain(rest.split_whitespace().map(str::to_string)).collect();
-    if Path::new(s).is_file() {
-        return vec![s.to_string()];
-    }
-    let lower = s.to_ascii_lowercase();
-    for ext in [".exe", ".cmd", ".bat"] {
-        if lower.ends_with(ext) {
-            return vec![s.to_string()];
-        }
-        if let Some(i) = lower.find(&format!("{ext} ")) {
-            return split(&s[..i + ext.len()], &s[i + ext.len()..]);
+    let split = |program: &str, rest: &str| std::iter::once(program.to_string()).chain(rest.split_whitespace().map(str::to_string)).collect();
+    for q in ['"', '\''] {
+        if let Some(end) = s.strip_prefix(q).and_then(|inner| inner.find(q)) {
+            return split(&s[1..=end], &s[end + 2..]);
         }
     }
-    if s.contains(['/', '\\']) {
-        let arg = [" -", " {"].iter().filter_map(|m| s.find(m)).min();
-        return match arg {
-            Some(i) => split(&s[..i], &s[i..]),
-            None => vec![s.to_string()],
-        };
+    // Where each word ends, so a candidate program keeps the spaces as written.
+    let ends: Vec<usize> = s
+        .char_indices()
+        .filter(|&(i, c)| !c.is_whitespace() && s[i + c.len_utf8()..].chars().next().is_none_or(char::is_whitespace))
+        .map(|(i, c)| i + c.len_utf8())
+        .collect();
+    let path = |program: &str| program.contains(['/', '\\']);
+    if let Some(&end) = ends.iter().find(|&&end| path(&s[..end]) && exists(&s[..end])) {
+        return split(&s[..end], &s[end..]);
     }
-    s.split_whitespace().map(str::to_string).collect()
+    let windows_program = |program: &str| {
+        let lower = program.to_ascii_lowercase();
+        program.contains(char::is_whitespace) && path(program) && [".exe", ".cmd", ".bat"].iter().any(|e| lower.ends_with(e))
+    };
+    if let Some(&end) = ends.iter().find(|&&end| windows_program(&s[..end])) {
+        return split(&s[..end], &s[end..]);
+    }
+    // A path that goes on after a space (`/opt/my tools/python3`): the next words that continue
+    // it, with a separator but starting as no item does (`-`, `{`, `/`, `.`, `~`, a drive).
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let continues = |w: &str| path(w) && !w.starts_with(['-', '{', '/', '\\', '.', '~']) && w.get(1..2).is_none_or(|c| c != ":");
+    if words.first().is_some_and(|w| path(w)) {
+        let n = 1 + words[1..].iter().take_while(|w| continues(w)).count();
+        return std::iter::once(words[..n].join(" ")).chain(words[n..].iter().map(|w| w.to_string())).collect();
+    }
+    words.into_iter().map(str::to_string).collect()
+}
+
+/// A word as a TOML string the user can paste (18.2, 18.5): in double quotes, in literal quotes
+/// when it has a backslash or a double quote, or escaped when it also has a single quote.
+fn toml_string(w: &str) -> String {
+    if !w.contains(['\\', '"']) {
+        format!("\"{w}\"")
+    } else if !w.contains('\'') {
+        format!("'{w}'")
+    } else {
+        format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 /// How a TOML value is named in messages: `string "30s"`, `integer 5`, `array`.
@@ -289,9 +313,9 @@ impl File {
     fn strings(&self, what: &str, v: &toml::Value, command: bool, non_empty: bool) -> Result<Vec<String>, ConfigError> {
         let list: Vec<String> = match v {
             toml::Value::String(s) if command && !s.trim().is_empty() => {
-                // A word with a backslash goes in TOML literal quotes, so the hint stays valid TOML.
-                let quote = |w: &str| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
-                let words: Vec<String> = command_words(s).iter().map(|w| quote(w)).collect();
+                // A program path is looked up as 18.1 will: in the home folder, or from this file.
+                let exists = |p: &str| home_relative(p).unwrap_or_else(|| self.base.join(p)).is_file();
+                let words: Vec<String> = command_words(s, exists).iter().map(|w| toml_string(w)).collect();
                 return Err(self.error(format!("{what} must be an array: write [{}]", words.join(", "))));
             }
             toml::Value::Array(items) => items.iter().map(|i| self.string_of(what, i)).collect::<Result<_, _>>()?,
@@ -366,15 +390,16 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
         if (message.contains("escape") || message.contains("unicode")) && line_text.is_some_and(|l| l.contains('\\')) {
             message.push_str("\n  hint: in \"…\", a backslash starts an escape: write Windows paths with / or in single quotes, as in venv = 'C:\\proj\\.venv'");
         } else if let Some((key, value)) = line_text.and_then(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())) {
-            // `venv = .venv`: text needs quotes (single ones keep a Windows path's backslashes).
+            // `venv = .venv`: text needs quotes (single ones keep a Windows path's backslashes);
+            // a `#` comment after it stays outside them.
+            let value = value.split_once('#').map_or(value, |(v, _)| v).trim_end();
             let bare = !key.is_empty()
                 && !value.is_empty()
-                && !value.starts_with(['"', '\'', '[', '{', '-', '+'])
+                && !value.starts_with(['"', '\'', '[', '{', '-', '+', '='])
                 && !value.starts_with(|c: char| c.is_ascii_digit())
                 && !matches!(value, "true" | "false");
             if bare {
-                let quoted = if value.contains('\\') { format!("'{value}'") } else { format!("\"{value}\"") };
-                message.push_str(&format!("\n  hint: text goes in quotes: {key} = {quoted}"));
+                message.push_str(&format!("\n  hint: text goes in quotes: {key} = {}", toml_string(value)));
             }
         }
         match e.span() {
@@ -550,6 +575,26 @@ mod tests {
         assert!(e.ends_with("command must be an array: write [\"/opt/my tools/python3\", \"-X\", \"utf8\"]"), "{e}");
         let e = project("cmdnode", "[engines.js]\ncommand = \"node --no-warnings\"\n").unwrap_err().0;
         assert!(e.ends_with("command must be an array: write [\"node\", \"--no-warnings\"]"), "{e}");
+        // A program without spaces, then words: each its own item (`env` exists or not).
+        let e = project("cmdenv", "[engines.py]\ncommand = \"/usr/bin/env python3\"\n").unwrap_err().0;
+        assert!(e.ends_with("command must be an array: write [\"/usr/bin/env\", \"python3\"]"), "{e}");
+        let e = project("cmduv", "[engines.py]\ncommand = \"~/.local/bin/uv run python\"\n").unwrap_err().0;
+        assert!(e.ends_with("command must be an array: write [\"~/.local/bin/uv\", \"run\", \"python\"]"), "{e}");
+        let e = project("cmdscript", "[engines.py]\ncommand = \"python3 ./wrap.py\"\n").unwrap_err().0;
+        assert!(e.ends_with("command must be an array: write [\"python3\", \"./wrap.py\"]"), "{e}");
+        // A quoted program loses its quotes, with either slash.
+        let e = project("cmdquoted", "[engines.py]\ncommand = '\"C:\\Program Files\\Python311\\python.exe\" -X utf8'\n").unwrap_err().0;
+        assert!(e.ends_with("command must be an array: write ['C:\\Program Files\\Python311\\python.exe', \"-X\", \"utf8\"]"), "{e}");
+        let e = project("cmdquoted2", "[engines.py]\ncommand = '\"C:/Program Files/Python311/python.exe\" -X utf8'\n").unwrap_err().0;
+        assert!(e.ends_with("command must be an array: write [\"C:/Program Files/Python311/python.exe\", \"-X\", \"utf8\"]"), "{e}");
+        // An existing program with spaces in a relative path, found from the file's folder.
+        let d = temp("cmdexists");
+        std::fs::create_dir_all(d.join("my tools")).unwrap();
+        std::fs::write(d.join("my tools").join("py"), "").unwrap();
+        std::fs::write(d.join("v2.toml"), "[engines.py]\ncommand = \"my tools/py -X utf8\"\n").unwrap();
+        let e = load_from(&d, vars(&[])).unwrap_err().0;
+        assert!(e.ends_with("command must be an array: write [\"my tools/py\", \"-X\", \"utf8\"]"), "{e}");
+        assert_eq!(toml_string("it's \"x\"\\y"), "\"it's \\\"x\\\"\\\\y\"");
         let e = project("cmdempty", "[engines.py]\ncommand = \" \"\n").unwrap_err().0;
         assert!(e.ends_with("[engines.py] command: expected an array of strings, got string \" \""), "{e}");
     }
@@ -592,6 +637,10 @@ mod tests {
         // Text without quotes.
         let e = project("bare", "[python]\nvenv = .venv\n").unwrap_err().0;
         assert!(e.ends_with("\n  hint: text goes in quotes: venv = \".venv\""), "{e}");
+        let e = project("barecomment", "[python]\nvenv = .venv   # the project's env\n").unwrap_err().0;
+        assert!(e.ends_with("\n  hint: text goes in quotes: venv = \".venv\""), "{e}");
+        let e = project("eqeq", "[python]\nvenv == \".venv\"\n").unwrap_err().0;
+        assert!(!e.contains("hint:"), "{e}");
         // Windows PowerShell 5's `>` writes UTF-16.
         let d = temp("utf16");
         let mut bytes = vec![0xFF, 0xFE];

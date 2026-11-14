@@ -2250,8 +2250,41 @@ fn doctor_names_the_programs_it_could_not_use() {
     assert_eq!(rows["js"], ["broken", node.as_str(), "-", "PATH"], "{stdout}");
     assert_eq!(rows["ts"], ["broken", node.as_str(), "-", "PATH"], "{stdout}");
     assert!(stdout.contains("\n  py: too old: found 3.8.1, V2 needs 3.10+; install: "), "{stdout}");
-    assert!(stdout.contains("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)"), "{stdout}");
-    assert!(stdout.contains("exit code 127): node: error while loading shared libraries: libatomic.so.1"), "{stdout}");
+    // The note, then the program it skipped and why, which "see why below" points at.
+    let below = format!("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)\n  js: skipped {node} (version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1)\n");
+    assert!(stdout.contains(&below), "{stdout}");
+    assert!(stdout.contains("\n  ts: engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and engine 'js' (JavaScript) was found but doesn't run (see js above)\n"), "{stdout}");
+}
+
+#[test]
+fn doctor_quotes_a_configured_command_with_a_space() {
+    // 19.2: an item with a space is quoted when there is more than one, also when it isn't found.
+    let files = [("v2.toml", "[engines.py]\ncommand = [\"no such/python\", \"-X\", \"utf8\"]\n")];
+    let (code, stdout, stderr, _home) = run_with_files(&files, &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let command = &doctor_rows(&stdout)["py"][1];
+    assert!(command.starts_with('"') && command.ends_with("python\" -X utf8"), "{stdout}");
+}
+
+#[cfg(windows)]
+#[test]
+fn doctor_never_names_a_store_placeholder_as_the_broken_program() {
+    // 19.2 and 7.8: a broken row's COMMAND is the program that doesn't run, even when a Store
+    // placeholder comes first on PATH.
+    let home = TempHome::new();
+    let apps = home.0.join("lad").join("Microsoft").join("WindowsApps");
+    let bin = home.0.join("b");
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(apps.join("python3.cmd"), "@echo Python was not found; run without arguments to install from the Microsoft Store\r\n@exit /b 9009\r\n").unwrap();
+    std::fs::write(bin.join("python.cmd"), "@echo No global/local python version has been set yet.\r\n@exit /b 1\r\n").unwrap();
+    let path = std::env::join_paths([&apps, &bin]).unwrap();
+    let lad = home.0.join("lad");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[("PATH", path.as_os_str()), ("LOCALAPPDATA", lad.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let rows = doctor_rows(&stdout);
+    assert_eq!(rows["py"][..2], ["broken".to_string(), bin.join("python.cmd").display().to_string()], "{stdout}");
+    assert!(stdout.contains("(Microsoft Store placeholder)"), "{stdout}");
 }
 
 #[test]

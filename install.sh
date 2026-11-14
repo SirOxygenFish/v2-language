@@ -15,6 +15,7 @@ set -eu
 
 repo="SirOxygenFish/v2-language"
 marker="# V2 (added by install.sh)"
+status=0
 
 say() { printf '%s\n' "$*"; }
 fail() {
@@ -76,6 +77,9 @@ if [ -n "${V2_ARCHIVE:-}" ]; then
     archive=$(full_path "$V2_ARCHIVE")
     shown_archive=$(basename "$archive")
     [ -f "$archive" ] || fail "V2_ARCHIVE names no file: $archive"
+    case "$shown_archive" in
+    *.zip) fail "$shown_archive is the download for Windows: this computer needs $name" ;;
+    esac
     cp "$archive" "$tmp/$name"
     if [ -f "$archive.sha256" ]; then
         cp "$archive.sha256" "$tmp/$name.sha256"
@@ -117,6 +121,10 @@ if [ -f "$tmp/unpacked/v2-$target/v2" ]; then
 elif [ -f "$tmp/unpacked/v2" ]; then
     bin="$tmp/unpacked/v2"
 else
+    # A release for another computer is in a folder named for it.
+    for other in "$tmp/unpacked"/v2-*; do
+        [ ! -d "$other" ] || fail "$shown_archive is the download for another computer (${other##*/v2-}): this one needs $name"
+    done
     fail "$shown_archive has no v2 in it"
 fi
 chmod 755 "$bin"
@@ -133,8 +141,11 @@ if ! "$bin" --version >"$tmp/version" 2>"$tmp/error"; then
 fi
 installed=$(cut -d ' ' -f 1-2 <"$tmp/version")
 
-# 5. Put v2 in place (a rename, so a running v2 is not touched).
+# 5. Put v2 in place (a rename, so a running v2 is not touched), in the folder as PATH spells it:
+# absolute, without `.`, `..` or a trailing `/`.
 mkdir -p "$dir" || fail "could not create $dir"
+dir=$(CDPATH='' cd -- "$dir" && pwd) || fail "could not open $dir"
+[ ! -d "$dir/v2" ] || fail "$dir/v2 is a folder, so v2 can't go there: move it away, then run this again"
 cp "$bin" "$dir/v2.new"
 chmod 755 "$dir/v2.new"
 mv -f "$dir/v2.new" "$dir/v2"
@@ -150,14 +161,18 @@ case "$dir" in
 "$HOME"/*) shown="\$HOME/${dir#"$HOME"/}" ;;
 *) shown="$dir" ;;
 esac
-add_line() { # FILE LINE
-    if [ -f "$1" ] && grep -qF "$2" "$1"; then
+# add_line FILE LINE: 0 when it adds the line, 1 when FILE has that exact line already, 2 when
+# FILE can't be written.
+add_line() {
+    if [ -f "$1" ] && grep -qxF -- "$2" "$1"; then
         return 1
     fi
-    mkdir -p "$(dirname "$1")"
-    # A file whose last line has no line break gets one first.
-    if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then printf '\n' >>"$1"; fi
-    printf '%s\n%s\n' "$marker" "$2" >>"$1"
+    mkdir -p "$(dirname "$1")" 2>/dev/null || return 2
+    {
+        # A file whose last line has no line break gets one first.
+        if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then printf '\n'; fi
+        printf '%s\n%s\n' "$marker" "$2"
+    } 2>/dev/null >>"$1" || return 2
 }
 if yes_value "${V2_NO_MODIFY_PATH:-}"; then
     if [ "$on_path" = no ]; then
@@ -186,21 +201,33 @@ else
     *) set -- "$HOME/.profile" ;;
     esac
     added=""
+    unwritable=""
     for f in "$@"; do
+        case "$f" in
+        "$HOME"/*) short="~/${f#"$HOME"/}" ;;
+        *) short=$f ;;
+        esac
         if add_line "$f" "$line"; then
-            case "$f" in
-            "$HOME"/*) f="~/${f#"$HOME"/}" ;;
-            esac
-            added="${added:+$added and }$f"
+            added="${added:+$added and }$short"
+        elif [ $? -eq 2 ]; then
+            unwritable="${unwritable:+$unwritable and }$short"
         fi
     done
+    if [ -n "$unwritable" ]; then
+        printf 'install.sh: could not write %s, so new terminals may not find v2: add this line to it yourself:\n    %s\n' "$unwritable" "$line" >&2
+        status=1
+    fi
     if [ -n "$added" ]; then
         say "Added $dir to PATH in $added"
-    elif [ "$on_path" = no ]; then
+    elif [ "$on_path" = no ] && [ -z "$unwritable" ]; then
         say "Your startup files already put $dir on PATH"
     fi
     if [ "$on_path" = no ]; then
-        say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
+        if [ -n "$added" ] || [ -z "$unwritable" ]; then
+            say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
+        else
+            say "To use v2 in this terminal, run: export PATH=\"$dir:\$PATH\""
+        fi
     fi
 fi
 
@@ -215,3 +242,4 @@ if [ -n "$other" ] && [ "$other" != "$dir/v2" ]; then
     fi
 fi
 say "Next: run 'v2 doctor' to see whether Python and Node.js are ready for @py and @js blocks."
+exit "$status"
