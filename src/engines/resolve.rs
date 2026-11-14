@@ -601,8 +601,13 @@ impl Resolver<'_> {
         };
         let Some(exe) = candidates.iter().find(|p| is_regular_file(p)) else {
             let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
+            // A command to paste: quoted when the path has a space; `python3` where `python` is
+            // often missing (Linux, macOS).
+            let python = if cfg!(windows) { "python" } else { "python3" };
+            let shown = venv.display().to_string();
+            let arg = if shown.contains(' ') { format!("\"{shown}\"") } else { shown.clone() };
             return Err(NotFound::broken(
-                format!("[python] venv '{}' has no {want} (create it: python -m venv {})", venv.display(), venv.display()),
+                format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {arg})"),
                 candidates[0].display().to_string(),
                 from,
             ));
@@ -682,6 +687,10 @@ impl Resolver<'_> {
 fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>) -> String {
     let tried: Vec<String> = spec.candidates.iter().map(|c| c.join(" ")).collect();
     let head = match (newest_old, spec.min_version) {
+        // Node 23.0 and 23.1: newer than the minimum, but without type stripping (7.6).
+        (Some(v), Some(min)) if v >= min => {
+            format!("engine '{}' ({}) is not supported: found {v}, which has no type stripping; V2 needs {}", spec.id, spec.language, spec.needs(min))
+        }
         (Some(v), Some(min)) => format!("engine '{}' ({}) is too old: found {v}, V2 needs {}", spec.id, spec.language, spec.needs(min)),
         _ => format!("engine '{}' ({}) not found", spec.id, spec.language),
     };
@@ -1098,7 +1107,13 @@ mod tests {
         let p = fake(|_| says("Python 3.12.1"));
         let nf = resolve_with(&missing, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
-        assert!(nf.message.starts_with(&format!("[python] venv '{}' has no {want} (create it: python -m venv ", venv.display())), "{}", nf.message);
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        assert!(nf.message.starts_with(&format!("[python] venv '{}' has no {want} (create it: {python} -m venv ", venv.display())), "{}", nf.message);
+        // A folder with a space is quoted, so the command can be pasted (7.6).
+        let spaced = d.join("my env");
+        let cfg = Config { python_venv: Some(Sourced { value: spaced.clone(), from: project_source() }), ..Config::default() };
+        let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("(create it: {python} -m venv \"{}\")", spaced.display())), "{}", nf.message);
         let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
         std::fs::create_dir_all(&bin).unwrap();
         let python = exe(&bin, "python");

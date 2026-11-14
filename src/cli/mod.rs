@@ -31,11 +31,13 @@ V2: one script, every language.
 
 Usage:
   v2 FILE [ARGS...]   run a script; ARGS become args()
-  v2 check FILE       validate a script without running anything
-  v2 doctor           show every engine and where it was found
-  v2 cache clean      delete V2's caches (~/.v2/cache)
+  v2 check FILE       check a script's V2 syntax without running anything
+  v2 doctor           show whether Python and Node.js were found, and where
+  v2 cache clean      delete V2's caches (~/.v2/cache); not built yet
   v2 --version        print the version
   v2 --help           print this help
+
+Docs: README.md and DOCS.md, at https://github.com/SirOxygenFish/v2-language
 
 Exit codes:
   0    success
@@ -43,6 +45,7 @@ Exit codes:
   2    usage or configuration error
   3    a required engine is missing
   130  interrupted (Ctrl+C); finally blocks don't run, engines are stopped
+  141  the output's reader went away (v2 x.v2 | head)
   101  internal error in V2 itself (a bug, please report it)
 ";
 
@@ -57,11 +60,16 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     };
     let rest = &args[1..];
     match word.as_str() {
-        "--help" => Ok(Command::Help),
-        "--version" => Ok(Command::Version),
+        "--help" | "--version" => match rest {
+            [] if word == "--help" => Ok(Command::Help),
+            [] => Ok(Command::Version),
+            [extra, ..] => Err(UsageError(format!("unexpected argument `{extra}` after `v2 {word}`"))),
+        },
         "-h" | "-help" | "-?" | "--h" | "-H" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--help`?)"))),
         "-v" | "-V" | "-version" | "--v" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--version`?)"))),
         s if s.starts_with('-') => Err(UsageError(format!("unknown flag `{s}`"))),
+        // `--help` after a command is a request for help, not a file or a typo.
+        "check" | "doctor" | "cache" if rest.first().is_some_and(|w| w == "--help") => Ok(Command::Help),
         "check" => match rest {
             [file] => Ok(Command::Check { file: file.clone() }),
             [] => Err(UsageError("`v2 check` needs a FILE".into())),
@@ -115,9 +123,13 @@ mod tests {
         assert_eq!(cmd(&["--help"]), Command::Help);
         assert_eq!(cmd(&["--version"]), Command::Version);
         assert_eq!(cmd(&["main.v2", "--help"]), Command::Script { file: "main.v2".into(), args: vec!["--help".into()] });
-        // Only as the first word: after a subcommand they are ordinary arguments.
-        assert_eq!(p(&["doctor", "--help"]).unwrap_err().0, "unexpected argument `--help` after `v2 doctor`");
+        // Right after a command, `--help` is help; `--version` there is an ordinary argument.
+        assert_eq!(cmd(&["doctor", "--help"]), Command::Help);
+        assert_eq!(cmd(&["check", "--help"]), Command::Help);
         assert_eq!(cmd(&["check", "--version"]), Command::Check { file: "--version".into() });
+        // Nothing may follow them.
+        assert_eq!(p(&["--version", "x"]).unwrap_err().0, "unexpected argument `x` after `v2 --version`");
+        assert_eq!(p(&["--help", "x"]).unwrap_err().0, "unexpected argument `x` after `v2 --help`");
     }
 
     #[test]

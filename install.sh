@@ -4,16 +4,23 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
 #
-# Settings, as environment variables (all optional):
+# Settings, as environment variables (all optional). With the one-liner they go after the pipe,
+# where sh sees them: `curl -fsSL .../install.sh | V2_INSTALL_DIR=~/bin sh`.
 #   V2_VERSION=v0.1.0-alpha.2   the release to install (default: the one this script names)
 #   V2_INSTALL_DIR=/some/dir    where v2 goes (default: ~/.v2/bin)
-#   V2_ARCHIVE=/path/v2-....tar.gz   install from an archive you downloaded instead
+#   V2_ARCHIVE=/path/v2-....tar.gz   install from an archive you downloaded instead (a .sha256
+#                               file next to it is checked)
 #   V2_NO_MODIFY_PATH=1         don't add the folder to your shell's startup file
 set -eu
 
 repo="SirOxygenFish/v2-language"
 version="${V2_VERSION:-v0.1.0-alpha.2}"
+case "$version" in
+v*) ;;
+*) version="v$version" ;;
+esac
 dir="${V2_INSTALL_DIR:-$HOME/.v2/bin}"
+marker="# V2 (added by install.sh)"
 
 say() { printf '%s\n' "$*"; }
 fail() {
@@ -42,7 +49,7 @@ download() { # URL FILE
     elif command -v wget >/dev/null 2>&1; then
         wget -q -O "$2" "$1"
     else
-        fail "this needs curl or wget to download V2: install one (sudo apt install curl), or download the archive yourself and set V2_ARCHIVE"
+        fail "this needs curl or wget to download V2: install one (sudo apt update && sudo apt install curl), or download the archive yourself and set V2_ARCHIVE"
     fi
 }
 
@@ -50,7 +57,11 @@ download() { # URL FILE
 if [ -n "${V2_ARCHIVE:-}" ]; then
     [ -f "$V2_ARCHIVE" ] || fail "V2_ARCHIVE names no file: $V2_ARCHIVE"
     cp "$V2_ARCHIVE" "$tmp/$name"
-    if [ -f "$V2_ARCHIVE.sha256" ]; then cp "$V2_ARCHIVE.sha256" "$tmp/$name.sha256"; fi
+    if [ -f "$V2_ARCHIVE.sha256" ]; then
+        cp "$V2_ARCHIVE.sha256" "$tmp/$name.sha256"
+    else
+        say "Note: there is no $(basename "$V2_ARCHIVE").sha256 next to the archive, so it isn't checked"
+    fi
 else
     url="https://github.com/$repo/releases/download/$version/$name"
     say "Downloading $url"
@@ -75,25 +86,30 @@ if [ -f "$tmp/$name.sha256" ]; then
 fi
 
 # 4. Unpack, and check that it runs here before it replaces anything.
-tar -xzf "$tmp/$name" -C "$tmp" || fail "could not unpack $name"
+tar -xzf "$tmp/$name" -C "$tmp" || fail "could not unpack $name: download it again"
 [ -f "$tmp/v2" ] || fail "$name has no v2 in it"
 chmod 755 "$tmp/v2"
 if ! "$tmp/v2" --version >"$tmp/version" 2>"$tmp/error"; then
     cat "$tmp/error" >&2
-    if grep -q GLIBC "$tmp/error"; then
-        fail "this Linux is too old for the prebuilt V2, which needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later): $from_source"
+    need=$(grep -o 'GLIBC_[0-9.]*' "$tmp/error" | head -n 1 | cut -d _ -f 2)
+    if [ -n "$need" ]; then
+        fail "this Linux is too old for the prebuilt V2, which needs glibc $need or newer: $from_source"
+    fi
+    if grep -qi 'exec format\|cannot execute' "$tmp/error"; then
+        fail "that v2 is for another kind of computer: this one needs $name"
     fi
     fail "the downloaded v2 doesn't run here (see above): $from_source"
 fi
+installed=$(cut -d ' ' -f 1-2 <"$tmp/version")
 
 # 5. Put v2 in place (a rename, so a running v2 is not touched).
 mkdir -p "$dir" || fail "could not create $dir"
 cp "$tmp/v2" "$dir/v2.new"
 chmod 755 "$dir/v2.new"
 mv -f "$dir/v2.new" "$dir/v2"
-say "Installed $(cat "$tmp/version") as $dir/v2"
+say "Installed $installed as $dir/v2"
 
-# 6. Put the folder on PATH for new terminals.
+# 6. Put the folder on PATH for new terminals: two lines, the marker and the setting.
 case ":$PATH:" in
 *":$dir:"*) on_path=yes ;;
 *) on_path=no ;;
@@ -117,11 +133,13 @@ if [ "$on_path" = no ]; then
             ;;
         *) rc="$HOME/.profile" ;;
         esac
-        if [ -f "$rc" ] && grep -qF "$shown" "$rc"; then
-            say "$rc already puts $dir on PATH"
+        if [ -f "$rc" ] && grep -qF "$marker" "$rc"; then
+            say "$rc already puts V2 on PATH"
         else
             mkdir -p "$(dirname "$rc")"
-            printf '\n# V2 (added by install.sh)\n%s\n' "$line" >>"$rc"
+            # A file whose last line has no line break gets one first.
+            if [ -s "$rc" ] && [ -n "$(tail -c 1 "$rc")" ]; then printf '\n' >>"$rc"; fi
+            printf '%s\n%s\n' "$marker" "$line" >>"$rc"
             say "Added $dir to PATH in $rc"
         fi
         say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"

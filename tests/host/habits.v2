@@ -1,0 +1,27 @@
+// Python and JavaScript names for what V2 spells differently get the V2 spelling in the message
+// (INTERNALS 5.9).
+func try_it(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, e.message)
+    }
+}
+try_it(func() { print(True) })
+try_it(func() { print(None) })
+try_it(func() { print(undefined) })
+try_it(func() { console.log(1) })
+let xs = [1, 2]
+let s = "Ab"
+let d = {a: 1}
+try_it(func() { xs.append(3) })
+try_it(func() { print(xs.length) })
+try_it(func() { print(xs.includes(1)) })
+try_it(func() { xs.forEach(print) })
+try_it(func() { print(s.toUpperCase()) })
+try_it(func() { print(s.strip()) })
+try_it(func() { print(s.startsWith("A")) })
+try_it(func() { print(d.items()) })
+try_it(func() { print(d.has("a")) })
+try_it(func() { print(d.pop("a")) })
+try_it(func() { print(xs.uppr()) })

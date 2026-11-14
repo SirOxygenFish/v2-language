@@ -86,6 +86,8 @@ pub enum LoadError {
 pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
         "file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"
+    } else if bytes.iter().take(8192).any(|&b| b == 0) {
+        "file is not valid UTF-8: it looks like a binary file, not a V2 script"
     } else {
         "file is not valid UTF-8: save it as UTF-8"
     }

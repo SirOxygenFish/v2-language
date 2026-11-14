@@ -1,0 +1,9 @@
+// exit: 1
+// stderr: pasted_spaces.v2:8:1: SyntaxError: unexpected character U+00A0 (a no-break space)
+// stderr: hint: type a plain space instead
+// Code copied from a web page can be indented with no-break spaces: named, not taken for a
+// misplaced directive (INTERNALS 3.2, 4.4).
+@py t {
+    def f():
+    @export { f }
+}

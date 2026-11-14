@@ -56,6 +56,28 @@ pub fn exit_interrupted() -> ! {
     die(&lock())
 }
 
+/// The exit code when stdout's reader went away: 128 + SIGPIPE, what a shell shows for a command
+/// a closed pipe stopped (6.5).
+pub const EXIT_BROKEN_PIPE: i32 = 141;
+
+/// stdout's reader went away (`v2 x.v2 | head`): nothing more can be shown, so the run ends at
+/// once and quietly, as for an interrupt but with no output left to write: every child stopped
+/// as a tree, the run dir removed, exit 141 (6.5).
+pub fn exit_broken_pipe() -> ! {
+    let w = lock();
+    for (_, kill) in &w.children {
+        kill.kill_tree();
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    for (_, kill) in &w.children {
+        kill.wait_stopped(deadline);
+    }
+    if let Some(dir) = &w.run_dir {
+        remove_run_dir(dir);
+    }
+    hard_exit(EXIT_BROKEN_PIPE)
+}
+
 fn die(w: &Watch) -> ! {
     for (_, kill) in &w.children {
         kill.kill_tree();

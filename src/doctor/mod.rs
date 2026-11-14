@@ -156,7 +156,7 @@ fn plural(n: usize, word: &str) -> String {
 
 /// `v2 check FILE` (19.3): diagnostics to stderr, the summary to stdout; exit 1 on any error.
 pub fn check(file: &str) -> i32 {
-    if let Some(msg) = crate::cli::entry_error(file, None) {
+    if let Some(msg) = crate::cli::entry_error(file, None, "v2 check") {
         stderrln!("v2: {msg}");
         return 2;
     }
@@ -215,7 +215,16 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     Status::Broken => ("broken", "-".to_string()),
                 };
                 let dash = || "-".to_string();
-                rows.push([id.clone(), status.into(), nf.command.clone().unwrap_or_else(dash), version, nf.from.clone().unwrap_or_else(dash)]);
+                // Only too-old versions found on PATH: the newest one's place (19.2).
+                let found = match (nf.status, &nf.command) {
+                    (Status::Old(v), None) => nf.skipped.iter().find(|(_, why)| why.starts_with(&format!("too old: {v} "))).map(|(p, _)| p.display().to_string()),
+                    _ => None,
+                };
+                let (command, from) = match found {
+                    Some(path) => (path, "PATH".to_string()),
+                    None => (nf.command.clone().unwrap_or_else(dash), nf.from.clone().unwrap_or_else(dash)),
+                };
+                rows.push([id.clone(), status.into(), command, version, from]);
                 skipped(&nf.skipped, &mut notes);
                 // ts is held to js's minimum (7.6).
                 let rule = spec.session_of.as_ref().and_then(|host| reg.specs().iter().find(|s| &s.id == host)).unwrap_or(spec);

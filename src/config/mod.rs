@@ -153,7 +153,11 @@ fn engine_overrides(env: impl Iterator<Item = (OsString, OsString)>) -> Result<O
         if canonical_tag(&tag) != tag {
             continue;
         }
-        found.insert(tag, (from_cwd(&cwd, Path::new(&v)), k));
+        // cmd's `set V2_ENGINE_PY="C:\Program Files\…\python.exe"` keeps the quotes: one pair
+        // around the whole value is taken off (18.4).
+        let v = v.to_string_lossy();
+        let v = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')).filter(|x| !x.is_empty()).unwrap_or(&v);
+        found.insert(tag, (from_cwd(&cwd, Path::new(v)), k));
     }
     Ok(found)
 }
@@ -299,10 +303,21 @@ impl File {
 fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(), ConfigError> {
     let shown = path.display().to_string();
     let bytes = std::fs::read(path).map_err(|e| ConfigError(format!("{shown}: config error: cannot read the file: {}", crate::syntax::span::os_message(&e))))?;
-    let text = String::from_utf8(bytes).map_err(|_| ConfigError(format!("{shown}: config error: the file is not valid UTF-8")))?;
+    let text = String::from_utf8(bytes).map_err(|e| {
+        let why = crate::syntax::span::not_utf8_message(e.as_bytes()).trim_start_matches("file is not valid UTF-8");
+        ConfigError(format!("{shown}: config error: the file is not valid UTF-8{why}"))
+    })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let table: toml::Table = text.parse().map_err(|e: toml::de::Error| {
-        let message = e.message().trim().to_string();
+        let mut message = e.message().trim().to_string();
+        let line_text = e.span().map(|span| {
+            let start = text[..span.start.min(text.len())].rfind('\n').map_or(0, |i| i + 1);
+            text[start..].lines().next().unwrap_or_default()
+        });
+        // A Windows path in "…" is read with backslash escapes (18.5).
+        if (message.contains("escape") || message.contains("unicode")) && line_text.is_some_and(|l| l.contains('\\')) {
+            message.push_str("\n  hint: in \"…\", a backslash starts an escape: write Windows paths with / or in single quotes, as in venv = 'C:\\proj\\.venv'");
+        }
         match e.span() {
             Some(span) => {
                 let before = &text[..span.start.min(text.len())];
@@ -493,6 +508,28 @@ mod tests {
             let e = project("unknown", toml_text).unwrap_err().0;
             assert!(e.ends_with(&format!("v2.toml: config error: {message}")), "{toml_text:?}: {e}");
         }
+    }
+
+    #[test]
+    fn windows_habits_get_hints() {
+        // A Windows path in "…" reads its backslashes as escapes: the hint says what to write (18.5).
+        let hint = "\n  hint: in \"…\", a backslash starts an escape: write Windows paths with / or in single quotes, as in venv = 'C:\\proj\\.venv'";
+        for toml_text in ["[python]\nvenv = \"C:\\Users\\me\\proj\\.venv\"\n", "[python]\nvenv = \"D:\\projects\\new\\.venv\"\n"] {
+            let e = project("backslash", toml_text).unwrap_err().0;
+            assert!(e.contains(": config error: ") && e.ends_with(hint), "{toml_text:?}: {e}");
+        }
+        assert!(project("single", "[python]\nvenv = 'C:\\proj\\.venv'\n").is_ok());
+        // Windows PowerShell 5's `>` writes UTF-16.
+        let d = temp("utf16");
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("[python]\n".encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(d.join("v2.toml"), bytes).unwrap();
+        let e = load_from(&d, vars(&[])).unwrap_err().0;
+        assert!(e.ends_with("v2.toml: config error: the file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"), "{e}");
+        // cmd's `set V2_ENGINE_PY="C:\…\python.exe"` keeps its quotes; one pair is taken off (18.4).
+        let exe = if cfg!(windows) { "C:\\Python 3\\python.exe" } else { "/opt/python 3/bin/python3" };
+        let cfg = project_env("quoted", "", &[("V2_ENGINE_PY", &format!("\"{exe}\""))]).unwrap();
+        assert_eq!(cfg.engines["py"].command.as_ref().unwrap().value, vec![exe]);
     }
 
     #[test]

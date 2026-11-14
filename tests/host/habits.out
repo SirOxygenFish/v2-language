@@ -1,0 +1,15 @@
+NameError 'True' is not declared — V2 writes true
+NameError 'None' is not declared — V2 writes null
+NameError 'undefined' is not declared — V2 writes null
+NameError 'console' is not declared — V2 prints with print(...)
+TypeError list has no method 'append' — did you mean 'push'?
+TypeError list has no field 'length' — V2 writes len(x)
+TypeError list has no method 'includes' — V2 writes item in x
+TypeError list has no method 'forEach' — V2 loops with for item in x { ... }
+TypeError str has no method 'toUpperCase' — did you mean 'upper'?
+TypeError str has no method 'strip' — did you mean 'trim'?
+TypeError str has no method 'startsWith' — did you mean 'starts_with'?
+TypeError dict has no method 'items' — V2 loops over a dict with for key, value in d { ... }
+TypeError dict has no method 'has' — V2 writes key in d
+TypeError dict has no method 'pop' — did you mean 'remove'?
+TypeError list has no method 'uppr'
