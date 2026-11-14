@@ -857,8 +857,9 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 
 ### Python — `@py`
 
-- Found as `python3`, `python`, or the `py -3` launcher on Windows (the Microsoft Store
-  placeholder `python.exe` is skipped). Override with `[engines.py] command`.
+- Found as `python3` or `python`, whichever comes first on `PATH` (so an activated virtual
+  environment wins), else the `py -3` launcher on Windows (the Microsoft Store placeholder
+  `python.exe` is skipped). Override with `[engines.py] command`.
 - If `[python] venv` is set, that virtual environment's Python and packages are used
   ([14](#14-project-file-v2toml)).
 - Where Python modules are found: [chapter 7](#7-importing-foreign-packages).
@@ -1058,7 +1059,7 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 | Situation                              | Message                                                     |
 | -------------------------------------- | ----------------------------------------------------------- |
 | name not exported                      | `'x' is not exported by 'stats' (did the block @export it?)` |
-| selector matches nothing               | `No engine exports found for selector 'stats'`              |
+| no block has that label                | `no block in this file is labeled 'stat' — did you mean 'stats'?`, or, with no close label, `…: a Python module is imported with py.stat, an npm package with js.stat` |
 | the block has no `@export`             | `block 'stats' exports nothing: add @export { mean } inside it` |
 | block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
 | block not loaded yet when a block calls `x` | `block 'stats' has not run yet — 'x' can't be called before it loads` |
@@ -1791,13 +1792,13 @@ temp directory, and caches live in `~/.v2/`.
 | `v2 check file.v2`             | parse and check the script and every file it `import`s, without running or writing anything; prints the errors |
 | `v2 doctor`                    | show every engine: found or not, command, version, and where the setting came from |
 | `v2 cache clean`               | delete V2's caches (compiled blocks and toolchain probe results)     |
-| `v2 --version`, `v2 --help`    |                                                                      |
+| `v2 --version`, `v2 --help`    | (`-h` is `--help` too)                                               |
 
 There are no other flags. A first word that is exactly `check`, `doctor` or `cache` is a command;
 to run a script with such a name, write it as a path: `v2 ./doctor`. A script that isn't there, or
 a folder given as one, is a usage error whose message says what to do next: the folder V2 looked
 in, and the file you probably meant (`did you mean 'hello.v2'?`, or the `hello.v2.txt` your editor
-saved).
+saved), or the folder on the way that isn't there.
 
 | Exit code | Meaning                                                                  |
 | --------- | ------------------------------------------------------------------------ |

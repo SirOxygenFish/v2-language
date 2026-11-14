@@ -11,7 +11,7 @@ use serde_json::{json, Value as Json};
 use super::session::SessionId;
 use super::units::{wire_unit, Export, UnitState, Waiting};
 use crate::runtime::env::{declare, own_value, Env};
-use crate::runtime::error::{fail, ErrorValue, Exec, Flow};
+use crate::runtime::error::{did_you_mean, fail, ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
 use crate::runtime::value::{Callable, Func, Value};
 use crate::syntax::scan::canonical_tag;
@@ -324,7 +324,7 @@ fn hint_missing_package(f: &Flow) {
     let quoted = |after: &str| e.message.split(after).nth(1).and_then(|r| r.split('\'').next()).map(str::to_string);
     let hint = if let Some(name) = quoted("No module named '") {
         let top = name.split('.').next().unwrap_or(&name).to_string();
-        format!("install {top} with pip for the Python that v2 doctor shows; README.md, \"Python packages\", has the steps")
+        format!("if '{top}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps")
     } else if let Some(name) = quoted("Cannot find module '") {
         if name.starts_with(['.', '/']) || name.contains(':') {
             "a local file is found from the .v2 file's folder: check the path".to_string()
@@ -377,16 +377,36 @@ impl Interp {
             Selector::Exact { tag, label } => (Some(&label.text), Some(canonical_tag(&tag.text))),
             _ => (None, None),
         };
+        let bodies = &self.files[&file].bodies;
+        let same_engine = |b: &EngineBlock| tag.is_none_or(|t| canonical_tag(&b.tag.text) == t);
         let action = label.filter(|l| {
-            self.files[&file].bodies.iter().any(|b| {
-                b.directives.exports.is_none()
-                    && b.label.as_ref().is_some_and(|n| &n.text == *l)
-                    && tag.is_none_or(|t| canonical_tag(&b.tag.text) == t)
-            })
+            bodies.iter().any(|b| b.directives.exports.is_none() && b.label.as_ref().is_some_and(|n| &n.text == *l) && same_engine(b))
         });
-        match action {
-            Some(l) => format!("block '{l}' exports nothing: add @export {{ {} }} inside it", name.unwrap_or("…")),
-            None => format!("No engine exports found for selector '{}'", self.selector_text(sel)),
+        if let Some(l) = action {
+            return format!("block '{l}' exports nothing: add @export {{ {} }} inside it", name.unwrap_or("…"));
+        }
+        let Some(l) = label else {
+            // `@py`: no block of that engine has an @export.
+            return format!("no {} block in this file has an @export", self.selector_text(sel));
+        };
+        let what = match tag {
+            Some(t) => format!("no @{t} block in this file is labeled '{l}'"),
+            None => format!("no block in this file is labeled '{l}'"),
+        };
+        let labels: Vec<&str> = bodies.iter().filter(|b| same_engine(b)).filter_map(|b| b.label.as_ref().map(|n| &*n.text)).collect();
+        if let Some(close) = did_you_mean(l, labels) {
+            return format!("{what} — did you mean '{close}'?");
+        }
+        if tag.is_some() {
+            return what;
+        }
+        // A package written without its language: npm's when node_modules has it.
+        let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let npm = dir.ancestors().any(|d| d.join("node_modules").join(&**l).is_dir());
+        if npm {
+            format!("{what}: an npm package is imported with js.{l}")
+        } else {
+            format!("{what}: a Python module is imported with py.{l}, an npm package with js.{l}")
         }
     }
 

@@ -5,21 +5,15 @@
 #   curl -fsSL https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
 #
 # Settings, as environment variables (all optional). With the one-liner they go after the pipe,
-# where sh sees them: `curl -fsSL .../install.sh | V2_INSTALL_DIR=~/bin sh`.
+# where sh sees them: `curl -fsSL .../install.sh | V2_INSTALL_DIR=~/.local/bin sh`.
 #   V2_VERSION=v0.1.0-alpha.2   the release to install (default: the one this script names)
 #   V2_INSTALL_DIR=/some/dir    where v2 goes (default: ~/.v2/bin)
 #   V2_ARCHIVE=/path/v2-....tar.gz   install from an archive you downloaded instead (a .sha256
 #                               file next to it is checked)
-#   V2_NO_MODIFY_PATH=1         don't add the folder to your shell's startup file
+#   V2_NO_MODIFY_PATH=1         don't add the folder to your shell's startup files
 set -eu
 
 repo="SirOxygenFish/v2-language"
-version="${V2_VERSION:-v0.1.0-alpha.2}"
-case "$version" in
-v*) ;;
-*) version="v$version" ;;
-esac
-dir="${V2_INSTALL_DIR:-$HOME/.v2/bin}"
 marker="# V2 (added by install.sh)"
 
 say() { printf '%s\n' "$*"; }
@@ -28,6 +22,30 @@ fail() {
     exit 1
 }
 from_source='build it from source instead (README.md, "Build from source")'
+# A path as a shell would read it: a leading ~ (kept by quotes) is the home folder, and a
+# relative one starts at the current folder.
+full_path() {
+    case "$1" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s\n' "$HOME/${1#"~/"}" ;;
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "$PWD/$1" ;;
+    esac
+}
+yes_value() {
+    case "$1" in
+    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss]) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+version="${V2_VERSION:-v0.1.0-alpha.2}"
+case "$version" in
+v*) ;;
+*) version="v$version" ;;
+esac
+dir=$(full_path "${V2_INSTALL_DIR:-$HOME/.v2/bin}")
+[ ! -e "$dir" ] || [ -d "$dir" ] || fail "V2_INSTALL_DIR names a file, not a folder: $dir"
 
 # 1. Which binary this computer needs.
 os=$(uname -s)
@@ -55,18 +73,23 @@ download() { # URL FILE
 
 # 2. Get the archive and its checksum.
 if [ -n "${V2_ARCHIVE:-}" ]; then
-    [ -f "$V2_ARCHIVE" ] || fail "V2_ARCHIVE names no file: $V2_ARCHIVE"
-    cp "$V2_ARCHIVE" "$tmp/$name"
-    if [ -f "$V2_ARCHIVE.sha256" ]; then
-        cp "$V2_ARCHIVE.sha256" "$tmp/$name.sha256"
+    archive=$(full_path "$V2_ARCHIVE")
+    shown_archive=$(basename "$archive")
+    [ -f "$archive" ] || fail "V2_ARCHIVE names no file: $archive"
+    cp "$archive" "$tmp/$name"
+    if [ -f "$archive.sha256" ]; then
+        cp "$archive.sha256" "$tmp/$name.sha256"
     else
-        say "Note: there is no $(basename "$V2_ARCHIVE").sha256 next to the archive, so it isn't checked"
+        say "Note: there is no $shown_archive.sha256 next to the archive, so it isn't checked"
     fi
+    again="download $shown_archive and its .sha256 again"
 else
+    shown_archive=$name
     url="https://github.com/$repo/releases/download/$version/$name"
     say "Downloading $url"
     download "$url" "$tmp/$name" || fail "could not download $url (is $version a release? see https://github.com/$repo/releases)"
     download "$url.sha256" "$tmp/$name.sha256" || fail "could not download $url.sha256"
+    again="try again"
 fi
 
 # 3. Check it.
@@ -81,15 +104,23 @@ if [ -f "$tmp/$name.sha256" ]; then
         say "Note: no sha256sum or shasum here, so the download isn't checked"
     fi
     if [ -n "$got" ] && [ "$got" != "$want" ]; then
-        fail "the download is damaged (its SHA-256 doesn't match): try again"
+        fail "$shown_archive is damaged (its SHA-256 doesn't match): $again"
     fi
 fi
 
-# 4. Unpack, and check that it runs here before it replaces anything.
-tar -xzf "$tmp/$name" -C "$tmp" || fail "could not unpack $name: download it again"
-[ -f "$tmp/v2" ] || fail "$name has no v2 in it"
-chmod 755 "$tmp/v2"
-if ! "$tmp/v2" --version >"$tmp/version" 2>"$tmp/error"; then
+# 4. Unpack (the files are in a folder named like the archive), and check that v2 runs here
+# before it replaces anything.
+mkdir "$tmp/unpacked"
+tar -xzf "$tmp/$name" -C "$tmp/unpacked" || fail "could not unpack $shown_archive: $again"
+if [ -f "$tmp/unpacked/v2-$target/v2" ]; then
+    bin="$tmp/unpacked/v2-$target/v2"
+elif [ -f "$tmp/unpacked/v2" ]; then
+    bin="$tmp/unpacked/v2"
+else
+    fail "$shown_archive has no v2 in it"
+fi
+chmod 755 "$bin"
+if ! "$bin" --version >"$tmp/version" 2>"$tmp/error"; then
     cat "$tmp/error" >&2
     need=$(grep -o 'GLIBC_[0-9.]*' "$tmp/error" | head -n 1 | cut -d _ -f 2)
     if [ -n "$need" ]; then
@@ -104,51 +135,83 @@ installed=$(cut -d ' ' -f 1-2 <"$tmp/version")
 
 # 5. Put v2 in place (a rename, so a running v2 is not touched).
 mkdir -p "$dir" || fail "could not create $dir"
-cp "$tmp/v2" "$dir/v2.new"
+cp "$bin" "$dir/v2.new"
 chmod 755 "$dir/v2.new"
 mv -f "$dir/v2.new" "$dir/v2"
 say "Installed $installed as $dir/v2"
 
-# 6. Put the folder on PATH for new terminals: two lines, the marker and the setting.
+# 6. Put the folder on PATH for new terminals: in each startup file the shell reads, the marker
+# and the setting, once per folder.
 case ":$PATH:" in
 *":$dir:"*) on_path=yes ;;
 *) on_path=no ;;
 esac
-if [ "$on_path" = no ]; then
-    case "$dir" in
-    "$HOME"/*) shown="\$HOME/${dir#"$HOME"/}" ;;
-    *) shown="$dir" ;;
-    esac
-    if [ "${V2_NO_MODIFY_PATH:-}" = 1 ]; then
+case "$dir" in
+"$HOME"/*) shown="\$HOME/${dir#"$HOME"/}" ;;
+*) shown="$dir" ;;
+esac
+add_line() { # FILE LINE
+    if [ -f "$1" ] && grep -qF "$2" "$1"; then
+        return 1
+    fi
+    mkdir -p "$(dirname "$1")"
+    # A file whose last line has no line break gets one first.
+    if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then printf '\n' >>"$1"; fi
+    printf '%s\n%s\n' "$marker" "$2" >>"$1"
+}
+if yes_value "${V2_NO_MODIFY_PATH:-}"; then
+    if [ "$on_path" = no ]; then
         say "Add $dir to your PATH to use v2 (V2_NO_MODIFY_PATH is set, so nothing was changed)."
-    else
-        shell_name=$(basename "${SHELL:-sh}")
-        line="export PATH=\"$shown:\$PATH\""
-        case "$shell_name" in
-        zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
-        bash) if [ "$os" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
-        fish)
-            rc="$HOME/.config/fish/conf.d/v2.fish"
-            line="fish_add_path \"$dir\""
-            ;;
-        *) rc="$HOME/.profile" ;;
-        esac
-        if [ -f "$rc" ] && grep -qF "$marker" "$rc"; then
-            say "$rc already puts V2 on PATH"
+    fi
+else
+    line="export PATH=\"$shown:\$PATH\""
+    # The startup files, as the positional parameters (a home folder's path can have spaces).
+    case "$(basename "${SHELL:-sh}")" in
+    # Every zsh reads .zshenv: new terminals, `zsh -lc`, ssh commands.
+    zsh) set -- "${ZDOTDIR:-$HOME}/.zshenv" ;;
+    # A new terminal reads .bashrc, a login shell .bash_profile or else .profile (macOS
+    # terminals are login shells).
+    bash)
+        if [ "$os" = Darwin ] || [ -f "$HOME/.bash_profile" ]; then
+            set -- "$HOME/.bashrc" "$HOME/.bash_profile"
         else
-            mkdir -p "$(dirname "$rc")"
-            # A file whose last line has no line break gets one first.
-            if [ -s "$rc" ] && [ -n "$(tail -c 1 "$rc")" ]; then printf '\n' >>"$rc"; fi
-            printf '%s\n%s\n' "$marker" "$line" >>"$rc"
-            say "Added $dir to PATH in $rc"
+            set -- "$HOME/.bashrc" "$HOME/.profile"
         fi
+        ;;
+    fish)
+        set -- "$HOME/.config/fish/conf.d/v2.fish"
+        # Global, not universal: deleting the file undoes it.
+        line="contains \"$dir\" \$PATH; or set -gx PATH \"$dir\" \$PATH"
+        ;;
+    *) set -- "$HOME/.profile" ;;
+    esac
+    added=""
+    for f in "$@"; do
+        if add_line "$f" "$line"; then
+            case "$f" in
+            "$HOME"/*) f="~/${f#"$HOME"/}" ;;
+            esac
+            added="${added:+$added and }$f"
+        fi
+    done
+    if [ -n "$added" ]; then
+        say "Added $dir to PATH in $added"
+    elif [ "$on_path" = no ]; then
+        say "Your startup files already put $dir on PATH"
+    fi
+    if [ "$on_path" = no ]; then
         say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
     fi
 fi
 
-# 7. Another v2 that would come first?
+# 7. Another v2 that would come first: on PATH before this folder, or, when this folder isn't
+# on PATH yet and nothing was added, the one a terminal finds now.
 other=$(command -v v2 2>/dev/null || true)
-if [ -n "$other" ] && [ "$other" != "$dir/v2" ] && [ "$on_path" = yes ]; then
-    say "Note: another v2 comes first on your PATH: $other (remove it, or put $dir before it)"
+if [ -n "$other" ] && [ "$other" != "$dir/v2" ]; then
+    if [ "$on_path" = yes ]; then
+        say "Note: another v2 comes first on your PATH: $other (remove it, or put $dir before it)"
+    elif yes_value "${V2_NO_MODIFY_PATH:-}"; then
+        say "Note: a terminal finds another v2 now: $other"
+    fi
 fi
 say "Next: run 'v2 doctor' to see whether Python and Node.js are ready for @py and @js blocks."

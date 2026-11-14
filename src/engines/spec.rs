@@ -150,7 +150,7 @@ impl EngineSpec {
             return Some(format!("too old: {v} < {}", min.short()));
         }
         if self.is_node() && !node_supported(v) {
-            return Some(format!("too old: {v} has no type stripping (needs {})", self.needs(min)));
+            return Some(format!("not supported: {v} has no type stripping; V2 needs {}", self.needs(min)));
         }
         None
     }
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(py.too_old(Version(3, 9, 6)).as_deref(), Some("too old: 3.9.6 < 3.10"));
         assert_eq!(py.too_old(Version(3, 10, 0)), None);
         assert_eq!(js.too_old(Version(20, 18, 0)).as_deref(), Some("too old: 20.18.0 < 22.13"));
-        assert_eq!(js.too_old(Version(23, 1, 0)).as_deref(), Some("too old: 23.1.0 has no type stripping (needs 22.13+, not 23.0 or 23.1)"));
+        assert_eq!(js.too_old(Version(23, 1, 0)).as_deref(), Some("not supported: 23.1.0 has no type stripping; V2 needs 22.13+, not 23.0 or 23.1"));
         assert_eq!(js.too_old(Version(22, 13, 0)), None);
         assert_eq!(js.too_old(Version(24, 11, 1)), None);
     }

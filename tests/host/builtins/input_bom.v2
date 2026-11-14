@@ -1,0 +1,6 @@
+// Windows PowerShell 5 pipes text with a byte-order mark first: input() drops it from the
+// first line only, as a script file does (INTERNALS 5.10).
+let l = input()
+print(len(l), l)
+let m = input()
+print(len(m))

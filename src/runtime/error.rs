@@ -159,7 +159,33 @@ fn excerpt(sm: &SourceMap, span: Span) -> String {
         caret = caret - start + if start > 0 { 3 } else { 0 };
         text = s;
     }
-    format!("    {text}\n    {}^\n", " ".repeat(caret))
+    // The caret goes under its character in a terminal, where wide characters take two columns.
+    let pad: usize = text.chars().take(caret).map(columns).sum();
+    format!("    {text}\n    {}^\n", " ".repeat(pad))
+}
+
+/// The terminal columns a character takes (2.4): 2 for East Asian wide and fullwidth characters
+/// and the common emoji, 0 for combining marks and zero-width characters, else 1.
+fn columns(c: char) -> usize {
+    match c as u32 {
+        0x0300..=0x036F | 0x200B..=0x200F | 0x20D0..=0x20FF | 0xFE00..=0xFE0F => 0,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F680..=0x1F6FF
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
 }
 
 /// What an excerpt shows for a character: a tab as one space, other C0 controls and DEL as their
@@ -324,6 +350,15 @@ mod tests {
             render_error(&sm, &e),
             "main.v2:2:5: NameError: 'nope' is not declared\n    nope(1)\n    ^\n  at main.v2:2\n"
         );
+    }
+
+    #[test]
+    fn the_caret_counts_terminal_columns() {
+        // 2.4: wide characters take two columns, so the caret still lands under the `+`.
+        let (sm, id) = sm_with("let 名前 = \"测试\" + 1\n");
+        // `+` is byte 22, character 15; before it: `let ` 4, 名前 4, ` = ` 3, `"` 1, 测试 4, `" ` 2.
+        let d = Diag::new("x", sm.span(id, 22, 23));
+        assert_eq!(render_diag(&sm, &d), format!("main.v2:1:15: SyntaxError: x\n    let 名前 = \"测试\" + 1\n    {}^\n", " ".repeat(18)));
     }
 
     #[test]

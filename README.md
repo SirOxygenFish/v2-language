@@ -42,10 +42,9 @@ Open a terminal, paste this line and press Enter:
 curl -fsSL https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
 ```
 
-It puts `v2` in `~/.v2/bin` and adds that folder to your PATH in your shell's startup file
-(`~/.zshrc`, `~/.bashrc`, `~/.bash_profile`, fish's `conf.d`, or `~/.profile`). Then open a new
-terminal. No `curl` (`curl: command not found`)? Install it (`sudo apt update && sudo apt install
-curl` on Ubuntu and Debian), or use `wget` instead:
+It puts `v2` in `~/.v2/bin` and adds that folder to your PATH in your shell's startup files
+(it says which). Then open a new terminal. No `curl` (`curl: command not found`)? Install it
+(`sudo apt update && sudo apt install curl` on Ubuntu and Debian), or use `wget` instead:
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
@@ -61,23 +60,35 @@ another `v2` comes first on your PATH. Running one again updates V2. Settings:
 | Setting               | Does                                                          |
 | --------------------- | ------------------------------------------------------------- |
 | `V2_INSTALL_DIR`      | install into this folder instead                              |
-| `V2_NO_MODIFY_PATH=1` | leave PATH alone                                              |
+| `V2_NO_MODIFY_PATH=1` | leave PATH alone (`true` and `yes` work too)                  |
 | `V2_VERSION`          | install another release, such as `v0.1.0-alpha.2`             |
 | `V2_ARCHIVE`          | install from a file you downloaded (a `.sha256` file next to it is checked) |
 
 With the one-liner, a setting goes after the pipe, where `sh` sees it:
 `curl -fsSL https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | V2_INSTALL_DIR=~/bin sh`.
 In PowerShell, set it first in the same window: `$env:V2_INSTALL_DIR = "C:\Tools\v2"`, then the
-`irm` line. To install from a download, save the script too and run it with the file:
+`irm` line.
+
+To install from files you downloaded: get the archive for your computer from
+[Releases](https://github.com/SirOxygenFish/v2-language/releases) (and its `.sha256`, to have it
+checked), and save the script from the address in the one-liner
+([install.sh](https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh) or
+[install.ps1](https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.ps1)) into
+the same folder. Then, in that folder:
 
 ```bash
-V2_ARCHIVE=~/Downloads/v2-x86_64-unknown-linux-gnu.tar.gz sh install.sh
+cd ~/Downloads
+V2_ARCHIVE=v2-x86_64-unknown-linux-gnu.tar.gz sh install.sh
 ```
 
 ```powershell
-$env:V2_ARCHIVE = "$HOME\Downloads\v2-x86_64-pc-windows-msvc.zip"
+cd $HOME\Downloads
+$env:V2_ARCHIVE = "v2-x86_64-pc-windows-msvc.zip"
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
+
+Run as a file, `install.ps1` shows the line that makes `v2` work in that same window; new windows
+have it anyway.
 
 ### Install by hand
 
@@ -90,9 +101,9 @@ Download the file for your computer from
 | macOS (Apple Silicon)            | `v2-aarch64-apple-darwin.tar.gz`     |
 | Linux (64-bit Intel/AMD)         | `v2-x86_64-unknown-linux-gnu.tar.gz` |
 
-Unpack it and put `v2` (`v2.exe` on Windows) in a folder that is on your PATH. On macOS, a file
-downloaded with a browser is blocked the first time ("can't be opened"): run
-`xattr -d com.apple.quarantine v2` on it once.
+Unpack it: the folder inside has `v2` (`v2.exe` on Windows). Put that in a folder that is on
+your PATH. On macOS, a file downloaded with a browser is blocked the first time ("can't be
+opened"): run `xattr -d com.apple.quarantine v2` on it once.
 
 ### Build from source
 
@@ -256,7 +267,7 @@ ForeignError ZeroDivisionError
 
 | Python, JavaScript                        | V2                                              |
 | ----------------------------------------- | ----------------------------------------------- |
-| `def f(x):`, `function f(x) { }`          | `func f(x) { ... }`                             |
+| `def f(x, y=2):`, `function f(x, y = 2) { }` | `func f(x, y = 2) { ... }`                   |
 | `lambda x: x * 2`, `x => x * 2`           | `func(x) => x * 2`                              |
 | `x = 1`, `var x = 1`, `let x = 1`         | `let x = 1` (and `const` for a constant)        |
 | `True`, `False`, `None`, `null`, `undefined` | `true`, `false`, `null`                      |
@@ -264,16 +275,26 @@ ForeignError ZeroDivisionError
 | `f"{x}"`, `` `${x}` ``                    | `f"${x}"`                                       |
 | `elif`, `else if`                         | `elif`                                          |
 | `i += 1`, `i++`                           | `i += 1`                                        |
+| `while x < 3:`, `while (x < 3) { }`       | `while x < 3 { ... }`                           |
 | `for i in range(3)`                       | `for i in 0..3` (0, 1, 2)                       |
 | `xs.append(x)`, `xs.push(x)`              | `xs.push(x)`                                    |
 | `len(xs)`, `xs.length`                    | `len(xs)`                                       |
+| `", ".join(xs)`, `xs.join(", ")`          | `xs.join(", ")`                                 |
+| `s.strip()`, `s.trim()`                   | `s.trim()`                                      |
+| `a // b`, `Math.floor(a / b)`             | `div(a, b)` (`//` starts a comment)             |
 | `f(x, key=1)`                             | `f(x, key: 1)`                                  |
 | `try: … except E as e:`, `catch (e) { }`  | `try { ... } catch (e) { ... }`                 |
+| `raise ValueError("bad")`, `throw new Error("bad")` | `throw error("ValueError", "bad")`, or `throw "bad"` |
+| `print(x, end="")`, `process.stdout.write(x)` | `print(x, end: "")`                         |
+| `open(f).read()`, `fs.readFileSync(f, "utf8")` | `read_file(f)`, and `write_file(f, text)`  |
+| `sys.exit(1)`, `process.exit(1)`          | `exit(1)`                                       |
 | `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`) |
 | `input()`                                 | `input()` (`null` at the end of input)          |
 
 A block can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and its last
-expression is its value. `v2 check FILE` checks a script's V2 syntax without running it. The
+expression is its value. File paths are relative to the folder you run `v2` from; for a file next
+to the script, `read_file(f"${script_dir()}/data.csv")`. `v2 check FILE` checks a script's V2
+syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
 [the host language](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#3-the-host-language),
 [blocks](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#4-embedded-blocks),
@@ -287,11 +308,15 @@ V2 doesn't install packages: it uses the Python and Node.js that `v2 doctor` sho
 packages installed for them.
 
 - **npm:** in your project folder, `npm install lodash`, then
-  `@import { chunk } from js.lodash`. A file of your own next to the script is
+  `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
+  `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
+  own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
   `@import { f } from js."./helpers.js"`.
-- **Python on Windows:** `py -m pip install numpy` (or the path `v2 doctor` shows, then
-  `-m pip install numpy`), then `@import py.numpy as np`. A `helpers.py` next to the script is
-  `py.helpers`.
+- **Python on Windows:** `py -m pip install numpy`, then `@import py.numpy as np`. If
+  `v2 doctor` shows another Python, use its path, with `&` in front in PowerShell:
+  `& "C:\Program Files\Python313\python.exe" -m pip install numpy`. A virtual environment works
+  as below, with `py -m venv .venv` and `.venv\Scripts\pip install numpy`. A `helpers.py` next
+  to the script is `py.helpers`.
 - **Python on Linux and macOS:** the system's and Homebrew's Python refuse `pip install` outside a
   virtual environment ("externally-managed-environment"), so make one in your project folder:
 
@@ -341,11 +366,19 @@ or give its full path. The message says where V2 looked and which `.v2` files ar
 **`unexpected character U+00A0 (a no-break space)`, `'“' (a curly quote)`.** Code copied from a
 web page or a chat can bring characters that look like spaces or quotes: retype them.
 
+**`v2 doctor` says Node.js `doesn't run`, with `libatomic.so.1`.** Node.js's own Linux download
+needs a library that minimal systems lack: `sudo apt install libatomic1`.
+
+**`v2` works in a terminal but not in cron or `ssh host v2 ...`.** Those may not read your shell's
+startup files: use the full path, `~/.v2/bin/v2`.
+
 **macOS says `v2` "can't be opened".** Only files downloaded with a browser are blocked:
 `xattr -d com.apple.quarantine ~/.v2/bin/v2`.
 
 **PowerShell says running scripts is disabled.** The `irm ... | iex` line works anyway. If you
 saved `install.ps1` as a file, run it with `powershell -ExecutionPolicy Bypass -File install.ps1`.
+For `npm` ("npm.ps1 cannot be loaded"), type `npm.cmd` instead. A virtual environment needs no
+`Activate.ps1`: the `v2.toml` above finds it.
 
 **A script hangs.** Press Ctrl+C: V2 stops it, and its Python and Node.js workers, with exit
 code 130.
@@ -359,7 +392,8 @@ says what's ready.
 `py -3`) and `node` on your PATH; `v2 doctor` shows them. To pick one, put a `v2.toml` in your
 project folder ([docs, chapter 14](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#14-project-file-v2toml)):
 `[python]` `venv = ".venv"` for a virtual environment, or `[engines.py]`
-`command = ["C:/Python313/python.exe"]`. The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
+`command = ["C:/Python313/python.exe"]` (on macOS, for example, `["/opt/homebrew/bin/python3"]`).
+The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
 program's path, without quotes, does the same for one run.
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,
@@ -367,7 +401,8 @@ so `add("2", 3)` runs. Run `tsc` yourself for checking. `enum` and `namespace` a
 there.
 
 **Does V2 leave files around?** No. Temporary files go to a private folder in your temp directory
-and are removed when V2 exits (if V2 was killed, the next run removes them); caches live in
+and are removed when V2 exits (if V2 was killed, the next script that runs a block removes
+them); caches live in
 `~/.v2/cache`. Nothing is written to your project.
 
 **Is a `.v2` file safe to run?** Like any script, it runs with your rights, every block in every
@@ -395,7 +430,10 @@ Node.js workers.
 - **Values cross between languages as copies** (numbers, strings, lists, dicts) or as handles to
   the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep.
   V2's integers are 64-bit: a bigger Python or JavaScript integer arrives as a handle, so do big
-  number math inside the block.
+  number math inside the block. A handle works only in its own language: `to_v2(h)` makes plain
+  data that any language takes (functions are the exception: they can be passed anywhere).
+- **Blocks can't read standard input:** V2's `input()` owns it. Read the input in V2 and pass it
+  in.
 - **Output from blocks is text:** bytes that aren't UTF-8 come out as U+FFFD, so write binary data
   to a file.
 - **A class imported from a block is a function here:** you can make objects and call their
@@ -403,19 +441,19 @@ Node.js workers.
 - **Calls between languages nest at most 64 deep.**
 - **`v2 check` checks V2's syntax only:** names, engine tags and the code inside blocks are checked
   when the script runs.
-- **A `#!` first line isn't read:** run scripts with `v2 file.v2`.
+- **A `#!` first line is an error:** delete it, and run scripts with `v2 file.v2`.
 - **No REPL, no package manager of its own, no editor plugins.**
 - **It's an alpha:** syntax and behavior may still change before 0.1.0.
 
 ## Uninstall
 
-1. Delete the folder V2 was installed in: `.v2` in your home folder (`%USERPROFILE%\.v2` on
-   Windows), plus the folder you gave as `V2_INSTALL_DIR`, if you did. That also deletes V2's
-   caches.
+1. Delete the folder `.v2` in your home folder (`%USERPROFILE%\.v2` on Windows): it holds V2
+   and its caches. If you installed with `V2_INSTALL_DIR`, delete just `v2` (`v2.exe`) from that
+   folder, not the folder.
 2. Take it off your PATH. Windows: Settings, search "Edit environment variables for your account",
-   select `Path`, delete the `.v2\bin` entry. macOS and Linux: in the startup file `install.sh`
-   named, delete the line `# V2 (added by install.sh)` and the `export PATH=...` line under it;
-   with fish, delete `~/.config/fish/conf.d/v2.fish`.
+   select `Path`, delete the `.v2\bin` entry. macOS and Linux: in each startup file `install.sh`
+   named, delete the line `# V2 (added by install.sh)` and the line under it; with fish, delete
+   `~/.config/fish/conf.d/v2.fish`.
 
 ## Reporting bugs
 
