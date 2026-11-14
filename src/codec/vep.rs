@@ -38,13 +38,20 @@ enum Step {
     Key(Rc<str>),
 }
 
+/// The path as `args[0]["when"]`; a deep one keeps its first 4 and last 4 steps, with how many
+/// are left out between them, so a line never holds hundreds of `[0]` (10.5).
 fn path_text(root: &str, path: &[Step]) -> String {
+    let step = |s: &Step| match s {
+        Step::Index(i) => format!("[{i}]"),
+        Step::Key(k) => format!("[{}]", Json::String(k.to_string())),
+    };
     let mut s = root.to_string();
-    for step in path {
-        match step {
-            Step::Index(i) => s.push_str(&format!("[{i}]")),
-            Step::Key(k) => s.push_str(&format!("[{}]", Json::String(k.to_string()))),
-        }
+    if path.len() > 12 {
+        path[..4].iter().for_each(|p| s.push_str(&step(p)));
+        s.push_str(&format!("…({} more)…", path.len() - 8));
+        path[path.len() - 4..].iter().for_each(|p| s.push_str(&step(p)));
+    } else {
+        path.iter().for_each(|p| s.push_str(&step(p)));
     }
     s
 }
@@ -519,10 +526,20 @@ mod tests {
             v
         };
         assert!(Fixture::new().wire(ALL).encode(&nested(256), "x").is_ok());
-        assert_eq!(enc(&nested(257)), "MarshalError: value nested deeper than 256 levels (at value".to_string() + &"[0]".repeat(256) + ")");
+        // The path is shortened to its first and last 4 steps (10.5).
+        assert_eq!(enc(&nested(257)), format!("MarshalError: value nested deeper than 256 levels (at value{}…(248 more)…{})", "[0]".repeat(4), "[0]".repeat(4)));
         let text = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
         assert!(dec(&text(256)).is_ok());
         assert_eq!(dec(&text(257)).err().unwrap(), "value nested deeper than 256 levels");
+    }
+
+    #[test]
+    fn deep_paths_are_shortened() {
+        // 10.5: the first 4 and last 4 steps of a path over 12, so a message stays one line.
+        let deep: Vec<Step> = (0..256).map(|_| Step::Index(0)).collect();
+        assert_eq!(path_text("args", &deep), format!("args{}…(248 more)…{}", "[0]".repeat(4), "[0]".repeat(4)));
+        let short = vec![Step::Index(1), Step::Key("when".into())];
+        assert_eq!(path_text("args", &short), "args[1][\"when\"]");
     }
 
     #[test]

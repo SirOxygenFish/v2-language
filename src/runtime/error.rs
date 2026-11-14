@@ -22,6 +22,9 @@ pub struct ErrorValue {
     pub trace: OnceCell<Rc<[Rc<str>]>>,
     /// The error this one was raised from (a foreign exception's cause, 9.6), or `null`.
     pub cause: Value,
+    /// What to do about it, printed only when the error ends the program (2.4); never part of
+    /// `e.message`, so a program that catches it sees the error as it was raised.
+    pub hint: OnceCell<Rc<str>>,
 }
 
 /// An error's `data` and `cause` are freed through the same queue as containers (5.1), so a
@@ -49,6 +52,7 @@ impl ErrorValue {
             span: OnceCell::new(),
             trace: OnceCell::new(),
             cause: Value::Null,
+            hint: OnceCell::new(),
         }
     }
 }
@@ -133,11 +137,12 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
 // Rendering (2.4)
 
 /// The source line under `span` with a caret, indented 4. Leading whitespace is removed, tabs
-/// print as one space, and lines over 120 chars are cut to a window around the caret.
+/// print as one space, other control characters as their visible symbols, and lines over 120
+/// chars are cut to a window around the caret.
 fn excerpt(sm: &SourceMap, span: Span) -> String {
     let line = sm.line_text(span.file, span.line);
     let removed = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-    let chars: Vec<char> = line.chars().skip(removed).map(|c| if c == '\t' { ' ' } else { c }).collect();
+    let chars: Vec<char> = line.chars().skip(removed).map(visible).collect();
     let mut caret = (span.col as usize).saturating_sub(1 + removed);
     let mut text: String = chars.iter().collect();
     if chars.len() > 120 {
@@ -155,6 +160,19 @@ fn excerpt(sm: &SourceMap, span: Span) -> String {
         text = s;
     }
     format!("    {text}\n    {}^\n", " ".repeat(caret))
+}
+
+/// What an excerpt shows for a character: a tab as one space, other C0 controls and DEL as their
+/// Control Pictures symbol (U+2400 on), C1 controls as U+FFFD, so a stray control character, an
+/// escape sequence included, can't garble the terminal (2.4).
+fn visible(c: char) -> char {
+    match c {
+        '\t' => ' ',
+        '\u{0}'..='\u{1F}' => char::from_u32(0x2400 + c as u32).unwrap_or('\u{FFFD}'),
+        '\u{7F}' => '\u{2421}',
+        '\u{80}'..='\u{9F}' => '\u{FFFD}',
+        c => c,
+    }
 }
 
 fn split_message(message: &str) -> (&str, Vec<&str>) {
@@ -189,6 +207,9 @@ pub fn render_error(sm: &SourceMap, e: &ErrorValue) -> String {
     for line in rest {
         out.push_str(&format!("    {line}\n"));
     }
+    if let Some(h) = e.hint.get() {
+        out.push_str(&format!("  hint: {h}\n"));
+    }
     if let Some(trace) = e.trace.get() {
         render_frames(&mut out, trace, "  ");
     }
@@ -204,20 +225,50 @@ pub fn render_error(sm: &SourceMap, e: &ErrorValue) -> String {
     out
 }
 
-/// More than 100 frames: the first 50, `... N frames omitted`, then the last 20 (2.4).
+/// The frames as lines (2.4): a run of the same frame, or of the same 2 to 4 frames (a recursion
+/// through other languages), that comes three or more times in a row prints once, then
+/// `... the frame above repeated N more times`. Then, more than 100 lines: the first 50,
+/// `... N frames omitted`, the last 20.
 fn render_frames(out: &mut String, trace: &[Rc<str>], indent: &str) {
-    if trace.len() > 100 {
-        for f in &trace[..50] {
-            out.push_str(&format!("{indent}at {f}\n"));
+    // Each line with the number of frames it stands for.
+    let mut lines: Vec<(String, usize)> = Vec::new();
+    let mut i = 0;
+    while i < trace.len() {
+        let mut best: Option<(usize, usize)> = None;
+        for period in 1..=4 {
+            let unit = &trace[i..(i + period).min(trace.len())];
+            if unit.len() < period {
+                break;
+            }
+            let mut reps = 1;
+            while trace.get(i + reps * period..i + (reps + 1) * period) == Some(unit) {
+                reps += 1;
+            }
+            if reps >= 3 && best.is_none_or(|(p, r)| period * reps > p * r) {
+                best = Some((period, reps));
+            }
         }
-        out.push_str(&format!("{indent}... {} frames omitted\n", trace.len() - 70));
-        for f in &trace[trace.len() - 20..] {
-            out.push_str(&format!("{indent}at {f}\n"));
+        match best {
+            Some((period, reps)) => {
+                lines.extend(trace[i..i + period].iter().map(|f| (format!("at {f}"), 1)));
+                let what = if period == 1 { "the frame above".to_string() } else { format!("the {period} frames above") };
+                lines.push((format!("... {what} repeated {} more times", reps - 1), period * (reps - 1)));
+                i += period * reps;
+            }
+            None => {
+                lines.push((format!("at {}", trace[i]), 1));
+                i += 1;
+            }
         }
+    }
+    let mut put = |text: &str| out.push_str(&format!("{indent}{text}\n"));
+    if lines.len() > 100 {
+        let omitted: usize = lines[50..lines.len() - 20].iter().map(|(_, n)| n).sum();
+        lines[..50].iter().for_each(|(t, _)| put(t));
+        put(&format!("... {omitted} frames omitted"));
+        lines[lines.len() - 20..].iter().for_each(|(t, _)| put(t));
     } else {
-        for f in trace {
-            out.push_str(&format!("{indent}at {f}\n"));
-        }
+        lines.iter().for_each(|(t, _)| put(t));
     }
 }
 
@@ -273,6 +324,45 @@ mod tests {
             render_error(&sm, &e),
             "main.v2:2:5: NameError: 'nope' is not declared\n    nope(1)\n    ^\n  at main.v2:2\n"
         );
+    }
+
+    #[test]
+    fn repeated_frames_print_once() {
+        // 2.4: a recursion's frames fold; so does a cycle through other languages.
+        let frames = |list: &[&str]| -> Vec<Rc<str>> { list.iter().map(|f| Rc::<str>::from(*f)).collect() };
+        let mut trace = vec!["f (r.v2:2)"; 10_000];
+        trace.push("r.v2:4");
+        let mut out = String::new();
+        render_frames(&mut out, &frames(&trace), "  ");
+        assert_eq!(out, "  at f (r.v2:2)\n  ... the frame above repeated 9999 more times\n  at r.v2:4\n");
+        let mut trace = Vec::new();
+        for _ in 0..30 {
+            trace.extend(["pong (m.v2:9)", "relay (m.v2:2, in @js j)", "ping (m.v2:6)"]);
+        }
+        trace.push("m.v2:13");
+        let mut out = String::new();
+        render_frames(&mut out, &frames(&trace), "  ");
+        assert_eq!(
+            out,
+            "  at pong (m.v2:9)\n  at relay (m.v2:2, in @js j)\n  at ping (m.v2:6)\n  ... the 3 frames above repeated 29 more times\n  at m.v2:13\n"
+        );
+        // Two in a row stay as they are; 150 different frames are cut to 50, a count, 20.
+        let mut out = String::new();
+        render_frames(&mut out, &frames(&["a", "a", "b"]), "  ");
+        assert_eq!(out, "  at a\n  at a\n  at b\n");
+        let many: Vec<String> = (0..150).map(|i| format!("f{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut out = String::new();
+        render_frames(&mut out, &frames(&many), "  ");
+        assert!(out.lines().count() == 71 && out.contains("\n  ... 80 frames omitted\n  at f130\n"), "{out}");
+    }
+
+    #[test]
+    fn excerpts_show_control_characters() {
+        // A stray escape sequence in a file can't recolour the terminal; a tab is one space (2.4).
+        let (sm, id) = sm_with("let a = 1\u{1B}[31m\t\u{0}\u{7F}\u{85}\n");
+        let d = Diag::new("unexpected character U+001B", sm.span(id, 9, 10));
+        assert_eq!(render_diag(&sm, &d), "main.v2:1:10: SyntaxError: unexpected character U+001B\n    let a = 1\u{241B}[31m \u{2400}\u{2421}\u{FFFD}\n             ^\n");
     }
 
     #[test]

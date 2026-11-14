@@ -24,8 +24,16 @@ it is loaded automatically into every session and every subagent.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
 - Released `v0.1.0-alpha.1` on 2026-11-12 (`main`, CI green; the crate version matches the tag).
-  The owner said to stop after the release. Next, only when the owner says go: `llms.txt`, then
-  Phase 2 in the ROADMAP's order.
+- Now: ROADMAP "Pre-publish" (owner-approved 2026-11-14): newcomer README, release.yml + install
+  scripts (§22.6), first-run messages, clean-machine tests, newcomer agents round after round.
+  Pushing `v2-reboot` and CI are fine; merging, new tags and publishing the draft release
+  (`v0.1.0-alpha.2`) wait for the owner's OK. Ask before creating OS user accounts.
+  A `v2-reboot` push whose commit message contains `[release]` rebuilds the draft (release.yml).
+  Subagents always get this file and the memory index (renaming CLAUDE.md doesn't stop it), so
+  newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
+  base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
+  The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
+  Then, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order.
 - `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
   commit it; it is in `.git/info/exclude`.
 - macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
@@ -81,7 +89,10 @@ it is loaded automatically into every session and every subagent.
   ones first call `stop_if_interrupted`). Never use `print!`/`eprint!` in src. Debug builds:
   `V2_TEST_PANIC` panics the interpreter thread (for the 101 test).
 - `cli/`: argv parser (`v2 FILE`, `check FILE`, `doctor`, `cache clean` (parsed; main prints
-  "not implemented yet" until 2.3), `--version`, `--help`; no other flags), HELP text.
+  "not implemented yet" until 2.3), `--version`, `--help`; no other flags), HELP text;
+  `entry.rs`: what to do next for a missing FILE or a folder, the note for a .py/.js file (19.1).
+  Release side (not src): `install.sh`, `install.ps1`, `.github/workflows/release.yml`,
+  `tests/install/smoke.{sh,ps1}` (§22.6).
   `config/`: the project's `v2.toml` read in file order, then
   `V2_ENGINE_<TAG>` overrides (canonical tags only; a replaced `command` is not validated);
   `command` must be an array; unknown sections/keys and keys that don't apply are config
@@ -117,7 +128,8 @@ it is loaded automatically into every session and every subagent.
   `codec/vep`: the `$v2` wire codec (`Wire` context: session, tag, caps, release queue,
   callables, sm, `routes`; a route `fn` tag decodes via `Route::value`).
 - `doctor/`: `v2 check` (parse + static checks of the file and its imports, explicit-stack walk;
-  prints `check X: N files, M errors`) and `doctor::doctor` (the table).
+  prints `check X: N files, M errors`) and `doctor::doctor` (the table, notes, version line,
+  `ready:`/`not ready:` summary).
 - `engines/process.rs`: child rules (setsid/PDEATHSIG; suspended + Job Object), `ChildProc`,
   `KillHandle` (`release_memory`: 8.8), `UntilExit` (a worker's stdout on Unix: ends with the child), `run_captured(argv, env, limit, input)` (stdin null or fed by an unjoined thread;
   `SpawnError { message, reason }`; batch paths with `%` refused), the watchdog (only the top timer
@@ -130,8 +142,8 @@ it is loaded automatically into every session and every subagent.
   and ts: 22.13+, not 23.0/23.1), `engines/resolve.rs` (`Lookup`, `find_program`,
   `Prober`/`RealProber`, `ProbeCache` (usable entries only) + `CacheMode`, `Resolver`,
   `ResolvedEngine`, `NotFound`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
-  `engine_available`). A reached block resolves its tag, then `not_yet` until 1.4. Uncaught
-  EngineNotFound exits 3.
+  `engine_available`; `later_language`: tags of Phases 2-3 say "not in this version yet", drop
+  each row when its engine registers). Uncaught EngineNotFound exits 3.
 - `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders; `hello` = vep, version, pid,
   caps), `engines/handles.rs` (`HandleRef`: Drop only queues the release; `CallableTable`),
   `engines/session.rs` (`Interp.sessions: Vec<Session>`, `start_session`/`attach_session` (Unix, an
@@ -187,5 +199,6 @@ it is loaded automatically into every session and every subagent.
 ## Reminders for later phases
 - Interrupt path (6.5): once `INTERRUPTED` is set the interpreter prints nothing, runs no
   catch/finally, spawns nothing and sends no `bye` (`shutdown_sessions` skips it).
-- CI runs on pushes to `v2-reboot` (Windows, Linux, minimum versions); read results in the
-  built-in browser (the owner is signed in to GitHub there). macOS is the owner's Mac, not CI.
+- CI runs on every push (Windows, Linux, minimum versions); read results in the built-in browser,
+  which loses the owner's GitHub sign-in when the pane reopens (ask them to sign in again).
+  macOS is the owner's Mac, not CI, except release.yml's macOS build and install check.

@@ -5,10 +5,10 @@ KeyError: key 'zzz' not found
 TypeError: dict.get() argument 'k' must be a str, got int
 TypeError: dict has no method 'frobnicate'
 TypeError: dict keys must be str, got int
-TypeError: list has no field 'len'
-TypeError: list has no method 'len'
-TypeError: dict has no method 'len'
-TypeError: list has no method 'append'
+TypeError: list has no field 'len' — V2 writes len(x)
+TypeError: list has no method 'len' — V2 writes len(x)
+TypeError: dict has no method 'len' — V2 writes len(x)
+TypeError: list has no method 'append' — did you mean 'push'?
 IndexError: pop from empty list
 IndexError: list index 5 out of range (length 2)
 IndexError: list index -3 out of range (length 2)

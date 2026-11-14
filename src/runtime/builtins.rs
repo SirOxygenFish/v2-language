@@ -230,6 +230,10 @@ impl Out {
     /// it has handled that output, and the end of the run doesn't count it as lost (6.5).
     fn raise(&mut self, r: std::io::Result<()>) -> Exec<()> {
         let Err(e) = r else { return Ok(()) };
+        // Its reader went away (`| head`): the run stops quietly (6.5).
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            crate::engines::process::exit_broken_pipe();
+        }
         lock(self.pending).clear();
         fail("IOError", format!("cannot write to stdout: {}", os_message(&e)))
     }

@@ -37,6 +37,7 @@ fn create() -> Result<PathBuf, String> {
         match make_private(&dir) {
             Ok(()) => {
                 crate::engines::process::set_run_dir(dir.clone());
+                sweep_stale(&base);
                 return Ok(dir);
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
@@ -44,6 +45,65 @@ fn create() -> Result<PathBuf, String> {
         }
     }
     Err(fail(None))
+}
+
+/// The run dirs that runs killed outright (SIGKILL, Task Manager) left in `base`: a real folder
+/// named `v2-{pid}-{32 hex}` (on POSIX this user's), whose pid isn't running, is removed, best
+/// effort (20.3). A live pid, even one reused by another program, keeps its folder.
+fn sweep_stale(base: &Path) {
+    let me = std::process::id();
+    for entry in std::fs::read_dir(base).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("v2-")) else { continue };
+        let Some((pid, hex)) = rest.split_once('-') else { continue };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if pid == me || hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || running(pid) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(m) = std::fs::symlink_metadata(&path) else { continue };
+        if !m.is_dir() || !owned_by_me(&m) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
+#[cfg(unix)]
+fn running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: signal 0 only checks; EPERM means it exists under another user.
+    unsafe { libc::kill(pid, 0) == 0 || Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(windows)]
+fn running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: a handle we close; a process we may not open is taken as running.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let alive = GetExitCodeProcess(h, &mut code) == 0 || code == STILL_ACTIVE as u32;
+        CloseHandle(h);
+        alive
+    }
+}
+
+#[cfg(unix)]
+fn owned_by_me(m: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: a plain query.
+    m.uid() == unsafe { libc::geteuid() }
+}
+
+/// Windows: the folder's protected DACL already lets only its user delete it.
+#[cfg(windows)]
+fn owned_by_me(_: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// POSIX: `mkdir` with mode 0700, `chmod` 0700 (the umask may have cleared owner bits), then
@@ -155,6 +215,32 @@ fn random16() -> std::io::Result<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_dirs_of_killed_runs_are_swept() {
+        // 20.3: what a run killed outright left is removed by the next run that makes a run dir;
+        // a live pid's folder, and anything else, stay.
+        let base = std::env::temp_dir().join(format!("v2sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // A pid that has ended: a child that ran and was waited for.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--list").stdout(std::process::Stdio::null()).spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let hex = "0123456789abcdef0123456789abcdef";
+        let stale = base.join(format!("v2-{dead}-{hex}"));
+        let live = base.join(format!("v2-{}-{hex}", std::process::id()));
+        let other = base.join(format!("v2-{dead}-not-hex"));
+        for d in [&stale, &live, &other] {
+            std::fs::create_dir_all(d.join("adapters")).unwrap();
+            std::fs::write(d.join("adapters").join("py.py"), "x").unwrap();
+        }
+        assert!(!running(dead) && running(std::process::id()));
+        sweep_stale(&base);
+        assert!(!stale.exists(), "the killed run's folder goes");
+        assert!(live.exists() && other.exists(), "a running pid's folder and other names stay");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn the_run_dir_is_private_named_and_removed() {

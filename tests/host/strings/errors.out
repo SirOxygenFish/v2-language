@@ -4,15 +4,15 @@ TypeError: string index must be an int, got float
 TypeError: string index must be an int, got str
 TypeError: str has no method 'frobnicate'
 TypeError: str has no method 'uper' — did you mean 'upper'?
-TypeError: str has no field 'len'
-TypeError: str has no method 'len'
+TypeError: str has no field 'len' — V2 writes len(x)
+TypeError: str has no method 'len' — V2 writes len(x)
 ValueError: str.split() separator must not be empty
 ValueError: str.replace() argument 'old' must not be empty
 TypeError: str.split() argument 'sep' must be a str, got int
 ArityError: str.upper() takes 0 positional arguments but 1 was given
 ValueError: invalid UTF-8 at byte offset 0
 IndexError: bytes index 2 out of range (length 2)
-TypeError: bytes has no method 'len'
+TypeError: bytes has no method 'len' — V2 writes len(x)
 TypeError: slice bounds must be int, got str
 TypeError: the :.2f format needs a number, got str
 TypeError: str is immutable

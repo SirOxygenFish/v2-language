@@ -14,6 +14,7 @@ use crate::runtime::env::{declare, own_value, Env};
 use crate::runtime::error::{fail, ErrorValue, Exec, Flow};
 use crate::runtime::interp::Interp;
 use crate::runtime::value::{Callable, Func, Value};
+use crate::syntax::scan::canonical_tag;
 use crate::syntax::ast::*;
 use crate::syntax::span::{absolute_clean, FileId, Span};
 
@@ -313,6 +314,34 @@ fn find<'e>(exports: &'e [Export], name: &str) -> Option<&'e Export> {
 /// The import list's (name, local name, span).
 type Item = (Rc<str>, Rc<str>, Span);
 
+/// A package that isn't installed (Python's `No module named 'x'`, Node's `Cannot find module
+/// 'x'`): the hint says how to install it (7). V2 installs nothing itself.
+fn hint_missing_package(f: &Flow) {
+    let Flow::Error(e) = f else { return };
+    if &*e.kind != "ImportError" {
+        return;
+    }
+    let quoted = |after: &str| e.message.split(after).nth(1).and_then(|r| r.split('\'').next()).map(str::to_string);
+    let hint = if let Some(name) = quoted("No module named '") {
+        let top = name.split('.').next().unwrap_or(&name).to_string();
+        format!("install {top} with pip for the Python that v2 doctor shows; README.md, \"Python packages\", has the steps")
+    } else if let Some(name) = quoted("Cannot find module '") {
+        if name.starts_with(['.', '/']) || name.contains(':') {
+            "a local file is found from the .v2 file's folder: check the path".to_string()
+        } else {
+            format!("install it in your project folder: npm install {name}")
+        }
+    } else {
+        return;
+    };
+    let _ = e.hint.set(hint.into());
+}
+
+/// The imported names as an `@export { … }` list would write them.
+fn names_text(list: &[ImportItem]) -> String {
+    list.iter().map(|i| i.name.to_string()).collect::<Vec<_>>().join(", ")
+}
+
 fn named_items(items: &[ImportItem]) -> Vec<Item> {
     items.iter().map(|i| (i.name.clone(), i.alias.as_ref().map_or_else(|| i.name.clone(), |a| a.text.clone()), i.span)).collect()
 }
@@ -332,13 +361,33 @@ impl Interp {
 
     /// A block selector's own errors, before any name's: an unknown tag, or nothing it matches
     /// (13.3 steps 1-2), at the selector.
-    fn check_selector(&self, file: FileId, sel: &Selector) -> Exec<()> {
+    fn check_selector(&self, file: FileId, sel: &Selector, names: &str) -> Exec<()> {
         let at = self.selector_span(sel);
         if self.candidates(file, sel).map_err(|f| self.raise(f, at))?.is_empty() {
-            let msg = format!("No engine exports found for selector '{}'", self.selector_text(sel));
-            return Err(self.raise(import_error(msg), at));
+            return Err(self.raise(import_error(self.no_exports(file, sel, Some(names))), at));
         }
         Ok(())
+    }
+
+    /// A selector with no candidates (13.3 step 2): a block with that label that has no
+    /// `@export` (an action block) says what to add; otherwise nothing matches.
+    fn no_exports(&self, file: FileId, sel: &Selector, name: Option<&str>) -> String {
+        let (label, tag) = match sel {
+            Selector::Label { label } => (Some(&label.text), None),
+            Selector::Exact { tag, label } => (Some(&label.text), Some(canonical_tag(&tag.text))),
+            _ => (None, None),
+        };
+        let action = label.filter(|l| {
+            self.files[&file].bodies.iter().any(|b| {
+                b.directives.exports.is_none()
+                    && b.label.as_ref().is_some_and(|n| &n.text == *l)
+                    && tag.is_none_or(|t| canonical_tag(&b.tag.text) == t)
+            })
+        });
+        match action {
+            Some(l) => format!("block '{l}' exports nothing: add @export {{ {} }} inside it", name.unwrap_or("…")),
+            None => format!("No engine exports found for selector '{}'", self.selector_text(sel)),
+        }
     }
 
     /// 13.3: what follows already fails for `name` whatever loads now: its provider is neither
@@ -418,7 +467,7 @@ impl Interp {
         let cands = self.candidates(file, sel)?;
         let text = self.selector_text(sel);
         if cands.is_empty() {
-            return Err(import_error(format!("No engine exports found for selector '{text}'")));
+            return Err(import_error(self.no_exports(file, sel, Some(name))));
         }
         let hits: Vec<&Rc<EngineBlock>> = cands.iter().filter(|b| self.provides(b, name, seen)).collect();
         match hits.as_slice() {
@@ -582,7 +631,7 @@ impl Interp {
             (sel, ImportItems::Names(list)) => {
                 // A name nothing can provide, or whose block can't have loaded by then, needs no
                 // language to find that out (13.3).
-                self.check_selector(file, sel)?;
+                self.check_selector(file, sel, &names_text(list))?;
                 for (name, _, span) in named_items(list) {
                     self.provider(file, sel, &name, seen).map_err(|f| self.raise(f, span))?;
                     if let Some(b) = self.certain_failure(file, sel, &name, seen) {
@@ -669,7 +718,7 @@ impl Interp {
         let from = self.sm.file(file).path.to_string_lossy().into_owned();
         let frame = json!({"t": "module", "unit": unit, "name": joined, "from": from, "names": names});
         let what = format!("@import from '{}'", self.selector_text(sel));
-        let reply = self.request(s, frame, &what, at)?;
+        let reply = self.request(s, frame, &what, at).inspect_err(hint_missing_package)?;
         let unit: Rc<str> = unit.into();
         let exports = reply.exports.into_iter().map(|(name, v)| export(s, &unit, name, v)).collect();
         Ok((reply.value, exports, reply.missing))
@@ -745,7 +794,7 @@ impl Interp {
                 }
                 sel => {
                     let ImportItems::Names(list) = &imp.items else { unreachable!("a static error in blocks") };
-                    self.check_selector(file, sel)?;
+                    self.check_selector(file, sel, &names_text(list))?;
                     for (name, alias, span) in named_items(list) {
                         let hit = self.provider(file, sel, &name, None).map_err(|f| self.raise(f, span))?;
                         match self.units.get(&hit.unit_id) {

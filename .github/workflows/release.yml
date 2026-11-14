@@ -60,17 +60,25 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked
+      - name: The Linux binary runs on glibc 2.35 (Ubuntu 22.04, Debian 12, Fedora 36)
+        if: runner.os == 'Linux'
+        run: |
+          need=$(objdump -T target/release/v2 | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          echo "needs $need"
+          [ "$(printf '%s\n' GLIBC_2.35 "$need" | sort -V | tail -n 1)" = GLIBC_2.35 ] || { echo "the binary needs $need, newer than the 2.35 README promises"; exit 1; }
       - name: Package
         shell: bash
         run: |
           mkdir stage
           cp LICENSE README.md stage/
+          chmod 644 stage/LICENSE stage/README.md
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/release/v2.exe stage/
             asset="v2-${{ matrix.target }}.zip"
             (cd stage && 7z a -tzip "../$asset" . >/dev/null)
           else
             cp target/release/v2 stage/
+            chmod 755 stage/v2
             asset="v2-${{ matrix.target }}.tar.gz"
             tar -czf "$asset" -C stage v2 LICENSE README.md
           fi

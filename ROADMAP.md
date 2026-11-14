@@ -10,7 +10,7 @@ says *in what order* and *what's done*.
 | --- | --- |
 | **Current phase** | Pre-publish (approved by the owner 2026-11-14), before Phase 2 |
 | **Next task** | The pre-publish boxes below; merging, the `v0.1.0-alpha.2` tag and publishing the draft release wait for the owner's OK |
-| **Last update** | 2026-11-14: pre-publish started (progress log) |
+| **Last update** | 2026-11-14: pre-publish newcomer round 1 found and fixed (progress log) |
 
 ## Rules
 
@@ -25,8 +25,8 @@ says *in what order* and *what's done*.
    list of known engines names only the registered ones (a tag of a later phase says it isn't in
    this version yet, §7.3), and its `declare it in [engines.<tag>] in v2.toml, or with
    define_engine` hint comes with custom engines. The only placeholders: a
-   block of a registered engine, `@import` and `extern` raise `Error: … doesn't run yet in this
-   build` until their milestone, and `v2 cache clean` prints "not implemented yet" until 2.3.
+   block of a registered engine, `@import` and `extern` raise `Error: … isn't in this version of
+   V2 yet` until their milestone, and `v2 cache clean` prints "not implemented yet" until 2.3.
 3. **The docs are the spec.** If code and docs disagree, decide which one is wrong and fix it on
    purpose, in the same change. Never let them drift.
 4. **Every fixed bug gets a test** before its box goes back to checked.
@@ -273,22 +273,24 @@ asking anyone. No bug in a newcomer's first 15 minutes, and docs that answer eve
 it's asked. Merging, new tags and publishing the release wait for the owner's OK; the release is
 prepared as a draft.
 
-- [ ] README.md for a newcomer: what V2 is in three lines, what it needs, install per OS, a
-      quickstart of three examples that run as written (plain V2, Python, JavaScript; tests/docs),
-      troubleshooting, FAQ, known limitations, uninstall, the alpha label
-- [ ] Prebuilt binaries for Windows, Linux and macOS from CI (`release.yml`, §22.6), with
+- [x] README.md for a newcomer: what V2 is in three lines, what it needs, install per OS, a
+      quickstart of four examples that run as written (plain V2, Python, JavaScript, a program of
+      your own; tests/docs), a Python/JavaScript-to-V2 table, packages, troubleshooting, FAQ,
+      known limitations, uninstall, the alpha label
+- [~] Prebuilt binaries for Windows, Linux and macOS from CI (`release.yml`, §22.6), with
       `install.sh` and `install.ps1` one-liners; nobody needs Rust
-- [ ] `v2 doctor` says what is missing, how to install it, and what is ready; every first-run
+- [x] `v2 doctor` says what is missing, how to install it, and what is ready; every first-run
       error says what to do next: a missing script or a folder (§19.1), a file that isn't UTF-8
       (§3.1), a Python or JavaScript file given to V2, an engine not found or too old (§7.8), a
-      tag of a later phase (§7.3)
-- [ ] Clean machines follow the README literally: a fresh Linux (a new WSL distro), Windows (a
+      tag of a later phase (§7.3), Python and JavaScript habits (§2.4, §5.9), a V2 variable named
+      in a block (§12.1), a package that isn't installed (§13.5), pasted look-alike characters
+- [~] Clean machines follow the README literally: a fresh Linux (a new WSL distro), Windows (a
       fresh profile and PATH; the CI runners), macOS (a temp HOME on the owner's Mac Mini); the
       release workflow's install check on each fresh runner (§22.6)
-- [ ] A newcomer test: fresh agents that only get the README install V2, run the quickstart and
+- [~] A newcomer test: fresh agents that only get the README install V2, run the quickstart and
       try to break it, round after round until a round finds nothing; every question they have to
       ask is a docs bug, every crash or cryptic message a code bug, each fixed with a test
-- [ ] A bug-report issue template and CONTRIBUTING.md
+- [x] A bug-report issue template and CONTRIBUTING.md
 - [ ] The draft release `v0.1.0-alpha.2`; on the owner's OK: merge, tag, publish
 
 ---
@@ -471,3 +473,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-11-10 | The owner's review of Phases 0-1, with a second assistant from the owner's chat: processes stay the only transport (no embedded runtimes), DOCS 9.1's value model is the boundary type system (no new record or result types), no restart. Approved: a release gate before Phase 2 (the two quadratic operations, DOCS examples as tests, CI on Windows, Linux and the minimum versions, macOS on the owner's Mac Mini, a README, labels on what isn't built; pushing `v2-reboot` for CI; merging and the `v0.1.0-alpha.1` tag on the owner's OK, `old/` removed at the merge); VEP/1 reserves the `buffer` cap and tag and is frozen before Phase 3 invites adapters; Phase 2 order `extern`, C (gcc and clang, then `cl`), Rust, C++ last; Phase 3 starts with the adapter profile, a conformance kit and a Lua adapter, then the built-in run engines; `llms.txt` after the gate |
 | 2026-11-11 | Release gate: everything but the merge is done. The first CI runs, and the owner's Mac Mini, found what Windows and WSL couldn't: Node 22.13 reports TypeScript strip errors with a snippet and says nothing about which module awaited in a `require()` of a TLA graph (a CommonJS module ran twice), Python 3.10 has no columns, the CI runner is an Administrator, and on macOS the adapter's own folder stayed on `sys.path` (a symlinked temp folder). All fixed with tests; `s +=` and `dict.remove` are linear (9.8 s to 0.02 s, 14.2 s to 0.13 s); the DOCS examples run as tests; MIT license. Merging, removing `old/` and the `v0.1.0-alpha.1` tag wait for the owner |
 | 2026-11-12 | On the owner's OK: `v2-reboot` fast-forwarded into `main`, `old/` removed (it stays in git history before this tag), the crate's version set to `0.1.0-alpha.1` to match the tag, CI green on `main`, tagged `v0.1.0-alpha.1`. Phase 2 waits for the owner |
+| 2026-11-14 | Pre-publish, newcomer round 1: two fresh agents with only the README, on a fresh Ubuntu 24.04 (a new WSL distro, root only) and on Windows (a sandbox profile), about 400 scripts, no crash or internal error. Fixed with tests: the README couldn't teach a program of one's own (a fourth example, a Python/JavaScript table, packages on Ubuntu/Debian, installer settings, exact uninstall lines); V2 functions passed to JavaScript's `map`/`forEach` failed on the extra arguments (now dropped, as JS does); `v2 x.v2 | head` ended with an IOError, and a printing block never stopped (a closed pipe now stops the run quietly, exit 141; other failed writes keep their IOError); `v2 data.csv` read 18 MB into 925 MB of RAM (refused); a V2 variable inside a block, Python/JavaScript habits, f"{x}", `@import x from`, missing packages, `npm.x`, curly quotes and no-break spaces got no hint; temp folders of killed runs stayed; the default Windows build needed VCRUNTIME140.dll (releases link the C runtime in); install.sh installed a binary before checking it ran; `/bin` and `/usr/bin` probed twice; a Linux build on Ubuntu 24.04 needs glibc 2.39 (releases build on 22.04, and the workflow checks it). Not decided, for the owner: `#!` lines and static members of imported classes (both agents met them) |

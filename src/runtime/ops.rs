@@ -127,7 +127,7 @@ pub fn order(a: &Value, b: &Value, op: &str) -> Exec<Option<Ordering>> {
         (Value::Float(f), Value::Int(i)) => cmp_int_float(*i, *f).map(Ordering::reverse),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
         _ => {
-            let hint = if is_handle(a) || is_handle(b) { HANDLE_HINT } else { "" };
+            let hint = handle_hint(a, b);
             return type_error(format!("cannot compare {} and {} with '{op}'{hint}", a.type_name(), b.type_name()));
         }
     })
@@ -159,7 +159,7 @@ fn overflow<T>(op: &str) -> Exec<T> {
 fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
     let mut msg = format!("unsupported operand types for {op}: '{}' and '{}'", a.type_name(), b.type_name());
     if is_handle(a) || is_handle(b) {
-        msg.push_str(HANDLE_HINT);
+        msg.push_str(handle_hint(a, b));
     } else if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
         msg.push_str(" — use f\"...${x}\" or str(x)");
     }
@@ -168,6 +168,19 @@ fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
 
 /// What a TypeError about a handle operand adds (11.7).
 pub const HANDLE_HINT: &str = " — do it inside a block, or convert it with to_v2(h) first";
+
+/// The hint for an operation on a handle: for an integer too big for V2's 64-bit int (a Python
+/// `int`, a JavaScript `bigint`), `to_v2` can't help, so the work stays in the block (9.1).
+fn handle_hint(a: &Value, b: &Value) -> &'static str {
+    let big = |v: &Value| matches!(v, Value::Handle(h) if matches!(&*h.type_name, "int" | "bigint"));
+    if big(a) || big(b) {
+        " — this integer needs more than 64 bits, which V2's int doesn't have: keep the arithmetic in the block"
+    } else if is_handle(a) || is_handle(b) {
+        HANDLE_HINT
+    } else {
+        ""
+    }
+}
 
 pub fn is_handle(v: &Value) -> bool {
     matches!(v, Value::Handle(_))

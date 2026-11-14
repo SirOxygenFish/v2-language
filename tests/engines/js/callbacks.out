@@ -2,6 +2,6 @@
 ["Linus", "Ada", "Grace"]
 true
 13
-["ArityError", "twice() takes 1 positional argument but 2 were given"]
+["ArityError", "twice() missing required argument 'x'"]
 [["Error", "V2 function 'twice' called outside an active V2 call"]]
 8

@@ -112,6 +112,15 @@ impl Registry {
     /// of a later roadmap phase says so first, so `@rs` is not taken for a typo of `@ts`.
     pub fn unknown_message(&self, tag: &str) -> String {
         let ids: Vec<&str> = self.specs.iter().map(|s| &*s.id).collect();
+        // Names of the tools rather than the languages (`@node`, `npm.lodash`, `pip.numpy`).
+        let tool = match tag {
+            "node" | "nodejs" | "npm" | "deno" | "bun" => Some(("js", "npm packages are imported with js.NAME, as in @import { chunk } from js.lodash")),
+            "python3" | "py3" | "pip" | "pypi" => Some(("py", "Python modules are imported with py.NAME, as in @import { mean } from py.statistics")),
+            _ => None,
+        };
+        if let Some((id, how)) = tool {
+            return format!("unknown engine '@{tag}' (did you mean '@{id}'? {how})");
+        }
         if let Some(language) = later_language(tag) {
             return format!("unknown engine '@{tag}': {language} blocks aren't in this version of V2 yet — known engines: {}", ids.join(", "));
         }

@@ -1,7 +1,7 @@
 [2, "red", 1] [1, "blue", 2] [0, "blue", 1]
 2 4
 false str
-ForeignError SystemExit 3
+ForeignError SystemExit sys.exit(3) can't end V2's Python engine; raise an error instead
 2
 42
 héllo ✓ 日本語

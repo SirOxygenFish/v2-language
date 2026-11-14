@@ -493,6 +493,65 @@ fn first_run_mistakes_say_what_to_do_next() {
 }
 
 #[test]
+fn cross_language_mistakes_say_what_to_do() {
+    // The hints of INTERNALS 2.4 that only an uncaught error prints, and the messages of 11.7 and
+    // 13.3 for what a newcomer tries first.
+    if !needs("py", "cross_language_mistakes_say_what_to_do") || !needs("js", "cross_language_mistakes_say_what_to_do") {
+        return;
+    }
+    let cases = [
+        ("var.v2", "let n = 10\nlet h = @js { n * 2 }\n", "  hint: 'n' is a V2 variable, and blocks don't see V2 variables: pass it in, @js(n) { ... }\n"),
+        ("loop.v2", "for i in 0..2 {\n    print(@py { i * 100 })\n}\n", "  hint: 'i' is a V2 variable, and blocks don't see V2 variables: pass it in, @py(i) { ... }\n"),
+        (
+            "nomod.v2",
+            "@import { thing } from py.no_such_module_xyz\nprint(thing())\n",
+            "  hint: install no_such_module_xyz with pip for the Python that v2 doctor shows; README.md, \"Python packages\", has the steps\n",
+        ),
+        ("nonpm.v2", "@import { chunk } from js.no_such_package_xyz\nprint(chunk([1], 1))\n", "  hint: install it in your project folder: npm install no_such_package_xyz\n"),
+        ("noexport.v2", "@py tools {\n    def a():\n        return 1\n}\n@import { a } from tools\nprint(a())\n", "ImportError: block 'tools' exports nothing: add @export { a } inside it\n"),
+        (
+            "static.v2",
+            "@py k {\n    class C:\n        @staticmethod\n        def hello():\n            return 1\n    @export { C }\n}\n@import { C } from k\nprint(C.hello())\n",
+            "an imported class is only a function here; @export a function from the block that uses C.hello\n",
+        ),
+        ("big.v2", "let b = @py { 2 ** 100 }\nprint(b + 1)\n", "this integer needs more than 64 bits, which V2's int doesn't have: keep the arithmetic in the block\n"),
+    ];
+    for (name, src, needle) in cases {
+        let (code, _, stderr, _home) = run_with_files(&[(name, src)], &[name]);
+        assert_eq!(code, Some(1), "{name}: {stderr}");
+        assert!(stderr.contains(needle), "{name}: stderr {stderr:?} lacks {needle:?}");
+    }
+    // A caught error has no hint in its message.
+    let src = "let n = 10\ntry {\n    @py { n }\n} catch (e) {\n    print(e.message)\n}\n";
+    let (code, stdout, stderr, _home) = run_with_files(&[("caught.v2", src)], &["caught.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "name 'n' is not defined\n"), "{stderr}");
+}
+
+#[test]
+fn a_closed_stdout_stops_the_run_quietly() {
+    // INTERNALS 6.5: when stdout's reader goes away (`v2 x.v2 | head`), the run stops at once
+    // with 141 and prints nothing more: V2's own loop, and a block that prints forever.
+    let mut programs = vec![("loop.v2", "for i in 0..100000000 {\n    print(i)\n}\n")];
+    if needs("py", "a_closed_stdout_stops_the_run_quietly") {
+        programs.push(("pyloop.v2", "@py {\n    i = 0\n    while True:\n        print(i)\n        i += 1\n}\n"));
+    }
+    for (name, src) in programs {
+        let home = TempHome::new();
+        std::fs::write(home.0.join(name), src).unwrap();
+        let mut child = v2_command(&home.0).arg(name).current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut first = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut first).unwrap();
+        assert_eq!(first, "0\n", "{name}");
+        // The reader is dropped with the BufReader: the pipe is closed.
+        let start = Instant::now();
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(20)).unwrap();
+        assert_eq!(out.status.code(), Some(141), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.stderr.is_empty(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(start.elapsed() < Duration::from_secs(10), "{name} stopped only after {:?}", start.elapsed());
+    }
+}
+
+#[test]
 fn a_utf16_file_says_to_save_it_as_utf8() {
     // Windows PowerShell 5's `>` writes UTF-16 with a byte-order mark (INTERNALS 2.1).
     let home = TempHome::new();
@@ -505,6 +564,11 @@ fn a_utf16_file_says_to_save_it_as_utf8() {
         String::from_utf8_lossy(&out.stderr),
         "u16.v2:1:1: SyntaxError: file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8\n"
     );
+    // A program or an image given to V2 is named a binary file (a NUL byte in its start).
+    std::fs::write(home.0.join("app.v2"), b"MZ\x90\x00\x03\x00\xff\xff").unwrap();
+    let out = v2_command(&home.0).arg("app.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "app.v2:1:1: SyntaxError: file is not valid UTF-8: it looks like a binary file, not a V2 script\n");
 }
 
 #[test]
@@ -896,20 +960,20 @@ fn print_to_stderr_flushes_stdout_first() {
 }
 
 #[test]
-fn writing_to_a_closed_stdout_is_an_io_error() {
+fn writing_to_a_failing_stdout_is_an_io_error() {
     // INTERNALS 21 (Host) and 5.10: a failed write (closed pipe; Rust ignores SIGPIPE) raises
     // IOError at the print.
     let home = TempHome::new();
+    let Some(stdout) = failing_stdout(&home.0) else { return };
     std::fs::write(home.0.join("spam.v2"), "while true { print(\"x\" * 1000) }\n").unwrap();
-    let mut child = v2_command(&home.0)
+    let child = v2_command(&home.0)
         .arg("spam.v2")
         .current_dir(&home.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    drop(child.stdout.take()); // close the read end
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
@@ -1095,21 +1159,21 @@ print(go())
 }
 
 #[test]
-fn a_program_that_catches_a_closed_stdout_ends_well() {
+fn a_program_that_catches_a_failing_stdout_ends_well() {
     // INTERNALS 6.5: what a failed write couldn't write goes with its IOError, so a program that
     // catches it has handled that output: exit 0, nothing said at the end.
     let home = TempHome::new();
+    let Some(stdout) = failing_stdout(&home.0) else { return };
     let src = "try {\n    while true {\n        print(\"x\")\n    }\n} catch (e) {\n    print(\"caught\", e.type, stderr: true)\n}\n";
     std::fs::write(home.0.join("caught.v2"), src).unwrap();
-    let mut child = v2_command(&home.0)
+    let child = v2_command(&home.0)
         .arg("caught.v2")
         .current_dir(&home.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    drop(child.stdout.take()); // close the read end
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!((out.status.code(), normalize(&err).as_str()), (Some(0), "caught IOError\n"));
@@ -1185,16 +1249,16 @@ fn a_blocks_failed_output_goes_with_its_io_error() {
     let block = "@py P {\n    def blk():\n        for i in range(1000):\n            print(\"p\" * 99)\n    @export { blk }\n}\n@import { blk } from P\n";
     for (end, want_code) in [("try {\n    blk()\n} catch (e) {\n    print(\"caught\", e.type, stderr: true)\n}\n", 0), ("blk()\n", 1)] {
         let home = TempHome::new();
+        let Some(stdout) = failing_stdout(&home.0) else { return };
         std::fs::write(home.0.join("lines.v2"), format!("{block}{end}")).unwrap();
-        let mut child = v2_command(&home.0)
+        let child = v2_command(&home.0)
             .arg("lines.v2")
             .current_dir(&home.0)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(stdout)
             .stderr(Stdio::piped())
             .spawn()
             .expect("start v2");
-        drop(child.stdout.take()); // close the read end
         let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(want_code), "{err}");
@@ -1211,17 +1275,17 @@ fn a_loss_that_a_blocks_error_hid_is_reported_at_the_end() {
         return;
     }
     let home = TempHome::new();
+    let Some(stdout) = failing_stdout(&home.0) else { return };
     let src = "let big = \"y\" * 100000\n@py(big) {\n    import sys\n    sys.stdout.write(big)\n    raise ValueError(\"block failed\")\n}\n";
     std::fs::write(home.0.join("hidden.v2"), src).unwrap();
-    let mut child = v2_command(&home.0)
+    let child = v2_command(&home.0)
         .arg("hidden.v2")
         .current_dir(&home.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    drop(child.stdout.take()); // close the read end
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
@@ -1229,19 +1293,19 @@ fn a_loss_that_a_blocks_error_hid_is_reported_at_the_end() {
 }
 
 #[test]
-fn a_closed_stdout_is_reported_once() {
+fn a_failing_stdout_is_reported_once() {
     // INTERNALS 6.5: the IOError that a write raised says it; the end of the run doesn't again.
     let home = TempHome::new();
+    let Some(stdout) = failing_stdout(&home.0) else { return };
     std::fs::write(home.0.join("flood.v2"), "while true {\n    print(\"x\")\n}\n").unwrap();
-    let mut child = v2_command(&home.0)
+    let child = v2_command(&home.0)
         .arg("flood.v2")
         .current_dir(&home.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    drop(child.stdout.take()); // close the read end
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
@@ -1286,7 +1350,7 @@ fn a_file_name_that_isnt_utf8_is_a_usage_error() {
 }
 
 #[test]
-fn a_worker_writing_to_a_closed_stdout_is_an_io_error() {
+fn a_worker_writing_to_a_failing_stdout_is_an_io_error() {
     // INTERNALS 9.9: the write fails with no V2 expression waiting, so the IOError comes when the
     // block returns, catchable, and the worker is still there.
     if !needs("py", "a_worker_writing_to_a_closed_stdout_is_an_io_error") {
@@ -1308,16 +1372,16 @@ try {
 print(@py { 1 + 1 }, stderr: true)
 ";
     let home = TempHome::new();
+    let Some(stdout) = failing_stdout(&home.0) else { return };
     std::fs::write(home.0.join("flood.v2"), src).unwrap();
-    let mut child = v2_command(&home.0)
+    let child = v2_command(&home.0)
         .arg("flood.v2")
         .current_dir(&home.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    drop(child.stdout.take()); // close the read end
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("caught IOError true\n2\n"), "{err}");
@@ -1364,16 +1428,16 @@ try {
 }
 ";
     let home = TempHome::new();
+    let Some(stdout) = failing_stdout(&home.0) else { return };
     std::fs::write(home.0.join("stale.v2"), src).unwrap();
-    let mut child = v2_command(&home.0)
+    let child = v2_command(&home.0)
         .arg("stale.v2")
         .current_dir(&home.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    drop(child.stdout.take()); // close the read end
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("A ForeignError\nB 42\nC 5\nD IOError\n"), "{err}");
@@ -1763,6 +1827,22 @@ fn an_interrupt_as_the_run_ends_still_exits_130() {
     }
 }
 
+/// A stdout that fails every write with an error other than a closed pipe, which stops the run
+/// quietly instead (6.5): the IOError rules of 6.5 and 9.9 for every other failure. A full device
+/// on Linux, a read-only handle on Windows; `None` on macOS, which has neither.
+#[allow(unused_variables, unreachable_code)]
+fn failing_stdout(home: &Path) -> Option<Stdio> {
+    #[cfg(target_os = "linux")]
+    return Some(Stdio::from(std::fs::OpenOptions::new().write(true).open("/dev/full").expect("/dev/full")));
+    #[cfg(windows)]
+    {
+        let path = home.join("read-only stdout");
+        std::fs::write(&path, b"").unwrap();
+        return Some(Stdio::from(std::fs::File::open(&path).unwrap()));
+    }
+    None
+}
+
 /// `v2 ARGS` in `dir` with stdout (or stderr) on a pipe whose reader is already gone; returns
 /// the exit code and the other stream.
 fn run_with_a_closed_stream(home: &Path, args: &[&str], close_stdout: bool) -> (Option<i32>, String) {
@@ -1807,11 +1887,10 @@ fn a_closed_stdout_or_stderr_never_panics() {
         assert_eq!(got, Some(code), "stdout closed, args {args:?}: {stderr}");
         assert!(!stderr.contains("internal error") && !stderr.contains("panicked"), "args {args:?}: {stderr}");
     }
-    // Program output that can't be written at the end of the run: reported, and exit 0 becomes
-    // 1; another code is kept (6.5).
+    // Program output whose reader went away by the end of the run: nothing said, and exit 0
+    // becomes 141; another code is kept (6.5).
     let (got, stderr) = run_with_a_closed_stream(d, &["small.v2"], true);
-    assert_eq!(got, Some(1), "{stderr}");
-    assert!(stderr.starts_with("v2: cannot write to stdout: "), "{stderr}");
+    assert_eq!((got, stderr.as_str()), (Some(141), ""));
     let (got, stderr) = run_with_a_closed_stream(d, &["exit3.v2"], true);
     assert_eq!(got, Some(3), "{stderr}");
     for (args, code) in [
