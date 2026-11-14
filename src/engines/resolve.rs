@@ -614,8 +614,16 @@ impl Resolver<'_> {
     fn search(&mut self, spec: &Rc<EngineSpec>) -> Result<ResolvedEngine, NotFound> {
         let mut skipped: Vec<(PathBuf, String)> = Vec::new();
         let mut newest_old: Option<Version> = None;
+        // A file met again, through another PATH entry (on most Linux systems /bin is a link to
+        // /usr/bin) or another candidate name, with the same arguments, isn't probed or listed
+        // twice (7.6).
+        let mut seen: std::collections::HashSet<(PathBuf, Vec<String>)> = std::collections::HashSet::new();
         for candidate in &spec.candidates {
             for hit in find_program(&candidate[0], self.lookup) {
+                let file = std::fs::canonicalize(&hit).unwrap_or_else(|_| hit.clone());
+                if !seen.insert((file, candidate[1..].iter().map(|a| a.to_string()).collect())) {
+                    continue;
+                }
                 if self.lookup.xcrun_shims.contains(&hit) && !self.command_line_tools() {
                     skipped.push((hit, "Command Line Tools missing".into()));
                     continue;
@@ -635,7 +643,7 @@ impl Resolver<'_> {
             }
         }
         let status = newest_old.map_or(Status::Missing, Status::Old);
-        Err(NotFound { status, message: not_found_message(spec, &skipped), command: None, from: None, skipped })
+        Err(NotFound { status, message: not_found_message(spec, &skipped, newest_old), command: None, from: None, skipped })
     }
 
     /// macOS: whether the Command Line Tools are installed, so the `xcrun` shims can run
@@ -651,10 +659,12 @@ impl Resolver<'_> {
             let rest: Vec<&str> = nf.message.lines().skip(1).collect();
             // A configured js that can't run is named for what is wrong with it.
             let mut message = match nf.status {
-                Status::Missing | Status::Old(_) => "engine 'ts' (TypeScript) not found — @ts blocks run on the js engine".to_string(),
-                Status::Broken => format!("engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and {}", nf.message.lines().next().unwrap_or_default()),
+                Status::Missing => "engine 'ts' (TypeScript) not found — @ts blocks run on the js engine".to_string(),
+                Status::Old(_) | Status::Broken => {
+                    format!("engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and {}", nf.message.lines().next().unwrap_or_default())
+                }
             };
-            if rest.is_empty() && nf.status != Status::Broken {
+            if rest.is_empty() && nf.status == Status::Missing {
                 message.push_str(&format!("\njs: {}", nf.message));
             }
             for line in rest {
@@ -667,10 +677,15 @@ impl Resolver<'_> {
     }
 }
 
-/// 7.8's message: what was tried, what was skipped and why, how to install, how to configure.
-fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)]) -> String {
+/// 7.8's message: what was found (nothing, or only versions that are too old), what was tried,
+/// what was skipped and why, how to install, how to configure.
+fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>) -> String {
     let tried: Vec<String> = spec.candidates.iter().map(|c| c.join(" ")).collect();
-    let mut m = format!("engine '{}' ({}) not found\ntried: {} on PATH", spec.id, spec.language, tried.join(", "));
+    let head = match (newest_old, spec.min_version) {
+        (Some(v), Some(min)) => format!("engine '{}' ({}) is too old: found {v}, V2 needs {}", spec.id, spec.language, spec.needs(min)),
+        _ => format!("engine '{}' ({}) not found", spec.id, spec.language),
+    };
+    let mut m = format!("{head}\ntried: {} on PATH", tried.join(", "));
     for (path, reason) in skipped {
         m.push_str(&format!("\nskipped: {} ({reason})", path.display()));
     }
@@ -921,6 +936,29 @@ mod tests {
     }
 
     #[test]
+    fn the_same_file_twice_on_path_is_probed_once() {
+        // Ubuntu's /bin is a link to /usr/bin, so one old node is met twice (7.6).
+        let root = temp("samefile");
+        let real = root.join("usr-bin");
+        std::fs::create_dir_all(&real).unwrap();
+        exe(&real, "node");
+        #[cfg(unix)]
+        let other = {
+            let link = root.join("bin");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            link
+        };
+        // The same folder: Windows file names are case-insensitive.
+        #[cfg(windows)]
+        let other = root.join("USR-BIN");
+        let p = fake(|_| says("v18.19.1"));
+        let nf = resolve_with(&Config::default(), &lookup(&[&real, &other], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
+        assert_eq!(nf.skipped.len(), 1, "{:?}", nf.skipped);
+        assert_eq!(nf.skipped[0].0, real.join(if cfg!(windows) { "node.exe" } else { "node" }));
+        assert_eq!(p.calls.get(), 1);
+    }
+
+    #[test]
     fn too_old_skipped_search_continues() {
         let root = temp("old");
         let (a, b) = (root.join("a"), root.join("b"));
@@ -939,6 +977,8 @@ mod tests {
         let p = fake(|prog| says(if prog.to_string_lossy().contains("python3") { "Python 3.7.9" } else { "Python 3.6.8" }));
         let nf = resolve_with(&Config::default(), &lookup(&[&a], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert_eq!(nf.status, Status::Old(Version(3, 7, 9)));
+        // The first line says what was found and what V2 needs, not "not found" (7.8).
+        assert!(nf.message.starts_with("engine 'py' (Python) is too old: found 3.7.9, V2 needs 3.10+\ntried: "), "{}", nf.message);
         assert!(nf.message.contains("too old: 3.7.9 < 3.10") && nf.message.contains("too old: 3.6.8 < 3.10"), "{}", nf.message);
     }
 
@@ -1098,7 +1138,8 @@ mod tests {
         let js = r.resolve(&spec("js"));
         assert_eq!(js.as_ref().unwrap_err().status, Status::Old(Version(22, 6, 0)));
         let nf = r.resolve_ts(&spec("ts"), js.as_ref()).unwrap_err();
-        assert!(nf.message.starts_with("engine 'ts' (TypeScript) not found — @ts blocks run on the js engine\n"), "{}", nf.message);
+        let head = "engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and engine 'js' (JavaScript) is too old: found 22.6.0, V2 needs 22.13+, not 23.0 or 23.1\n";
+        assert!(nf.message.starts_with(head), "{}", nf.message);
         assert!(nf.message.contains("too old: 22.6.0 < 22.13"), "{}", nf.message);
         let p = fake(|_| says("v24.11.1"));
         let mut r = Resolver { cfg: &cfg, lookup: &l, prober: &p, cache: &mut cache };

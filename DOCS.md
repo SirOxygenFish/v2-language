@@ -89,15 +89,12 @@ macros, decorators, type annotations, tuples, sets, comprehensions, pipes, bitwi
 
 ### Install
 
-```bash
-cargo install --path .       # from the repo root
-```
-
-This puts `v2` in `~/.cargo/bin`, which rustup already added to your `PATH`. The binary is called
-`v2`. Building it from source needs Rust and a C compiler (V2 bundles libffi, which is written in
-C); the built binary has no other dependencies. Each language you embed
-needs its own toolchain (`python`, `node`, `rustc`, and a C/C++ compiler: MSVC `cl` on Windows,
-`gcc` or `clang` elsewhere; see [chapter 5](#5-engines)). `v2 doctor` shows what V2 can find.
+[README.md](README.md#install) has the one-line install command for Windows, macOS and Linux, the
+downloads, and how to build from source (`cargo install --path .` in a clone of the repository,
+which needs Rust and a C compiler: V2 bundles libffi, which is written in C). The binary is called
+`v2` and has no other dependencies. Each language you embed needs its own toolchain (`python`,
+`node`, `rustc`, and a C/C++ compiler: MSVC `cl` on Windows, `gcc` or `clang` elsewhere; see
+[chapter 5](#5-engines)). `v2 doctor` shows what V2 can find.
 
 ### Hello, world
 
@@ -134,6 +131,22 @@ cpp     ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
 rust    ok      C:\Users\me\.cargo\bin\rustc.exe          1.91.1    PATH
 ...
 config file: none
+v2 0.1.0 (VEP/1), windows x86_64
+ready: py, js, ts, c, cpp, rust, ...
+```
+
+(This version lists `py`, `js` and `ts` only: the other rows come with the engines, ROADMAP Phases
+2 and 3.) An engine that isn't found, or is too old, gets a note with the command that installs
+it, and the last lines say what that means for your scripts:
+
+```text
+notes:
+  js: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal
+  ts: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal
+config file: none
+v2 0.1.0 (VEP/1), windows x86_64
+ready: py
+not ready: js, ts (see the notes); scripts that don't use them still run
 ```
 
 ### A project
@@ -183,8 +196,9 @@ ends with an operator, a comma or `=>`, or the next line starts with `.` or `?.`
 only an expression must be a call or a block, so `x == 1` meant as `x = 1`, or a line starting
 with `-` meant to continue the previous one, is caught as a `SyntaxError`.
 
-Source files are UTF-8 (a BOM is fine). Identifiers are letters, digits and `_`, not starting
-with a digit. Keywords are listed in the [appendix](#keywords).
+Source files are UTF-8 (a BOM is fine); any other encoding is a `SyntaxError` that says to save the
+file as UTF-8 (and names UTF-16, which Windows PowerShell 5's `>` writes). Identifiers are letters,
+digits and `_`, not starting with a digit. Keywords are listed in the [appendix](#keywords).
 
 ### 3.2 Values
 
@@ -889,7 +903,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 
 ### C — `@c`, C++ — `@cpp`, Rust — `@rust`
 
-> **Not built yet** (ROADMAP Phase 2): these tags raise `EngineUnknown` for now.
+> **Not built yet** (ROADMAP Phase 2): these tags raise `EngineUnknown` for now
+> (`unknown engine '@c': C blocks aren't in this version of V2 yet`).
 
 - On Linux and macOS, found as `cc`/`gcc`/`clang` (C) and `c++`/`g++`/`clang++` (C++). On
   Windows, C and C++ use MSVC `cl` only (found even outside a Developer Prompt, through the Visual
@@ -900,7 +915,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 
 ### Built-in run engines
 
-> **Not built yet** (ROADMAP Phase 3): these tags raise `EngineUnknown` for now.
+> **Not built yet** (ROADMAP Phase 3): these tags raise `EngineUnknown` for now
+> (`unknown engine '@sh': shell blocks aren't in this version of V2 yet`).
 
 These work exactly like a custom `run` engine ([13.1](#131-run-engines-execute-a-file): output
 printed, or the block's value as a `str`; args as `V2_ARG_<name>` variables; no `@export` or
@@ -1767,7 +1783,10 @@ temp directory, and caches live in `~/.v2/`.
 | `v2 --version`, `v2 --help`    |                                                                      |
 
 There are no other flags. A first word that is exactly `check`, `doctor` or `cache` is a command;
-to run a script with such a name, write it as a path: `v2 ./doctor`.
+to run a script with such a name, write it as a path: `v2 ./doctor`. A script that isn't there, or
+a folder given as one, is a usage error whose message says what to do next: the folder V2 looked
+in, and the file you probably meant (`did you mean 'hello.v2'?`, or the `hello.v2.txt` your editor
+saved).
 
 | Exit code | Meaning                                                                  |
 | --------- | ------------------------------------------------------------------------ |

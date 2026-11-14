@@ -1,6 +1,6 @@
 [package]
 name = "v2"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 description = "V2: a small glue language built around embedded Python, JS/TS, C, C++ and Rust"
 license = "MIT"

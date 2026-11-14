@@ -36,8 +36,8 @@ fn module_diag(sm: &SourceMap, d: &Diag) -> ModuleDiag {
 pub fn parse_file(sm: &mut SourceMap, path: &Path) -> Result<Parsed, LoadError> {
     let file = match sm.load(path) {
         Ok(id) => id,
-        Err(LoadError::NotUtf8 { display, line }) => {
-            return Ok(Parsed::Failed(vec![ModuleDiag { display, line, col: 1, message: "file is not valid UTF-8".into() }]))
+        Err(LoadError::NotUtf8 { display, line, message }) => {
+            return Ok(Parsed::Failed(vec![ModuleDiag { display, line, col: 1, message: message.into() }]))
         }
         Err(e) => return Err(e),
     };

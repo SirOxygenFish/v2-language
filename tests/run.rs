@@ -442,15 +442,69 @@ fn usage_errors_exit_2() {
         (&["--engine", "py=x", "x.v2"][..], "unknown flag `--engine`"),
         (&["--no-cache", "x.v2"][..], "unknown flag `--no-cache`"),
         (&["doctor", "py"][..], "unexpected argument `py` after `v2 doctor`"),
-        (&["run"][..], "cannot read 'run'"),
+        (&["run"][..], "there is no 'run' command: to run a script, type: v2 FILE"),
         (&["check"][..], "needs a FILE"),
-        (&["no_such_script.v2"][..], "cannot read 'no_such_script.v2'"),
+        (&["no_such_script.v2"][..], "cannot find 'no_such_script.v2' in "),
     ] {
         let out = v2(args);
         assert_eq!(out.status.code(), Some(2), "args {args:?}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(needle), "args {args:?}: stderr {err:?} lacks {needle:?}");
     }
+}
+
+#[test]
+fn first_run_mistakes_say_what_to_do_next() {
+    // INTERNALS 19.1: a FILE that is missing or is a folder ends with what to do next (exit 2),
+    // and a JavaScript file given to V2 gets a note after its error.
+    let files = [("hello.v2", "print(1)\n"), ("notes.v2.txt", "print(2)\n"), ("proj/main.v2", "print(3)\n"), ("app.js", "console.log(\"hi\")\n")];
+    let sep = std::path::MAIN_SEPARATOR;
+    let cases: Vec<(Vec<&str>, i32, String)> = vec![
+        (vec!["hello"], 2, "did you mean 'hello.v2'?".into()),
+        (vec!["notes.v2"], 2, "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'".into()),
+        (vec!["helo.v2"], 2, "did you mean 'hello.v2'?".into()),
+        (vec!["nothing.v2"], 2, "the .v2 files there: hello.v2".into()),
+        (vec!["run", "hello.v2"], 2, "there is no 'run' command: to run hello.v2, type: v2 hello.v2".into()),
+        (vec!["help"], 2, "for help, type: v2 --help".into()),
+        (vec!["check", "hello"], 2, "did you mean 'hello.v2'?".into()),
+        (vec!["proj"], 2, format!("'proj' is a folder, not a script\nrun one of its .v2 files, for example: v2 proj{sep}main.v2")),
+        (
+            vec!["app.js"],
+            1,
+            "NameError: 'console' is not declared".into(),
+        ),
+        (
+            vec!["app.js"],
+            1,
+            "note: 'app.js' is a JavaScript file, and V2 runs .v2 scripts: put JavaScript code in a @js { } block in a .v2 file\n".into(),
+        ),
+    ];
+    for (args, code, needle) in cases {
+        let (got, stdout, stderr, _home) = run_with_files(&files, &args);
+        assert_eq!(got, Some(code), "{args:?}: {stderr}");
+        assert!(stdout.is_empty() && stderr.contains(&needle), "{args:?}: stderr {stderr:?} lacks {needle:?}");
+    }
+    // The first line names the folder it looked in.
+    let (_, _, stderr, home) = run_with_files(&files, &["nothing.v2"]);
+    let folder = std::fs::canonicalize(&home.0).unwrap();
+    let folder = folder.to_string_lossy();
+    let folder = folder.strip_prefix(r"\\?\").unwrap_or(&folder);
+    assert!(stderr.starts_with(&format!("v2: cannot find 'nothing.v2' in {folder}\n")), "{stderr}");
+}
+
+#[test]
+fn a_utf16_file_says_to_save_it_as_utf8() {
+    // Windows PowerShell 5's `>` writes UTF-16 with a byte-order mark (INTERNALS 2.1).
+    let home = TempHome::new();
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend("print(1)\n".encode_utf16().flat_map(u16::to_le_bytes));
+    std::fs::write(home.0.join("u16.v2"), bytes).unwrap();
+    let out = v2_command(&home.0).arg("u16.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "u16.v2:1:1: SyntaxError: file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8\n"
+    );
 }
 
 #[test]
@@ -494,7 +548,7 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
         let expected_line = if bytes.contains(&b'\n') { 2 } else { 3 };
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            format!("bad.v2:{expected_line}:1: SyntaxError: file is not valid UTF-8\n")
+            format!("bad.v2:{expected_line}:1: SyntaxError: file is not valid UTF-8: save it as UTF-8\n")
         );
         assert!(out.stdout.is_empty());
     }
@@ -1802,7 +1856,7 @@ fn check_keeps_file_order_for_files_that_are_not_utf8() {
     assert!(bad < good, "{stderr}");
     let (code, stdout, stderr) = check("bad.v2");
     assert_eq!((code, stdout.as_str()), (Some(1), "check bad.v2: 1 file, 1 error\n"), "{stderr}");
-    assert_eq!(stderr, "bad.v2:1:1: SyntaxError: file is not valid UTF-8\n");
+    assert_eq!(stderr, "bad.v2:1:1: SyntaxError: file is not valid UTF-8: save it as UTF-8\n");
 }
 
 #[test]
@@ -2048,6 +2102,10 @@ fn doctor_prints_the_engine_table() {
         }
     }
     assert!(stdout.contains("config file: none"), "{stdout}");
+    // The summary names the engines that are ready (19.2).
+    let ok: Vec<&str> = ["py", "js", "ts"].into_iter().filter(|id| rows[*id][0] == "ok").collect();
+    let ready = if ok.is_empty() { "none".to_string() } else { ok.join(", ") };
+    assert!(stdout.contains(&format!("\nready: {ready}\n")), "{stdout}");
     drop(home);
 }
 
@@ -2271,6 +2329,14 @@ fn doctor_without_engines_notes_install_hints() {
         assert_eq!(rows[id], ["missing", "-", "-", "-"], "{stdout}");
         assert!(stdout.contains(&format!("\n  {id}: not found; install: ")), "{stdout}");
     }
+    // Then the version line for bug reports and what it means for the user's scripts (19.2).
+    let end = format!(
+        "config file: none\nv2 {} (VEP/1), {} {}\nready: none\nnot ready: py, js, ts (see the notes); plain V2 scripts still run\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    assert!(stdout.ends_with(&end), "{stdout}");
 }
 
 #[test]

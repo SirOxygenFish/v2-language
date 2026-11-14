@@ -201,7 +201,7 @@ impl Interp {
                 Err(e) => {
                     let msg = match e {
                         crate::syntax::span::LoadError::Io(m) => m,
-                        crate::syntax::span::LoadError::NotUtf8 { .. } => "file is not valid UTF-8".into(),
+                        crate::syntax::span::LoadError::NotUtf8 { message, .. } => message.into(),
                     };
                     return self.fail_at("ImportError", format!("cannot import '{spec}': {msg}"), at);
                 }

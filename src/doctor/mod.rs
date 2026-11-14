@@ -48,10 +48,10 @@ impl Checker {
     }
 
     /// A file that is not UTF-8 never gets a `FileId`; its one error sorts at its place.
-    fn not_utf8(&mut self, display: &str, line: u32) {
+    fn not_utf8(&mut self, display: &str, line: u32, message: &str) {
         self.files += 1;
         self.errors += 1;
-        let text = format!("{display}:{line}:1: SyntaxError: file is not valid UTF-8\n");
+        let text = format!("{display}:{line}:1: SyntaxError: {message}\n");
         self.problems.push(Problem { met: self.files, lo: 0, text });
     }
 
@@ -141,9 +141,9 @@ impl Checker {
                     self.done.insert(canonical);
                     self.import_error(format!("cannot import '{spec}': {msg}"), at);
                 }
-                Err(LoadError::NotUtf8 { display, line }) => {
+                Err(LoadError::NotUtf8 { display, line, message }) => {
                     self.done.insert(canonical);
-                    self.not_utf8(&display, line);
+                    self.not_utf8(&display, line, message);
                 }
             }
         }
@@ -156,6 +156,10 @@ fn plural(n: usize, word: &str) -> String {
 
 /// `v2 check FILE` (19.3): diagnostics to stderr, the summary to stdout; exit 1 on any error.
 pub fn check(file: &str) -> i32 {
+    if let Some(msg) = crate::cli::entry_error(file, None) {
+        stderrln!("v2: {msg}");
+        return 2;
+    }
     let mut c = Checker::default();
     let display: Rc<str> = match c.sm.load(Path::new(file)) {
         Ok(entry) => {
@@ -166,8 +170,8 @@ pub fn check(file: &str) -> i32 {
             stderrln!("v2: {msg}");
             return 2;
         }
-        Err(LoadError::NotUtf8 { display, line }) => {
-            c.not_utf8(&display, line);
+        Err(LoadError::NotUtf8 { display, line, message }) => {
+            c.not_utf8(&display, line, message);
             display
         }
     };
@@ -191,6 +195,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
     let reg = Registry::real(cfg.clone(), CacheMode::Refresh);
     let mut rows: Vec<[String; 5]> = vec![["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].map(String::from)];
     let mut notes: Vec<String> = Vec::new();
+    let (mut ready, mut not_ready) = (Vec::new(), Vec::new());
     for spec in reg.specs() {
         let id = spec.id.to_string();
         let skipped = |list: &[(std::path::PathBuf, String)], notes: &mut Vec<String>| {
@@ -201,6 +206,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
                 rows.push([id.clone(), "ok".into(), e.shown(), version, e.origin.label()]);
                 skipped(&e.skipped, &mut notes);
+                ready.push(id);
             }
             Err(nf) => {
                 let (status, version) = match nf.status {
@@ -211,11 +217,16 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let dash = || "-".to_string();
                 rows.push([id.clone(), status.into(), nf.command.clone().unwrap_or_else(dash), version, nf.from.clone().unwrap_or_else(dash)]);
                 skipped(&nf.skipped, &mut notes);
-                if nf.status == Status::Missing {
-                    notes.push(format!("{id}: not found; install: {}", install_hint(&id)));
-                } else {
-                    notes.push(format!("{id}: {}", nf.message.lines().next().unwrap_or_default()));
+                // ts is held to js's minimum (7.6).
+                let rule = spec.session_of.as_ref().and_then(|host| reg.specs().iter().find(|s| &s.id == host)).unwrap_or(spec);
+                match (nf.status, rule.min_version, &nf.command) {
+                    (Status::Missing, _, _) => notes.push(format!("{id}: not found; install: {}", install_hint(&id))),
+                    (Status::Old(v), Some(min), None) => {
+                        notes.push(format!("{id}: too old: found {v}, V2 needs {}; install: {}", rule.needs(min), install_hint(&id)))
+                    }
+                    _ => notes.push(format!("{id}: {}", nf.message.lines().next().unwrap_or_default())),
                 }
+                not_ready.push(id);
             }
         }
     }
@@ -240,6 +251,14 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
     match &cfg.file {
         Some(f) => stdoutln!("config file: {}", f.display()),
         None => stdoutln!("config file: none"),
+    }
+    // What a bug report needs, then what the table means for the user's scripts.
+    stdoutln!("{}, {} {}", crate::cli::version_line(), std::env::consts::OS, std::env::consts::ARCH);
+    let list = |ids: &[String]| if ids.is_empty() { "none".to_string() } else { ids.join(", ") };
+    stdoutln!("ready: {}", list(&ready));
+    if !not_ready.is_empty() {
+        let still = if ready.is_empty() { "plain V2 scripts still run" } else { "scripts that don't use them still run" };
+        stdoutln!("not ready: {} (see the notes); {still}", list(&not_ready));
     }
     0
 }
