@@ -505,7 +505,7 @@ fn cross_language_mistakes_say_what_to_do() {
         (
             "nomod.v2",
             "@import { thing } from py.no_such_module_xyz\nprint(thing())\n",
-            "  hint: install no_such_module_xyz with pip for the Python that v2 doctor shows; README.md, \"Python packages\", has the steps\n",
+            "  hint: if 'no_such_module_xyz' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps\n",
         ),
         ("nonpm.v2", "@import { chunk } from js.no_such_package_xyz\nprint(chunk([1], 1))\n", "  hint: install it in your project folder: npm install no_such_package_xyz\n"),
         ("noexport.v2", "@py tools {\n    def a():\n        return 1\n}\n@import { a } from tools\nprint(a())\n", "ImportError: block 'tools' exports nothing: add @export { a } inside it\n"),
@@ -2219,6 +2219,39 @@ fn doctor_reports_configured_problems() {
     let toml = real.join("v2.toml");
     assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing/python.exe").display(), toml.display())), "{stdout}");
     assert!(stdout.contains(&format!("config file: {}", toml.display())), "{stdout}");
+}
+
+#[test]
+fn doctor_names_the_programs_it_could_not_use() {
+    // 19.2: an old Python and a Node.js that doesn't run, found on PATH: their rows show the
+    // program and FROM PATH, ts shows js's, and the notes say why.
+    let home = TempHome::new();
+    let bin = home.0.join("fake bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let ext = if cfg!(windows) { ".cmd" } else { "" };
+    let (py, node) = (bin.join(format!("python3{ext}")), bin.join(format!("node{ext}")));
+    if cfg!(windows) {
+        std::fs::write(&py, "@echo Python 3.8.1\r\n").unwrap();
+        std::fs::write(&node, "@echo node: error while loading shared libraries: libatomic.so.1 1>&2\r\n@exit /b 127\r\n").unwrap();
+    } else {
+        std::fs::write(&py, "#!/bin/sh\necho Python 3.8.1\n").unwrap();
+        std::fs::write(&node, "#!/bin/sh\necho 'node: error while loading shared libraries: libatomic.so.1' >&2\nexit 127\n").unwrap();
+    }
+    #[cfg(unix)]
+    for f in [&py, &node] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[("PATH", bin.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let rows = doctor_rows(&stdout);
+    let (py, node) = (py.display().to_string(), node.display().to_string());
+    assert_eq!(rows["py"], ["old", py.as_str(), "3.8.1", "PATH"], "{stdout}");
+    assert_eq!(rows["js"], ["broken", node.as_str(), "-", "PATH"], "{stdout}");
+    assert_eq!(rows["ts"], ["broken", node.as_str(), "-", "PATH"], "{stdout}");
+    assert!(stdout.contains("\n  py: too old: found 3.8.1, V2 needs 3.10+; install: "), "{stdout}");
+    assert!(stdout.contains("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)"), "{stdout}");
+    assert!(stdout.contains("exit code 127): node: error while loading shared libraries: libatomic.so.1"), "{stdout}");
 }
 
 #[test]

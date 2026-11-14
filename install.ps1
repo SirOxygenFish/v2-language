@@ -20,14 +20,36 @@
     $repo = 'SirOxygenFish/v2-language'
     $version = if ($env:V2_VERSION) { $env:V2_VERSION } else { 'v0.1.0-alpha.2' }
     if (-not $version.StartsWith('v')) { $version = "v$version" }
-    $dir = if ($env:V2_INSTALL_DIR) { $env:V2_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.v2\bin' }
     $fromSource = 'build it from source instead (README.md, "Build from source")'
+    $noPath = $env:V2_NO_MODIFY_PATH -match '^\s*(1|true|yes)\s*$'
 
     # A failure: thrown with this mark, so the handler below prints it as one line.
     function Fail($message) { throw [System.Exception]::new("install.ps1: $message") }
+    # A path as PowerShell reads it: a leading ~ is your user folder, and a relative one starts at
+    # the current folder.
+    function FullPath($path) {
+        $path = $path.Trim().Trim('"')
+        if ($path -eq '~') { $path = $env:USERPROFILE }
+        elseif ($path -match '^~[\\/]') { $path = Join-Path $env:USERPROFILE $path.Substring(2) }
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+    }
+    # The first v2.exe a window with this PATH runs, or $null.
+    function FirstV2($pathText) {
+        foreach ($entry in ($pathText -split ';')) {
+            if (-not $entry) { continue }
+            try {
+                $candidate = Join-Path ([Environment]::ExpandEnvironmentVariables($entry.Trim('"'))) 'v2.exe'
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+            } catch {}
+        }
+        $null
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("v2-install-" + [Guid]::NewGuid().ToString('N'))
     try {
+        $dir = if ($env:V2_INSTALL_DIR) { FullPath $env:V2_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.v2\bin' }
+        if (Test-Path -LiteralPath $dir -PathType Leaf) { Fail "V2_INSTALL_DIR names a file, not a folder: $dir" }
+
         # 1. Which binary: x64 (Windows on Arm runs it too, emulated).
         if (-not [Environment]::Is64BitOperatingSystem) { Fail "V2 needs 64-bit Windows: $fromSource" }
         $target = 'x86_64-pc-windows-msvc'
@@ -37,14 +59,19 @@
 
         # 2. Get the archive and its checksum.
         if ($env:V2_ARCHIVE) {
-            if (-not (Test-Path -LiteralPath $env:V2_ARCHIVE -PathType Leaf)) { Fail "V2_ARCHIVE names no file: $env:V2_ARCHIVE" }
-            Copy-Item -LiteralPath $env:V2_ARCHIVE -Destination $zip
-            if (Test-Path -LiteralPath "$($env:V2_ARCHIVE).sha256") {
-                Copy-Item -LiteralPath "$($env:V2_ARCHIVE).sha256" -Destination "$zip.sha256"
+            $archive = FullPath $env:V2_ARCHIVE
+            $shownArchive = Split-Path -Leaf $archive
+            $again = "download $shownArchive and its .sha256 again"
+            if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { Fail "V2_ARCHIVE names no file: $archive" }
+            Copy-Item -LiteralPath $archive -Destination $zip
+            if (Test-Path -LiteralPath "$archive.sha256" -PathType Leaf) {
+                Copy-Item -LiteralPath "$archive.sha256" -Destination "$zip.sha256"
             } else {
-                Write-Host "Note: there is no $(Split-Path -Leaf $env:V2_ARCHIVE).sha256 next to the archive, so it isn't checked"
+                Write-Host "Note: there is no $shownArchive.sha256 next to the archive, so it isn't checked"
             }
         } else {
+            $shownArchive = $name
+            $again = 'try again'
             # Windows PowerShell 5.1 on older systems doesn't offer TLS 1.2 by itself.
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             $url = "https://github.com/$repo/releases/download/$version/$name"
@@ -61,32 +88,47 @@
         if (Test-Path -LiteralPath "$zip.sha256") {
             $want = ((Get-Content -LiteralPath "$zip.sha256" -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
             $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($want -ne $got) { Fail "the download is damaged (its SHA-256 doesn't match): try again" }
+            if ($want -ne $got) { Fail "$shownArchive is damaged (its SHA-256 doesn't match): $again" }
         }
 
-        # 4. Unpack, and check that it runs here before it replaces anything.
+        # 4. Unpack (the files are in a folder named like the archive), and check that it runs here
+        # before it replaces anything.
         $unpacked = Join-Path $tmp 'unpacked'
-        try { Expand-Archive -LiteralPath $zip -DestinationPath $unpacked } catch { Fail "$name isn't a zip file, or is damaged: download it again" }
-        $exe = Join-Path $unpacked 'v2.exe'
-        if (-not (Test-Path -LiteralPath $exe)) { Fail "$name has no v2.exe in it" }
+        try { Expand-Archive -LiteralPath $zip -DestinationPath $unpacked } catch { Fail "could not unpack $shownArchive (it isn't a zip file, or is damaged): $again" }
+        $exe = Join-Path $unpacked "v2-$target\v2.exe"
+        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $exe = Join-Path $unpacked 'v2.exe' }
+        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Fail "$shownArchive has no v2.exe in it" }
         try { $shown = & $exe --version } catch { Fail "the downloaded v2.exe doesn't run here ($($_.Exception.Message)): $fromSource" }
         if ($LASTEXITCODE -ne 0) { Fail "the downloaded v2.exe doesn't run here: $fromSource" }
         $shown = (($shown -split ' ')[0..1]) -join ' '
 
-        # 5. Put v2.exe in place. A running v2.exe can't be overwritten, but it can be renamed, so
-        # the old one moves aside first.
+        # 5. Put v2.exe in place. A running v2.exe can't be overwritten or deleted, but it can be
+        # renamed, so the old one moves aside first, to a name no other running v2.exe has.
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $dest = Join-Path $dir 'v2.exe'
-        if (Test-Path -LiteralPath $dest) { Move-Item -LiteralPath $dest -Destination "$dest.old" -Force }
-        Copy-Item -LiteralPath $exe -Destination $dest
-        Remove-Item -LiteralPath "$dest.old" -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $dir -Filter 'v2.exe.old*' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        $old = "$dest.old"
+        if (Test-Path -LiteralPath $old) { $old = "$dest.old-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) }
+        $moved = $false
+        if (Test-Path -LiteralPath $dest) {
+            try { Move-Item -LiteralPath $dest -Destination $old -Force } catch { Fail "could not replace $dest ($($_.Exception.Message))" }
+            $moved = $true
+        }
+        try {
+            Copy-Item -LiteralPath $exe -Destination $dest
+        } catch {
+            if ($moved) { Move-Item -LiteralPath $old -Destination $dest -Force -ErrorAction SilentlyContinue }
+            Fail "could not write $dest ($($_.Exception.Message))"
+        }
+        if ($moved) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
         Write-Host "Installed $shown as $dest"
 
         # 6. Put the folder on the user PATH (kept unexpanded, as Windows stores it), and on this
         # window's PATH.
-        $same = { param($entry) [Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -ieq $dir.TrimEnd('\') }
-        if ($env:V2_NO_MODIFY_PATH -eq '1') {
-            Write-Host "Add $dir to your PATH to use v2 (V2_NO_MODIFY_PATH is set, so nothing was changed)."
+        $same = { param($entry) [Environment]::ExpandEnvironmentVariables($entry.Trim('"')).TrimEnd('\') -ieq $dir.TrimEnd('\') }
+        $onPath = [bool](@($env:Path -split ';') | Where-Object { & $same $_ })
+        if ($noPath) {
+            if (-not $onPath) { Write-Host "Add $dir to your PATH to use v2 (V2_NO_MODIFY_PATH is set, so nothing was changed)." }
         } else {
             $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
             try {
@@ -102,14 +144,28 @@
             } finally {
                 $key.Close()
             }
-            if (-not (@($env:Path -split ';') | Where-Object { & $same $_ })) { $env:Path = "$dir;$env:Path" }
-            Write-Host "v2 works in this window now; other open windows need to be reopened first."
+            if (-not $onPath) {
+                $env:Path = "$dir;$env:Path"
+                if ($PSCommandPath) {
+                    # Run as a file, this may be another PowerShell than the window's.
+                    Write-Host "Open a new window to use v2 (or, in this one, run: `$env:Path = `"$dir;`" + `$env:Path)"
+                } else {
+                    Write-Host "v2 works in this window now; other open windows need to be reopened first."
+                }
+            }
         }
 
-        # 7. Another v2.exe that would come first?
-        $first = Get-Command v2 -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($first -and ($first.Source -ine $dest)) {
-            Write-Host "Note: another v2 comes first on your PATH: $($first.Source) (remove it, or move $dir before it)"
+        # 7. Another v2.exe that would come first: in this window when nothing was changed, else
+        # in new windows (the system PATH comes before the user PATH there).
+        $first = if ($noPath) { FirstV2 $env:Path } else {
+            FirstV2 ([Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User'))
+        }
+        if ($first -and ($first -ine $dest)) {
+            if ($noPath) {
+                Write-Host "Note: a window finds another v2 now: $first"
+            } else {
+                Write-Host "Note: new windows find another v2 first: $first (remove it, or move $dir before it in PATH)"
+            }
         }
         Write-Host "Next: run 'v2 doctor' to see whether Python and Node.js are ready for @py and @js blocks."
     } catch {

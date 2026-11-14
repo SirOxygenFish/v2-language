@@ -253,6 +253,10 @@ pub fn strip_verbatim(p: &Path) -> PathBuf {
 pub fn display_path(canonical: &Path) -> Rc<str> {
     if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
         let cwd = strip_verbatim(&cwd);
+        // Relative to a filesystem root (`cd /`), a path would only lose its first `/`.
+        if cwd.parent().is_none() {
+            return canonical.to_string_lossy().into_owned().into();
+        }
         if let Ok(rel) = canonical.strip_prefix(&cwd) {
             let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
             if !parts.is_empty() {

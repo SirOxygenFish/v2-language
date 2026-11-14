@@ -66,21 +66,23 @@ jobs:
           need=$(objdump -T target/release/v2 | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
           echo "needs $need"
           [ "$(printf '%s\n' GLIBC_2.35 "$need" | sort -V | tail -n 1)" = GLIBC_2.35 ] || { echo "the binary needs $need, newer than the 2.35 README promises"; exit 1; }
+      # The files go in a folder named like the archive, so unpacking it by hand makes one folder.
       - name: Package
         shell: bash
         run: |
-          mkdir stage
-          cp LICENSE README.md stage/
-          chmod 644 stage/LICENSE stage/README.md
+          top="v2-${{ matrix.target }}"
+          mkdir -p "stage/$top"
+          cp LICENSE README.md "stage/$top/"
+          chmod 644 "stage/$top/LICENSE" "stage/$top/README.md"
           if [ "$RUNNER_OS" = Windows ]; then
-            cp target/release/v2.exe stage/
-            asset="v2-${{ matrix.target }}.zip"
-            (cd stage && 7z a -tzip "../$asset" . >/dev/null)
+            cp target/release/v2.exe "stage/$top/"
+            asset="$top.zip"
+            (cd stage && 7z a -tzip "../$asset" "$top" >/dev/null)
           else
-            cp target/release/v2 stage/
-            chmod 755 stage/v2
-            asset="v2-${{ matrix.target }}.tar.gz"
-            tar -czf "$asset" -C stage v2 LICENSE README.md
+            cp target/release/v2 "stage/$top/"
+            chmod 755 "stage/$top/v2"
+            asset="$top.tar.gz"
+            tar -czf "$asset" -C stage "$top"
           fi
           if command -v sha256sum >/dev/null; then sha256sum "$asset" > "$asset.sha256"; else shasum -a 256 "$asset" > "$asset.sha256"; fi
           echo "ASSET=$asset" >> "$GITHUB_ENV"
@@ -98,6 +100,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\smoke.ps1 $env:ASSET
+      - name: The installer's choices (Linux, macOS; zsh and fish on Linux)
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q >/dev/null && sudo apt-get install -y -q zsh fish >/dev/null; fi
+          sh tests/install/paths.sh "$ASSET"
+      - name: The installer's choices (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\paths.ps1 $env:ASSET -ModifyPath
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

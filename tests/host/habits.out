@@ -13,3 +13,7 @@ TypeError dict has no method 'items' — V2 loops over a dict with for key, valu
 TypeError dict has no method 'has' — V2 writes key in d
 TypeError dict has no method 'pop' — did you mean 'remove'?
 TypeError list has no method 'uppr'
+NameError 'open' is not declared — V2 reads a file with read_file(path) and writes one with write_file(path, text)
+NameError 'sorted' is not declared — V2 sorts a list with xs.sort()
+TypeError str has no method 'join' — V2 joins a list with xs.join(sep)
+ArityError error() needs a type and a message, as in error("ValueError", "my error"); throw "my error" throws a plain Error

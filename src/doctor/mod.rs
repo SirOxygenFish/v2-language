@@ -215,14 +215,22 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     Status::Broken => ("broken", "-".to_string()),
                 };
                 let dash = || "-".to_string();
-                // Only too-old versions found on PATH: the newest one's place (19.2).
+                // Found on PATH but not usable: the newest too-old one's place, or the first that
+                // doesn't run; ts shows what js found (19.2).
                 let found = match (nf.status, &nf.command) {
-                    (Status::Old(v), None) => nf.skipped.iter().find(|(_, why)| why.starts_with(&format!("too old: {v} "))).map(|(p, _)| p.display().to_string()),
+                    (Status::Old(v), None) => nf
+                        .skipped
+                        .iter()
+                        .find(|(_, why)| why.starts_with(&format!("too old: {v} ")) || why.starts_with(&format!("not supported: {v} ")))
+                        .map(|(p, _)| p.display().to_string()),
+                    (Status::Broken, None) => nf.skipped.iter().map(|(p, _)| p.display().to_string()).next(),
                     _ => None,
                 };
-                let (command, from) = match found {
-                    Some(path) => (path, "PATH".to_string()),
-                    None => (nf.command.clone().unwrap_or_else(dash), nf.from.clone().unwrap_or_else(dash)),
+                let host = spec.session_of.as_ref().and_then(|h| rows.iter().find(|r| *r[0] == **h)).filter(|r| r[1] != "missing").map(|r| (r[2].clone(), r[4].clone()));
+                let (command, from) = match (found, host) {
+                    (Some(path), _) => (path, "PATH".to_string()),
+                    (None, Some(js)) if nf.command.is_none() => js,
+                    _ => (nf.command.clone().unwrap_or_else(dash), nf.from.clone().unwrap_or_else(dash)),
                 };
                 rows.push([id.clone(), status.into(), command, version, from]);
                 skipped(&nf.skipped, &mut notes);
@@ -230,6 +238,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let rule = spec.session_of.as_ref().and_then(|host| reg.specs().iter().find(|s| &s.id == host)).unwrap_or(spec);
                 match (nf.status, rule.min_version, &nf.command) {
                     (Status::Missing, _, _) => notes.push(format!("{id}: not found; install: {}", install_hint(&id))),
+                    (Status::Old(v), Some(min), None) if v >= min => notes.push(format!(
+                        "{id}: not supported: found {v}, which has no type stripping; V2 needs {}; install: {}",
+                        rule.needs(min),
+                        install_hint(&id)
+                    )),
                     (Status::Old(v), Some(min), None) => {
                         notes.push(format!("{id}: too old: found {v}, V2 needs {}; install: {}", rule.needs(min), install_hint(&id)))
                     }

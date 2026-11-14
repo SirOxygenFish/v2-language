@@ -131,6 +131,7 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "endsWith" | "endswith" if matches!(o, Value::Str(_)) => "did you mean 'ends_with'?",
         "splitlines" if matches!(o, Value::Str(_)) => "did you mean 'lines'?",
         "format" if matches!(o, Value::Str(_)) => "V2 formats with f-strings: f\"${x}\"",
+        "join" if matches!(o, Value::Str(_)) => "V2 joins a list with xs.join(sep)",
         "items" | "entries" if matches!(o, Value::Dict(_)) => "V2 loops over a dict with for key, value in d { ... }",
         "has" | "has_key" | "hasOwnProperty" | "containsKey" if matches!(o, Value::Dict(_)) => "V2 writes key in d",
         "pop" | "delete" if matches!(o, Value::Dict(_)) => "did you mean 'remove'?",
@@ -528,6 +529,8 @@ impl Interp {
             "None" | "undefined" | "nil" | "NULL" => Some("V2 writes null".to_string()),
             "console" | "System" => Some("V2 prints with print(...)".to_string()),
             "require" => Some("V2 imports a package with @import { name } from js.package".to_string()),
+            "open" | "readFile" | "readFileSync" => Some("V2 reads a file with read_file(path) and writes one with write_file(path, text)".to_string()),
+            "sorted" => Some("V2 sorts a list with xs.sort()".to_string()),
             _ => None,
         };
         if let Some(h) = habit {

@@ -33,6 +33,12 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
+  Rounds 1 and 2 found and fixed (bf4327c and the next commit, ROADMAP log); round 3 next, on a
+  new distro and sandbox (round 2's: v2new24b, scratchpad/newcomer/linux2, `win2 ü`). Loop until
+  a round finds nothing new. Installer tests: tests/install/paths.{sh,ps1} (paths.ps1 never
+  changes the user PATH without -ModifyPath, CI only).
+  Newcomer prompts: scratchpad/newcomer/prompt-{linux,windows}.md (session-local; rewrite if gone).
+  Owner decisions still open: `#!` lines, static members of imported classes.
   Then, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order.
 - `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
   commit it; it is in `.git/info/exclude`.
@@ -92,7 +98,7 @@ it is loaded automatically into every session and every subagent.
   "not implemented yet" until 2.3), `--version`, `--help`; no other flags), HELP text;
   `entry.rs`: what to do next for a missing FILE or a folder, the note for a .py/.js file (19.1).
   Release side (not src): `install.sh`, `install.ps1`, `.github/workflows/release.yml`,
-  `tests/install/smoke.{sh,ps1}` (§22.6).
+  `tests/install/smoke.{sh,ps1}` and `paths.{sh,ps1}` (§22.6).
   `config/`: the project's `v2.toml` read in file order, then
   `V2_ENGINE_<TAG>` overrides (canonical tags only; a replaced `command` is not validated);
   `command` must be an array; unknown sections/keys and keys that don't apply are config

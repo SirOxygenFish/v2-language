@@ -59,6 +59,25 @@ fn habit(toks: &[Token], at: Span) -> Option<String> {
         (Some("var"), Some(_), _) => "V2 declares variables with let: let x = 1".into(),
         (_, Some("and" | "or"), _) => "V2 writes and, or and not as &&, || and !".into(),
         (_, Some("is"), _) => "V2 compares with == and !=, as in x == null".into(),
+        (Some("lambda"), Some(_), _) => "V2 writes an anonymous function as func(x) => x * 2".into(),
+        (Some("print"), _, _) if matches!(tok(0), Some(Tok::Str(_) | Tok::FStr(_) | Tok::Ident(_) | Tok::Int(_) | Tok::Float(_))) => {
+            "print is a function in V2: print(\"hello\")".into()
+        }
+        (Some("import"), Some(name), _) => format!("V2 imports a name from a Python module with @import {{ {name} }} from py.module"),
+        _ if matches!(tok(0), Some(Tok::Kw(Kw::From))) && matches!(tok(1), None | Some(Tok::Newline | Tok::Semi)) => {
+            "V2 imports names with @import { mean } from py.statistics".into()
+        }
+        // `js.date-fns`: a package name with `-` goes in quotes, the whole name as written.
+        (_, _, Some(Op::Minus)) if word(1).is_some() && op(2) == Some(Op::Dot) && matches!(word(3), Some("js" | "py" | "ts")) => {
+            let mut name = word(1).unwrap_or("name").to_string();
+            let mut j = i;
+            while let (Some(Tok::Op(Op::Minus)), Some(Tok::Ident(w))) = (toks.get(j).map(|t| &t.tok), toks.get(j + 1).map(|t| &t.tok)) {
+                name.push('-');
+                name.push_str(w);
+                j += 2;
+            }
+            format!("a package name with - goes in quotes: {}.\"{name}\"", word(3).unwrap_or("js"))
+        }
         (_, _, Some(Op::FatArrow)) => "V2 writes an anonymous function as func(x) => x * 2".into(),
         (_, _, Some(Op::Plus)) if op(1) == Some(Op::Plus) => "V2 has no ++: write x += 1".into(),
         _ if ends_line && op(1) == Some(Op::Minus) && op(2) == Some(Op::Minus) => "V2 has no --: write x -= 1".into(),
@@ -491,8 +510,12 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let t = self.bump();
                 let Tok::Str(path) = t.tok else {
-                    return Err(Diag::new(format!("expected a path string after import, found {}", t.tok), t.span)
-                        .hint("import \"./util.v2\" as util"));
+                    // Python's `import numpy as np` imports a module: V2's form says the language.
+                    let hint = match &t.tok {
+                        Tok::Ident(m) => format!("a Python module is imported with @import py.{m} as {m}; another .v2 file with import \"./util.v2\" as util"),
+                        _ => "import \"./util.v2\" as util".to_string(),
+                    };
+                    return Err(Diag::new(format!("expected a path string after import, found {}", t.tok), t.span).hint(hint));
                 };
                 if !self.at_kw(Kw::As) {
                     return Err(Diag::new("expected `as NAME` after the import path", self.span()).hint("import \"./util.v2\" as util"));
@@ -598,6 +621,9 @@ impl<'a> Parser<'a> {
             }
             if self.at_op(Op::Comma) {
                 self.bump();
+            } else if self.at_op(Op::Colon) {
+                return Err(Diag::new(format!("expected `,` or `)`, found {}", self.peek()), self.span())
+                    .hint("V2 has no type annotations; a default is written with =, as in func f(x, key = 1)"));
             } else if !self.at_op(Op::RParen) {
                 return Err(Diag::new(format!("expected `,` or `)`, found {}", self.peek()), self.span()));
             }
@@ -696,8 +722,20 @@ impl<'a> Parser<'a> {
             // `@import math from py.math`: names go in braces (Python's `from m import x` habit).
             if let (Selector::Label { label }, true) = (&selector, self.at_kw(Kw::From)) {
                 let name = label.text.clone();
+                // The selector after `from`, as written, for the hint.
+                self.bump();
+                let from = self.selector().ok().map(|sel| match sel {
+                    Selector::Module { lang, path } => {
+                        let parts: Vec<String> = path.iter().map(|p| if super::lexer::is_plain_name(&p.text) { p.text.to_string() } else { format!("\"{}\"", p.text) }).collect();
+                        format!("{}.{}", lang.text, parts.join("."))
+                    }
+                    _ => format!("py.{name}"),
+                });
+                let from = from.unwrap_or_else(|| format!("py.{name}"));
+                let js = from.starts_with("js.") || from.starts_with("ts.");
+                let default = if js { format!(" (a default export: @import {{ \"default\" as {name} }} from {from})") } else { String::new() };
                 return Err(Diag::new("expected `{` before the names to import", label.span)
-                    .hint(format!("write @import {{ {name} }} from …, or @import py.{name} as {name} for a whole module")));
+                    .hint(format!("write @import {{ {name} }} from {from}{default}, or @import {from} as {name} for the whole module")));
             }
             if !matches!(selector, Selector::Module { .. }) {
                 return Err(Diag::new("only a package selector (py.name, js.name) can be imported as a whole module", self.prev_span()));
@@ -750,6 +788,11 @@ impl<'a> Parser<'a> {
                 } else {
                     Ok(Selector::Label { label: Name::new(n, t.span) })
                 }
+            }
+            // `from "py.statistics"`: the package selector, quoted whole by mistake.
+            Tok::Str(s) if ["py.", "js.", "ts."].iter().any(|p| s.starts_with(p)) => {
+                let (lang, name) = s.split_at(2);
+                Err(Diag::new("a block label can't be a string", t.span).hint(format!("a package is written {lang}{name} (with quotes only around a name like {lang}.\"date-fns\")")))
             }
             Tok::Str(_) => Err(Diag::new("a block label can't be a string", t.span).hint(LABEL_HINT)),
             other => Err(Diag::new(format!("expected a selector (@py, a block label, or py.module), found {other}"), t.span)),
@@ -1573,7 +1616,19 @@ extern "m" as m { double cos(double x); }
         assert!(parse_str("print(f\"{{n}} and \\${n} and ${1}\")").is_ok(), "doubled and escaped braces are text");
         let d = diag("@import math from py.math");
         assert_eq!(d.message, "expected `{` before the names to import");
-        assert_eq!(d.hint.as_deref(), Some("write @import { math } from …, or @import py.math as math for a whole module"));
+        assert_eq!(d.hint.as_deref(), Some("write @import { math } from py.math, or @import py.math as math for the whole module"));
+        assert_eq!(
+            hint("@import slugify from js.\"@sindresorhus/slugify\""),
+            "write @import { slugify } from js.\"@sindresorhus/slugify\" (a default export: @import { \"default\" as slugify } from js.\"@sindresorhus/slugify\"), or @import js.\"@sindresorhus/slugify\" as slugify for the whole module"
+        );
+        assert_eq!(hint("let f = lambda x: x * 2"), "V2 writes an anonymous function as func(x) => x * 2");
+        assert_eq!(hint("print \"hi\""), "print is a function in V2: print(\"hello\")");
+        assert_eq!(hint("import numpy as np"), "a Python module is imported with @import py.numpy as numpy; another .v2 file with import \"./util.v2\" as util");
+        assert_eq!(hint("from statistics import mean"), "V2 imports names with @import { mean } from py.statistics");
+        assert_eq!(hint("@import { f } from \"py.statistics\""), "a package is written py.statistics (with quotes only around a name like py.\"date-fns\")");
+        assert_eq!(hint("@import { format } from js.date-fns"), "a package name with - goes in quotes: js.\"date-fns\"");
+        assert_eq!(hint("@import { x } from js.left-pad-x\n"), "a package name with - goes in quotes: js.\"left-pad-x\"");
+        assert_eq!(hint("func greet(name, greeting: \"hello\") {\n}"), "V2 has no type annotations; a default is written with =, as in func f(x, key = 1)");
         assert_eq!(diag("@import py.os.path").hint.as_deref(), Some("@import py.os.path as path"));
         // An error with nothing of the kind keeps no hint.
         assert_eq!(diag("let = 1").hint, None);
