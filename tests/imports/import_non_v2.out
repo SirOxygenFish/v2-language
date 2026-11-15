@@ -1,3 +1,4 @@
 ImportError cannot import './fixtures/data.csv': import loads .v2 files; read a data file with read_file(f"${script_dir()}/fixtures/data.csv")
 ImportError cannot import './fixtures/helper.py': import loads .v2 files; a Python file is imported with @import { name } from py.fixtures.helper
 ImportError cannot import './fixtures/helper.js': import loads .v2 files; a JavaScript file is imported with @import { name } from js."./fixtures/helper.js"
+ImportError cannot import './fixtures': it is a folder, and import loads a .v2 file, as in import "./fixtures/one.v2" as one

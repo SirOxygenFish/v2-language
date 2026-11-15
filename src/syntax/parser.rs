@@ -87,6 +87,12 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
             format!("a package name with - goes in quotes: {}.\"{name}\"", word(3).unwrap_or("js"))
         }
         (_, _, Some(Op::FatArrow)) => "V2 writes an anonymous function as func(x) => x * 2".into(),
+        // Python's `xs[::2]`, `xs[1:5:2]`.
+        (_, _, Some(Op::Colon)) if slice_step(toks, i) => {
+            "V2 slices have no step: xs[a:b] takes the items from a up to b (a @py block has xs[::2])".into()
+        }
+        // JavaScript's `[0, ...a]`.
+        (_, _, Some(Op::Ellipsis)) if matches!(op(1), Some(Op::Comma | Op::LBracket)) => "... spreads a list into a call's arguments only: join lists with +, as in [0] + a".into(),
         (_, _, Some(Op::Plus)) if op(1) == Some(Op::Plus) => "V2 has no ++: write x += 1".into(),
         _ if ends_line && op(1) == Some(Op::Minus) && op(2) == Some(Op::Minus) => "V2 has no --: write x -= 1".into(),
         (_, _, Some(Op::Eq)) if op(1) == Some(Op::DotDot) => "a..b leaves out b: for 1, 2 and 3 write 1..4".into(),
@@ -216,8 +222,9 @@ fn alias_for(package: &str) -> String {
     }
 }
 
-/// `{name}` (or `{a.b}`) in an f-string's text, Python's placeholder for V2's `${name}`: the
-/// name, unless the braces are doubled (`{{name}}`, a template for something else).
+/// `{name}` (or `{a.b}`, `{x:.2f}`) in an f-string's text, Python's placeholder for V2's
+/// `${name}`: what is inside, unless the braces are doubled (`{{name}}`, a template for something
+/// else).
 fn python_placeholder(parts: &[FPartTok]) -> Option<String> {
     for part in parts {
         let FPartTok::Lit(s) = part else { continue };
@@ -229,7 +236,10 @@ fn python_placeholder(parts: &[FPartTok]) -> Option<String> {
             let inner = &s[open + 1..open + 1 + len];
             // `{{x}}` is a template for something else, and `${x}` here was written `\${x}`.
             let doubled = (open > 0 && matches!(b[open - 1], b'{' | b'$')) || b.get(open + 2 + len) == Some(&b'}');
-            if !doubled && !inner.is_empty() && inner.split('.').all(super::lexer::is_plain_name) {
+            // A format after the name, as Python writes one: `.2f`, `>10`, `,`.
+            let (name, spec) = inner.split_once(':').unwrap_or((inner, ""));
+            let spec_ok = spec.chars().all(|c| c.is_ascii_alphanumeric() || ".,<>^=+-#_%".contains(c)) && (spec.is_empty() || !inner.ends_with(':'));
+            if !doubled && !name.is_empty() && name.split('.').all(super::lexer::is_plain_name) && spec_ok {
                 return Some(inner.to_string());
             }
             i = open + 1;
@@ -238,8 +248,23 @@ fn python_placeholder(parts: &[FPartTok]) -> Option<String> {
     None
 }
 
-/// Whether the line before `toks[i]` (a `{`) is `function(…)` or `fn(…)`, another language's
-/// anonymous function.
+/// Whether `toks[i]`, a `:`, is a second one inside `[ ]` on its line: a slice with a step.
+fn slice_step(toks: &[Token], i: usize) -> bool {
+    let (mut depth, mut colons) = (0usize, 0usize);
+    for t in toks[..i].iter().rev() {
+        match t.tok {
+            Tok::Op(Op::RParen | Op::RBracket) | Tok::RBrace => depth += 1,
+            Tok::Op(Op::LParen) | Tok::LBrace(_) if depth == 0 => return false,
+            Tok::Op(Op::LBracket) if depth == 0 => return colons > 0,
+            Tok::Op(Op::LParen | Op::LBracket) | Tok::LBrace(_) => depth -= 1,
+            Tok::Op(Op::Colon) if depth == 0 => colons += 1,
+            Tok::Newline | Tok::Semi => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The name that starts the line of token `i`, if a name does.
 fn first_word_of_line(toks: &[Token], i: usize) -> Option<&str> {
     let line = toks[i].span.line;
@@ -253,6 +278,8 @@ fn first_word_of_line(toks: &[Token], i: usize) -> Option<&str> {
     }
 }
 
+/// Whether the line before `toks[i]` (a `{`) is `function(…)` or `fn(…)`, another language's
+/// anonymous function.
 fn anonymous_function_before(toks: &[Token], i: usize) -> bool {
     let line = toks[i].span.line;
     let mut j = i;
@@ -719,7 +746,8 @@ impl<'a> Parser<'a> {
             // `=> {` starts a dict: the JS habit of a block after `=>` lands here.
             let dict = matches!(self.peek(), Tok::LBrace(_));
             let hint = "`=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }";
-            FuncBody::Expr(self.expr().map_err(|d| if dict && d.message.contains("dict key") { d.hint(hint) } else { d })?)
+            // Unless the key itself has a hint: `=> {1: "x"}` is a dict, with a number for a key.
+            FuncBody::Expr(self.expr().map_err(|d| if dict && d.message.contains("dict key") && d.hint.is_none() { d.hint(hint) } else { d })?)
         } else {
             FuncBody::Block(self.body("func")?)
         };
@@ -1607,6 +1635,10 @@ impl<'a> Parser<'a> {
                     DictKey::Computed(k)
                 }
                 Tok::Kw(_) => return Err(Diag::new(format!("{} can't be a bare dict key: quote it", t.tok), t.span)),
+                // Python's `{1: "x"}`: V2's keys are strings.
+                Tok::Int(n) => {
+                    return Err(Diag::new("dict keys are names, strings or [expr]", t.span).hint(format!("dict keys are strings: write \"{n}\": or [str({n})]:")))
+                }
                 _ => return Err(Diag::new("dict keys are names, strings or [expr]", t.span)),
             };
             self.expect_op(Op::Colon)?;
@@ -1887,6 +1919,11 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("raise ValueError(\"bad\")"), "V2 throws an error with throw error(\"ValueError\", \"bad\")");
         assert_eq!(hint("throw new Error(\"bad\")"), "V2 has no new: throw error(\"Error\", \"bad\"), or throw \"bad\" for a plain Error");
         assert_eq!(hint("let d = new Date()"), "V2 has no new: call it, as in Date(…)");
+        let step = "V2 slices have no step: xs[a:b] takes the items from a up to b (a @py block has xs[::2])";
+        assert_eq!(hint("print(\"abcdef\"[::2])"), step);
+        assert_eq!(hint("let xs = [1]\nprint(xs[1:5:2])"), step);
+        assert_eq!(hint("let a = [1]\nlet b = [0, ...a]"), "... spreads a list into a call's arguments only: join lists with +, as in [0] + a");
+        assert_eq!(hint("let f = func() => {1: \"x\"}"), "dict keys are strings: write \"1\": or [str(1)]:");
         let class = "V2 has no classes: keep the data in a dict and write functions for the rest, or write the class in a @py or @js block";
         assert_eq!(hint("class Point {\n}"), class);
         assert_eq!(hint("class Point:\n    pass"), class);
@@ -1897,6 +1934,7 @@ extern "m" as m { double cos(double x); }
         let args = "block args are `name` or `name: expr`, as in @py(n: len(xs))";
         assert_eq!(hint("let data = [1]\n@py(data.copy()) { 1 }"), args);
         assert_eq!(hint("@py(1 + 2) { 1 }"), args);
+        assert_eq!(hint("let x = 2\nprint(f\"{x:.2f}\")"), "write ${x:.2f} for its value, or ${\"{x:.2f}\"} for the text {x:.2f}");
         assert_eq!(hint("let s = \"big\" if x > 2 else \"small\""), "V2 writes a conditional value as cond ? a : b, as in x > 2 ? \"big\" : \"small\"");
         assert_eq!(hint("try {\n} except (e) {\n}"), "V2 writes except as catch: try { ... } catch (e) { ... }");
         assert_eq!(hint("try {\n}\nexcept (e) {\n}"), "V2 writes except as catch: try { ... } catch (e) { ... }");

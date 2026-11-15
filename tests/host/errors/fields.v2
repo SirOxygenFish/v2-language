@@ -12,7 +12,7 @@ try {
     print(e.type, "-", e.message)
     print(f"at ${e.file}:${e.line}:${e.col}")
     print(e.trace)
-    print(e.data, e.lang, e.foreign_type, e.cause)
+    print(e.data, e.lang, e.foreign_type, e.cause, e.hint)
 } finally {
     print("done")
 }
@@ -70,3 +70,5 @@ try {
 } catch (e) {
     print(e.type, e.line, e.col)
 }
+// What an uncaught error prints after `hint:`, a caught one has in e.hint.
+try { read_file("%NO_SUCH_V2_VAR%/x.txt") } catch (e) { print(e.hint) }

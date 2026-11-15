@@ -57,12 +57,18 @@ fn missing_message(file: &str, path: &Path, next: Option<&str>) -> String {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
     };
+    // The file's own name in its folder: `sub/x.v2` is `x.v2` in `…/sub`, not `sub/x.v2` there.
+    let name = path.file_name().map_or_else(|| file.to_string(), |n| n.to_string_lossy().into_owned());
     let first = if path.is_absolute() {
         format!("cannot find '{file}'")
     } else {
         let shown = std::env::current_dir().map(|cwd| shown_folder(&cwd.join(&folder))).unwrap_or_else(|_| folder.display().to_string());
-        format!("cannot find '{file}' in {shown}")
+        format!("cannot find '{name}' in {shown}")
     };
+    // A link to a file that isn't there is listed in its folder, but can't be run.
+    if let Some(target) = std::fs::read_link(path).ok().filter(|_| !path.exists()) {
+        return format!("{first}\n'{name}' is a symbolic link to {}, which isn't there", target.display());
+    }
     // A folder on the way that isn't there: say so, with the one it probably meant.
     if !folder.is_dir() {
         let mut missing = folder.clone();
@@ -170,13 +176,19 @@ fn shown_folder(p: &Path) -> String {
     crate::syntax::span::strip_verbatim(&p).display().to_string()
 }
 
-/// A path as the user would type it in a shell: quoted when it has a space.
-fn quoted(s: &str) -> String {
-    if s.contains(' ') {
-        format!("\"{s}\"")
-    } else {
+/// A word as the user would type it in a shell: in double quotes unless it holds only letters,
+/// digits and `._-+~\/:`, so a pasted `R&D\app.v2` or `it's` works in cmd, PowerShell and sh
+/// (19.1).
+pub fn shell_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || "._-+~\\/:".contains(c)) {
         s.to_string()
+    } else {
+        format!("\"{s}\"")
     }
+}
+
+fn quoted(s: &str) -> String {
+    shell_word(s)
 }
 
 /// A note for a file in another language given to V2, printed after its errors: `None` for
@@ -203,6 +215,17 @@ pub fn foreign_file_note(file: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggested_commands_are_quoted_for_a_shell() {
+        // 19.1: what cmd, PowerShell or sh would split or run (& ; ' and spaces) is quoted.
+        assert_eq!(shell_word(r"R&D\app.v2"), r#""R&D\app.v2""#);
+        assert_eq!(shell_word("semi;colon/app.v2"), "\"semi;colon/app.v2\"");
+        assert_eq!(shell_word("it's/app.v2"), "\"it's/app.v2\"");
+        assert_eq!(shell_word("sub dir/deep.v2"), "\"sub dir/deep.v2\"");
+        assert_eq!(shell_word("C:\\Users\\ME~1\\donn\u{e9}es\\app.v2"), "C:\\Users\\ME~1\\donn\u{e9}es\\app.v2");
+        assert_eq!(shell_word("../lib/x-1.2+b.v2"), "../lib/x-1.2+b.v2");
+    }
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("v2entry-{}-{name}", std::process::id()));

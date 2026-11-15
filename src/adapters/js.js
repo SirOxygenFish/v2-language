@@ -1125,9 +1125,16 @@ function compileOrExplain(src, m) {
       // a caret under the column.
       const loc = /^(.*):(\d+)\r?\n(?:[^\n]*\r?\n([ \t]*)\^)?/.exec(e.stack || '');
       if (loc && loc[1] === m.file) {
+        const text = src.split('\n')[Number(loc[2]) - m.line] ?? '';
         // `{"k": t}` on a line of its own: an object read as a block of code (DOCS 4).
-        if (String(e.message) === "Unexpected token ':'" && /^\s*\{/.test(src.split('\n')[Number(loc[2]) - m.line] ?? '')) {
+        if (String(e.message) === "Unexpected token ':'" && /^\s*\{/.test(text)) {
           e.message = 'an object at the start of a statement needs parentheses, as in ({a: 1}): JavaScript reads { there as a block of code';
+        }
+        // A decorator: Node's JavaScript has none yet, and TypeScript's are more than types.
+        if (String(e.message) === 'Invalid or unexpected token' && /^\s*@[A-Za-z_$]/.test(text)) {
+          e.message = m.lang === 'ts'
+            ? "decorators aren't supported in @ts blocks: Node runs TypeScript by removing its types, and a decorator is code"
+            : "decorators aren't part of the JavaScript Node runs yet";
         }
         const [line, col] = realPosition(m.file, Number(loc[2]), loc[3] === undefined ? null : loc[3].length + 1);
         e.v2Frame = { file: m.file, line, col, func: null };
@@ -1403,10 +1410,31 @@ function objectBraces(src, m) {
   throw err;
 }
 
+// A block's last line that starts with ( [ or ` continues the line above, as JavaScript reads it:
+// `let a = 1` then `[a, 2]` is `1[a, 2]`, and the block's value is something else (DOCS 4).
+function joinedLines(src, m) {
+  const lines = src.split('\n');
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last].trim()) last--;
+  let prev = last - 1;
+  while (prev >= 0 && !lines[prev].trim()) prev--;
+  if (prev < 0) return;
+  const start = lines[last].trimStart();
+  const end = lines[prev].trimEnd().slice(-1);
+  if (!'([`'.includes(start[0]) || !/[\w$)\]'"`]/.test(end)) return;
+  const err = new SyntaxError(`JavaScript reads this line as part of the one above, as in a(…) or a[…]: end the line above with ;`);
+  const [line, cp] = realPosition(m.file, m.line + last, lines[last].length - start.length + 1);
+  err.v2Frame = { file: m.file, line, col: cp, func: null };
+  throw err;
+}
+
 function doLoad(m) {
   const src = m.lang === 'ts' ? stripTypes(m.source, m) : m.source;
   rememberSource(m.file, m.line, m.source); // stripping keeps every UTF-16 offset (12.6)
-  if (m.kind === 'action' && m.want_value) objectBraces(src, m);
+  if (m.kind === 'action' && m.want_value) {
+    objectBraces(src, m);
+    joinedLines(src, m);
+  }
   const ctx = newContext(m.file);
   for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));
   bindImports(ctx, m.imports || [], m.kind !== 'action');
@@ -1701,7 +1729,10 @@ function toV2(x, depth = 0, open = new Walk()) {
       }
     }
   }
-  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data: make plain data of it in a block first, as in @js(h) { ({ ...h }) } or @js(h) { h.toISOString() }`);
+  // A way that works for this object: a date's ISO text, a Map's entries, a Set's items, else its
+  // own fields.
+  const how = x instanceof Date ? 'h.toISOString()' : x instanceof Map ? 'Object.fromEntries(h)' : x instanceof Set ? '[...h]' : '({ ...h })';
+  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data: make plain data of it in a block first, as in @js(h) { ${how} }`);
 }
 
 function isEager(obj) {

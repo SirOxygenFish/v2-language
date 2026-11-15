@@ -362,7 +362,8 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into());
     } else if tilde && !p.exists() {
         // A shell expands them, V2 doesn't (5.10); `$env:X\…` fails as a bad name, not as missing.
-        let _ = err.hint.set(format!("V2 doesn't expand ~ in paths: write getenv(\"{home}\") + \"{}\"", &path[1..]).into());
+        let write = if path == "~" { format!("getenv(\"{home}\")") } else { format!("getenv(\"{home}\") + \"{}\"", &path[1..]) };
+        let _ = err.hint.set(format!("V2 doesn't expand ~ in paths: write {write}").into());
     } else if let Some(var) = crate::config::unexpanded(path).filter(|_| !p.exists()) {
         let name = var.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
         let _ = err.hint.set(format!("V2 doesn't expand {var} in paths: write getenv(\"{name}\") in its place").into());
@@ -443,7 +444,14 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     }
     match String::from_utf8(line) {
         Ok(s) => Ok(Value::Str(s.into())),
-        Err(e) => io_error(format!("input line {n} is not valid UTF-8: {}: send UTF-8 text, or read the file with read_file(path, binary: true)", not_utf8_kind(e.as_bytes()))),
+        Err(e) => {
+            let err = ErrorValue::new("IOError", format!("input line {n} is not valid UTF-8: {}: send UTF-8 text", not_utf8_kind(e.as_bytes())));
+            // A Windows shell sends its console's old code page unless told otherwise.
+            if cfg!(windows) {
+                let _ = err.hint.set("in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run".into());
+            }
+            Err(Flow::Error(Rc::new(err)))
+        }
     }
 }
 
@@ -573,7 +581,12 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
         Ok(s) => Ok(Value::str(s)),
         Err(_) => {
             let kind = not_utf8_kind(&bytes);
-            let fix = if kind.ends_with("binary data") { "read it with binary: true" } else { "save it as UTF-8, or read it with binary: true" };
+            // Text in another encoding is read by a block that knows it (V2's strings are UTF-8).
+            let fix = match kind {
+                k if k.ends_with("binary data") => "read it with binary: true",
+                k if k.starts_with("it is UTF-16") => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"utf-16\").read() }",
+                _ => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"cp1252\").read() }",
+            };
             io_error(format!("'{}' is not valid UTF-8: {kind}: {fix}", shown_path(&path)))
         }
     }
@@ -712,7 +725,10 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         }
     };
     it.out.flush_or_stop();
-    let c = match process::run_captured(&argv, &[], None, input) {
+    // A Python program writes a pipe in the locale's encoding (ANSI on Windows: café as cafÚ in
+    // the console's code page, and CJK not at all): UTF-8 instead, unless the user chose (5.10).
+    let utf8 = std::env::var_os("PYTHONIOENCODING").is_none().then(|| (OsString::from("PYTHONIOENCODING"), OsString::from("utf-8")));
+    let c = match process::run_captured(&argv, utf8.as_slice(), None, input) {
         Ok(c) => c,
         Err(e) => return io_error(format!("exec: cannot start '{name}': {}", e.reason)),
     };

@@ -1,5 +1,5 @@
 // `import` loads .v2 files: a data file, a Python file and a JavaScript file each get the way to
-// use them instead of being parsed as V2 (INTERNALS 6.4).
+// use them instead of being parsed as V2, and a folder one of its .v2 files (INTERNALS 6.4).
 try {
     import "./fixtures/data.csv" as data
 } catch (e) {
@@ -12,6 +12,11 @@ try {
 }
 try {
     import "./fixtures/helper.js" as h
+} catch (e) {
+    print(e.type, e.message)
+}
+try {
+    import "./fixtures" as f
 } catch (e) {
     print(e.type, e.message)
 }

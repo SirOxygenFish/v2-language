@@ -6,7 +6,7 @@
 //! word is the script, and everything after it goes to `args()` untouched.
 
 mod entry;
-pub use entry::{entry_error, foreign_file_note};
+pub use entry::{entry_error, foreign_file_note, shell_word};
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
