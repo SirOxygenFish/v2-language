@@ -191,15 +191,65 @@ pub fn node_needs_strip_flag(node: Version) -> bool {
     }
 }
 
-/// The install line of an `EngineNotFound` message, for this OS (7.8).
-pub fn install_hint(id: &str) -> &'static str {
+/// The install line of an `EngineNotFound` message, for this system (7.8).
+pub fn install_hint(id: &str) -> String {
     match (id, std::env::consts::OS) {
-        ("py", "windows") => "winget install -e --id Python.Python.3.13 (or https://www.python.org/downloads/), then open a new terminal",
-        ("py", "macos") => "brew install python (or https://www.python.org/downloads/)",
-        ("py", _) => "sudo apt install python3 / sudo dnf install python3 (or https://www.python.org/downloads/)",
-        (_, "windows") => "winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal",
-        (_, "macos") => "brew install node (or https://nodejs.org)",
-        _ => "https://nodejs.org/en/download (distro packages may be older than 22.13)",
+        ("py", "windows") => "winget install -e --id Python.Python.3.13 (or https://www.python.org/downloads/), then open a new terminal".into(),
+        ("py", "macos") => "brew install python (or https://www.python.org/downloads/)".into(),
+        ("py", _) => {
+            let (family, sudo) = this_linux();
+            format!("{} (or https://www.python.org/downloads/)", package_line(family, sudo, "python3", "python3", None))
+        }
+        (_, "windows") => "winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal".into(),
+        (_, "macos") => "brew install node (or https://nodejs.org)".into(),
+        _ => "https://nodejs.org/en/download (distro packages may be older than 22.13)".into(),
+    }
+}
+
+/// Which package manager a Linux uses, from `/etc/os-release`'s `ID` and `ID_LIKE` (7.8).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Family {
+    Apt,
+    Dnf,
+    Unknown,
+}
+
+pub fn family_of(os_release: &str) -> Family {
+    let ids: Vec<&str> = os_release
+        .lines()
+        .filter_map(|l| l.strip_prefix("ID=").or_else(|| l.strip_prefix("ID_LIKE=")))
+        .flat_map(|v| v.trim_matches(['"', '\'']).split_whitespace())
+        .collect();
+    let has = |names: &[&str]| ids.iter().any(|i| names.contains(i));
+    match (has(&["debian", "ubuntu"]), has(&["fedora", "rhel", "centos"])) {
+        (true, false) => Family::Apt,
+        (false, true) => Family::Dnf,
+        _ => Family::Unknown,
+    }
+}
+
+/// This system's family and `sudo ` (none for root: a container, a fresh WSL distro) (7.8).
+pub fn this_linux() -> (Family, &'static str) {
+    static IT: std::sync::OnceLock<(Family, &'static str)> = std::sync::OnceLock::new();
+    *IT.get_or_init(|| {
+        let family = family_of(&std::fs::read_to_string("/etc/os-release").unwrap_or_default());
+        #[cfg(unix)]
+        // SAFETY: geteuid has no preconditions.
+        let root = unsafe { libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let root = false;
+        (family, if root { "" } else { "sudo " })
+    })
+}
+
+/// The command that installs a package: one manager's when the family is known, else both, as
+/// `apt … / dnf …`, or as `on Debian and Ubuntu, …; on Fedora, …` when `named` (7.8).
+pub fn package_line(family: Family, sudo: &str, apt: &str, dnf: &str, named: Option<()>) -> String {
+    match (family, named) {
+        (Family::Apt, _) => format!("{sudo}apt install {apt}"),
+        (Family::Dnf, _) => format!("{sudo}dnf install {dnf}"),
+        (Family::Unknown, None) => format!("{sudo}apt install {apt} / {sudo}dnf install {dnf}"),
+        (Family::Unknown, Some(())) => format!("on Debian and Ubuntu, {sudo}apt install {apt}; on Fedora, {sudo}dnf install {dnf}"),
     }
 }
 
@@ -281,10 +331,28 @@ mod tests {
             ),
             "macos" => ("brew install python (or https://www.python.org/downloads/)", "brew install node (or https://nodejs.org)"),
             _ => (
-                "sudo apt install python3 / sudo dnf install python3 (or https://www.python.org/downloads/)",
+                // This system's own line: its tests are below.
+                &*format!("{} (or https://www.python.org/downloads/)", { let (f, s) = this_linux(); package_line(f, s, "python3", "python3", None) }),
                 "https://nodejs.org/en/download (distro packages may be older than 22.13)",
             ),
         };
-        assert_eq!((install_hint("py"), install_hint("js"), install_hint("ts")), (py, node, node));
+        assert_eq!((install_hint("py"), install_hint("js"), install_hint("ts")), (py.to_string(), node.to_string(), node.to_string()));
+    }
+
+    #[test]
+    fn linux_install_lines_fit_the_system() {
+        // 7.8: apt or dnf by /etc/os-release, and no sudo for root.
+        assert_eq!(family_of("NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n"), Family::Apt);
+        assert_eq!(family_of("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"), Family::Apt);
+        assert_eq!(family_of("ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n"), Family::Dnf);
+        assert_eq!(family_of("ID=alpine\n"), Family::Unknown);
+        assert_eq!(family_of(""), Family::Unknown);
+        assert_eq!(package_line(Family::Apt, "", "python3", "python3", None), "apt install python3");
+        assert_eq!(package_line(Family::Dnf, "sudo ", "python3", "python3", None), "sudo dnf install python3");
+        assert_eq!(package_line(Family::Unknown, "sudo ", "python3", "python3", None), "sudo apt install python3 / sudo dnf install python3");
+        assert_eq!(
+            package_line(Family::Unknown, "sudo ", "libatomic1", "libatomic", Some(())),
+            "on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic"
+        );
     }
 }

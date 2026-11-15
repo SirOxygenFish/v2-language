@@ -111,16 +111,23 @@ function fatal(what) {
 // ---------------------------------------------------------------------------------------------
 // Framing (9.1)
 
-let rbuf = Buffer.alloc(0);
-const chunk = Buffer.allocUnsafe(65536);
+let rbuf = Buffer.alloc(0); // what was read after the frames returned so far
+let parts = []; // the current frame's earlier chunks, which hold no line break
+let partsLength = 0;
+const chunk = Buffer.allocUnsafe(1 << 20);
 
 function recv() {
-  // The next frame; exits at end of input.
+  // The next frame; exits at end of input. Only new bytes are searched for the line break, and a
+  // frame's chunks are joined once, so a large frame costs time in step with its size.
   for (;;) {
     const i = rbuf.indexOf(10);
     if (i >= 0) {
-      const line = rbuf.subarray(0, i).toString('utf8');
+      const head = rbuf.subarray(0, i);
+      const bytes = parts.length ? Buffer.concat([...parts, head], partsLength + i) : head;
+      parts = [];
+      partsLength = 0;
       rbuf = rbuf.subarray(i + 1);
+      const line = bytes.toString('utf8');
       let m;
       try {
         m = JSON.parse(line);
@@ -132,6 +139,11 @@ function recv() {
       }
       return m;
     }
+    if (rbuf.length) {
+      parts.push(rbuf);
+      partsLength += rbuf.length;
+      rbuf = Buffer.alloc(0);
+    }
     let n;
     try {
       n = rawReadSync(IN_FD, chunk, 0, chunk.length, null);
@@ -140,7 +152,7 @@ function recv() {
       n = 0; // EOF (Windows reports a closed pipe as an error)
     }
     if (n === 0) gone();
-    rbuf = Buffer.concat([rbuf, chunk.subarray(0, n)]);
+    rbuf = Buffer.from(chunk.subarray(0, n)); // a copy: `chunk` is read into again
   }
 }
 
@@ -528,7 +540,8 @@ Module.syncBuiltinESMExports();
 
 // 3. A block can't end the worker; the original exit is kept for `bye` (9.10).
 process.exit = function (code) {
-  throw new Error(`process.exit(${code === undefined ? '' : code}) can't end V2's JavaScript engine; throw an error instead`);
+  const arg = code === undefined ? '' : String(code);
+  throw new Error(`process.exit(${arg}) can't end V2's JavaScript engine; throw an error instead, or end the program with V2's exit(${arg})`);
 };
 
 // 4. The host owns Ctrl+C; errors with no call to attach to are printed and the worker goes on.
@@ -585,7 +598,7 @@ function printUnattached(prefix, e) {
   }
   writeOut('stderr', lines.join('\n') + '\n');
 }
-process.on('uncaughtException', (e) => printUnattached('', e));
+process.on('uncaughtException', (e) => printUnattached('uncaught exception: ', e));
 process.on('unhandledRejection', (e) => printUnattached('unhandled rejection: ', e));
 // Node prints an ExperimentalWarning the first time types are stripped (12.5).
 const rawEmitWarning = process.emitWarning;
@@ -978,9 +991,11 @@ function plainName(e) {
 }
 
 function errorMessage(e) {
+  // A thrown value that isn't an error (`throw { code: 42 }`) shows as `str(h)` would show it,
+  // not as `[object Object]` (11.3).
   try {
     if (e !== null && typeof e === 'object' && typeof e.message === 'string') return e.message;
-    return String(e);
+    return strOf(e);
   } catch {
     return '<unprintable>';
   }
@@ -1403,7 +1418,14 @@ function moduleReply(mod, names) {
     else if (typeof r[0] === 'function') exports.push({ name: n, kind: 'func' });
     else exports.push({ name: n, kind: 'value', value: encodeValue(r[0], n) });
   }
-  return { value: null, exports, missing };
+  if (!missing.length) return { value: null, exports, missing };
+  // What it has, for V2's did-you-mean (9.4, 13.5): its own names and its default export's.
+  const own = (o) => (o !== null && (typeof o === 'object' || typeof o === 'function') ? Object.keys(o) : []);
+  let keys = [];
+  try {
+    keys = [...new Set([...own(mod), ...own(nothing ? null : mod.default)])];
+  } catch {} // a Proxy that refuses
+  return { value: null, exports, missing, names: keys.filter((k) => !k.startsWith('_') && k.isWellFormed()).sort().slice(0, 5000) };
 }
 
 function doModule(m) {

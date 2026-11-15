@@ -1,0 +1,13 @@
+// requires: js
+// A thrown value that isn't an error shows as str(h) would show it, not as [object Object]
+// (INTERNALS 11.3, 14.4); a thrown string stays the string.
+try {
+    @js { throw { code: 42, why: "object" } }
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+try {
+    @js { throw "plain" }
+} catch (e) {
+    print(e.type, e.message)
+}

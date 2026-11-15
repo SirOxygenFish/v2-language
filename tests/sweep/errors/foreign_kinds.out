@@ -5,6 +5,6 @@ ValueError | null | made here | py
 ZeroDivisionError division by zero
 ForeignError | Custom | mine | js
 ForeignError | object | null | js
-ForeignError | Object | [object Object] | js
+ForeignError | Object | { a: 1 } | js
 ForeignError | Error | outer | js
 TypeError inner

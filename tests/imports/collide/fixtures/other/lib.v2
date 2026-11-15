@@ -1,5 +1,12 @@
-@import { who as py_who } from py.same
 @import { who as js_who } from js.jpkg
+// Its own same.py, unless another same.py was loaded first: then the ImportError (DOCS 7).
+let py_who = null
+try {
+    @import { who as mine } from py.same
+    py_who = mine
+} catch (e) {
+    py_who = func() => e.type
+}
 func both() {
     return [py_who(), js_who()]
 }

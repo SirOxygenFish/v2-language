@@ -76,9 +76,9 @@ pub struct SourceFile {
 pub enum LoadError {
     /// The file can't be read (missing, unreadable): a startup error, exit 2.
     Io(String),
-    /// The bytes aren't UTF-8: a `SyntaxError` at the line of the first bad byte; `message` says
-    /// so and how to fix it (2.1).
-    NotUtf8 { display: Rc<str>, line: u32, message: &'static str },
+    /// The bytes aren't UTF-8: a `SyntaxError` at the line and column of the first bad byte;
+    /// `message` says so and how to fix it (2.1).
+    NotUtf8 { display: Rc<str>, line: u32, col: u32, message: &'static str },
 }
 
 /// The message for a file that isn't UTF-8 (2.1). A UTF-16 file (a byte-order mark first) is
@@ -89,7 +89,7 @@ pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
         "file is not valid UTF-8: it looks like a binary file, not a V2 script"
     } else {
-        "file is not valid UTF-8: save it as UTF-8"
+        "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8"
     }
 }
 
@@ -127,7 +127,10 @@ impl SourceMap {
                     .filter(|&(i, &b)| b == b'\n' || (b == b'\r' && good.get(i + 1) != Some(&b'\n')))
                     .count();
                 let line = breaks as u32 + 1;
-                return Err(LoadError::NotUtf8 { display, line, message: not_utf8_message(e.as_bytes()) });
+                // The bad byte's column: the characters before it on its line, plus one.
+                let before = std::str::from_utf8(good).unwrap_or_default();
+                let col = before.rsplit(['\n', '\r']).next().map_or(0, |l| l.chars().count()) as u32 + 1;
+                return Err(LoadError::NotUtf8 { display, line, col, message: not_utf8_message(e.as_bytes()) });
             }
         };
         Ok(self.add(canonical, display, &text))

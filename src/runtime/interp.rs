@@ -563,6 +563,10 @@ impl Interp {
         if let Some(h) = habit {
             return self.fail_at("NameError", format!("{base} — {h}"), span);
         }
+        // A block's export used without its @import, or a block's label used as a name.
+        if let Some(h) = self.import_hint(span.file, name).filter(|_| !assigning) {
+            return self.fail_at("NameError", format!("{base} — {h}"), span);
+        }
         let msg = match (super::error::did_you_mean(name, names.iter().map(|n| &**n)), assigning) {
             (Some(s), false) => format!("{base} — did you mean '{s}'?"),
             (Some(s), true) => format!("{base} — did you mean '{s}'? (or declare it with let)"),

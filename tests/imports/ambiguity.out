@@ -3,5 +3,5 @@ ImportError | Import of 'mean' from '@py' is ambiguous (exported by blocks 'stat
 calc
 b
 ImportError | no block in this file is labeled 'nothing': a Python module is imported with py.nothing, an npm package with js.nothing
-ImportError | 'median' is not exported by 'stats' (did the block @export it?)
+ImportError | 'median' is not exported by 'stats' — did you mean 'mean'?
 EngineUnknown | unknown engine '@pyhton' (did you mean '@py'?)

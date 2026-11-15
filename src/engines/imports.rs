@@ -318,13 +318,29 @@ type Item = (Rc<str>, Rc<str>, Span);
 /// 'x'`): the hint says how to install it (7). V2 installs nothing itself.
 /// `'chunk' is not exported by 'js."lodash/chunk"'`: and when the name is the package's own last
 /// part, the form for a module that is one function (`module.exports = function`) (13.5).
-fn not_exported(name: &str, text: &str) -> String {
+fn not_exported(name: &str, text: &str, names: &[Rc<str>]) -> String {
     let base = format!("'{name}' is not exported by '{text}'");
+    // `meen` for `mean`: the module's own names, which its worker sent (13.5).
+    if let Some(near) = did_you_mean(name, names.iter().map(|n| &**n)) {
+        return format!("{base} — did you mean '{near}'?");
+    }
     let package = text.strip_prefix("js.").or_else(|| text.strip_prefix("ts.")).map(|p| p.trim_matches('"'));
     let stem = |last: &str| [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"].iter().find_map(|e| last.strip_suffix(e)).unwrap_or(last).to_string();
     match package.and_then(|p| p.rsplit('/').next()).map(stem) {
         Some(last) if last == name => format!("{base}; a module that is one function is imported with @import {{ \"default\" as {name} }} from {text}"),
         _ => base,
+    }
+}
+
+/// A `module` request's answer (13.5): the module or null, the names asked for that it has, the
+/// ones it lacks, and, when it lacks some, its public names for the did-you-mean.
+type ModuleAnswer = (Value, Vec<Export>, Vec<Rc<str>>, Vec<Rc<str>>);
+
+/// 13.3 step 6: `name` isn't among what the block exports, with the closest of those names.
+fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator<Item = &'a str>) -> String {
+    match did_you_mean(name, exported) {
+        Some(near) => format!("'{name}' is not exported by '{text}' — did you mean '{near}'?"),
+        None => format!("'{name}' is not exported by '{text}' (did the block @export it?)"),
     }
 }
 
@@ -412,6 +428,10 @@ impl Interp {
         if tag.is_some() {
             return what;
         }
+        // `from py`: an engine's tag without its @ (the file's @py blocks).
+        if matches!(canonical_tag(l), "py" | "js" | "ts") {
+            return format!("{what} — did you mean @{l}? (from @{l} takes the names this file's @{l} blocks export)");
+        }
         // A package written without its language: npm's when node_modules has it.
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
         let npm = dir.ancestors().any(|d| d.join("node_modules").join(&**l).is_dir());
@@ -420,6 +440,24 @@ impl Interp {
         } else {
             format!("{what}: a Python module is imported with py.{l}, an npm package with js.{l}")
         }
+    }
+
+    /// A NameError's hint (5.9): a block of the file exports `name`, or `name` is a block's label,
+    /// so the `@import` that would bring it in is missing.
+    pub(crate) fn import_hint(&self, file: FileId, name: &str) -> Option<String> {
+        let bodies = &self.files.get(&file)?.bodies;
+        let exporter = bodies.iter().find(|b| b.directives.exports.as_ref().is_some_and(|x| x.items.iter().any(|i| &*i.text == name)));
+        if let Some(b) = exporter {
+            let from = match &b.label {
+                Some(l) => l.text.to_string(),
+                None => format!("@{}", canonical_tag(&b.tag.text)),
+            };
+            return Some(format!("{} exports it: add @import {{ {name} }} from {from}", self.block_name(b)));
+        }
+        bodies
+            .iter()
+            .any(|b| b.label.as_ref().is_some_and(|l| &*l.text == name))
+            .then(|| format!("it is a block's label: bring the block's names in with @import {{ … }} from {name}"))
     }
 
     /// 13.3: what follows already fails for `name` whatever loads now: its provider is neither
@@ -508,7 +546,7 @@ impl Interp {
                 .iter()
                 .find(|b| b.directives.exports.as_ref().is_some_and(|e| e.star.is_some()) && self.loaded_for(b, seen).is_none())
                 .cloned()
-                .ok_or_else(|| import_error(format!("'{name}' is not exported by '{text}' (did the block @export it?)"))),
+                .ok_or_else(|| import_error(not_exported_by_block(name, &text, cands.iter().flat_map(|b| b.directives.exports.iter().flat_map(|x| x.items.iter().map(|i| &*i.text)))))),
             many => Err(self.ambiguous(name, &text, many)),
         }
     }
@@ -558,7 +596,7 @@ impl Interp {
         match self.loaded_for(&b, seen) {
             Some(exports) => match find(exports, name) {
                 Some(e) => Ok(e.value.clone()),
-                None => Err(import_error(format!("'{name}' is not exported by '{}' (did the block @export it?)", self.selector_text(sel)))),
+                None => Err(import_error(not_exported_by_block(name, &self.selector_text(sel), exports.iter().map(|e| &*e.name)))),
             },
             None => Err(self.state_error(&b, None)),
         }
@@ -643,7 +681,7 @@ impl Interp {
                     ImportItems::Names(list) => json!(list.iter().map(|i| &*i.name).collect::<Vec<_>>()),
                     ImportItems::Module(_) => Json::Null,
                 };
-                let (value, exports, missing) = self.import_module(file, &imp.selector, names, self.selector_span(&imp.selector))?;
+                let (value, exports, missing, have) = self.import_module(file, &imp.selector, names, self.selector_span(&imp.selector))?;
                 let text = self.selector_text(&imp.selector);
                 match items {
                     ImportItems::Module(alias) => bound.push((alias.text.clone(), value)),
@@ -651,7 +689,7 @@ impl Interp {
                         for (name, alias, span) in named_items(list) {
                             match find(&exports, &name) {
                                 Some(e) if !missing.contains(&name) => bound.push((alias, e.value.clone())),
-                                _ => return Err(self.raise(import_error(not_exported(&name, &text)), span)),
+                                _ => return Err(self.raise(import_error(not_exported(&name, &text, &have)), span)),
                             }
                         }
                     }
@@ -734,7 +772,7 @@ impl Interp {
 
     /// One `module` frame (13.5): the module handle (or null), the exports of the requested
     /// `names` (a list, or null) and the requested names the module lacks.
-    fn import_module(&mut self, file: FileId, sel: &Selector, names: Json, at: Span) -> Exec<(Value, Vec<Export>, Vec<Rc<str>>)> {
+    fn import_module(&mut self, file: FileId, sel: &Selector, names: Json, at: Span) -> Exec<ModuleAnswer> {
         let Selector::Module { lang, path } = sel else { unreachable!("a module selector") };
         let key = self.selector_key(lang).map_err(|f| self.raise(f, at))?;
         let joined = path.iter().map(|n| &*n.text).collect::<Vec<_>>().join(".");
@@ -750,7 +788,7 @@ impl Interp {
         let reply = self.request(s, frame, &what, at).inspect_err(hint_missing_package)?;
         let unit: Rc<str> = unit.into();
         let exports = reply.exports.into_iter().map(|(name, v)| export(s, &unit, name, v)).collect();
-        Ok((reply.value, exports, reply.missing))
+        Ok((reply.value, exports, reply.missing, reply.names))
     }
 
     /// The route for one item of an inner `@import`; a later load of the importer resets it (13.6).
@@ -805,12 +843,12 @@ impl Interp {
                         continue;
                     }
                     let names = json!(list.iter().map(|i| &*i.name).collect::<Vec<_>>());
-                    let (_, exports, missing) = self.import_module(file, &imp.selector, names, at)?;
+                    let (_, exports, missing, have) = self.import_module(file, &imp.selector, names, at)?;
                     let text = self.selector_text(&imp.selector);
                     for (name, alias, span) in named_items(list) {
                         let found = find(&exports, &name).filter(|_| !missing.contains(&name));
                         let Some(e) = found else {
-                            return Err(self.raise(import_error(not_exported(&name, &text)), span));
+                            return Err(self.raise(import_error(not_exported(&name, &text, &have)), span));
                         };
                         if !e.func {
                             return Err(self.raise(constant_error(&name), span));
@@ -882,11 +920,11 @@ impl Interp {
         let imp = &block.directives.imports[import];
         let file = block.unit_id.file;
         if let Selector::Module { .. } = &imp.selector {
-            let (_, exports, missing) = self.import_module(file, &imp.selector, json!([&**name]), at)?;
+            let (_, exports, missing, have) = self.import_module(file, &imp.selector, json!([&**name]), at)?;
             return match find(&exports, name) {
                 Some(e) if !missing.contains(name) && e.func => Ok(e.value.clone()),
                 Some(_) if !missing.contains(name) => Err(constant_error(name)),
-                _ => Err(import_error(format!("'{name}' is not exported by '{}'", self.selector_text(&imp.selector)))),
+                _ => Err(import_error(not_exported(name, &self.selector_text(&imp.selector), &have))),
             };
         }
         // What can only fail starts nothing (13.3).
@@ -899,7 +937,7 @@ impl Interp {
         match self.loaded(&hit).map(|ex| find(ex, name).cloned()) {
             Some(Some(e)) if e.func => Ok(e.value),
             Some(Some(_)) => Err(constant_error(name)),
-            Some(None) => Err(import_error(format!("'{name}' is not exported by '{}' (did the block @export it?)", self.selector_text(&imp.selector)))),
+            Some(None) => Err(import_error(not_exported_by_block(name, &self.selector_text(&imp.selector), self.loaded(&hit).into_iter().flat_map(|l| l.iter()).map(|e| &*e.name)))),
             None => Err(self.state_error(&hit, Some(name))),
         }
     }

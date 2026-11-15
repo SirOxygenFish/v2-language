@@ -1,0 +1,24 @@
+// requires: py
+// A block's export used without its @import, a block's label used as a name, and a label
+// written where an engine's tag goes (INTERNALS 5.9, 13.3).
+@py tools {
+    def spread(xs):
+        return max(xs) - min(xs)
+    @export { spread }
+}
+@py {
+    def f():
+        return 1
+    @export { f }
+}
+try { print(spread([1, 5])) } catch (e) { print(e.message) }
+try { print(tools.spread([1, 5])) } catch (e) { print(e.message) }
+try { print(f()) } catch (e) { print(e.message) }
+try {
+    @import { f } from py
+    print(f())
+} catch (e) {
+    print(e.message)
+}
+@import { spread } from tools
+print(spread([1, 5]))

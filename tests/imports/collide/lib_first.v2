@@ -1,7 +1,14 @@
 // requires: py js
-// The other order: lib.v2 imports first, so its folder's copies win for both files (DOCS 7).
+// The other order: lib.v2 imports first, so its folder's same.py and jpkg are the ones the
+// engines hold; this file's own same.py is then an ImportError that names both files, and jpkg
+// stays lib's (DOCS 7).
 import "./fixtures/other/lib.v2" as lib
-@import { who as py_who } from py.same
-@import { who as js_who } from js.jpkg
 print(lib.both())
-print(py_who(), js_who())
+try {
+    @import { who as py_who } from py.same
+    print(py_who())
+} catch (e) {
+    print(e.type, ", which was loaded first, not your " in e.message, e.message.ends_with("same.py: give your file another name (one Python serves the whole run, with one module per name)"))
+}
+@import { who as js_who } from js.jpkg
+print(js_who())
