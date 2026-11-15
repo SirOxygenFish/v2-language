@@ -524,8 +524,9 @@ pub fn bytes_repr(b: &[u8]) -> String {
     s
 }
 
-/// A string inside a container: double-quoted, with `\" \\ \n \r \t` and `\u{..}` for other
-/// control chars (5.10).
+/// A string inside a container: double-quoted, with `\" \\ \n \r \t`, and `\u{..}` for other
+/// control characters and the invisible ones (a byte-order mark, zero-width and bidi
+/// characters, a soft hyphen), so `["\u{feff}name"]` shows what `==` will see (5.10).
 pub fn quoted(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -535,7 +536,9 @@ pub fn quoted(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if c.is_control() || matches!(c as u32, 0x00AD | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2064 | 0xFEFF) => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
             c => out.push(c),
         }
     }

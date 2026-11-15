@@ -105,32 +105,12 @@ pub fn is_drive_relative(p: &Path) -> bool {
     matches!(p.components().next(), Some(std::path::Component::Prefix(_))) && !p.has_root()
 }
 
-/// Every hit for `name`, in `PATH` order, so the search can go on past a skipped one (7.5).
-/// With a separator, `name` is joined to `l.cwd`; otherwise each absolute `PATH` entry is
-/// tried (never the cwd).
+/// Every hit for `name`, in `PATH` order (7.5): what the resolver's folder-by-folder search
+/// meets one at a time. With a separator, `name` is joined to `l.cwd`; otherwise each absolute
+/// `PATH` entry is tried (never the cwd).
+#[cfg(test)]
 pub fn find_program(name: &str, l: &Lookup) -> Vec<PathBuf> {
     search(name, l, usize::MAX)
-}
-
-/// The hits of several bare names in `PATH` order, each folder tried with every name in turn:
-/// the name's index and the hit (7.5, 7.6).
-pub fn find_programs(names: &[&str], l: &Lookup) -> Vec<(usize, PathBuf)> {
-    let mut hits: Vec<(usize, PathBuf)> = Vec::new();
-    let path = l.path.clone().unwrap_or_default();
-    for dir in std::env::split_paths(&path) {
-        if dir.as_os_str().is_empty() || dir.is_relative() {
-            continue;
-        }
-        for (k, name) in names.iter().enumerate() {
-            let one = Lookup { path: Some(dir.clone().into_os_string()), ..l.clone() };
-            for hit in search(name, &one, usize::MAX) {
-                if !hits.iter().any(|(_, h)| *h == hit) {
-                    hits.push((k, hit));
-                }
-            }
-        }
-    }
-    hits
 }
 
 /// The first of `find_program`'s hits, with no walk past it: a long `PATH` can be slow to stat.
@@ -596,6 +576,10 @@ impl Resolver<'_> {
                 let reason = other.reason().unwrap_or_default();
                 let hint = if reason.starts_with("version probe timed out") {
                     format!("; raise [engines.{}] startup_timeout if it is only slow", spec.id)
+                } else if reason == PLACEHOLDER {
+                    format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id))
+                } else if let Some(fix) = library_fix(&path, reason) {
+                    format!("\nfix: {fix}")
                 } else {
                     String::new()
                 };
@@ -615,8 +599,17 @@ impl Resolver<'_> {
     fn configured(&mut self, spec: &Rc<EngineSpec>, command: &[String], from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let name = &command[0];
         let Some(path) = first_program(name, self.lookup) else {
+            // `V2_ENGINE_PY="py -3"`: the variable holds one program, never split (18.4).
+            let hint = match from {
+                ConfigSource::Env(var) if name.trim().contains(char::is_whitespace) => format!(
+                    "; {var} names one program, without arguments: for a command with arguments, write [engines.{}] command = [{}] in v2.toml",
+                    spec.id,
+                    name.split_whitespace().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(", ")
+                ),
+                _ => String::new(),
+            };
             return Err(NotFound::broken(
-                format!("engine '{}' command '{name}' not found (set by {})", spec.id, set_by(from)),
+                format!("engine '{}' command '{name}' not found (set by {}){hint}", spec.id, set_by(from)),
                 join(&command.iter().map(OsString::from).collect::<Vec<_>>()),
                 from,
             ));
@@ -634,16 +627,41 @@ impl Resolver<'_> {
         };
         let Some(exe) = candidates.iter().find(|p| is_regular_file(p)) else {
             let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
-            // A command to paste: quoted when the path has a space; `python3` where `python` is
-            // often missing (Linux, macOS).
-            let python = if cfg!(windows) { "python" } else { "python3" };
             let shown = venv.display().to_string();
-            let arg = if shown.contains(' ') { format!("\"{shown}\"") } else { shown.clone() };
-            return Err(NotFound::broken(
-                format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {arg})"),
-                candidates[0].display().to_string(),
-                from,
-            ));
+            // What to write instead, as v2.toml's folder sees it (18.1).
+            let base = match from {
+                ConfigSource::Project(file) => file.parent().map(Path::to_path_buf),
+                ConfigSource::Env(_) => None,
+            };
+            let write = |p: &Path| {
+                let r = base.as_ref().and_then(|b| p.strip_prefix(b).ok()).filter(|r| !r.as_os_str().is_empty()).unwrap_or(p).display().to_string();
+                if r.contains('\\') { format!("venv = '{r}'") } else { format!("venv = \"{r}\"") }
+            };
+            let is_venv = |p: &Path| p.join("pyvenv.cfg").is_file();
+            let message = if is_regular_file(venv) {
+                // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
+                let folder = venv.parent().and_then(Path::parent).filter(|f| is_venv(f));
+                let fix = folder.map_or_else(|| "the folder that holds pyvenv.cfg".to_string(), &write);
+                format!("[python] venv '{shown}' is a file: venv names the virtual environment's folder: write {fix}")
+            } else if let Some(near) = venv
+                .parent()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && is_venv(p))
+                .min()
+            {
+                format!("[python] venv '{shown}' has no {want}; there is a virtual environment in {}: did you mean {}?", near.display(), write(&near))
+            } else {
+                // A command to paste: quoted when the path has a space; the `py` launcher on
+                // Windows (`python` may be the Store's stand-in), `python3` elsewhere.
+                let python = if cfg!(windows) { "py" } else { "python3" };
+                let arg = if shown.contains(' ') { format!("\"{shown}\"") } else { shown.clone() };
+                format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {arg})")
+            };
+            return Err(NotFound::broken(message, candidates[0].display().to_string(), from));
         };
         let what = format!("[python] venv '{}'", venv.display());
         self.usable(spec, vec![exe.clone().into_os_string()], Origin::Venv, &what, from)
@@ -661,17 +679,20 @@ impl Resolver<'_> {
         let mut failed = false;
         // The names that take no arguments (`python3`, `python`) are looked for folder by folder,
         // so the first PATH folder that has any of them wins: an activated virtual environment's
-        // `python.exe` before a `python3.exe` further down. Then the others (`py -3`) (7.6).
-        let plain: Vec<&str> = spec.candidates.iter().filter(|c| c.len() == 1).map(|c| &*c[0]).collect();
-        let mut hits: Vec<(&[Rc<str>], PathBuf)> = find_programs(&plain, self.lookup)
-            .into_iter()
-            .map(|(k, hit)| (&spec.candidates.iter().filter(|c| c.len() == 1).nth(k).expect("a plain candidate")[..], hit))
-            .collect();
-        for candidate in spec.candidates.iter().filter(|c| c.len() > 1) {
-            hits.extend(find_program(&candidate[0], self.lookup).into_iter().map(|hit| (&candidate[..], hit)));
-        }
-        {
-            for (candidate, hit) in hits {
+        // `python.exe` before a `python3.exe` further down. Then the others (`py -3`) (7.6). Each
+        // folder is looked in only when the ones before it had nothing usable: on WSL, PATH holds
+        // dozens of Windows folders, each slow to look in.
+        let path = self.lookup.path.clone().unwrap_or_default();
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty() && !d.is_relative()).collect();
+        let plain = spec.candidates.iter().filter(|c| c.len() == 1);
+        let with_args = spec.candidates.iter().filter(|c| c.len() > 1);
+        let order = dirs
+            .iter()
+            .flat_map(|d| plain.clone().map(move |c| (d, c)))
+            .chain(with_args.flat_map(|c| dirs.iter().map(move |d| (d, c))));
+        for (dir, candidate) in order {
+            let one = Lookup { path: Some(dir.clone().into_os_string()), ..self.lookup.clone() };
+            for hit in search(&candidate[0], &one, usize::MAX) {
                 let file = std::fs::canonicalize(&hit).unwrap_or_else(|_| hit.clone());
                 if !seen.insert((file, candidate[1..].iter().map(|a| a.to_string()).collect())) {
                     continue;
@@ -736,6 +757,19 @@ impl Resolver<'_> {
     }
 }
 
+/// What to do when `path` couldn't start because a shared library is missing (its probe said
+/// `error while loading shared libraries: libatomic.so.1: …`, as Node.js's own Linux build does
+/// on a minimal system): the package for libatomic, else the library to install.
+pub fn library_fix(path: &Path, reason: &str) -> Option<String> {
+    let (_, rest) = reason.split_once("error while loading shared libraries: ")?;
+    let lib = rest.split(':').next()?.trim();
+    Some(if lib.starts_with("libatomic.so") {
+        format!("{} needs {lib}: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic", path.display())
+    } else {
+        format!("{} needs {lib}, which isn't installed: install it with your system's package manager", path.display())
+    })
+}
+
 /// 7.8's message: what was found (nothing, or only versions that are too old), what was tried,
 /// what was skipped and why, how to install, how to configure.
 fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>, failed: bool) -> String {
@@ -745,13 +779,20 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
         (Some(v), Some(min)) if v >= min => {
             format!("engine '{}' ({}) is not supported: found {v}, which has no type stripping; V2 needs {}", spec.id, spec.language, spec.needs(min))
         }
-        (Some(v), Some(min)) => format!("engine '{}' ({}) is too old: found {v}, V2 needs {}", spec.id, spec.language, spec.needs(min)),
+        (Some(v), Some(min)) => {
+            // Another one, perhaps the newer one just installed, doesn't run: say so up front.
+            let also = if failed { "; another doesn't run (see why below)" } else { "" };
+            format!("engine '{}' ({}) is too old: found {v}, V2 needs {}{also}", spec.id, spec.language, spec.needs(min))
+        }
         (None, _) if failed => format!("engine '{}' ({}) was found but doesn't run (see why below)", spec.id, spec.language),
         _ => format!("engine '{}' ({}) not found", spec.id, spec.language),
     };
     let mut m = format!("{head}\ntried: {} on PATH", tried.join(", "));
     for (path, reason) in skipped {
         m.push_str(&format!("\nskipped: {} ({reason})", path.display()));
+    }
+    for fix in skipped.iter().filter_map(|(path, reason)| library_fix(path, reason)) {
+        m.push_str(&format!("\nfix: {fix}"));
     }
     let id = &spec.id;
     m.push_str(&format!("\ninstall: {}\nor set [engines.{id}] command in v2.toml, or V2_ENGINE_{}", install_hint(id), id.to_uppercase()));
@@ -1184,6 +1225,20 @@ mod tests {
     }
 
     #[test]
+    fn messages_say_what_to_do() {
+        // A missing shared library names its package (7.8).
+        let node = Path::new("/usr/local/bin/node");
+        let reason = "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file";
+        assert_eq!(library_fix(node, reason).as_deref(), Some("/usr/local/bin/node needs libatomic.so.1: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic"));
+        assert!(library_fix(node, "version probe failed (exit code 127): x: error while loading shared libraries: libfoo.so.2: nope").unwrap().ends_with("needs libfoo.so.2, which isn't installed: install it with your system's package manager"));
+        assert_eq!(library_fix(node, "version probe failed (exit code 1)"), None);
+        // V2_ENGINE_PY holds one program (18.4).
+        let cfg = with_command("py", &["py -3"], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with("; V2_ENGINE_PY names one program, without arguments: for a command with arguments, write [engines.py] command = [\"py\", \"-3\"] in v2.toml"), "{}", nf.message);
+    }
+
+    #[test]
     fn venv_interpreter_and_precedence() {
         let d = temp("venv");
         let venv = d.join(".venv");
@@ -1191,7 +1246,7 @@ mod tests {
         let p = fake(|_| says("Python 3.12.1"));
         let nf = resolve_with(&missing, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
-        let python = if cfg!(windows) { "python" } else { "python3" };
+        let python = if cfg!(windows) { "py" } else { "python3" };
         assert!(nf.message.starts_with(&format!("[python] venv '{}' has no {want} (create it: {python} -m venv ", venv.display())), "{}", nf.message);
         // A folder with a space is quoted, so the command can be pasted (7.6).
         let spaced = d.join("my env");
@@ -1202,7 +1257,15 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let python = exe(&bin, "python");
         let e = resolve_with(&missing, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
-        assert_eq!((e.argv, e.origin), (vec![python.into_os_string()], Origin::Venv));
+        assert_eq!((e.argv, e.origin), (vec![python.clone().into_os_string()], Origin::Venv));
+        // The interpreter instead of its folder, and a venv under another name (7.6).
+        std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
+        let toml = d.join("v2.toml");
+        let at = |p: &Path| Config { python_venv: Some(Sourced { value: p.to_path_buf(), from: ConfigSource::Project(toml.clone()) }), ..Config::default() };
+        let nf = resolve_with(&at(&python), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("[python] venv '{}' is a file: venv names the virtual environment's folder: write venv = \".venv\"", python.display()));
+        let nf = resolve_with(&at(&d.join("venv")), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("; there is a virtual environment in {}: did you mean venv = \".venv\"?", venv.display())), "{}", nf.message);
         // A configured command wins over the venv, from v2.toml or V2_ENGINE_PY (7.6).
         let other = exe(&d, "python3");
         for command_from in [project_source(), ConfigSource::Env("V2_ENGINE_PY".into())] {

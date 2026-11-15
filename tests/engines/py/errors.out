@@ -1,7 +1,7 @@
 ForeignError | ZeroDivisionError | division by zero | py | 11
 ForeignError | KeyError | 'k' | py | 12
 ForeignError | SyntaxError | '(' was never closed | py | 14
-ForeignError | SystemExit | sys.exit(3) can't end V2's Python engine; raise an error instead | py | 16
+ForeignError | SystemExit | sys.exit(3) can't end V2's Python engine; raise an error instead, or end the program with V2's exit(3) | py | 16
 the worker is still running
 ForeignError | ValueError | bad value | py | 19
 ForeignError: ValueError: bad value

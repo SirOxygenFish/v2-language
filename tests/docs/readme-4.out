@@ -3,4 +3,4 @@ grace: B
 linus: keep going
 ["ada", "grace"] 2 true
 best: ada
-ForeignError ZeroDivisionError
+ForeignError ZeroDivisionError division by zero

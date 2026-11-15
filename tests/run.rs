@@ -2174,7 +2174,7 @@ fn doctor_prints_the_engine_table() {
     let rows = doctor_rows(&stdout);
     for (id, avail) in ["py", "js", "ts"].iter().zip(available) {
         let row = &rows[*id];
-        assert!(["ok", "missing", "old", "broken"].contains(&row[0].as_str()), "{stdout}");
+        assert!(["ok", "missing", "old", "unsupported", "broken"].contains(&row[0].as_str()), "{stdout}");
         assert_eq!(row[0] == "ok", avail, "{id}: doctor and engine_available agree:\n{stdout}");
         if row[0] == "missing" {
             assert_eq!(&row[1..], ["-", "-", "-"], "{stdout}");
@@ -2250,10 +2250,58 @@ fn doctor_names_the_programs_it_could_not_use() {
     assert_eq!(rows["js"], ["broken", node.as_str(), "-", "PATH"], "{stdout}");
     assert_eq!(rows["ts"], ["broken", node.as_str(), "-", "PATH"], "{stdout}");
     assert!(stdout.contains("\n  py: too old: found 3.8.1, V2 needs 3.10+; install: "), "{stdout}");
+    // The row and that note say it all: no skipped line repeats it.
+    assert!(!stdout.contains(&format!("py: skipped {py}")), "{stdout}");
+    assert!(stdout.contains(&format!("\n  js: fix: {node} needs libatomic.so.1: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic\n")), "{stdout}");
     // The note, then the program it skipped and why, which "see why below" points at.
     let below = format!("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)\n  js: skipped {node} (version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1)\n");
     assert!(stdout.contains(&below), "{stdout}");
     assert!(stdout.contains("\n  ts: engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and engine 'js' (JavaScript) was found but doesn't run (see js above)\n"), "{stdout}");
+}
+
+#[test]
+fn an_imported_files_syntax_error_shows_its_line_and_hint() {
+    // 6.4: uncaught, the ImportError shows the problem as v2 check would: its line and its hint.
+    let files = [("main.v2", "import \"./lib/util.v2\" as util\nprint(util.shout(\"x\"))\n"), ("lib/util.v2", "func shout(s) => s.upper()\n")];
+    let (code, _out, err, _home) = run_with_files(&files, &["main.v2"]);
+    assert_eq!(code, Some(1), "{err}");
+    let shown = "lib/util.v2";
+    let want = format!(
+        "main.v2:1:1: ImportError: cannot import './lib/util.v2': {shown}:1:15: SyntaxError: expected {{, found `=>`\n    import \"./lib/util.v2\" as util\n    ^\n  in {shown}:\n    func shout(s) => s.upper()\n                  ^\n  hint: a named function has a {{ }} body: func shout(s) {{ return … }}, or write let shout = func(s) => …\n"
+    );
+    assert!(err.starts_with(&want), "{err}");
+}
+
+#[test]
+fn a_path_with_a_control_character_gets_the_escape_hint() {
+    // 5.10: "notes\new.txt" holds a line break: the message shows it escaped, with a hint.
+    let (code, _out, err, _home) = run_with_files(&[("p.v2", "read_file(\"notes\\new.txt\")\n")], &["p.v2"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.starts_with("p.v2:1:1: IOError: cannot read 'notes\\new.txt': "), "{err}");
+    let hint = "\n  hint: in \"…\", a backslash starts an escape (\\n is a line break, \\t a tab): write Windows paths with / or \\\\, as in \"notes/new.txt\"\n";
+    assert!(err.contains(hint), "{err}");
+}
+
+#[test]
+fn doctor_calls_node_23_1_unsupported() {
+    // 19.2: 23.0 and 23.1 are newer than the minimum but can't run ts: `unsupported`, not `old`.
+    let home = TempHome::new();
+    let bin = home.0.join("fake bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let node = bin.join(if cfg!(windows) { "node.cmd" } else { "node" });
+    std::fs::write(&node, if cfg!(windows) { "@echo v23.1.0\r\n" } else { "#!/bin/sh\necho v23.1.0\n" }).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[("PATH", bin.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let rows = doctor_rows(&stdout);
+    let node = node.display().to_string();
+    assert_eq!(rows["js"], ["unsupported", node.as_str(), "23.1.0", "PATH"], "{stdout}");
+    assert!(stdout.contains("\n  js: not supported: found 23.1.0, which has no type stripping; V2 needs 22.13+, not 23.0 or 23.1; install: "), "{stdout}");
+    assert!(!stdout.contains("js: skipped"), "{stdout}");
 }
 
 #[test]

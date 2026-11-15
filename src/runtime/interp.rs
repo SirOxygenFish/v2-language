@@ -262,6 +262,13 @@ impl Interp {
                     })
                     .collect();
                 let e = Rc::new(ErrorValue::with_data("ImportError".into(), msg.into(), Value::list(data)));
+                // When it ends the program: the problem's own line and hint (6.4).
+                if !d.excerpt.is_empty() {
+                    let _ = e.detail.set(format!("  in {}:\n{}", d.display, d.excerpt).into());
+                }
+                if let Some(h) = &d.hint {
+                    let _ = e.hint.set(h.as_str().into());
+                }
                 let flow = self.raise(Flow::Error(e.clone()), at);
                 self.modules.insert(path, ModuleState::Failed(e));
                 return Err(flow);
@@ -531,6 +538,9 @@ impl Interp {
             "require" => Some("V2 imports a package with @import { name } from js.package".to_string()),
             "open" | "readFile" | "readFileSync" => Some("V2 reads a file with read_file(path) and writes one with write_file(path, text)".to_string()),
             "sorted" => Some("V2 sorts a list with xs.sort()".to_string()),
+            "process" => Some("V2 gets the script's arguments with args() and prints without a newline with print(x, end: \"\")".to_string()),
+            "sys" => Some("V2 gets the script's arguments with args() and stops with exit(n); a Python module is imported with @import py.sys as sys".to_string()),
+            "Math" => Some("V2 has min, max, abs, round, sum and div(a, b) built in; JavaScript's Math works in a @js block".to_string()),
             _ => None,
         };
         if let Some(h) = habit {

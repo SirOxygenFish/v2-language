@@ -170,6 +170,7 @@ try {
     $second = StartWaiting "$bin\v2.exe" "$h\wait.v2"
     $r = Install $h
     Want $r.code 0 'exit code, two running'
+    Says $r 'Note: the old v2.exe is still running, so v2.exe.old-'
     Want @(Get-ChildItem -LiteralPath $bin -Filter 'v2.exe.old*').Count 2 'old copies while both run'
     Want $first.HasExited $false 'the first still runs'
     Want $second.HasExited $false 'the second still runs'

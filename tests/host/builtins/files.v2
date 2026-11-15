@@ -20,5 +20,13 @@ show(func() => read_file(path))
 try { read_file(home + "/missing_v2_file.txt") } catch (e) { print(e.type, e.message.replace(home, "~").split("': ")[0]) }
 show(func() => write_file(path, 5))
 show(func() => read_file(path, binary: "yes"))
+// One leading byte-order mark is dropped from text (Windows tools write one); binary keeps it.
 write_file(path, b"\xef\xbb\xbfok")
-print(len(read_file(path)), read_file(path).encode().hex())
+print(len(read_file(path)), read_file(path).encode().hex(), len(read_file(path, binary: true)))
+// UTF-16 says so, a folder says so, and a path's control character shows escaped.
+write_file(path, b"\xff\xfeh\x00i\x00")
+show(func() => read_file(path))
+show(func() => read_file(home))
+try { read_file(home + "\new.txt") } catch (e) { print(e.type, e.message.replace(home, "~").split("': ")[0]) }
+// Invisible characters show inside containers.
+print(["\u{feff}name", "a\u{200b}b"])
