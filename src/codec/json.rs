@@ -66,7 +66,8 @@ fn scan(text: &str) -> Exec<()> {
                 let digits = token.strip_prefix('-').unwrap_or(token);
                 let integral = !digits.is_empty() && digits.bytes().all(|d| d.is_ascii_digit());
                 if integral && token.parse::<i64>().is_err() {
-                    return invalid(line, start_col, "integer does not fit in 64 bits");
+                    // Valid JSON, but not V2 data: an id of 20 digits is common (10.2).
+                    return value_error(format!("JSON at line {line} column {start_col} holds an integer beyond V2's 64-bit range (the JSON itself is fine): parse it in a @py block, as in @py(text) {{ import json; json.loads(text) }}, or have the number written as a string"));
                 }
             }
             _ => {}
@@ -307,8 +308,9 @@ mod tests {
         assert_eq!(parsed("-0"), "-0.0");
         assert_eq!(parsed("9223372036854775807"), "9223372036854775807");
         assert_eq!(parsed("-9223372036854775808"), "-9223372036854775808");
-        assert_eq!(parsed("9223372036854775808"), "invalid JSON at line 1 column 1: integer does not fit in 64 bits");
-        assert_eq!(parsed("[1,\n  -99999999999999999999]"), "invalid JSON at line 2 column 3: integer does not fit in 64 bits");
+        let big = "holds an integer beyond V2's 64-bit range (the JSON itself is fine): parse it in a @py block, as in @py(text) { import json; json.loads(text) }, or have the number written as a string";
+        assert_eq!(parsed("9223372036854775808"), format!("JSON at line 1 column 1 {big}"));
+        assert_eq!(parsed("[1,\n  -99999999999999999999]"), format!("JSON at line 2 column 3 {big}"));
         assert_eq!(json(&Value::Float(2.0)), "2.0");
         assert_eq!(json(&Value::Float(-0.0)), "-0.0");
         assert_eq!(json(&Value::Float(1e21)), "1e+21");

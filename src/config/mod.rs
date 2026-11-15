@@ -516,8 +516,10 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
             return Err(f.error(format!("[engines.{name}] names a program, not an engine: it runs the {engine} engine, so write [engines.{engine}] command = [\"{name}\"]")));
         }
         // A misspelled engine (`[engines.pyy]`, `[engines.Python]`) would configure nothing, with
-        // no word (18.2); a later engine's name (`ruby`) isn't a misspelling.
-        if !BUILTIN_TAGS.contains(&tag.as_str()) && crate::engines::registry::later_language(&tag).is_none() {
+        // no word (18.2); a later engine's name (`ruby`) isn't a misspelling, nor is a table with
+        // a `kind`, which only a custom engine has (`[engines.r]`, DOCS 13).
+        let custom = t.contains_key("kind");
+        if !BUILTIN_TAGS.contains(&tag.as_str()) && crate::engines::registry::later_language(&tag).is_none() && !custom {
             let names = ["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs"];
             if let Some(near) = crate::runtime::error::did_you_mean(name, names) {
                 return Err(f.error(format!("[engines.{name}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")));
@@ -699,6 +701,9 @@ mod tests {
             assert!(e.ends_with(&format!("[engines.{table}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")), "{e}");
         }
         assert!(project("later", "[engines.ruby]\ncommand = [\"ruby\"]\n[engines.perl]\ncommand = [\"perl\"]\n").is_ok());
+        // A table with `kind` is a custom engine's (DOCS 13.1), not a misspelling: `r` isn't `rs`.
+        let cfg = project("custom", "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\next = \"R\"\n").unwrap();
+        assert!(cfg.custom.contains_key("r"));
         // [python] venv and [engines.py] command both choose the Python (18.3).
         let e = project("venvcmd", "[python]\nvenv = \".venv\"\n[engines.py]\ncommand = [\"python3\"]\n").unwrap_err().0;
         assert!(e.ends_with("v2.toml: config error: [python] venv and [engines.py] command both choose the Python: keep one (venv for a virtual environment, command for any other Python)"), "{e}");

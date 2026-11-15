@@ -1,0 +1,22 @@
+// requires: js
+// In a block of several lines whose value is used, a last line that starts with ( [ or ` would be
+// read as part of the line above (`1` then `[a, 2]` is `1[a, 2]`): an error says to end that line
+// with ;. With the ;, or after a }, it is the block's value (DOCS 4).
+try {
+    let w = @js {
+        let a = 1
+        [a, 2]
+    }
+} catch (e) {
+    print(e.foreign_type, e.message)
+}
+let w = @js {
+    let a = 1;
+    [a, 2]
+}
+print(w)
+let v = @js {
+    function f() { return 1 }
+    (f() + 1)
+}
+print(v)

@@ -1,4 +1,6 @@
 EngineUnknown unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts
 unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: py, js, ts
 unknown engine '@sh': shell blocks aren't in this version of V2 yet — known engines: py, js, ts
+unknown engine '@r' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
+Error define_engine (custom engines) isn't in this version of V2 yet
 false false

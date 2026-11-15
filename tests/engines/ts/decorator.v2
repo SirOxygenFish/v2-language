@@ -1,0 +1,12 @@
+// requires: js ts
+// A decorator in a @ts block: Node runs TypeScript by removing its types, and a decorator is code,
+// so the error says that, not V8's bare "Invalid or unexpected token" (DOCS 4, INTERNALS 12.5).
+try {
+    let x = @ts {
+        function dec(c: any) { return c }
+        @dec class D {}
+        1
+    }
+} catch (e) {
+    print(e.foreign_type, e.message)
+}

@@ -167,6 +167,19 @@ fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
     })
 }
 
+/// JavaScript calls a callback with all it has (`xs.map(f)` passes the item, its index and the
+/// array) and a JS function ignores the extras: so does a V2 function called from JavaScript,
+/// passed in or imported with `from v2` (DOCS 8.2).
+pub(crate) fn drop_js_extras(f: &Value, pos: &mut Vec<Value>) {
+    if let Value::Func(func) = f {
+        if let Callable::Closure { decl, .. } = &**func {
+            if decl.rest.is_none() && pos.len() > decl.params.len() {
+                pos.truncate(decl.params.len());
+            }
+        }
+    }
+}
+
 /// An error at no location yet: `raise` places it at the V2 expression.
 fn error(kind: &str, message: String) -> Flow {
     match fail::<()>(kind, message) {
@@ -736,17 +749,8 @@ impl Interp {
             _ if self.xdepth >= MAX_XDEPTH => Err(depth_error()),
             Target::Fn(n) => match self.sessions[s].callables.get(n) {
                 Some(f) => {
-                    // JavaScript calls a callback with all it has (`xs.map(f)` passes the item,
-                    // its index and the array) and a JS function ignores the extras: so does a
-                    // V2 function called from JavaScript (DOCS 8.2).
                     if &*self.sessions[s].key == "js" {
-                        if let Value::Func(func) = &f {
-                            if let Callable::Closure { decl, .. } = &**func {
-                                if decl.rest.is_none() && pos.len() > decl.params.len() {
-                                    pos.truncate(decl.params.len());
-                                }
-                            }
-                        }
+                        drop_js_extras(&f, &mut pos);
                     }
                     self.xdepth += 1;
                     let r = self.call_value(&f, pos, named, at);
@@ -757,8 +761,9 @@ impl Interp {
             },
             Target::Route(n) => {
                 self.xdepth += 1;
+                let js = &*self.sessions[s].key == "js";
                 let r = match usize::try_from(n) {
-                    Ok(n) => self.call_route(n, pos, named, at),
+                    Ok(n) => self.call_route(n, pos, named, at, js),
                     Err(_) => fail("ProtocolError", format!("unknown callable id {n}")),
                 };
                 self.xdepth -= 1;

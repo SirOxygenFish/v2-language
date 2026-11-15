@@ -2,12 +2,12 @@ null
 16 ["line 1", "line 2é"]
 17 108
 efbbbf626f6dff
-IOError: '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252: save it as UTF-8, or read it with binary: true
+IOError: '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252: save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding="cp1252").read() }
 IOError cannot read '~/missing_v2_file.txt
 TypeError: write_file() argument 'data' must be a str or bytes, got int
 TypeError: read_file() argument 'binary' must be a bool, got str
 2 6f6b 5
-IOError: '~/v2_files_test.txt' is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write): save it as UTF-8, or read it with binary: true
+IOError: '~/v2_files_test.txt' is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write): save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding="utf-16").read() }
 IOError: cannot read '~': it is a folder
 IOError cannot read '~\new.txt
 ["\u{feff}name", "a\u{200b}b"]

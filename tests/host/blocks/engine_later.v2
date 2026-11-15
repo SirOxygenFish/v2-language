@@ -1,5 +1,6 @@
 // Tags of engines this build does not have yet say so, before any did-you-mean: `@rs` is Rust,
-// not a typo of `@ts` (INTERNALS 7.3, DOCS 5).
+// not a typo of `@ts`; another tag and define_engine say custom engines aren't here yet
+// (INTERNALS 7.3, DOCS 5, 13).
 try {
     @c { int x = 1; }
 } catch (e) {
@@ -14,5 +15,15 @@ try {
     @sh { echo hi }
 } catch (e) {
     print(e.message)
+}
+try {
+    @r { cat(1) }
+} catch (e) {
+    print(e.message)
+}
+try {
+    define_engine("r", kind: "run", command: ["Rscript", "{file}"])
+} catch (e) {
+    print(e.type, e.message)
 }
 print(engine_available("cpp"), engine_available("lua"))

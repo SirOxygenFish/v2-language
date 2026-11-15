@@ -1,10 +1,10 @@
 # V2 — one script, every language
 
-> **Status:** being built; [ROADMAP.md](ROADMAP.md) "Where we are" says which parts work. Built:
+> **Status:** being built; [ROADMAP.md](https://github.com/SirOxygenFish/v2-language/blob/main/ROADMAP.md) "Where we are" says which parts work. Built:
 > the host language, Python, JavaScript and TypeScript blocks, `@export`/`@import` across them,
 > packages, handles, callbacks and errors. Not built yet, and marked where they appear: compiled
 > blocks (`@c`, `@cpp`, `@rust`), `extern`, custom and built-in run engines. How it works under the
-> hood is specified in [INTERNALS.md](INTERNALS.md).
+> hood is specified in [INTERNALS.md](https://github.com/SirOxygenFish/v2-language/blob/main/INTERNALS.md).
 
 ---
 
@@ -57,25 +57,30 @@ does something well, V2 borrows it instead of reinventing it.
     @export { spread }
 }
 
-// A Rust block, compiled once and cached, for the hot path (not built yet: ROADMAP Phase 2).
-@rust fast {
-    fn sum_squares(n: i64) -> i64 {
-        (1..=n).map(|i| i * i).sum()
+// A JavaScript block for the hot path: its function is called like any other.
+@js fast {
+    function sumSquares(n) {
+        let s = 0
+        for (let i = 1; i <= n; i++) s += i * i
+        return s
     }
-    @export { sum_squares }
+    @export { sumSquares }
 }
 
 @import { spread } from stats
-@import { sum_squares } from fast
+@import { sumSquares } from fast
 
 let data = [3, 8, 1, 9, 4]
 print(f"mean ${mean(data)}, spread ${spread(data)}")
-print(f"sum of squares to 1000: ${sum_squares(1000)}")
+print(f"sum of squares to 1000: ${sumSquares(1000)}")
 
 // Blocks are expressions too: the last expression is the value.
 let top = @py(data) { sorted(data, reverse=True)[:2] }
 print(top)   // [9, 8]
 ```
+
+C, C++ and Rust blocks, compiled once and cached, join them in the same way (not built yet:
+ROADMAP Phase 2).
 
 ### Not in V2
 
@@ -499,6 +504,7 @@ try {
 | `e.lang`       | `null` for V2 errors, or the engine tag (`"py"`, `"js"`, …)       |
 | `e.foreign_type` | the foreign exception class, e.g. `"ZeroDivisionError"`         |
 | `e.cause`      | the error this one was raised from (a foreign exception's cause, e.g. Python `raise … from …`, JS `cause`), or `null`; `error()` can't set it |
+| `e.hint`       | what to do about it, when V2 knows (what an uncaught one prints after `hint:`), or `null` |
 
 Built-in error types: `Error`, `TypeError`, `ValueError`, `KeyError`, `IndexError`, `NameError`,
 `ArityError`, `IOError`, `RecursionError`, `ImportError`, `AssertionError`, plus the engine
@@ -607,7 +613,8 @@ read in the console's code page first, as `cmd` and other console programs write
 `code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
-directory and environment with no timeout. `exec` returns when the program exits, and what the
+directory and environment (plus `PYTHONIOENCODING=utf-8` when that isn't set, so a Python program
+writes UTF-8, which V2 reads), with no timeout. `exec` returns when the program exits, and what the
 program started is stopped then, or on Ctrl+C; only a process that escapes that
 ([chapter 16](#16-security-and-trust)) and keeps the outputs open makes `exec` wait until it closes
 them.
@@ -762,7 +769,8 @@ Definition blocks are statements only; using one as an expression is a syntax er
 At the start of its code JavaScript reads `{` as a block of code, so a `js` block whose value is
 an object is written `@js { ({a: 1}) }`: `@js { {a: 1} }` used as a value is an error saying so.
 In a block of several lines, end a line with `;` when the next one starts with `(`, `[` or a
-backtick: JavaScript would read the two as one (`1` then `({a: 1})` is the call `1({a: 1})`).
+backtick: JavaScript would read the two as one (`1` then `({a: 1})` is the call `1({a: 1})`). A
+block whose value is used and whose last line would be read so is an error saying this.
 
 A block value used as an operand, or followed by `.method()`, must be in parentheses:
 `(@py { 1 }) + 2`, `(@py { "ada" }).upper()`.
@@ -1143,7 +1151,8 @@ Python looks in the `.v2` file's folder, the project root, then its normal modul
 looks the way Node always does: in the `node_modules` folders from the `.v2` file's folder upwards
 (so your project's is found), then in your own `NODE_PATH` if you set one. Packages that only ship
 as ES modules work too, except the rare one whose `package.json` `exports` offers only an
-`import` entry. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
+`import` entry: load that one in a `@js` block, `async function load() { return await
+import("pkg") }`, as the error's hint shows. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
 
 One Python engine serves every `.v2` file in a run, so two local modules with the same name in
 different folders collide: importing the second is an `ImportError` that names both files, and so
@@ -1224,8 +1233,8 @@ Python calls the V2 function once per item; each call crosses back into V2 and r
 
 JavaScript calls a callback with everything it has (`xs.map(f)` passes the item, its index and the
 array), and a JavaScript function ignores what it doesn't take. A V2 function called from
-JavaScript does the same, so `xs.map(f)` and `xs.forEach(f)` work with `func f(x)`; one with
-`...rest` gets them all. From Python, extra arguments are an `ArityError`, as they are in Python.
+JavaScript does the same, passed in or brought in with `@import { f } from v2`, so `xs.map(f)` and
+`xs.forEach(f)` work with `func f(x)`; one with `...rest` gets them all. From Python, extra arguments are an `ArityError`, as they are in Python.
 
 A V2 function that foreign code keeps (a listener, a callback stored on an object) keeps the
 function that made it alive, with all its variables, until the foreign side lets go. Python lets
@@ -1732,7 +1741,7 @@ the program when it contains a path separator, and a later element when it start
 `../` (or `.\`, `..\`), or when it names a file that exists there (`adapters/v2_adapter.rb`).
 Options (`-c`) and elements containing `{` are left alone. Custom blocks are scanned by counting
 braces (4.2), so use the fence form when the code has unbalanced braces. The protocol is specified
-in [INTERNALS.md](INTERNALS.md), with a checklist of messages an adapter must handle. To test an
+in [INTERNALS.md](https://github.com/SirOxygenFish/v2-language/blob/main/INTERNALS.md), with a checklist of messages an adapter must handle. To test an
 adapter, run a two-line `.v2` file that uses it.
 
 ### 13.3 Declaring an engine in the script

@@ -548,6 +548,10 @@ impl Interp {
     }
 
     fn not_declared<T>(&self, name: &str, span: Span, env: &Env, assigning: bool) -> Exec<T> {
+        // A builtin of a later version (DOCS 13.3), said as `extern` and the later tags are.
+        if name == "define_engine" {
+            return Err(self.not_yet("define_engine (custom engines)", span));
+        }
         let names = env::visible_names(env);
         let base = format!("'{name}' is not declared");
         // Python's and JavaScript's names for what V2 spells differently (5.9).
@@ -865,6 +869,14 @@ impl Interp {
     /// the call itself.
     fn call_name(&mut self, callee: &Expr, args: &[Arg], env: &Env) -> Exec<Value> {
         let f = self.eval(callee, env)?;
+        // `let str = ""`, then `str(i)`: the variable hides the builtin of that name (5.7).
+        if let (ExprKind::Name(name, _), false) = (&callee.kind, matches!(f, Value::Func(_) | Value::Handle(_))) {
+            if super::builtins::BUILTINS.iter().any(|b| b.name == &**name) {
+                let err = ErrorValue::new("TypeError", format!("'{name}' is a {} here, not a function", f.type_name()));
+                let _ = err.hint.set(format!("a variable named '{name}' hides V2's {name}(): give the variable another name").into());
+                return Err(self.raise(Flow::Error(Rc::new(err)), callee.span));
+            }
+        }
         if let Some(v) = self.direct_call(&f, args, env, callee.span)? {
             return Ok(v);
         }
@@ -1139,7 +1151,7 @@ impl Interp {
                 let target = serde_json::json!({"unit": &**unit, "name": &**name});
                 self.foreign_call(*session, target, pos, named, &format!("a call to '{name}'"), call_site)
             }
-            Callable::Route { route, .. } => self.call_route(*route, pos, named, call_site),
+            Callable::Route { route, .. } => self.call_route(*route, pos, named, call_site, false),
             Callable::Waiting { .. } => {
                 let target = self.settle(c, call_site)?;
                 self.call_value(&target, pos, named, call_site)
@@ -1273,8 +1285,10 @@ impl Interp {
             "lang" => e.lang.clone().map_or(Value::Null, |s| Value::Str(s.into())),
             "foreign_type" => e.foreign_type.clone().map_or(Value::Null, |s| Value::Str(s.into())),
             "cause" => e.cause.clone(),
+            // What an uncaught one prints after `hint:`, so a program that catches it can too.
+            "hint" => e.hint.get().map_or(Value::Null, |h| Value::Str(h.clone().into())),
             _ => {
-                const FIELDS: [&str; 10] = ["type", "message", "file", "line", "col", "trace", "data", "lang", "foreign_type", "cause"];
+                const FIELDS: [&str; 11] = ["type", "message", "file", "line", "col", "trace", "data", "lang", "foreign_type", "cause", "hint"];
                 return type_error(with_suggestion(format!("error has no field '{n}'"), n, FIELDS));
             }
         })

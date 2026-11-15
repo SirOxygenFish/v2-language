@@ -127,7 +127,8 @@ impl Registry {
         let names = self.specs.iter().flat_map(|s| std::iter::once(&s.id).chain(&s.aliases)).map(|n| &**n);
         match did_you_mean(tag, names).and_then(|n| self.canonical(n)) {
             Some(spec) => format!("unknown engine '@{tag}' (did you mean '@{}'?)", spec.id),
-            None => format!("unknown engine '@{tag}' — known engines: {}", ids.join(", ")),
+            // A custom engine's tag (`@r`, DOCS 13): those come in a later version (7.3).
+            None => format!("unknown engine '@{tag}' — known engines: {} (custom engines aren't in this version of V2 yet)", ids.join(", ")),
         }
     }
 
@@ -181,7 +182,7 @@ mod tests {
         assert_eq!(reg.unknown_message("pyhton"), "unknown engine '@pyhton' (did you mean '@py'?)");
         assert_eq!(reg.unknown_message("javscript"), "unknown engine '@javscript' (did you mean '@js'?)");
         assert_eq!(reg.unknown_message("PY"), "unknown engine '@PY' (did you mean '@py'?)");
-        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)");
         assert_eq!(reg.unknown_message("lua"), "unknown engine '@lua': Lua blocks aren't in this version of V2 yet — known engines: py, js, ts");
         assert_eq!(reg.unknown_message("c"), "unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts");
         // A later tag one edit away from a known one is not a typo of it.

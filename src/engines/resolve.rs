@@ -275,9 +275,10 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<D
             }
             let Some((args, pattern)) = &spec.probe else { return Judged::Skipped("no version probe".into()) };
             let Some(version) = pattern.find(output) else {
-                // `V2_ENGINE_JS` naming Python: what it printed says so.
+                // `V2_ENGINE_JS` naming Python: what it printed says so, and whose version it isn't.
                 let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(" (it printed: {})", l.chars().take(80).collect::<String>()));
-                return Judged::Skipped(format!("no version in its {} output{}", args.join(" "), said.unwrap_or_default()));
+                let program = if &*spec.id == "js" { "Node.js" } else { &*spec.language };
+                return Judged::Skipped(format!("no {program} version in its {} output{}", args.join(" "), said.unwrap_or_default()));
             };
             match spec.too_old(version) {
                 Some(why) => Judged::TooOld(version, why),
@@ -519,7 +520,7 @@ impl ResolvedEngine {
 fn join(argv: &[OsString]) -> String {
     let items: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     if items.len() > 1 {
-        items.iter().map(|i| if i.contains(' ') { format!("\"{i}\"") } else { i.clone() }).collect::<Vec<_>>().join(" ")
+        items.iter().map(|i| crate::cli::shell_word(i)).collect::<Vec<_>>().join(" ")
     } else {
         items.join(" ")
     }
@@ -706,13 +707,10 @@ impl Resolver<'_> {
                 if r.contains('\\') { format!("venv = '{r}'") } else { format!("venv = \"{r}\"") }
             };
             let is_venv = |p: &Path| p.join("pyvenv.cfg").is_file();
-            // A command to paste: quoted when the path has a space; the `py` launcher on Windows
-            // (`python` may be the Store's stand-in), `python3` elsewhere.
+            // A command to paste: the path quoted as a shell needs it; the `py` launcher on
+            // Windows (`python` may be the Store's stand-in), `python3` elsewhere.
             let python = if cfg!(windows) { "py" } else { "python3" };
-            let pasted = |p: &Path| {
-                let p = p.display().to_string();
-                if p.contains(' ') { format!("\"{p}\"") } else { p }
-            };
+            let pasted = |p: &Path| crate::cli::shell_word(&p.display().to_string());
             // `.venv/bin`, `.venv\Scripts`, or a python in one that isn't there: a path inside
             // the virtual environment, whose folder is the one above.
             let bin = |p: &Path| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin") || n.eq_ignore_ascii_case("Scripts"));
@@ -812,7 +810,12 @@ impl Resolver<'_> {
             None if failed => Status::Broken,
             None => Status::Missing,
         };
-        Err(NotFound { status, message: not_found_message(spec, &skipped, newest_old, failed), command: None, from: None, skipped })
+        let mut message = not_found_message(spec, &skipped, newest_old, failed);
+        // `env -i v2 x.v2`: nothing to search (7.5).
+        if self.lookup.path.as_ref().is_none_or(|p| p.is_empty()) {
+            message = message.replacen(" on PATH", " on PATH, which isn't set", 1);
+        }
+        Err(NotFound { status, message, command: None, from: None, skipped })
     }
 
     /// macOS: whether the Command Line Tools are installed, so the `xcrun` shims can run
@@ -982,6 +985,14 @@ mod tests {
         assert_eq!(e.version, Some(Version(3, 12, 1)));
         assert_eq!(e.origin, Origin::Path);
         assert_eq!(e.skipped, [(alias, "Microsoft Store placeholder".to_string())]);
+    }
+
+    #[test]
+    fn an_unset_path_is_named() {
+        // 7.8: `env -i v2 x.v2` has no PATH to search, and the message says so.
+        let p = fake(|_| says("Python 3.12.1"));
+        let nf = resolve_with(&Config::default(), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.contains(" on PATH, which isn't set\n"), "{}", nf.message);
     }
 
     #[test]
@@ -1227,7 +1238,7 @@ mod tests {
                 ProbeOutcome::Exited { code: Some(127), output: "\nnode: error while loading shared libraries: libatomic.so.1: cannot open shared object file\n".into() },
                 "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file",
             ),
-            (says("node, but no version"), "no version in its --version output (it printed: node, but no version)"),
+            (says("node, but no version"), "no Node.js version in its --version output (it printed: node, but no version)"),
         ] {
             let p = fake(move |_| outcome.clone());
             let nf = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
