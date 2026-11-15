@@ -33,10 +33,12 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 7 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 8 next
-  on a new distro and sandbox (round 7's prompts: scratchpad/newcomer/prompt-*-r7.md, made by
-  scratchpad/setup_round7.py; the Windows one forbids windowed programs and files named like PATH
-  programs: round 5's code.cmd ran VS Code). Heredocs mangle `\n` in edit scripts too: Write them.
+  Rounds 1 to 8 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 9 next
+  on a new distro and sandbox (round 8's prompts: scratchpad/newcomer/prompt-*-r8.md, made by
+  scratchpad/setup_round8.py; agents may read the archive's DOCS.md; the Windows one forbids
+  windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
+  Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
+  line endings).
   CI's minimum Node (22.13) for local checks: WSL Ubuntu's ~/node2213/node-v22.13.0-linux-x64/bin
   first on PATH (copied from round 5's distro, which checked it against nodejs.org's SHASUMS).
   Newcomer agents work as root only: no user accounts, not even in a throwaway distro (the

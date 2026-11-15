@@ -33,6 +33,13 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 /// Set by the interrupt handler; nothing else happens in the handler (6.5).
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Unix: Ctrl+Z (SIGTSTP) came; the watchdog stops the children, then v2 itself (6.5).
+#[cfg(unix)]
+static SUSPEND: AtomicBool = AtomicBool::new(false);
+
+/// A wait this much longer than asked means the process (or the computer) was suspended.
+const SUSPENDED: Duration = Duration::from_secs(1);
+
 /// Whether an interrupt came. From then on the interpreter thread runs no `catch` or `finally`,
 /// prints no diagnostic and starts no process; the watchdog (or main, when the run ended
 /// first) exits 130 (6.5).
@@ -228,6 +235,15 @@ impl TimerStack {
             t.fired = true;
         }
     }
+
+    /// Time the process spent suspended ran no call: the running clock doesn't count it (8.5).
+    fn skip(&mut self, gap: Duration, now: Instant) {
+        for t in &mut self.stack {
+            if let Some(since) = t.running_since {
+                t.running_since = Some((since + gap).min(now));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -324,6 +340,8 @@ fn watch() {
     let mut w = lock();
     let mut last_exit_check = Instant::now();
     let park = park_after();
+    // When the watchdog last went to sleep, and for how long.
+    let mut asked: Option<(Instant, Duration)> = None;
     loop {
         if w.stop {
             return;
@@ -331,7 +349,18 @@ fn watch() {
         if interrupted() {
             die(&w);
         }
+        #[cfg(unix)]
+        if SUSPEND.swap(false, Ordering::SeqCst) {
+            suspend(&mut w);
+        }
         let now = Instant::now();
+        // Woken long after it asked (SIGSTOP, a computer that slept): no call ran meanwhile.
+        if let Some((slept, wait)) = asked.take() {
+            let late = now.saturating_duration_since(slept).saturating_sub(wait);
+            if late >= SUSPENDED {
+                w.timers.skip(late, now);
+            }
+        }
         if let Some(id) = w.timers.expired(now) {
             if let Some(kill) = w.kills.get(&id) {
                 kill.kill_tree();
@@ -357,6 +386,7 @@ fn watch() {
         if w.timers.top_id().is_some() {
             wait = wait.min(EXIT_CHECK.saturating_sub(now.duration_since(last_exit_check)));
         }
+        asked = Some((Instant::now(), wait));
         w = match s.wake.wait_timeout(w, wait) {
             Ok((guard, _)) => guard,
             Err(poisoned) => poisoned.into_inner().0,
@@ -366,6 +396,25 @@ fn watch() {
 
 fn wake() {
     shared().wake.notify_all();
+}
+
+/// Ctrl+Z: every child's group stops, then v2 itself, as a shell's job would; when the job goes
+/// on (fg, bg, SIGCONT), so do they, and the calls' clocks skip the time stopped (6.5, 8.5).
+#[cfg(unix)]
+fn suspend(w: &mut Watch) {
+    for (_, kill) in &w.children {
+        kill.signal_group(libc::SIGSTOP);
+    }
+    let stopped = Instant::now();
+    // SAFETY: a plain signal to this process; it stops every thread until SIGCONT.
+    unsafe {
+        libc::raise(libc::SIGSTOP);
+    }
+    for (_, kill) in &w.children {
+        kill.signal_group(libc::SIGCONT);
+    }
+    let now = Instant::now();
+    w.timers.skip(now.saturating_duration_since(stopped), now);
 }
 
 /// Handle to the watchdog, held by main for the whole run.
@@ -658,6 +707,18 @@ struct KillInner {
 }
 
 impl KillHandle {
+    /// Unix: send `sig` to the child's process group, else to the child (6.5).
+    #[cfg(unix)]
+    fn signal_group(&self, sig: libc::c_int) {
+        // SAFETY: plain signal calls; the leader is not reaped yet, so its pgid is not reused.
+        unsafe {
+            let pid = self.0.pid;
+            if libc::kill(-pid, sig) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                libc::kill(pid, sig);
+            }
+        }
+    }
+
     /// Kill the child and everything it started that did not detach (8.3).
     pub fn kill_tree(&self) {
         #[cfg(windows)]
@@ -783,11 +844,17 @@ impl KillHandle {
                 if pid == 0 {
                     return None;
                 }
-                return Some(if info.si_code == libc::CLD_EXITED {
-                    ExitInfo { code: Some(status), signal: None }
-                } else {
-                    ExitInfo { code: None, signal: Some(status) }
-                });
+                return match info.si_code {
+                    libc::CLD_EXITED => Some(ExitInfo { code: Some(status), signal: None }),
+                    libc::CLD_KILLED | libc::CLD_DUMPED => Some(ExitInfo { code: None, signal: Some(status) }),
+                    // macOS reports a stop or a continue (Ctrl+Z, fg) too, unasked: not an exit.
+                    // Waiting, look again in a moment (WNOWAIT leaves the report there).
+                    _ if block => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    _ => None,
+                };
             }
         }
     }
@@ -1165,6 +1232,20 @@ fn install_interrupt_handler() {
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }
     }
+    // Ctrl+Z: the watchdog stops the children with v2 (`suspend`); one that is ignored stays so.
+    extern "C" fn on_stop(_: libc::c_int) {
+        SUSPEND.store(true, Ordering::SeqCst);
+    }
+    // SAFETY: as above.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_stop as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&mut action.sa_mask);
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGTSTP, std::ptr::null(), &mut old) == 0 && old.sa_sigaction != libc::SIG_IGN {
+            libc::sigaction(libc::SIGTSTP, &action, std::ptr::null_mut());
+        }
+    }
 }
 
 /// Windows: Ctrl+C, Ctrl+Break and console close. The routine runs on its own thread: it sets
@@ -1465,6 +1546,24 @@ pub(crate) mod tests {
         s.pop(2, at(t0, 1_000));
         assert_eq!(s.expired(at(t0, 1_049)), None);
         assert_eq!(s.expired(at(t0, 1_050)), Some(1), "its deadline is still enforced");
+    }
+
+    #[test]
+    fn time_suspended_doesnt_count() {
+        // 8.5: a process stopped (Ctrl+Z, SIGSTOP) or a computer asleep runs no call, so the
+        // running clock skips that time; a paused or buried timer has nothing to skip.
+        let t0 = Instant::now();
+        let mut s = TimerStack::default();
+        s.push(1, Some(Duration::from_millis(100)), t0);
+        s.skip(Duration::from_millis(5_000), at(t0, 5_050));
+        assert_eq!(s.expired(at(t0, 5_099)), None, "50 ms ran before the stop, 49 after");
+        assert_eq!(s.expired(at(t0, 5_100)), Some(1));
+        // A gap can't make a clock start in the future.
+        let mut s = TimerStack::default();
+        s.push(1, Some(Duration::from_millis(100)), t0);
+        s.skip(Duration::from_secs(60), at(t0, 10));
+        assert_eq!(s.expired(at(t0, 109)), None);
+        assert_eq!(s.expired(at(t0, 110)), Some(1));
     }
 
     #[test]

@@ -1,0 +1,8 @@
+// A variable named like a builtin hides it, and calling it then says so (DOCS 3, INTERNALS 5.7).
+let str = ""
+try {
+    print(str(1))
+} catch (e) {
+    print(e.type, e.message)
+    print(e.hint)
+}

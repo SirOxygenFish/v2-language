@@ -1,0 +1,3 @@
+SyntaxError JavaScript reads this line as part of the one above, as in a(…) or a[…]: end the line above with ;
+[1, 2]
+2

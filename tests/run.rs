@@ -490,6 +490,21 @@ fn first_run_mistakes_say_what_to_do_next() {
     let folder = folder.to_string_lossy();
     let folder = folder.strip_prefix(r"\\?\").unwrap_or(&folder);
     assert!(stderr.starts_with(&format!("v2: cannot find 'nothing.v2' in {folder}\n")), "{stderr}");
+    // In a folder that is there: the file's own name in it, not the path given once more.
+    std::fs::create_dir_all(home.0.join("sub")).unwrap();
+    let (_, _, stderr) = run_in_home(&home.0, &["sub/x.v2"], &[]);
+    let sub = std::fs::canonicalize(home.0.join("sub")).unwrap();
+    let sub = sub.to_string_lossy();
+    let sub = sub.strip_prefix(r"\\?\").unwrap_or(&sub);
+    assert!(stderr.starts_with(&format!("v2: cannot find 'x.v2' in {sub}\n")), "{stderr}");
+    // A symbolic link to a file that isn't there says so (19.1).
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/nonexistent/real.v2", home.0.join("dangling.v2")).unwrap();
+        let (code, _, stderr) = run_in_home(&home.0, &["dangling.v2"], &[]);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stderr.contains("\n'dangling.v2' is a symbolic link to /nonexistent/real.v2, which isn't there"), "{stderr}");
+    }
 }
 
 #[test]
@@ -782,8 +797,8 @@ fn import_messages_show_paths_per_2_1() {
     assert_eq!(code, Some(0), "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines[0], "cannot find module './lib/../lib/nope.v2' (looked for lib/nope.v2)");
-    assert!(lines[1].starts_with("cannot import './dir': cannot read 'dir': "), "{}", lines[1]);
-    assert!(!lines[1].ends_with('.'), "no final period: {}", lines[1]);
+    // A folder: one of its .v2 files is what to write (6.4).
+    assert_eq!(lines[1], "cannot import './dir': it is a folder, and import loads a .v2 file, as in import \"./dir/keep.v2\" as keep");
     // A missing file outside the cwd shows its absolute path.
     let (_, stdout, _) = run_in_project(&[("app/main.v2", "try { import \"../../gone.v2\" as g } catch (e) { print(e.message) }\n")], "app", &["main.v2"]);
     let shown = stdout.trim_end().rsplit("(looked for ").next().unwrap().trim_end_matches(')');
@@ -1062,6 +1077,27 @@ fn exec_output_in_the_console_code_page_is_decoded() {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     let out = v2_command(&home.0).args(["oem.v2", &python]).current_dir(&home.0).stdin(Stdio::null()).creation_flags(DETACHED_PROCESS).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1 true\n", "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn a_python_program_run_with_exec_writes_utf8() {
+    // INTERNALS 5.10: exec's children get PYTHONIOENCODING=utf-8 unless it is set, so a Python
+    // program's text arrives whole (on Windows its pipes would be in the ANSI code page: café as
+    // cafÚ, and CJK a UnicodeEncodeError); a value the user set is kept.
+    if !needs("py", "a_python_program_run_with_exec_writes_utf8") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    // Python's own escapes, so the program text is ASCII.
+    let src = "let r = exec([args()[0], \"-c\", \"print('caf\\\\u00e9 \\\\u65e5\\\\u672c')\"])\nprint(r.code, r.stdout.trim())\n";
+    std::fs::write(home.0.join("u.v2"), src).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.env_remove("PYTHONIOENCODING").env_remove("PYTHONUTF8");
+    let out = cmd.args(["u.v2", &python]).current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0 caf\u{e9} \u{65e5}\u{672c}\n", "{}", String::from_utf8_lossy(&out.stderr));
+    let out = v2_command(&home.0).args(["u.v2", &python]).env("PYTHONIOENCODING", "ascii:replace").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0 caf? ??\n", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]
@@ -1783,6 +1819,72 @@ fn running(pid: u32) -> bool {
             ok != 0 && code == 259 // STILL_ACTIVE
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_z_stops_the_workers_with_v2() {
+    // INTERNALS 6.5: SIGTSTP (Ctrl+Z) stops v2 and its workers' process groups, as a shell's job
+    // is stopped; SIGCONT (fg, bg) goes on with all of them.
+    if !needs("py", "ctrl_z_stops_the_workers_with_v2") {
+        return;
+    }
+    let home = TempHome::new();
+    let src = "@py {\n    import os, time\n    open(\"worker.pid\", \"w\").write(str(os.getpid()))\n    with open(\"progress.txt\", \"w\") as f:\n        for i in range(40):\n            f.write(\"x\\n\")\n            f.flush()\n            time.sleep(0.05)\n}\nprint(\"done\")\n";
+    std::fs::write(home.0.join("busy.v2"), src).unwrap();
+    let child = v2_command(&home.0).arg("busy.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let v2 = child.id() as libc::pid_t;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let worker = loop {
+        if let Some(pid) = std::fs::read_to_string(home.0.join("worker.pid")).ok().and_then(|s| s.trim().parse::<libc::pid_t>().ok()) {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the block never started");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let state = |pid: libc::pid_t| String::from_utf8_lossy(&Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap().stdout).trim().to_string();
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(v2, libc::SIGTSTP) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(state(v2).starts_with('T') && state(worker).starts_with('T')) {
+        assert!(Instant::now() < deadline, "v2 ({}) and its worker ({}) weren't both stopped", state(v2), state(worker));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let lines = || std::fs::read_to_string(home.0.join("progress.txt")).map(|s| s.lines().count()).unwrap_or(0);
+    let before = lines();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(lines(), before, "the worker ran on while the job was stopped");
+    // SAFETY: as above.
+    unsafe { libc::kill(v2, libc::SIGCONT) };
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(30)).unwrap();
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()), (Some(0), "done\n".to_string()), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(lines(), 40);
+}
+
+#[cfg(unix)]
+#[test]
+fn time_stopped_doesnt_count_toward_call_timeout() {
+    // INTERNALS 8.5: v2 stopped (SIGSTOP, which it can't see) for longer than call_timeout,
+    // during calls that are quicker than it: the clock skips the time stopped, so no call times
+    // out and the engine isn't killed.
+    if !needs("py", "time_stopped_doesnt_count_toward_call_timeout") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("v2.toml"), "[engines.py]\ncall_timeout = 2\n").unwrap();
+    let src = "@py t {\n    import time\n    def one():\n        time.sleep(1)\n        return \"ok\"\n    @export { one }\n}\n@import { one } from t\nfor i in 0..3 {\n    print(i, one())\n}\n";
+    std::fs::write(home.0.join("tick.v2"), src).unwrap();
+    let child = v2_command(&home.0).arg("tick.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let v2 = child.id() as libc::pid_t;
+    std::thread::sleep(Duration::from_millis(1500));
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(v2, libc::SIGSTOP) };
+    std::thread::sleep(Duration::from_secs(3));
+    // SAFETY: as above.
+    unsafe { libc::kill(v2, libc::SIGCONT) };
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(30)).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0 ok\n1 ok\n2 ok\n", "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]

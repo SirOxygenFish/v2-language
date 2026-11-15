@@ -26,9 +26,15 @@ try {
 } catch (e) {
     print(e.message)
 }
-// A module name: the closest module Python could import, as Python words its suggestions.
+// A module name: one edit from a module Python could import, as Python words its suggestions;
+// a name shorter than six letters gets none, as most are packages not installed yet (lxml, xml).
 try {
     @import { mean } from py.statistcs
+} catch (e) {
+    print(e.message)
+}
+try {
+    @import { loads } from py.jsonn
 } catch (e) {
     print(e.message)
 }

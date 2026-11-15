@@ -1,0 +1,15 @@
+// requires: js
+// A V2 function imported into JavaScript with `from v2` ignores the extra arguments JavaScript
+// passes, as one passed in does, so xs.map(f) works with func f(x); one with ...rest gets them
+// all (DOCS 8.2).
+func f(x) { return x * 10 }
+func all(...xs) { return len(xs) }
+@js j {
+    @import { f, all } from v2
+    function viaMap(xs) { return xs.map(f) }
+    function direct() { return f(1, 2) }
+    function counted() { return [1].map(all) }
+    @export { viaMap, direct, counted }
+}
+@import { viaMap, direct, counted } from j
+print(viaMap([1, 2]), direct(), counted())

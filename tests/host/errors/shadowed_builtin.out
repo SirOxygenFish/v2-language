@@ -1,0 +1,2 @@
+TypeError 'str' is a str here, not a function
+a variable named 'str' hides V2's str(): give the variable another name

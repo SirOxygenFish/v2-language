@@ -79,6 +79,23 @@ pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
         format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target))
     })?;
+    // A folder: one of its .v2 files is what to write (Windows would say "Access is denied").
+    if found.is_dir() {
+        let mut names: Vec<String> = std::fs::read_dir(&found)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".v2"))
+            .collect();
+        names.sort();
+        let file = names.first().map_or("FILE.v2", String::as_str);
+        let stem = &file[..file.len() - 3];
+        let plain = stem.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && stem.chars().all(|c| c.is_alphanumeric() || c == '_');
+        let alias = if plain && file != "FILE.v2" { stem } else { "m" };
+        let joined = format!("{}/{file}", spec.trim_end_matches(['/', '\\']));
+        return Err(format!("cannot import '{spec}': it is a folder, and import loads a .v2 file, as in import \"{joined}\" as {alias}"));
+    }
     // `import` loads V2 files: another language's file, or data, is used another way.
     let ext = found.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
     let Some(ext) = ext.filter(|e| e != "v2") else { return Ok(found) };

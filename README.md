@@ -44,8 +44,9 @@ curl -fsSL https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/inst
 
 It puts `v2` in `~/.v2/bin` and adds that folder to your PATH in your shell's startup files
 (it says which). Then open a new terminal. No `curl` (`curl: command not found`)? Install it
-(`sudo apt update && sudo apt install curl` on Ubuntu and Debian; as root, as in a container or a
-fresh WSL distro, leave out `sudo`), or use `wget` instead:
+(`sudo apt update && sudo apt install curl` on Ubuntu and Debian), or use `wget`, if you have it,
+instead. (As root, as in a container or a fresh WSL distro, leave out `sudo` in every command in
+this README: such a system has none.)
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
@@ -333,15 +334,18 @@ More of V2, in short:
   `@js { ({a: 1}) }`, or JavaScript reads the braces as code; and in a `@js` block of several
   lines, end a line with `;` when the next one starts with `(`, `[` or a backtick, or JavaScript
   joins the two. What a block exports, another block imports with the same `@import` line, written
-  inside it. For code whose braces V2 can't match, a block can use a fence instead: three
-  backticks after the header, and three backticks alone on the line that closes it.
+  inside it. A block with `@export` runs when its language is first needed, so what its top level
+  prints comes then, or never: do such work in a block without `@export`. `sys.argv` and
+  `process.argv` in a block are V2's worker's: pass the script's in, `@py(a: args()) { ... }`.
+  For code whose braces V2 can't match, a block can use a fence instead: three backticks after
+  the header, and three backticks alone on the line that closes it.
 - **From the shell:** `$1` is `args()[0]`, `$(cmd)` is `exec([...]).stdout.trim()` and `$?` its
   `.code`. `exec` starts one program, not a shell, so for a pipe, a glob, `cd dir && make` or
   `VAR=x cmd`, start a shell: `exec(["sh", "-c", "cd build && make"])`, on Windows
   `exec(["cmd", "/c", "cd /d build && make"])`. It returns when the program ends, with all its
   output; to see the output as it comes, run the program from a `@py` block with `subprocess.run`
-  (what it prints goes to standard error). `shutil.rmtree(path)` in a `@py` block removes a
-  folder.
+  (what it prints goes to standard error). In a `@py` block, `shutil.rmtree(path)` removes a
+  folder, `os.replace(a, b)` renames or moves a file, and `shutil.copy2(a, b)` copies one.
 
 `v2 check FILE` checks a script's V2 syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
@@ -415,10 +419,13 @@ one (`brew install python`, or [python.org](https://www.python.org/downloads/)).
 Linux distributions often ship older versions than 22.13 (`apt install nodejs` gives 18 on Ubuntu
 24.04): get Node.js 22 or newer from [nodejs.org](https://nodejs.org/en/download). One way there:
 its Linux `.tar.xz`, unpacked into `/opt` (`sudo apt install xz-utils`, then
-`sudo tar -xf node-v22.*-linux-x64.tar.xz -C /opt`), and its `bin` folder put on PATH in
-`~/.profile` (`echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' >> ~/.profile`, with the
-version you unpacked), then a new terminal; nvm, which the site also offers, sets up interactive
-shells only. `v2 doctor` shows which version V2 found, and where.
+`sudo tar -xf node-v22.*-linux-x64.tar.xz -C /opt`), and its `bin` folder put on PATH in your
+shell's startup file (bash: `echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' >>
+~/.profile`, with the version you unpacked; zsh: `~/.zshenv`; fish:
+`fish_add_path /opt/node-v22.21.0-linux-x64/bin`), then a new terminal. Or, whatever the shell,
+name it in a `v2.toml`: `[engines.js] command = ["/opt/node-v22.21.0-linux-x64/bin/node"]`. nvm,
+which the site also offers, sets up interactive shells only. `v2 doctor` shows which version V2
+found, and where.
 
 **`ImportError: No module named 'numpy'`** (or `Cannot find module 'lodash'`). Install the package:
 [Python and npm packages](#python-and-npm-packages).
@@ -430,10 +437,12 @@ shells only. `v2 doctor` shows which version V2 found, and where.
 and `Out-File` write UTF-16, and its `Set-Content` the old ANSI code page: use an editor, or add
 `-Encoding utf8`.
 
-**Non-ASCII text turns into `├╝` or `?` when piped in Windows PowerShell 5.1.** It decodes and
-encodes what passes through pipes with the console's old code page. Run
+**Non-ASCII text turns into `├╝`, `Ã©` or `?` when piped in Windows PowerShell 5.1, or `input()`
+says `input line 1 is not valid UTF-8`.** It decodes and encodes what passes through pipes with
+the console's old code page. Run
 `[Console]::OutputEncoding = $OutputEncoding = [Text.UTF8Encoding]::new()` first in that window,
-or use PowerShell 7. In cmd.exe, run `chcp 65001` first.
+or use PowerShell 7; and read a file with `Get-Content -Encoding UTF8 file.txt`, as 5.1 reads one
+without a byte-order mark in the old code page. In cmd.exe, run `chcp 65001` first.
 
 **`UnicodeDecodeError` when a `@py` block reads a file that plain Python reads.** Blocks run in
 Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass
@@ -499,7 +508,9 @@ language: only run scripts you trust ([docs, chapter 16](https://github.com/SirO
 **Is it fast?** V2's own code is a small interpreter, fine for gluing things together. Heavy
 loops belong in a Python or JavaScript block (and, later, in C or Rust blocks). Each call from one
 language to another takes about a tenth of a millisecond: pass a whole list to one call rather than
-calling once per item.
+calling once per item. Each line a block prints crosses over to V2 too (a Python block prints
+about a hundred thousand lines a second): for a lot of output, build the text in the block and
+print it once, or return it.
 
 **Can blocks use async JavaScript?** Yes: a function that returns a Promise (an `async` function),
 or a block whose value is a Promise, is awaited, and you get its result; a rejection is an error you

@@ -349,6 +349,15 @@ fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator
 /// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
 /// or what to install, from the folder of the importing .v2 file, `dir`.
 fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<String> {
+    // A package whose `exports` offer only `import`, which `require` can't load: a block can.
+    if let Some(rest) = message.split("No \"exports\" main defined in ").nth(1) {
+        let parts: Vec<String> = Path::new(rest.trim()).iter().map(|c| c.to_string_lossy().into_owned()).collect();
+        let at = parts.iter().rposition(|c| c == "node_modules")?;
+        let package = parts[at + 1..parts.len().saturating_sub(1)].join("/");
+        return Some(format!(
+            "'{package}' can be loaded only with import(), which a @js block can do: async function load() {{ return await import(\"{package}\") }}, then @export {{ load }} and call load()"
+        ));
+    }
     let quoted = |after: &str| message.split(after).nth(1).and_then(|r| r.split('\'').next()).map(str::to_string);
     if let Some(name) = quoted("No module named '") {
         // Python names the first part it couldn't find: a dotted one means the rest was there.
@@ -967,7 +976,8 @@ impl Interp {
     }
 
     /// A worker's `call {"route": n}` (13.6), or a call of a route stub passed back to V2.
-    pub(crate) fn call_route(&mut self, n: usize, pos: Vec<Value>, named: Vec<(Rc<str>, Value)>, at: Span) -> Exec<Value> {
+    /// `js`: the caller is JavaScript, whose extra arguments a V2 function ignores (DOCS 8.2).
+    pub(crate) fn call_route(&mut self, n: usize, mut pos: Vec<Value>, named: Vec<(Rc<str>, Value)>, at: Span, js: bool) -> Exec<Value> {
         let f = match self.routes.get(n) {
             None => return fail("ProtocolError", format!("unknown callable id {n}")),
             Some(Route::Target(f)) => f.clone(),
@@ -991,6 +1001,9 @@ impl Interp {
                 f
             }
         };
+        if js {
+            crate::engines::session::drop_js_extras(&f, &mut pos);
+        }
         self.call_value(&f, pos, named, at)
     }
 
@@ -1068,6 +1081,12 @@ mod tests {
         assert_eq!(hint("Cannot find module '@scope/pkg/sub'", &d), "if '@scope/pkg' isn't misspelled, install it in your project folder: npm install @scope/pkg");
         assert_eq!(hint("Cannot find module './nope.js'", &d), "a local file is found from the .v2 file's folder: check the path");
         assert_eq!(missing_package_hint("something else", &d, false), None);
+        // A package that offers only `import` (an ES module's `exports`).
+        let m = format!("No \"exports\" main defined in {}", d.join("node_modules").join("@scope").join("esm-only").join("package.json").display());
+        assert_eq!(
+            hint(&m, &d),
+            "'@scope/esm-only' can be loaded only with import(), which a @js block can do: async function load() { return await import(\"@scope/esm-only\") }, then @export { load } and call load()"
+        );
     }
 
     #[test]

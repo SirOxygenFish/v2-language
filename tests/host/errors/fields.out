@@ -1,7 +1,7 @@
 ValueError - port out of range: 99999
 at fields.v2:4:9
 ["parse_port (fields.v2:4)", "fields.v2:10"]
-null null null null
+null null null null null
 done
 KeyError k null null null [] {"extra": 1}
 KeyError: k
@@ -18,3 +18,4 @@ from catch: kept
 inner finally
 outer caught a
 KeyError 69 13
+V2 doesn't expand %NO_SUCH_V2_VAR% in paths: write getenv("NO_SUCH_V2_VAR") in its place

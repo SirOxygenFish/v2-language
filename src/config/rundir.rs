@@ -184,7 +184,8 @@ fn create() -> Result<PathBuf, String> {
 
 /// The run dirs that runs killed outright (SIGKILL, Task Manager) left in `base`: a real folder
 /// named `v2-{pid}-{32 hex}` (on POSIX this user's), whose pid isn't running, is removed, best
-/// effort (20.3). A live pid, even one reused by another program, keeps its folder.
+/// effort (20.3). A live pid keeps its folder, except on Windows, which reuses pids soon: there a
+/// process that started after the folder was made isn't the run that made it.
 fn sweep_stale(base: &Path) {
     let me = std::process::id();
     for entry in std::fs::read_dir(base).into_iter().flatten().flatten() {
@@ -192,16 +193,54 @@ fn sweep_stale(base: &Path) {
         let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("v2-")) else { continue };
         let Some((pid, hex)) = rest.split_once('-') else { continue };
         let Ok(pid) = pid.parse::<u32>() else { continue };
-        if pid == me || hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || running(pid) {
+        if pid == me || hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
         let path = entry.path();
         let Ok(m) = std::fs::symlink_metadata(&path) else { continue };
-        if !m.is_dir() || !owned_by_me(&m) {
+        if !m.is_dir() || !owned_by_me(&m) || owner_running(pid, &m) {
             continue;
         }
         let _ = std::fs::remove_dir_all(&path);
     }
+}
+
+/// Whether the run that made the folder `m` describes may still be running (20.3).
+#[cfg(unix)]
+fn owner_running(pid: u32, _: &std::fs::Metadata) -> bool {
+    running(pid)
+}
+
+/// Windows: a process with that pid that started after the folder was made has the pid again.
+#[cfg(windows)]
+fn owner_running(pid: u32, m: &std::fs::Metadata) -> bool {
+    match (started(pid), m.created()) {
+        (Some(started), Ok(made)) => started <= made,
+        _ => running(pid),
+    }
+}
+
+/// When the process with this pid started, if it is running and can be asked.
+#[cfg(windows)]
+fn started(pid: u32) -> Option<std::time::SystemTime> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut made, mut ended, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: a handle we close, and FILETIMEs for the call to fill.
+    let ok = unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32 && GetProcessTimes(h, &mut made, &mut ended, &mut kernel, &mut user) != 0;
+        CloseHandle(h);
+        ok
+    };
+    // 100 ns units since 1601; the Unix epoch is 11,644,473,600 s later.
+    let ticks = ((made.dwHighDateTime as u64) << 32 | made.dwLowDateTime as u64).checked_sub(116_444_736_000_000_000)?;
+    ok.then(|| std::time::UNIX_EPOCH + std::time::Duration::from_nanos(ticks.saturating_mul(100)))
 }
 
 #[cfg(unix)]
@@ -371,9 +410,26 @@ mod tests {
             std::fs::write(d.join("adapters").join("py.py"), "x").unwrap();
         }
         assert!(!running(dead) && running(std::process::id()));
+        // Windows reuses pids: a folder made before the process that has its pid now started.
+        #[cfg(windows)]
+        let (mut later, reused) = {
+            let made = base.join("made first");
+            std::fs::create_dir_all(made.join("adapters")).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+            let reused = base.join(format!("v2-{}-{hex}", child.id()));
+            std::fs::rename(&made, &reused).unwrap();
+            (child, reused)
+        };
         sweep_stale(&base);
         assert!(!stale.exists(), "the killed run's folder goes");
         assert!(live.exists() && other.exists(), "a running pid's folder and other names stay");
+        #[cfg(windows)]
+        {
+            assert!(!reused.exists(), "a pid that a later process has now");
+            let _ = later.kill();
+            let _ = later.wait();
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 

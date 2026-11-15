@@ -1035,8 +1035,8 @@ if __name__ == "__main__":
         return d[-1][-1]
 
     def near_module(name):
-        """The importable top-level module closest to `name`, within V2's did-you-mean limit (13.5):
-        the standard library's, the built-in ones, and what sys.path holds."""
+        """An importable top-level module one edit from `name`, when `name` has six or more
+        characters (13.5): the standard library's, the built-in ones, and what sys.path holds."""
         if "pkgutil" not in sys.modules:
             saved = sys.path[:]
             sys.path[:] = ORIGINAL_PATH  # the stdlib's pkgutil, not a project file (9.3)
@@ -1050,15 +1050,17 @@ if __name__ == "__main__":
             found = set()
         names = set(getattr(sys, "stdlib_module_names", ())) | set(sys.builtin_module_names) | found
         target = name.lower()
-        limit = max(1, min(3, (len(target) + 2) // 3))
+        # Stricter than V2's own rule: most such names are packages not installed yet, and short
+        # package names sit one edit from a standard module (lxml, xml; httpx, http; PIL, pip).
+        if len(target) < 6:
+            return None
         best = None
         for c in sorted(names):
-            if c == name or (c.startswith("_") and not name.startswith("_")) or abs(len(c) - len(target)) > limit:
+            if c == name or (c.startswith("_") and not name.startswith("_")) or abs(len(c) - len(target)) > 1:
                 continue
-            dist = osa(target, c.lower())
-            if dist <= limit and (best is None or dist < best[0]):
-                best = (dist, c)
-        return best and best[1]
+            if osa(target, c.lower()) <= 1:
+                best = best or c
+        return best
 
     def main_guard(node):
         """`if __name__ == "__main__":` (either way round), which a block's code never passes."""
@@ -1344,7 +1346,16 @@ if __name__ == "__main__":
                 finally:
                     path.hooks -= 1
                     path.discard(id(x))
-        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data: make plain data of it in a block first, as in @py(h) { list(h) } or @py(h) { vars(h) }" % type_name(x))
+        # A way that works for this object: its ISO text, its items, its fields, else its text.
+        if callable(getattr(x, "isoformat", None)):
+            how = "h.isoformat()"
+        elif hasattr(x, "__iter__"):
+            how = "list(h)"
+        elif hasattr(x, "__dict__"):
+            how = "vars(h)"
+        else:
+            how = "str(h)"
+        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data: make plain data of it in a block first, as in @py(h) { %s }" % (type_name(x), how))
 
     def do_op(m):
         op = m.get("op")
