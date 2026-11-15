@@ -759,7 +759,11 @@ impl Resolver<'_> {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
                 match venv.parent().and_then(Path::parent).filter(|f| is_venv(f)) {
                     Some(folder) => format!("[python] venv '{shown}' is a file: venv names the virtual environment's folder: write {}", write(folder)),
-                    None => format!("[python] venv '{shown}' is a file: venv names a virtual environment's folder; for a Python that isn't in one, write {} instead of venv", command(venv)),
+                    // A Python's name (python3, python.exe, pypy3): that program may be meant.
+                    None if venv.file_name().is_some_and(|f| f.to_string_lossy().to_ascii_lowercase().starts_with("py")) => {
+                        format!("[python] venv '{shown}' is a file: venv names a virtual environment's folder; for a Python that isn't in one, write {} instead of venv", command(venv))
+                    }
+                    None => format!("[python] venv '{shown}' is a file: venv names a virtual environment's folder, as in venv = \".venv\""),
                 }
             } else if let Some(folder) = inside.filter(|f| is_venv(f)) {
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}", write(folder))
@@ -876,6 +880,15 @@ impl Resolver<'_> {
         // `env -i v2 x.v2`: nothing to search (7.5).
         if self.lookup.path.as_ref().is_none_or(|p| p.is_empty()) {
             message = message.replacen(" on PATH", " on PATH, which isn't set", 1);
+            // It may well be installed (cron, `env -i`): what fixes it is a PATH or a name (round 16).
+            let key = if &*spec.id == "ts" { "js" } else { &*spec.id };
+            let fix = format!("fix: set PATH, or name the program with V2_ENGINE_{} or in v2.toml, [engines.{key}] command", key.to_ascii_uppercase());
+            message = message
+                .lines()
+                .filter(|l| !l.starts_with("or set [engines."))
+                .map(|l| if l.starts_with("install:") { fix.as_str() } else { l })
+                .collect::<Vec<_>>()
+                .join("\n");
         }
         Err(NotFound { status, message, command: None, from: None, skipped })
     }
@@ -1074,6 +1087,9 @@ mod tests {
         let p = fake(|_| says("Python 3.12.1"));
         let nf = resolve_with(&Config::default(), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.contains(" on PATH, which isn't set\n"), "{}", nf.message);
+        // Round 16: no install line for what may be installed, but how to point V2 at it.
+        assert!(!nf.message.contains("install:"), "{}", nf.message);
+        assert!(nf.message.ends_with("fix: set PATH, or name the program with V2_ENGINE_PY or in v2.toml, [engines.py] command"), "{}", nf.message);
     }
 
     #[test]
@@ -1593,6 +1609,11 @@ mod tests {
         // The python itself, not in a venv: name it as the command.
         let nf = resolve_with(&at(&py), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.contains("is a file: venv names a virtual environment's folder; for a Python that isn't in one, write [engines.py] command = "), "{}", nf.message);
+        // Another file (round 16: `venv = "v2.toml"`): not offered as a Python.
+        let toml_file = d.join("v2.toml");
+        std::fs::write(&toml_file, "").unwrap();
+        let nf = resolve_with(&at(&toml_file), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with("is a file: venv names a virtual environment's folder, as in venv = \".venv\""), "{}", nf.message);
         // A folder of other things: nothing to create in it.
         let src = d.join("src");
         std::fs::create_dir_all(&src).unwrap();

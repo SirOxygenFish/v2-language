@@ -1,0 +1,21 @@
+// requires: js
+// TypeScript's <T>x cast isn't a type the stripping removes: the ReferenceError it leads to gets
+// a hint (round 16); the as form works.
+try {
+    print(@ts {
+        const a: unknown = 5
+        <number>a
+    })
+} catch (e) {
+    print(e.foreign_type, "|", e.message, "|", e.hint)
+}
+print(@ts {
+    const a: unknown = 5
+    a as number
+})
+// Another ReferenceError gets no such hint.
+try {
+    @ts { missing_name + 1 }
+} catch (e) {
+    print(e.foreign_type, "|", e.hint)
+}

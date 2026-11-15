@@ -73,3 +73,11 @@ for v in [when, cents, {"ts": when}] {
     show(func() => json_stringify(v))
 }
 show(func() => pshown(stamp))
+// Round 16: an int beyond 64 bits goes as text; to_v2 says so too.
+let pbig = @py { 2 ** 64 }
+let jbig = @js { 2n ** 64n }
+show(func() => @js(pbig) { pbig })
+show(func() => @py(jbig) { jbig })
+show(func() => to_v2(pbig))
+show(func() => to_v2(jbig))
+print(@js(s: @py(pbig) { str(pbig) }) { BigInt(s) + 1n == 2n ** 64n + 1n })

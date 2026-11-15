@@ -400,7 +400,14 @@ impl Interp {
             // A variable the program reads as it starts may be why (8.4).
             let id = self.sessions[s].engine.spec.id.clone();
             let vars: String = super::spec::startup_variables(&id).iter().map(|(n, v)| format!("; {n} is set ({v}), which it reads as it starts")).collect();
-            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any{vars}"));
+            // Node.js reserves about 1 GB of address space as it starts (round 16).
+            #[cfg(unix)]
+            let limit = crate::address_limit()
+                .map(|l| format!("; a memory limit (ulimit -v) of {} MB is set for this shell, and {} as it starts: raise it", l >> 20, if &*id == "js" { "Node.js reserves about 1 GB" } else { "the engine may need more" }))
+                .unwrap_or_default();
+            #[cfg(not(unix))]
+            let limit = "";
+            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any{vars}{limit}"));
         }
         let pid = pid.map_or_else(String::new, |p| format!(" (pid {p})"));
         error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above, if any", pending.name))

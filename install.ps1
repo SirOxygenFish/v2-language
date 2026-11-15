@@ -31,6 +31,15 @@
         $path = $path.Trim().Trim('"')
         if ($path -eq '~') { $path = $env:USERPROFILE }
         elseif ($path -match '^~[\\/]') { $path = Join-Path $env:USERPROFILE $path.Substring(2) }
+        # Run as a file from a folder whose path has [ or ], Windows PowerShell can't enter it and
+        # starts in its own folder instead, while the process is still in that folder.
+        if (-not [IO.Path]::IsPathRooted($path)) {
+            $here = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+            $process = [IO.Directory]::GetCurrentDirectory()
+            if ($here.TrimEnd('\') -eq $PSHOME.TrimEnd('\') -and $process.TrimEnd('\') -ne $PSHOME.TrimEnd('\')) {
+                return [IO.Path]::GetFullPath([IO.Path]::Combine($process, $path))
+            }
+        }
         $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
     }
     # The first v2.exe a window with this PATH runs, or $null.

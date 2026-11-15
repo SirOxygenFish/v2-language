@@ -1,0 +1,14 @@
+// exit: 1
+// stderr: not_reached_nested.v2:13:11: ImportError: block 'helpers' (line 7) is inside an `if`, a loop or a function, which hasn't run it: a block runs when the code it is in reaches it — move it to the top level, or this @import into that code
+// Round 16: the block is above the @import already, but in an `if` that didn't run, so
+// "move this @import below it" would send the reader in a circle.
+print("first")
+if false {
+    @py helpers {
+        def f():
+            return 1
+        @export { f }
+    }
+}
+@import { f } from helpers
+print(f())

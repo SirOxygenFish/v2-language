@@ -1,0 +1,2 @@
+SyntaxError | The requested module './b.js' does not provide an export named 'mul'
+  hint: "type": "commonjs", so Node loads ./b.js as CommonJS, whose exports an import can't name: set "type": "module" there, or rename it to .mjs

@@ -1,0 +1,11 @@
+// requires: js
+// An ES module that imports names from a sibling file which package.json makes CommonJS: Node
+// says the file has no such export, and the hint names the real cause (round 16, INTERNALS 13.5;
+// a .ts sibling: the unit test, since Node 22.13 fails there with an error of its own).
+try {
+    @import { twice } from js."./a.mjs"
+    print(twice(2))
+} catch (e) {
+    print(e.foreign_type, "|", e.message.split("\n")[0])
+    print("  hint:", e.hint.split(" says ")[1])
+}

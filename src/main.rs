@@ -58,17 +58,21 @@ pub fn interp_stack_bytes() -> usize {
     INTERP_STACK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Unix: under an address-space limit (`ulimit -v`), a stack bigger than a quarter of it leaves
-/// too little for the heap, and deep recursion ends in an abort ("memory allocation of 104 bytes
-/// failed") instead of V2's stack error.
+/// Unix: the address-space limit (`ulimit -v`), if one is set.
+#[cfg(unix)]
+fn address_limit() -> Option<libc::rlim_t> {
+    // SAFETY: getrlimit fills a zeroed struct.
+    let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+    (unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut r) } == 0 && r.rlim_cur != libc::RLIM_INFINITY).then_some(r.rlim_cur)
+}
+
+/// Unix: under an address-space limit, a stack bigger than a quarter of it leaves too little for
+/// the heap, and deep recursion ends in an abort ("memory allocation of 104 bytes failed")
+/// instead of V2's stack error.
 fn stack_cap() -> usize {
     #[cfg(unix)]
-    {
-        // SAFETY: getrlimit fills a zeroed struct.
-        let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
-        if unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut r) } == 0 && r.rlim_cur != libc::RLIM_INFINITY {
-            return usize::try_from(r.rlim_cur / 4).unwrap_or(usize::MAX);
-        }
+    if let Some(limit) = address_limit() {
+        return usize::try_from(limit / 4).unwrap_or(usize::MAX);
     }
     usize::MAX
 }
@@ -82,6 +86,15 @@ fn main() {
     // Before any thread starts: only the interpreter thread takes SIGINT and the others (6.5).
     #[cfg(unix)]
     engines::process::take_interrupts(false);
+    // glibc gives each thread that allocates an arena of its own, each holding 64 MiB of address
+    // space: under `ulimit -v` they, not the program, would use it up. One arena then.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if address_limit().is_some() {
+        // SAFETY: a malloc setting, made before any other thread runs.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, 1);
+        }
+    }
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // A file V2 couldn't name in its messages and paths: said so, not "no such file" (19.1).
     let file = raw.get(usize::from(raw.first().is_some_and(|w| w == "check")));

@@ -1,0 +1,3 @@
+ReferenceError | number is not defined | TypeScript's <T>x cast is code to Node, not a type it removes: write x as T
+5
+ReferenceError | null

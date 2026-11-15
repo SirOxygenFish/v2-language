@@ -1,0 +1,4 @@
+[4, 1, 0, 0]
+["(err, req, res, next)", "(a, *args, **kwargs)", "(*args, **kwargs)", "()"]
+handled boom
+42
