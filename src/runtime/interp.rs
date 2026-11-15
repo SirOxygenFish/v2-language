@@ -129,6 +129,11 @@ fn no_member(o: &Value, what: &str, n: &str) -> String {
     }
 }
 
+/// `input()`, or `input("…")`, a call whose null means the input has ended.
+fn reads_input(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Name(n, _) if &**n == "input"))
+}
+
 /// `x.items()`, `x.iteritems()`, `x.iterrows()`, `x.entries()`: a loop over pairs, which Python and
 /// JavaScript unpack (5.8). The method's name and the span of `x`.
 fn pairs_call(e: &Expr) -> Option<(&'static str, Span)> {
@@ -1044,6 +1049,12 @@ impl Interp {
                 let Some(o) = self.chain(obj, env)? else { return Ok(None) };
                 let k = self.eval(index, env)?;
                 let r = self.index(&o, &k, *bracket);
+                // `args()[0]` with no argument given: the script can say it needs one.
+                if let (Err(Flow::Error(e)), ExprKind::Call { callee, .. }) = (&r, &obj.kind) {
+                    if &*e.kind == "IndexError" && matches!(&callee.kind, ExprKind::Name(n, _) if &**n == "args") {
+                        let _ = e.hint.set("the script was given fewer arguments: use args().get(0, \"default\") for one that may be missing, or check len(args()) first".into());
+                    }
+                }
                 Ok(Some(self.at(r, *bracket)?))
             }
             ExprKind::Slice { obj, lo, hi, bracket } => {
@@ -1067,7 +1078,13 @@ impl Interp {
                         return Ok(None);
                     }
                     let o = self.settled(o, name.span)?;
-                    let target = self.method_target(&o, name)?;
+                    let target = match self.method_target(&o, name) {
+                        Err(Flow::Error(e)) if matches!(o, Value::Null) && reads_input(obj) => {
+                            let _ = e.hint.set("input() gives null when the input has ended: check it first, as in let line = input(); if line == null { break }".into());
+                            return Err(Flow::Error(e));
+                        }
+                        other => other?,
+                    };
                     let (pos, named) = self.args(args, env)?;
                     return Ok(Some(self.call_method(&o, name, target, pos, named)?));
                 }
@@ -1366,6 +1383,11 @@ impl Interp {
     fn index_of(&self, k: &Value, what: &str) -> Exec<i64> {
         match k {
             Value::Int(i) => Ok(*i),
+            Value::Float(_) => {
+                let err = ErrorValue::new("TypeError", format!("{what} index must be an int, got float"));
+                let _ = err.hint.set("V2's / always gives a float: write div(a, b) for a whole number, as in xs[div(len(xs), 2)]".into());
+                Err(Flow::Error(Rc::new(err)))
+            }
             other => type_error(format!("{what} index must be an int, got {}", other.type_name())),
         }
     }

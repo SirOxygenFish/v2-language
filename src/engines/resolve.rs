@@ -618,6 +618,12 @@ impl Resolver<'_> {
                     format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id))
                 } else if let Some(fix) = library_fix(&path, reason) {
                     format!("\nfix: {fix}")
+                } else if origin == Origin::Venv {
+                    // A venv's python that doesn't run: the Python it was made with is gone (an
+                    // upgrade that removed it: Windows says "No Python at …").
+                    let venv = path.parent().and_then(Path::parent).unwrap_or(&path);
+                    let python = if cfg!(windows) { "py" } else { "python3" };
+                    format!("; make the venv again, {python} -m venv --clear {}, and install its packages again", crate::cli::shell_word(&venv.display().to_string()))
                 } else {
                     String::new()
                 };
@@ -1576,6 +1582,15 @@ mod tests {
         std::fs::write(other.join("pyvenv.cfg"), "home = x\n").unwrap();
         let nf = resolve_with(&at(&other), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with(&format!(", so it was made on another system or is damaged: make it again here, {python} -m venv --clear {}", other.display())), "{}", nf.message);
+        // A venv whose python is there but doesn't run: the Python it was made with is gone.
+        let old = d.join("oldvenv");
+        let bin = old.join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(old.join("pyvenv.cfg"), "home = C:\\Python39\n").unwrap();
+        exe(&bin, "python");
+        let gone = fake(|_| ProbeOutcome::Exited { code: Some(103), output: "No Python at '\"C:\\Python39\\python.exe'".into() });
+        let nf = resolve_with(&at(&old), &lookup(&[], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("; make the venv again, {python} -m venv --clear {}, and install its packages again", old.display())), "{}", nf.message);
     }
 
     #[cfg(windows)]

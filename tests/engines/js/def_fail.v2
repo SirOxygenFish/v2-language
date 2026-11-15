@@ -1,6 +1,7 @@
 // requires: js
-// A JavaScript definition block that fails to load stays failed; @export names, quoted ones
-// included, must be defined (DOCS 4.3, 6.1; INTERNALS 12.1, 12.2, 12.4).
+// A JavaScript definition block that fails to load stays failed: reached again, ImportError with
+// the first error as its cause; @export names, quoted ones included, must be defined (DOCS 4.3,
+// 6.1; INTERNALS 12.1, 12.2, 12.4).
 let errs = []
 for i in 0..2 {
     try {
@@ -13,7 +14,7 @@ for i in 0..2 {
         errs.push(e)
     }
 }
-print(errs[0] == errs[1], errs[0].type, errs[0].foreign_type, errs[0].message)
+print(errs[1].cause == errs[0], errs[1].type, errs[0].type, errs[0].foreign_type, errs[0].message)
 for name in ["plain", "quoted"] {
     try {
         if name == "plain" {

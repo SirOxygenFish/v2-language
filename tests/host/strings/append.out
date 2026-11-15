@@ -12,6 +12,6 @@ abcabc
 ["px", "qz"] p
 {"k": "ab"}
 900 abcabc 301 -dd true
-TypeError: unsupported operand types for +: 'str' and 'int' — use f"...${x}" or str(x)
+TypeError: unsupported operand types for +: 'str' and 'int' — to join text, use f"...${x}" or str(x); to count with text such as input() gives, convert it: int(x) or float(x)
 TypeError: cannot assign to constant 'NAME'
 v

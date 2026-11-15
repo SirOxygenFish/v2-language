@@ -1,0 +1,14 @@
+// requires: py js
+// A function a block defines but doesn't export, called from V2: what to add (INTERNALS 5.9).
+@py {
+    def double(x):
+        return x * 2
+}
+@js tools {
+    function triple(x) { return x * 3 }
+    const quad = (x) => x * 4
+}
+try { print(double(4)) } catch (e) { print(e.message) }
+try { print(triple(4)) } catch (e) { print(e.message) }
+try { print(quad(4)) } catch (e) { print(e.message) }
+try { print(doubles(4)) } catch (e) { print(e.message) }

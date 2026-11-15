@@ -135,6 +135,11 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, next: Option<&str>) -> S
     if path.extension().is_none() && folder.join(format!("{name}.v2")).is_file() {
         return format!("did you mean '{file}.v2'?");
     }
+    // Notepad saves `hello` as hello.txt: whether FILE was hello or hello.v2, it becomes hello.v2.
+    let stem = name.strip_suffix(".v2").unwrap_or(&name);
+    if folder.join(format!("{stem}.txt")).is_file() && (stem != name || path.extension().is_none()) {
+        return format!("there is a '{stem}.txt': your editor saved it as a .txt file, so rename it to '{stem}.v2'");
+    }
     if folder.join(format!("{name}.txt")).is_file() {
         return format!("there is a '{name}.txt': your editor added '.txt', so rename it to '{name}'");
     }
@@ -255,6 +260,10 @@ mod tests {
         assert_eq!(hint("notes.v2", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         assert_eq!(hint("helo.v2", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("zzzzzz.v2", None), "the .v2 files there: b.v2, hello.v2");
+        // Notepad's hello.txt, run as hello.v2 or as hello.
+        std::fs::write(d.join("greet.txt"), "print(1)\n").unwrap();
+        assert_eq!(hint("greet.v2", None), "there is a 'greet.txt': your editor saved it as a .txt file, so rename it to 'greet.v2'");
+        assert_eq!(hint("greet", None), "there is a 'greet.txt': your editor saved it as a .txt file, so rename it to 'greet.v2'");
         // Names are compared without .v2: nope.v2 is no typo of tour.v2.
         std::fs::write(d.join("tour.v2"), "print(1)\n").unwrap();
         assert_eq!(hint("nope.v2", None), "the .v2 files there: b.v2, hello.v2, tour.v2");

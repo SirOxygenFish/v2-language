@@ -88,8 +88,11 @@ pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
         "file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
         "file is not valid UTF-8: it looks like a binary file, not a V2 script"
-    } else {
+    } else if cfg!(windows) {
         "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8"
+    } else {
+        // On Linux and macOS such a file comes from an old system or a share.
+        "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 or Latin-1: save it as UTF-8, as in iconv -f cp1252 -t utf-8 old.v2 > new.v2"
     }
 }
 

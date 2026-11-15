@@ -7,11 +7,11 @@ ValueError: division by zero
 ValueError: division by zero
 ValueError: division by zero
 ValueError: division by zero
-TypeError: unsupported operand types for +: 'str' and 'int' — use f"...${x}" or str(x)
-TypeError: unsupported operand types for -: 'int' and 'str'
+TypeError: unsupported operand types for +: 'str' and 'int' — to join text, use f"...${x}" or str(x); to count with text such as input() gives, convert it: int(x) or float(x)
+TypeError: unsupported operand types for -: 'int' and 'str' — to count with text such as input() gives, convert it: int(x) or float(x)
 TypeError: unsupported operand types for *: 'list' and 'str'
 TypeError: cannot compare list and list with '<'
-TypeError: cannot compare str and int with '<'
+TypeError: cannot compare str and int with '<' — to compare text such as input() gives with a number, convert it: int(x) or float(x)
 TypeError: bad operand type for unary -: 'str'
 TypeError: 'in' needs a list, dict, str or bytes on the right, got int
 TypeError: 'in' on a str needs a str, got int

@@ -1272,6 +1272,13 @@ if __name__ == "__main__":
                 exports.append({"name": n, "kind": "value", "value": encode_value(v, n)})
         if not missing:
             return {"value": None, "exports": exports, "missing": missing}
+        # Your statistics.py next to the script, which Python found before its own (13.5).
+        mine = getattr(mod, "__file__", None)
+        if m["name"] in getattr(sys, "stdlib_module_names", ()) and isinstance(mine, str):
+            where = os.path.normcase(os.path.abspath(mine))
+            if any(where.startswith(os.path.normcase(os.path.abspath(p)) + os.sep) for p in lead):
+                raise Fail("ImportError", "py.%s is your %s, which hides Python's own %s module, and it has no '%s': give your file another name"
+                           % (m["name"], mine, m["name"], missing[0]))
         # What it has, for V2's did-you-mean (9.4, 13.5).
         try:
             have = sorted(n for n in dir(mod) if isinstance(n, str) and not n.startswith("_") and n == well_formed(n))
@@ -1372,6 +1379,12 @@ if __name__ == "__main__":
                     raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
                 if path.hooks >= MAX_DEPTH:
                     raise Fail("MarshalError", "to_v2(): value nested deeper than %d levels" % MAX_DEPTH)
+                # A pandas or numpy object whose items alone pass the limit is refused before it
+                # converts, which would hold all of it as Python objects (gigabytes) to fail anyway:
+                # each item takes at least 2 bytes as sent ("0,"), 6 in to_dict's form ({"0":0,}).
+                size = getattr(x, "size", None)
+                if isinstance(size, numbers.Integral) and not isinstance(size, bool) and int(size) * (6 if hook == "to_dict" else 2) > LIMIT:
+                    raise Fail("MarshalError", "value too large to send to V2 (%d items, more than %d MiB)" % (size, LIMIT >> 20))
                 path.add(id(x))
                 path.hooks += 1
                 try:

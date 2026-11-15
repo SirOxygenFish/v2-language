@@ -45,6 +45,7 @@ Exit codes:
   2    usage or configuration error
   3    a required engine is missing
   130  interrupted (Ctrl+C, or told to stop); finally blocks don't run, engines are stopped
+       (Linux and macOS: v2 ends by the signal, which a shell shows as 128 + its number)
   141  the output's reader went away (v2 x.v2 | head)
   101  internal error in V2 itself (a bug, please report it)
 ";

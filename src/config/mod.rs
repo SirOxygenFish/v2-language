@@ -343,6 +343,16 @@ impl File {
         Ok(())
     }
 
+    /// `~/x` with no home folder set (`env -i`, a service without one): an error, not a folder
+    /// named `~` next to the file (18.1).
+    fn no_home(&self, what: &str, text: &str) -> Result<(), ConfigError> {
+        let tilde = text == "~" || text.starts_with("~/") || text.starts_with("~\\");
+        if tilde && home_dir().is_none() {
+            return Err(self.error(format!("{what}: '{text}' starts with ~, but {HOME_VAR} isn't set, so there is no home folder for it: write the full path")));
+        }
+        Ok(())
+    }
+
     /// A path: a leading `~/` is the home folder; another relative one resolves against the
     /// file's folder (18.1).
     fn path(&self, what: &str, v: &toml::Value) -> Result<PathBuf, ConfigError> {
@@ -350,6 +360,7 @@ impl File {
         if let Some(home) = home_relative(&text) {
             return Ok(absolute_clean(&home));
         }
+        self.no_home(what, &text)?;
         self.not_drive_relative(what, &text)?;
         // `../venvs/.venv` shown and used without the `..` (doctor prints it).
         Ok(absolute_clean(&self.base.join(text)))
@@ -399,6 +410,9 @@ impl File {
                 *a = home.to_string_lossy().into_owned();
                 continue;
             }
+            if i == 0 {
+                self.no_home(what, a)?;
+            }
             let p = Path::new(a.as_str());
             let path_like = a.contains(['/', '\\']);
             let candidate = !a.starts_with('-') && !a.contains('{') && !p.has_root();
@@ -436,8 +450,11 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
             let start = text[..span.start.min(text.len())].rfind('\n').map_or(0, |i| i + 1);
             text[start..].lines().next().unwrap_or_default()
         });
+        let one_line = line_text.and_then(|l| l.trim_start().strip_prefix('[')).and_then(|l| l.split_once(']')).filter(|(_, rest)| rest.contains('='));
         // A Windows path in "…" is read with backslash escapes (18.5).
-        if (message.contains("escape") || message.contains("unicode")) && line_text.is_some_and(|l| l.contains('\\')) {
+        if let Some((section, rest)) = one_line {
+            message.push_str(&format!("\n  hint: a section's name goes on a line of its own, its keys on the lines below it:\n    [{}]\n    {}", section.trim(), rest.trim()));
+        } else if (message.contains("escape") || message.contains("unicode")) && line_text.is_some_and(|l| l.contains('\\')) {
             message.push_str("\n  hint: in \"…\", a backslash starts an escape: write Windows paths with / or in single quotes, as in venv = 'C:\\proj\\.venv'");
         } else if let Some((key, value)) = line_text.and_then(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())) {
             // `venv = .venv`: text needs quotes (single ones keep a Windows path's backslashes);
@@ -467,6 +484,11 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
         let body = match value {
             toml::Value::Table(body) => body,
             v if SECTIONS.contains(&section.as_str()) => return Err(f.error(format!("[{section}]: expected a table, got {}", describe(v)))),
+            // A key without its section: name the section it belongs in.
+            _ if PYTHON_KEYS.contains(&section.as_str()) => return Err(f.error(format!("{section} goes in the [python] section: put a line [python] above it"))),
+            _ if ENGINE_KEYS.contains(&section.as_str()) => {
+                return Err(f.error(format!("{section} goes in an engine's section: put a line such as [engines.py] or [engines.js] above it")))
+            }
             // A top-level key that is not a section is an unknown key (18.5).
             _ => return Err(f.error(unknown(&format!("key {section}"), section, SECTIONS))),
         };
@@ -730,6 +752,9 @@ mod tests {
         for (toml_text, message) in [
             ("foo = \"x\"\n", "unknown key foo"),
             ("pythn = 1\n", "unknown key pythn (did you mean 'python'?)"),
+            // A key without its section line.
+            ("venv = \".venv\"\n", "venv goes in the [python] section: put a line [python] above it"),
+            ("command = [\"node\"]\n", "command goes in an engine's section: put a line such as [engines.py] or [engines.js] above it"),
             ("[engines.py]\ncomand = \"x\"\n", "unknown key [engines.py] comand (did you mean 'command'?)"),
             ("[engines.py]\naliases = [\"p\"]\n", "unknown key [engines.py] aliases"),
             ("[pyton]\n", "unknown section [pyton] (did you mean 'python'?)"),
@@ -761,6 +786,9 @@ mod tests {
         let home = home_dir().expect("a home folder in tests");
         assert_eq!(project("tilde", "[python]\nvenv = \"~/venvs/x\"\n").unwrap().python_venv.unwrap().value, home.join("venvs/x"));
         assert_eq!(project("tilde2", "[engines.py]\ncommand = [\"~/py/bin/python3\", \"-X\"]\n").unwrap().engines["py"].command.as_ref().unwrap().value[0], home.join("py/bin/python3").to_string_lossy());
+        // A section and its key on one line, as a sentence shows them.
+        let e = project("oneline", "[engines.js] command = [\"node\"]\n").unwrap_err().0;
+        assert!(e.ends_with("\n  hint: a section's name goes on a line of its own, its keys on the lines below it:\n    [engines.js]\n    command = [\"node\"]"), "{e}");
         // Text without quotes.
         let e = project("bare", "[python]\nvenv = .venv\n").unwrap_err().0;
         assert!(e.ends_with("\n  hint: text goes in quotes: venv = \".venv\""), "{e}");
