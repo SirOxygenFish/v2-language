@@ -1,5 +1,5 @@
 handle 2024 2024-02-29 true true 2024-02-29
 ForeignError | ValueError | true
 2028-02-29
-TypeError | null | unsupported operand types for +: 'handle' and 'int' — do it inside a block of its language, as in @py(h) { h + 1 } or @js(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
+TypeError | null | unsupported operand types for +: 'handle' and 'int' — do it inside a block of its language, as in @py(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
 ForeignError | TypeError | object of type 'datetime.date' has no len()

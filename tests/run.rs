@@ -1163,6 +1163,43 @@ fn a_blocks_output_reaches_a_pipe_as_it_comes() {
 }
 
 #[test]
+fn input_from_a_file_that_isnt_utf8_says_to_convert_the_file() {
+    // 5.10: `v2 x.v2 < data.txt` with a file in another encoding: no shell setting helps, so the
+    // hint is about the file; and bytes FF FE after the first line are not UTF-16's mark.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("r.v2"), "while true {\n    let l = input()\n    if l == null {\n        break\n    }\n    print(l)\n}\n").unwrap();
+    std::fs::write(home.0.join("data.txt"), b"ok\n\xff\xfe bad\n").unwrap();
+    let child = v2_command(&home.0)
+        .arg("r.v2")
+        .current_dir(&home.0)
+        .stdin(std::fs::File::open(home.0.join("data.txt")).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(1), "ok\n"), "{stderr}");
+    assert!(stderr.contains("IOError: input line 2 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text"), "{stderr}");
+    assert!(stderr.contains("\n  hint: the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with its encoding"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_file_to_dev_stdout_keeps_a_redirected_files_output() {
+    // 5.10: opening /dev/stdout again would start a redirected file over, or write at its start;
+    // through V2's own stdout nothing printed before is lost, and the order holds.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("w.v2"), "print(\"1\")\nwrite_file(\"/dev/stdout\", \"2\\n\")\nprint(\"3\")\n").unwrap();
+    let out_path = home.0.join("out.txt");
+    let file = std::fs::File::create(&out_path).unwrap();
+    let child = v2_command(&home.0).arg("w.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(file).stderr(Stdio::piped()).spawn().expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read_to_string(&out_path).unwrap(), "1\n2\n3\n");
+}
+
+#[test]
 fn a_line_printed_before_a_long_computation_reaches_a_pipe() {
     // INTERNALS 5.10: what `Out` holds for a file or a pipe goes out 100 ms later even when the
     // program prints nothing more, so a CI log or `| tee` shows "started" while V2 computes.

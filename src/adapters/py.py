@@ -825,7 +825,39 @@ if __name__ == "__main__":
                "trace": trace}
         if e.__cause__ is not None and depth < MAX_CAUSES:
             out["cause"] = serialize(e.__cause__, depth + 1)
+        data = own_data(e)
+        if data:
+            out["data"] = data
         return out
+
+    def own_data(e):
+        """An exception's own simple fields, as e.data in V2 (9.6): sys.exit(n)'s n as exit_code,
+        an OSError's errno, strerror and filename, and the plain attributes it was given.
+        Strings, ints within 64 bits, finite floats, booleans and None only; at most 32."""
+        fields = []
+        if isinstance(e, SystemExit):
+            fields.append(("exit_code", 0 if e.code is None else e.code))
+        if isinstance(e, OSError):
+            fields += [("errno", e.errno), ("strerror", e.strerror), ("filename", e.filename), ("filename2", e.filename2)]
+        try:
+            fields += [(k, v) for k, v in vars(e).items() if isinstance(k, str) and not k.startswith("_")]
+        except TypeError:
+            pass
+        data = {}
+        for k, v in fields:
+            if len(data) >= 32 or k in data or k == "$v2":
+                continue
+            if isinstance(v, str):
+                data[well_formed(k)] = well_formed(v)
+            elif v is None or isinstance(v, bool) or (type(v) is int and I64_MIN <= v <= I64_MAX):
+                data[well_formed(k)] = v
+            elif type(v) is float and v == v and abs(v) != float("inf"):
+                data[well_formed(k)] = v
+        # Fields the OS left unset say nothing.
+        for k in ("errno", "strerror", "filename", "filename2"):
+            if k in data and data[k] is None:
+                del data[k]
+        return data
 
     # ----------------------------------------------------------------------------------------
     # Awaiting (9.8)
@@ -929,7 +961,8 @@ if __name__ == "__main__":
 
     def check_name(k, what="block arg"):
         if not k.isidentifier() or keyword.iskeyword(k) or (k.startswith("__") and k.endswith("__")):
-            raise Fail("ValueError", "%s '%s' is not a valid Python name" % (what, k))
+            more = ": pass it under another name, as in @py(%s_: …)" % k if keyword.iskeyword(k) and what == "block arg" else ""
+            raise Fail("ValueError", "%s '%s' is not a valid Python name%s" % (what, k, more))
         return k
 
     _absent = object()
@@ -1378,7 +1411,11 @@ if __name__ == "__main__":
         if op == "value":
             return {"value": to_v2(obj)}
         if op == "iter":
-            mapping = isinstance(obj, collections.abc.Mapping)
+            # Two loop variables: a mapping, or anything with an items() method (a pandas
+            # Series or DataFrame), gives each key and value (11.4).
+            mapping = isinstance(obj, collections.abc.Mapping) or (
+                bool(m.get("pairs")) and not isinstance(obj, (str, bytes)) and callable(getattr(obj, "items", None))
+            )
             it = iter(obj.items()) if mapping else iter(obj)
             tag = handle_tag(it)
             _handles[tag["id"]][2] = eager(obj)

@@ -12,7 +12,7 @@ use super::call::ParamSpec;
 use super::error::{fail, type_error, value_error, ErrorValue, Exec, Flow};
 use super::interp::Interp;
 use super::methods::int_arg;
-use super::ops::{binop, is_handle, order, HANDLE_HINT};
+use super::ops::{binop, handle_hint, order};
 use super::value::{float_str, DictMap, Str, Value};
 use crate::codec::json;
 use crate::engines::process::{self, stop_if_interrupted};
@@ -229,8 +229,13 @@ impl Out {
     }
 
     pub fn write_str(&mut self, s: &str) -> Exec<()> {
+        self.write_bytes(s.as_bytes())
+    }
+
+    /// Bytes as they are (`write_file("/dev/stdout", b"…")`, 5.10).
+    pub fn write_bytes(&mut self, s: &[u8]) -> Exec<()> {
         let mut pending = lock(self.pending);
-        pending.extend_from_slice(s.as_bytes());
+        pending.extend_from_slice(s);
         if !self.tty && pending.len() < OUT_BUFFER && self.flushed.elapsed() < OUT_HOLD {
             if let Some(t) = flusher() {
                 t.unpark();
@@ -508,9 +513,10 @@ fn script_hint(name: &str) -> Option<String> {
     Some(format!("a .{ext} file runs through its program: write {call}"))
 }
 
-/// What text that isn't UTF-8 probably is (5.10).
-fn not_utf8_kind(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+/// What text that isn't UTF-8 probably is (5.10). `start`: `bytes` begin a file or stream, where
+/// UTF-16's byte order mark would be.
+fn not_utf8_kind(bytes: &[u8], start: bool) -> &'static str {
+    if start && (bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF])) {
         "it is UTF-16 (what Windows PowerShell's > and Out-File write)"
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
         "it looks like binary data"
@@ -551,14 +557,26 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     match String::from_utf8(line) {
         Ok(s) => Ok(Value::Str(s.into())),
         Err(e) => {
-            let err = ErrorValue::new("IOError", format!("input line {n} is not valid UTF-8: {}: send UTF-8 text", not_utf8_kind(e.as_bytes())));
-            // A Windows shell sends its console's old code page unless told otherwise.
-            if cfg!(windows) {
+            let err = ErrorValue::new("IOError", format!("input line {n} is not valid UTF-8: {}: send UTF-8 text", not_utf8_kind(e.as_bytes(), n == 1)));
+            if stdin_is_file() {
+                // `v2 x.v2 < data.txt`: no shell setting changes a file's bytes.
+                let _ = err.hint.set("the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with its encoding, as in @py(path) { open(path, encoding=\"cp1252\").read() }".into());
+            } else if cfg!(windows) {
+                // A Windows shell sends its console's old code page unless told otherwise.
                 let _ = err.hint.set("in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run".into());
             }
             Err(Flow::Error(Rc::new(err)))
         }
     }
+}
+
+/// Whether stdin is a file (`v2 x.v2 < data.txt`), not a terminal or a pipe.
+fn stdin_is_file() -> bool {
+    #[cfg(unix)]
+    let owned = std::os::fd::AsFd::as_fd(&std::io::stdin()).try_clone_to_owned().map(std::fs::File::from);
+    #[cfg(windows)]
+    let owned = std::os::windows::io::AsHandle::as_handle(&std::io::stdin()).try_clone_to_owned().map(std::fs::File::from);
+    owned.and_then(|f| f.metadata()).is_ok_and(|m| m.is_file())
 }
 
 /// `len(x)`: chars, bytes, items or entries, or a handle's `op len` (5.10, 11.3).
@@ -596,8 +614,23 @@ fn int(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
                 Err(_) => return value_error(format!("int out of range: '{s}'")),
             }
         }
+        Value::Handle(h) => return number_error("int() can't convert handle", &h.tag, true),
         other => return type_error(format!("int() can't convert {}", other.type_name())),
     }))
+}
+
+/// A handle where V2 wants a number (Python's `Decimal` or `Fraction`, a numpy array): the
+/// TypeError, with what converts it in its own language (5.10).
+pub(crate) fn number_error<T>(message: &str, tag: &str, int: bool) -> Exec<T> {
+    let conv = match (tag, int) {
+        ("js", true) => "Math.trunc(Number(h))",
+        ("js", false) => "Number(h)",
+        (_, true) => "int(h)",
+        (_, false) => "float(h)",
+    };
+    let err = ErrorValue::new("TypeError", message);
+    let _ = err.hint.set(format!("convert it in its language, as in @{tag}(h) {{ {conv} }}").into());
+    Err(Flow::Error(Rc::new(err)))
 }
 
 /// `float(x)` (5.10): strings via `f64::from_str` after trimming (`nan`, `inf`, `infinity`).
@@ -610,6 +643,7 @@ fn float(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             Ok(x) => x,
             Err(_) => return value_error(format!("invalid float: '{s}'")),
         },
+        Value::Handle(h) => return number_error("float() can't convert handle", &h.tag, false),
         other => return type_error(format!("float() can't convert {}", other.type_name())),
     }))
 }
@@ -687,21 +721,23 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     match std::str::from_utf8(text) {
         Ok(s) => Ok(Value::str(s)),
         Err(_) => {
-            let kind = not_utf8_kind(&bytes);
+            let kind = not_utf8_kind(&bytes, true);
             // Text in another encoding is read by a block that knows it (V2's strings are UTF-8).
             let fix = match kind {
                 k if k.ends_with("binary data") => "read it with binary: true",
                 k if k.starts_with("it is UTF-16") => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"utf-16\").read() }",
                 _ => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"cp1252\").read() }",
             };
-            io_error(format!("'{}' is not valid UTF-8: {kind}: {fix}", shown_path(&path)))
+            let err = ErrorValue::new("IOError", format!("'{}' is not valid UTF-8: {kind}", shown_path(&path)));
+            let _ = err.hint.set(fix.into());
+            Err(Flow::Error(Rc::new(err)))
         }
     }
 }
 
 /// `write_file(path, data, append: false)`: a str as UTF-8 or bytes as is; creates or
 /// truncates, or with `append` adds to the end, creating a missing file (5.10).
-fn write_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "write_file", "path")?;
     shell_shorthand("write", &path)?;
     let bytes: &[u8] = match &args[1] {
@@ -709,7 +745,27 @@ fn write_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         Value::Bytes(b) => b,
         other => return type_error(format!("write_file() argument 'data' must be a str or bytes, got {}", other.type_name())),
     };
-    let r = if bool_arg(&args[2], "write_file", "append")? {
+    let append = bool_arg(&args[2], "write_file", "append")?;
+    // `write_file("/dev/stdout", data)`: V2's own stdout or stderr, written through V2's own
+    // stream, so it comes after what print wrote and a redirected file isn't opened again at its
+    // start and cut short (5.10).
+    match path.as_ref() {
+        "/dev/stdout" | "/dev/fd/1" | "/proc/self/fd/1" if cfg!(unix) => {
+            it.out.write_bytes(bytes)?;
+            return Ok(Value::Null);
+        }
+        "/dev/stderr" | "/dev/fd/2" | "/proc/self/fd/2" if cfg!(unix) => {
+            it.out.flush_or_stop();
+            stop_if_interrupted();
+            let mut err = std::io::stderr().lock();
+            return match err.write_all(bytes).and_then(|_| err.flush()) {
+                Ok(()) => Ok(Value::Null),
+                Err(e) => io_error(format!("cannot write to stderr: {}", os_message(&e))),
+            };
+        }
+        _ => {}
+    }
+    let r = if append {
         std::fs::OpenOptions::new().append(true).create(true).open(&*path).and_then(|mut f| f.write_all(bytes))
     } else {
         std::fs::write(&*path, bytes)
@@ -826,9 +882,13 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             return io_error(format!("exec: cannot start '{name}': a drive-relative path: write it relative to the working directory, or absolute"));
         }
         None if name.contains(['/', '\\']) => {
-            let p = lookup.cwd.join(&**name);
+            let p: std::path::PathBuf = lookup.cwd.join(&**name).components().collect();
             if p.is_dir() {
                 return io_error(format!("exec: cannot start '{name}': it is a folder, not a program"));
+            }
+            // Not there: a batch file's path would go to cmd.exe, which says so as its output.
+            if !p.exists() {
+                return io_error(format!("exec: cannot start '{name}': there is no such file"));
             }
             // A path that names nothing usable: starting it gives the OS's reason.
             p.into_os_string()
@@ -852,7 +912,11 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // A Python program writes a pipe in the locale's encoding (ANSI on Windows: café as cafÚ in
     // the console's code page, and CJK not at all): UTF-8 instead, unless the user chose (5.10).
     let utf8 = std::env::var_os("PYTHONIOENCODING").is_none().then(|| (OsString::from("PYTHONIOENCODING"), OsString::from("utf-8")));
-    let c = match process::run_captured(&argv, utf8.as_slice(), None, input) {
+    // `exec(["cmd", "/c", "cd /d \"my dir\" && dir"])`: the one string after /c is a command line
+    // for cmd.exe, which reads it as typed; quoted for a program (`\"`), cmd would misread it.
+    let is_cmd = std::path::Path::new(&argv[0]).file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
+    let raw_tail = cfg!(windows) && is_cmd && argv.len() >= 3 && argv[argv.len() - 2].to_str().is_some_and(|s| s.eq_ignore_ascii_case("/c") || s.eq_ignore_ascii_case("/k"));
+    let c = match process::run_captured(&argv, utf8.as_slice(), None, input, raw_tail) {
         Ok(c) => c,
         Err(e) => {
             let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': {}", e.reason));
@@ -921,7 +985,7 @@ fn extreme(args: Vec<Value>, name: &str, want: Ordering) -> Exec<Value> {
         _ => None,
     };
     if let Some(bad) = items.iter().find(|v| kind(v).is_none()) {
-        let hint = if is_handle(bad) { HANDLE_HINT } else { "" };
+        let hint = handle_hint(bad, &format!("{name}(h)"), &format!("Math.{name}(...h)"));
         return type_error(format!("{name}() needs numbers or strings, got {}{hint}", bad.type_name()));
     }
     if let Some(other) = items.iter().find(|v| kind(v) != kind(first)) {
@@ -1038,6 +1102,12 @@ fn exit(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 pub fn str_arg(v: &Value, func: &str, param: &str) -> Exec<Str> {
     match v {
         Value::Str(s) => Ok(s.clone()),
+        // A pathlib.Path or a JS URL: its text is str(h).
+        Value::Handle(_) => {
+            let err = ErrorValue::new("TypeError", format!("{func}() argument '{param}' must be a str, got handle"));
+            let _ = err.hint.set(format!("pass its text, as in {func}(str(h))").into());
+            Err(Flow::Error(Rc::new(err)))
+        }
         other => type_error(format!("{func}() argument '{param}' must be a str, got {}", other.type_name())),
     }
 }

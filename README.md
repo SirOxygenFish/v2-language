@@ -288,7 +288,8 @@ ForeignError ZeroDivisionError division by zero
 | `", ".join(xs)`, `xs.join(", ")`          | `xs.join(", ")`                                 |
 | `s.strip()`, `s.trim()`                   | `s.trim()`                                      |
 | `a // b`, `Math.floor(a / b)`             | `div(a, b)` (`//` starts a comment)             |
-| `f(x, key=1)`                             | `f(x, key: 1)`                                  |
+| `f(x, key=1)`                             | `f(x, key: 1)` (a V2 word works as the name too: `df.agg(func: "sum")`) |
+| `for k, v in d.items():`                  | `for k, v in d`, for a dict or a handle with `items()` such as a pandas Series (V2 never unpacks pairs: over a list, two variables are the index and the item) |
 | `try: … except E as e:`, `catch (e) { }`  | `try { ... } catch (e) { ... }`                 |
 | `raise ValueError("bad")`, `throw new Error("bad")` | `throw error("ValueError", "bad")`, or `throw "bad"` |
 | `print(x, end="")`, `process.stdout.write(x)` | `print(x, end: "")`                         |
@@ -344,10 +345,14 @@ More of V2, in short:
 - **From the shell:** `$1` is `args()[0]`, `$(cmd)` is `exec([...]).stdout.trim()` and `$?` its
   `.code`. `exec` starts one program, not a shell, so for a pipe, a glob, `cd dir && make` or
   `VAR=x cmd`, start a shell: `exec(["sh", "-c", "cd build && make"])`, on Windows
-  `exec(["cmd", "/c", "cd /d build && make"])`. It returns when the program ends, with all its
+  `exec(["cmd", "/c", "cd /d build && make"])` (the one string after `/c` reaches cmd.exe as
+  written, so quote a path as cmd does: `"cd /d \"my build\" && make"`). It returns when the program ends, with all its
   output; to see the output as it comes, run the program from a `@py` block with `subprocess.run`
   (what it prints goes to standard error). In a `@py` block, `shutil.rmtree(path)` removes a
-  folder, `os.replace(a, b)` renames or moves a file, and `shutil.copy2(a, b)` copies one.
+  folder, `os.replace(a, b)` renames or moves a file, and `shutil.copy2(a, b)` copies one. On
+  Linux and macOS, `read_file("/dev/stdin")` reads all of standard input at once (anywhere:
+  `input()` in a loop until it gives `null`), and `write_file("/dev/stdout", data)` writes text
+  or bytes after what `print` wrote.
 
 `v2 check FILE` checks a script's V2 syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
@@ -367,7 +372,8 @@ modules, such as `json` or `numbers`: one Python serves the whole run, with one 
 and V2 says so when another came first).
 
 - **npm:** in your project folder, `npm install lodash` (in a Windows PowerShell that blocks
-  `npm`, `npm.cmd install lodash`), then
+  `npm`, `npm.cmd install lodash`; in WSL, check that `type -P npm` names Linux's npm, as the
+  Windows PATH that WSL adds can bring Windows' npm), then
   `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
   `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
@@ -397,6 +403,12 @@ and V2 says so when another came first).
   ```
 
   (Activating it, `source .venv/bin/activate`, before running `v2` works too.)
+- **conda (Anaconda, Miniconda):** run `v2` where the environment is activated
+  (`conda activate sales`): V2 finds its `python` first on `PATH`, as for an activated virtual
+  environment. Or name that Python in `v2.toml`, without `venv`, which is for virtual
+  environments only: `[engines.py]` and `command = ['C:\Users\you\miniconda3\envs\sales\python.exe']`
+  (single quotes keep the backslashes). Activated is the safer way: some conda packages find
+  their DLLs through what activation puts on `PATH`.
 
 Python and Node.js start when the script first needs them, and then every package a file imports
 from that language loads, in order: at the first call of an imported name (for
@@ -417,7 +429,8 @@ names.
 
 **`EngineNotFound: engine 'py' (Python) not found`** (or `'js'`, Node.js). Install it with the
 command the message shows, open a new terminal, and run `v2 doctor`. On Windows, if Python is
-installed but still not found, run its installer again and tick "Add python.exe to PATH".
+installed but still not found, run its installer again and tick "Add python.exe to PATH". For
+Node.js on Linux, the steps are in the next entry: distributions' own packages are often too old.
 
 **`... is too old: found 3.9.6, V2 needs 3.10+`.** macOS's own `python3` is 3.9: install a newer
 one (`brew install python`, or [python.org](https://www.python.org/downloads/)). For Node.js,
@@ -542,7 +555,9 @@ Node.js workers.
   don't get those warnings.
 - **Values cross between languages as copies** (numbers, strings, lists, dicts) or as handles to
   the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep
-  (deeper parts of a value from Python or JavaScript arrive as handles).
+  (deeper parts of a value from Python or JavaScript arrive as handles). `to_v2` of a large
+  DataFrame or array converts all of it before it finds it too big, which takes time and memory:
+  try a slice first (`df.head(1000)`), and keep the rest in its block.
   V2's integers are 64-bit: a bigger Python or JavaScript integer arrives as a handle, so do big
   number math inside the block. In JavaScript, a V2 integer from ±2⁵³ on is a `BigInt` (`x + 1`
   fails there: write `x + 1n`), a whole number comes back as an integer (`2.0` as `2`), and dict

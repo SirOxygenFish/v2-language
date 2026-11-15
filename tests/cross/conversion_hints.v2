@@ -1,0 +1,42 @@
+// requires: py js
+// to_v2 of typed arrays, and what to do with a date, date keys and a number V2 doesn't have
+// (DOCS 9.2, INTERNALS 11.5, 5.10).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        print("  hint: " + (e.hint ?? "none"))
+    }
+}
+show(func() => to_v2(@js { new Float64Array([1.5, 2.5]) }))
+show(func() => to_v2(@js { new BigInt64Array([3n, -4n]) }))
+// A block's Date is its own context's: still a date.
+show(func() => to_v2(@js { new Date(0) }))
+@py data {
+    import datetime, decimal
+    def by_day():
+        return {datetime.date(2026, 1, 1): 5}
+    def price():
+        return decimal.Decimal("1.10")
+    @export { by_day, price }
+}
+@import { by_day, price } from data
+show(func() => to_v2(by_day()))
+show(func() => float(price()))
+show(func() => int(price()))
+show(func() => f"${price():.2f}")
+// An operation on a handle: the example is in its own language.
+let point = @js { new (class Point { constructor() { this.x = 1 } })() }
+show(func() => point[1:3])
+// A handle where a str goes (a pathlib.Path): its text is str(h).
+let where = @py { __import__("pathlib").Path("x.txt") }
+show(func() => read_file(where))
+// A Python keyword as a block arg's name.
+show(func() => @py(class: 1) { 1 })
+// open() in a block reads UTF-8: Python runs in its UTF-8 mode.
+let home = getenv("HOME") ?? getenv("USERPROFILE")
+write_file(home + "/v2_cp1252.txt", b"caf\xe9!")
+show(func() => @py(p: home + "/v2_cp1252.txt") { open(p).read() })
+// A dict's method read as a key.
+show(func() => {a: 1}.keys)

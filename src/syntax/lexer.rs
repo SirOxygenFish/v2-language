@@ -293,8 +293,21 @@ impl<'a> Lexer<'a> {
                 d
             });
         }
-        let m = self.mark();
-        self.push(Tok::Eof, m);
+        // Right after the last code, not on the empty line past it: `let total = 1 +` shows its
+        // line with the caret where more was expected (2.4).
+        let span = match self.toks.iter().rev().find(|t| !matches!(t.tok, Tok::Newline)) {
+            Some(last) => {
+                let s = last.span;
+                let text = &self.src[s.lo as usize..s.hi as usize];
+                let (line, col) = match text.rfind('\n') {
+                    Some(nl) => (s.line + text.matches('\n').count() as u32, text[nl + 1..].chars().count() as u32 + 1),
+                    None => (s.line, s.col + text.chars().count() as u32),
+                };
+                Span { file: self.file, lo: s.hi, hi: s.hi, line, col }
+            }
+            None => self.span_from(self.mark()),
+        };
+        self.toks.push(Token { tok: Tok::Eof, span });
         Ok(None)
     }
 

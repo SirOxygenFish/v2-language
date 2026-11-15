@@ -13,6 +13,9 @@ func show(f) {
         f()
     } catch (e) {
         print(e.type + ": " + e.message.replace(home, "~"))
+        if e.hint {
+            print("  hint: " + e.hint)
+        }
     }
 }
 show(func() => read_file(path))

@@ -1,0 +1,9 @@
+// requires: py
+// A Python parameter named like a V2 keyword (pandas' func=) is given by name (DOCS 3.7, 5).
+@py tools {
+    def agg(func=None, **kw):
+        return [func, sorted(kw)]
+    @export { agg }
+}
+@import { agg } from tools
+print(agg(func: "sum", from: 1, if: 2))

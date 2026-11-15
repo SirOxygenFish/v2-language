@@ -155,6 +155,13 @@ fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
     if message.starts_with("value too large to send") {
         return Some("write it to a file and pass the file's path, or send it in parts");
     }
+    // A pandas Series indexed by dates, a dict keyed by tuples: V2's keys are strings.
+    if message.starts_with("to_v2(): can't convert") && message.contains("(key of type ") {
+        return Some(match lang {
+            "py" => "make its keys strings in the block, as in @py(h) { {str(k): v for k, v in h.items()} }",
+            _ => "make its keys strings in the block, as in @js(h) { Object.fromEntries([...h].map(([k, v]) => [String(k), v])) }",
+        });
+    }
     let code = message.split("unpaired surrogate (U+").nth(1)?.get(..4)?;
     let escaped = u32::from_str_radix(code, 16).is_ok_and(|c| (0xDC80..=0xDCFF).contains(&c));
     Some(match lang {
@@ -165,6 +172,17 @@ fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
         "py" => "replace it in the block: s.encode(\"utf-8\", \"replace\").decode()",
         _ => "replace it in the block: s.toWellFormed()",
     })
+}
+
+/// What to do about a foreign exception that V2's setup causes (12.6): blocks run Python in its
+/// UTF-8 mode (8.4), so `open()` reads UTF-8 where a plain Windows Python reads the ANSI code page.
+fn foreign_hint(kind: &str, message: &str, lang: &str) -> Option<&'static str> {
+    match (lang, kind) {
+        ("py", "UnicodeDecodeError") if message.starts_with("'utf-8' codec can't decode") => {
+            Some("blocks run Python in UTF-8 mode, so open() reads UTF-8: for a file in another encoding, name it, as in open(path, encoding=\"cp1252\")")
+        }
+        _ => None,
+    }
 }
 
 /// JavaScript calls a callback with all it has (`xs.map(f)` passes the item, its index and the
@@ -228,7 +246,7 @@ impl Interp {
                 let reason = crate::syntax::span::os_message(&e);
                 Err(process::SpawnError { message: format!("could not start '{}': {reason}", argv[0].to_string_lossy()), reason })
             }
-            None => ChildProc::spawn(&Spawn { argv, env: &env, stdin, stdout, stderr: Pipe::Inherit, keep: &keep }),
+            None => ChildProc::spawn(&Spawn { argv, env: &env, stdin, stdout, stderr: Pipe::Inherit, keep: &keep, raw_tail: false }),
         };
         let mut child = match spawned {
             Ok(c) => c,
@@ -930,6 +948,16 @@ impl Interp {
             err.foreign_type = Some(kind.into());
             err
         };
+        if &*err.kind == "ForeignError" {
+            if let Some(hint) = err.foreign_type.as_deref().and_then(|t| foreign_hint(t, message, &self.tag(s))) {
+                let _ = err.hint.set(hint.into());
+            }
+            // A foreign exception's own simple fields (Node's `code: "ENOENT"`, the n of
+            // `sys.exit(n)` as `exit_code`) are its data (9.6).
+            if let Some(data) = e.get("data").filter(|d| d.as_object().is_some_and(|o| !o.is_empty())) {
+                err.data = self.wire(s).decode(data)?;
+            }
+        }
         let frames = self.foreign_frames(s, e);
         err.lang = Some(self.tag(s));
         if let Some((span, lang)) = frames.at {

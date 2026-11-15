@@ -250,9 +250,12 @@ impl Interp {
 
     /// `for x in h` starts here (11.4): the iterator's handle, and whether `h` is a mapping
     /// (whose items are `[key, value]` pairs).
-    pub fn handle_iter(&mut self, h: &HandleRef, at: Span) -> Exec<(Rc<HandleRef>, bool)> {
+    /// `pairs`: the loop has two variables, so a Python object with an `items()` method gives
+    /// keys and values (11.4).
+    pub fn handle_iter(&mut self, h: &HandleRef, pairs: bool, at: Span) -> Exec<(Rc<HandleRef>, bool)> {
         let what = format!("iterating {}", h.text());
-        let reply = self.handle_op(h, "iter", Map::new(), &what, at)?;
+        let fields = if pairs { Map::from_iter([("pairs".to_string(), json!(true))]) } else { Map::new() };
+        let reply = self.handle_op(h, "iter", fields, &what, at)?;
         let parts = match &reply {
             Value::Dict(d) => {
                 let d = d.borrow();

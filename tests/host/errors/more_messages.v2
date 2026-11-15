@@ -26,5 +26,10 @@ func inner() {
 inner()
 let total = 1
 const count = 2
+/// An assignment's did-you-mean has no builtins: they can't be assigned.
+func assign() {
+    rnge = 1
+}
+try { assign() } catch (e) { print(e.message) }
 // A method read as a field.
 try { print("abc".upper) } catch (e) { print(e.message) }

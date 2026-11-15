@@ -127,7 +127,7 @@ pub fn order(a: &Value, b: &Value, op: &str) -> Exec<Option<Ordering>> {
         (Value::Float(f), Value::Int(i)) => cmp_int_float(*i, *f).map(Ordering::reverse),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
         _ => {
-            let hint = handle_hint(a, b);
+            let hint = operand_hint(a, b, &format!("h {op} x"));
             return type_error(format!("cannot compare {} and {} with '{op}'{hint}", a.type_name(), b.type_name()));
         }
     })
@@ -159,26 +159,29 @@ fn overflow<T>(op: &str) -> Exec<T> {
 fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
     let mut msg = format!("unsupported operand types for {op}: '{}' and '{}'", a.type_name(), b.type_name());
     if is_handle(a) || is_handle(b) {
-        msg.push_str(handle_hint(a, b));
+        msg.push_str(&operand_hint(a, b, &format!("h {op} 1")));
     } else if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
         msg.push_str(" — use f\"...${x}\" or str(x)");
     }
     type_error(msg)
 }
 
-/// What a TypeError about a handle operand adds (11.7).
-pub const HANDLE_HINT: &str = " — do it inside a block of its language, as in @py(h) { h + 1 } or @js(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)";
+/// What a TypeError about a handle adds (11.7): the operation done in the handle's own
+/// language, as `py` or `js` writes it; nothing for another value.
+pub fn handle_hint(v: &Value, py: &str, js: &str) -> String {
+    let Value::Handle(h) = v else { return String::new() };
+    let (tag, example) = if &*h.tag == "js" { ("js", js) } else { (&*h.tag, py) };
+    format!(" — do it inside a block of its language, as in @{tag}(h) {{ {example} }}, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)")
+}
 
-/// The hint for an operation on a handle: for an integer too big for V2's 64-bit int (a Python
-/// `int`, a JavaScript `bigint`), `to_v2` can't help, so the work stays in the block (9.1).
-fn handle_hint(a: &Value, b: &Value) -> &'static str {
+/// The hint for an operator with a handle operand: for an integer too big for V2's 64-bit int (a
+/// Python `int`, a JavaScript `bigint`), `to_v2` can't help, so the work stays in the block (9.1).
+fn operand_hint(a: &Value, b: &Value, example: &str) -> String {
     let big = |v: &Value| matches!(v, Value::Handle(h) if matches!(&*h.type_name, "int" | "bigint"));
     if big(a) || big(b) {
-        " — this integer needs more than 64 bits, which V2's int doesn't have: keep the arithmetic in the block"
-    } else if is_handle(a) || is_handle(b) {
-        HANDLE_HINT
+        " — this integer needs more than 64 bits, which V2's int doesn't have: keep the arithmetic in the block".into()
     } else {
-        ""
+        handle_hint(if is_handle(a) { a } else { b }, example, example)
     }
 }
 
@@ -354,7 +357,7 @@ pub fn neg(v: &Value) -> Exec<Value> {
         Value::Int(n) => n.checked_neg().map(Value::Int).map_or_else(|| overflow("-"), Ok),
         Value::Float(x) => Ok(Value::Float(-x)),
         other => {
-            let hint = if is_handle(other) { HANDLE_HINT } else { "" };
+            let hint = handle_hint(other, "-h", "-h");
             type_error(format!("bad operand type for unary -: '{}'{hint}", other.type_name()))
         }
     }
@@ -375,14 +378,14 @@ pub fn contains(y: &Value, x: &Value) -> Exec<bool> {
         Value::Dict(d) => Ok(matches!(x, Value::Str(k) if d.borrow().contains_key(k))),
         Value::Str(s) => match x {
             Value::Str(sub) => Ok(s.contains(&**sub)),
-            other => type_error(format!("'in' on a str needs a str, got {}{}", other.type_name(), if is_handle(other) { HANDLE_HINT } else { "" })),
+            other => type_error(format!("'in' on a str needs a str, got {}{}", other.type_name(), handle_hint(other, "h in text", "text.includes(h)"))),
         },
         Value::Bytes(b) => match x {
             Value::Bytes(sub) => Ok(sub.is_empty() || b.windows(sub.len()).any(|w| w == &sub[..])),
             Value::Int(n) => Ok((0..=255).contains(n) && b.contains(&(*n as u8))),
-            other => type_error(format!("'in' on bytes needs bytes or an int, got {}{}", other.type_name(), if is_handle(other) { HANDLE_HINT } else { "" })),
+            other => type_error(format!("'in' on bytes needs bytes or an int, got {}{}", other.type_name(), handle_hint(other, "h in data", "data.includes(h)"))),
         },
-        Value::Handle(_) => type_error(format!("'in' needs a list, dict, str or bytes on the right, got handle{HANDLE_HINT}")),
+        h @ Value::Handle(_) => type_error(format!("'in' needs a list, dict, str or bytes on the right, got handle{}", handle_hint(h, "x in h", "h.includes(x)"))),
         other => type_error(format!("'in' needs a list, dict, str or bytes on the right, got {}", other.type_name())),
     }
 }

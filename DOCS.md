@@ -376,9 +376,9 @@ print("email" in user)      // true
 print(user.get("phone", "none"))   // none
 ```
 
-Dict keys are always strings. In a literal, a bare word (`name:`) is a string key, except V2's
-keywords (`from`, `if`, `in`, …), which are quoted: `{"from": a, to: b}` (after a dot they are fine:
-`d.from`); write `[expr]: value` to compute a key. Reading a missing key with `d[k]` or `d.k` is a `KeyError`; use
+Dict keys are always strings. In a literal, a bare word (`name:`, also one of V2's own words
+such as `from:` or `if:`) is a string key, and after a dot it is a name (`d.from`); write
+`[expr]: value` to compute a key. Reading a missing key with `d[k]` or `d.k` is a `KeyError`; use
 `d.get(k, default)` when a key may be missing. `len(x)` is the number of items in a list or dict.
 
 | List method              | Effect                                        |
@@ -444,7 +444,7 @@ func greet(name, greeting = "Hello") {
 }
 
 print(greet("Ada"))                          // Hello, Ada!
-print(greet("Ada", greeting: "Welcome"))     // named argument
+print(greet("Ada", greeting: "Welcome"))     // named argument (any word: df.agg(func: "sum"))
 
 func total(...nums) {                        // collects extra arguments into a list
     let s = 0
@@ -505,7 +505,7 @@ try {
 | `e.message`    | human-readable text                                               |
 | `e.file`, `e.line`, `e.col` | where it was raised                                  |
 | `e.trace`      | list of stack frames as strings, innermost first                  |
-| `e.data`       | optional extra value                                              |
+| `e.data`       | optional extra value; for a foreign exception, a dict of its own simple fields (Node's `code`, as `"ENOENT"`; an `OSError`'s `errno` and `filename`; the `n` of `sys.exit(n)` or `process.exit(n)` in a block, as `exit_code`), or `null` |
 | `e.lang`       | `null` for V2 errors, or the engine tag (`"py"`, `"js"`, …)       |
 | `e.foreign_type` | the foreign exception class, e.g. `"ZeroDivisionError"`         |
 | `e.cause`      | the error this one was raised from (a foreign exception's cause, e.g. Python `raise … from …`, JS `cause`), or `null`; `error()` can't set it |
@@ -598,7 +598,11 @@ bigger come from the languages you embed.
 Relative paths in the file functions and in `exec` are relative to the folder you run `v2` from
 (the working directory), like in Python and Node. For a file next to your script, use
 `script_dir()`: `read_file(f"${script_dir()}/data.csv")` (forward slashes work on Windows too).
-`import` paths and `extern` library paths are relative to the `.v2` file instead. The file
+`import` paths and `extern` library paths are relative to the `.v2` file instead. A block that
+changes its working directory (`os.chdir`, `process.chdir`) changes it for its own language only:
+V2's file functions and `exec` keep V2's. On Linux and macOS, `write_file("/dev/stdout", data)`
+(and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
+wrote, and `read_file("/dev/stdin")` reads all of standard input. The file
 functions raise `IOError` when they fail (`exists` just returns `false`). Paths are taken as
 written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so build such a path with `getenv`
 (the error's hint says so). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
@@ -622,7 +626,9 @@ is read as UTF-16; on Windows, other output that isn't UTF-8 is read in the cons
 first, as `cmd` and other console programs write it). A non-zero
 `code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
-can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
+can't start raises `IOError: exec: cannot start 'gitt': <reason>` (`there is no such file` for a
+path that isn't there). For cmd.exe, the one string after `/c` (or `/k`) is a command line, passed
+as written, as cmd reads what you type: `exec(["cmd", "/c", "cd /d \"my dir\" && dir"])`. It runs in V2's working
 directory and environment (plus `PYTHONIOENCODING=utf-8` when that isn't set, so a Python program
 writes UTF-8, which V2 reads), with no timeout. `exec` returns when the program exits, and what the
 program started is stopped then, or on Ctrl+C; only a process that escapes that
@@ -892,7 +898,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   environment wins), else the `py -3` launcher on Windows (the Microsoft Store placeholder
   `python.exe` is skipped). Override with `[engines.py] command`.
 - If `[python] venv` is set, that virtual environment's Python and packages are used
-  ([14](#14-project-file-v2toml)).
+  ([14](#14-project-file-v2toml)). A conda environment isn't one: run `v2` where it is activated,
+  or name its `python` in `[engines.py] command`.
 - Where Python modules are found: [chapter 7](#7-importing-foreign-packages).
 - Named arguments become Python keyword arguments: `plot(xs, color: "red")`.
 - If a Python function returns a coroutine, V2 waits for it (see [8.4](#84-rules) for the one
@@ -1378,11 +1385,16 @@ What you can do with a handle:
 | convert to data        | `to_v2(h)`                 |
 
 Iterating a Python mapping or a JS `Map` works like a dict: `for k in h` gives keys,
-`for k, v in h` keys and values. Other handles give items, or index and item with two variables.
+`for k, v in h` keys and values. With two variables, a Python object with an `items()` method (a
+pandas Series or DataFrame) gives keys and values too, from `items()`, while one variable gives
+what Python's own `for` gives. Other handles give items, or index and item with two variables:
+V2 never unpacks pairs, so `for k, v in h.items()` is a `TypeError` that says to write
+`for k, v in h` (`h.iterrows()`: loop over `h.itertuples()` instead).
 
 `to_v2(h)` asks the engine to turn the object into plain data. Call it on the object itself:
 a value that has already arrived keeps the handles inside it as they are. Containers are converted
-recursively; Python sets and JS `Set`s become lists, JS `Map`s become dicts, and mapping keys that
+recursively; Python sets and JS `Set`s become lists, JS typed arrays (`Float64Array`, …) lists of
+their numbers, JS `Map`s become dicts, and mapping keys that
 are numbers, booleans or `None`/`null` become strings in V2's `str()` form (`1` → `"1"`, `True` → `"true"`, so a
 pandas Series with the default index gives `{"0": …, "1": …}`). Other objects use their
 `to_dict()` method if they have one, otherwise `tolist()`. Anything else — a `datetime`, a class
