@@ -1,0 +1,11 @@
+// exit: 1
+// stderr: missing_brace.v2:7:11: SyntaxError: `{` is never closed
+// stderr: hint: a } is probably missing before the else on line 9: write } else
+// A } left out before else: the error is at the block it doesn't close, and the hint names the
+// line where it goes (INTERNALS 3.3).
+let a = 1
+if a == 1 {
+    print("x")
+else {
+    print("y")
+}

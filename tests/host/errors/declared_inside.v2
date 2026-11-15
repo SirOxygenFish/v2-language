@@ -23,3 +23,6 @@ show(func() => print(x))
 // A name declared nowhere keeps its did-you-mean.
 let total = 1
 show(func() => print(totl))
+// A name declared further on in the file is offered before a builtin.
+show(func() => print(scor))
+let score = 3

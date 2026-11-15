@@ -1,0 +1,16 @@
+// A menu loop that never checks for null would spin forever once the input ends: the 1000th null
+// in a row is an IOError (DOCS 3.11, INTERNALS 5.10).
+let turns = 0
+try {
+    while true {
+        let wahl = input()
+        turns += 1
+        if wahl == "4" {
+            break
+        }
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+    print(e.hint)
+}
+print(turns)

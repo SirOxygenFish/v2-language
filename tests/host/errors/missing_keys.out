@@ -1,0 +1,8 @@
+KeyError | key 'der' not found
+  hint: when a key may be missing, read it with d.get(k, default), as in counts[w] = counts.get(w, 0) + 1, or test it first with k in d
+KeyError | key 'name' not found
+  hint: when a key may be missing, read it with d.get(k, default), as in counts[w] = counts.get(w, 0) + 1, or test it first with k in d
+IndexError | list index 1 out of range (length 1)
+  hint: xs.get(i, default) gives a default past the end; or check len(xs) first
+KeyError | key 'nmae' not found — did you mean 'name'?
+  hint: null

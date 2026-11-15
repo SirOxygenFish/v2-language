@@ -938,6 +938,11 @@ impl<'a> Parser<'a> {
     /// `@import { items } from SELECTOR` or `@import PACKAGE as NAME` at V2 level (4.1).
     fn engine_import(&mut self) -> Result<EngineImport, Diag> {
         let start = self.bump().span;
+        // Python's `from math import *`, written as `@import * from py.math`.
+        if self.at_op(Op::Star) {
+            return Err(Diag::new("@import needs a list of names, or a module and a name for it", self.span())
+                .hint("V2 has no import *: list the names, @import { sqrt, pi } from py.math, or import the module, @import py.math as math"));
+        }
         if matches!(self.peek(), Tok::LBrace(_)) {
             let open = self.bump().span;
             if self.at_op(Op::Star) {
@@ -2047,6 +2052,7 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let a = null\na ??= 5"), "V2 has no ??=: write a = a ?? …");
         assert_eq!(hint("let x = 1\nif x > 2 {\n} elsif x > 0 {\n}"), "V2 writes elif: } elif x > 0 { ... }");
         assert_eq!(hint("x := 1"), "V2 declares a name with let x = …, and assigns to it with x = …");
+        assert_eq!(hint("@import * from py.math"), "V2 has no import *: list the names, @import { sqrt, pi } from py.math, or import the module, @import py.math as math");
         assert_eq!(hint("let y = await foo()"), "V2 has no await: when a call returns a Promise or a coroutine, V2 waits for its result, so write foo(…)");
         // A body on the header's line, without braces; `and` keeps its own hint.
         assert_eq!(hint("let x = 1

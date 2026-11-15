@@ -1,0 +1,2 @@
+ImportError | 'VERSION' is imported as a function, and used here as a value: a block imports only functions; for a constant, pass it in as a block arg
+hi

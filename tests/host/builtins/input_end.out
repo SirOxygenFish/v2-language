@@ -1,0 +1,3 @@
+IOError | the input has ended, and input() has given null 1000 times in a row
+check for null and stop, as in let line = input(); if line == null { break }
+1000

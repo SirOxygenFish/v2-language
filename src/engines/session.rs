@@ -251,7 +251,12 @@ impl Interp {
         let mut child = match spawned {
             Ok(c) => c,
             Err(spawn) => {
-                let e = Rc::new(ErrorValue::new("EngineNotFound", spawn.message));
+                let e = ErrorValue::new("EngineNotFound", spawn.message);
+                // EMFILE: the program is there; the open-files limit stops V2 from starting it.
+                if spawn.reason.contains("Too many open files") {
+                    let _ = e.hint.set("the open-files limit (ulimit -n) is too low for V2 and its workers: raise it, as in ulimit -n 1024".into());
+                }
+                let e = Rc::new(e);
                 let s = self.new_session(key, engine, None, None, None, timeouts);
                 self.sessions[s].state = State::Dead(DeadReason::SpawnFailed(e.clone()));
                 return Err(self.raise(Flow::Error(e), at));

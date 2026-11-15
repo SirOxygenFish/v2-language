@@ -490,7 +490,9 @@ says `input line 1 is not valid UTF-8`.** It decodes and encodes what passes thr
 the console's old code page. Run
 `[Console]::OutputEncoding = $OutputEncoding = [Text.UTF8Encoding]::new()` first in that window,
 or use PowerShell 7; and read a file with `Get-Content -Encoding UTF8 file.txt`, as 5.1 reads one
-without a byte-order mark in the old code page. In cmd.exe, run `chcp 65001` first.
+without a byte-order mark in the old code page. In cmd.exe, run `chcp 65001` first. On Linux and
+macOS, V2 and its blocks always read and write UTF-8, whatever `LANG` says: use a UTF-8 locale
+(`C.UTF-8`, `de_DE.UTF-8`), or convert with `iconv`.
 
 **`UnicodeDecodeError` when a `@py` block reads a file that plain Python reads.** Blocks run in
 Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass
@@ -519,6 +521,11 @@ on PATH isn't found there either: name it in a `v2.toml` as in the entry on Node
 saved `install.ps1` as a file, run it with `powershell -ExecutionPolicy Bypass -File install.ps1`.
 For `npm` ("npm.ps1 cannot be loaded"), type `npm.cmd` instead. A virtual environment needs no
 `Activate.ps1`: the `v2.toml` above finds it.
+
+**`v2: Permission denied`, or the installer says a folder "doesn't let programs run".** That
+folder's file system is mounted `noexec`, as servers often have it: install into another folder
+with `V2_INSTALL_DIR`. Under a memory limit (`ulimit -v`), V2 needs about 300 MB of address space,
+and `@js` blocks over 1.2 GB, as Node.js reserves that much when it starts.
 
 **A script hangs.** Press Ctrl+C: V2 stops it, and its Python and Node.js workers, with exit
 code 130 (on Linux and macOS, v2 ends by the signal, as other programs do, so a shell loop of
