@@ -98,6 +98,12 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         // JavaScript's `[0, ...a]`.
         (_, _, Some(Op::Ellipsis)) if matches!(op(1), Some(Op::Comma | Op::LBracket)) => "... spreads a list into a call's arguments only: join lists with +, as in [0] + a".into(),
         (_, _, Some(Op::Plus)) if op(1) == Some(Op::Plus) => "V2 has no ++: write x += 1".into(),
+        // JavaScript's `a ??= 5`, Ruby's and Perl's `elsif`, Python's and Go's `x := 1`.
+        (_, _, Some(Op::Eq)) if op(1) == Some(Op::QQ) => format!("V2 has no ??=: write {0} = {0} ?? …", word(2).unwrap_or("x")),
+        (_, Some("elsif" | "elseif"), _) if matches!(tok(1), Some(Tok::RBrace)) => "V2 writes elif: } elif x > 0 { ... }".into(),
+        (_, _, Some(Op::Colon)) if word(1).is_some() && matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Op(Op::Eq))) => {
+            format!("V2 declares a name with let {0} = …, and assigns to it with {0} = …", word(1).unwrap_or("x"))
+        }
         _ if ends_line && op(1) == Some(Op::Minus) && op(2) == Some(Op::Minus) => "V2 has no --: write x -= 1".into(),
         (_, _, Some(Op::Eq)) if op(1) == Some(Op::DotDot) => "a..b leaves out b: for 1, 2 and 3 write 1..4".into(),
         (_, _, Some(Op::Eq)) if word(1).is_some() && matches!(op(2), Some(Op::Comma | Op::LParen)) => {
@@ -1525,10 +1531,14 @@ impl<'a> Parser<'a> {
                 self.bump();
                 return Ok(args);
             }
-            let is_named = matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Op(Op::Colon));
+            // A keyword before `:` is a name too (`df.agg(func: "sum")`): nothing else starts so.
+            let is_named = matches!(self.peek(), Tok::Ident(_) | Tok::Kw(_)) && matches!(self.peek_at(1), Tok::Op(Op::Colon));
             if is_named {
                 let t = self.bump();
-                let name = name_of(&t).expect("an identifier");
+                let name = match &t.tok {
+                    Tok::Kw(k) => Name::new(k.as_str().into(), t.span),
+                    _ => name_of(&t).expect("an identifier"),
+                };
                 self.bump(); // :
                 let value = self.expr()?;
                 if let Some(Arg::Named(prev, _)) = args.iter().find(|a| matches!(a, Arg::Named(n, _) if n.text == name.text)) {
@@ -1646,15 +1656,12 @@ impl<'a> Parser<'a> {
                     self.expect_op(Op::RBracket)?;
                     DictKey::Computed(k)
                 }
+                Tok::Kw(k) if self.at_op(Op::Colon) => DictKey::Str(k.as_str().into(), t.span),
                 Tok::Kw(_) if statement && entries.is_empty() => {
                     return Err(Diag::new("V2 has no bare { } blocks: a { that starts a statement is a dict", t.span)
                         .hint("write the statements without the braces, or in a function"))
                 }
-                // `{from: a}`, as JavaScript allows: a key, so its own hint, not 4.1's `=>` one.
-                Tok::Kw(k) if self.at_op(Op::Colon) => {
-                    return Err(Diag::new(format!("{} can't be a bare dict key: quote it", t.tok), t.span).hint(format!("write \"{}\": as the key", k.as_str())))
-                }
-                Tok::Kw(_) => return Err(Diag::new(format!("{} can't be a bare dict key: quote it", t.tok), t.span)),
+                Tok::Kw(_) => return Err(Diag::new(format!("expected a dict key, found {}", t.tok), t.span)),
                 // Python's `{1: "x"}`: V2's keys are strings.
                 Tok::Int(n) => {
                     return Err(Diag::new("dict keys are names, strings or [expr]", t.span).hint(format!("dict keys are strings: write \"{n}\": or [str({n})]:")))
@@ -1843,7 +1850,7 @@ extern "m" as m { double cos(double x); }
         assert_eq!(err("f() = 1"), "cannot assign to this expression");
         assert_eq!(err("a?.b = 1"), "cannot assign through ?.");
         assert_eq!(err("let d = {1: 2}"), "dict keys are names, strings or [expr]");
-        assert_eq!(err("let d = {true: 2}"), "keyword `true` can't be a bare dict key: quote it");
+        assert_eq!(err("let d = {true 2}"), "expected a dict key, found keyword `true`");
         assert_eq!(err("try { }"), "try needs a catch or a finally");
         assert_eq!(err("let r = 0..3"), "a..b is only allowed in a for head; use range(a, b)");
         assert_eq!(err("for i, x in 0..3 { }"), "a range loop takes one variable");
@@ -1944,9 +1951,10 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let xs = [1]\nprint(xs[1:5:2])"), step);
         assert_eq!(hint("let a = [1]\nlet b = [0, ...a]"), "... spreads a list into a call's arguments only: join lists with +, as in [0] + a");
         assert_eq!(hint("let f = func() => {1: \"x\"}"), "dict keys are strings: write \"1\": or [str(1)]:");
-        // A keyword before `:` is a key; one that starts a statement is a block after `=>`.
-        assert_eq!(hint("let f = func() => {if: 1}"), "write \"if\": as the key");
-        assert_eq!(hint("let c = {from: 1}"), "write \"from\": as the key");
+        assert_eq!(hint("let a = null\na ??= 5"), "V2 has no ??=: write a = a ?? …");
+        assert_eq!(hint("let x = 1\nif x > 2 {\n} elsif x > 0 {\n}"), "V2 writes elif: } elif x > 0 { ... }");
+        assert_eq!(hint("x := 1"), "V2 declares a name with let x = …, and assigns to it with x = …");
+        // One that starts a statement after `=>` is a block body (a keyword before `:` is a key).
         assert_eq!(hint("let f = func(x) => { return x }"), "`=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }");
         assert_eq!(hint("let x = 1\nif x = 2 {\n    print(x)\n}"), "V2 compares with ==, as in if x == 2 { ... }");
         assert_eq!(hint("let x = 1\nwhile x = 1 {\n}"), "V2 compares with ==, as in if x == 2 { ... }");

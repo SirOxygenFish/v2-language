@@ -6,4 +6,5 @@ area() got an unexpected argument 'h'
 'total' is used before its let on line 27
 'count' is used before its const on line 28
 'step' is used before it is declared: its declaration comes later
+'rnge' is not declared — declare it with let
 str has no field 'upper': upper is a method, so call it, as in x.upper()

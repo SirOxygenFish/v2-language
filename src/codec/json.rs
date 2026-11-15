@@ -87,12 +87,8 @@ pub fn parse(text: &str) -> Exec<Value> {
     let parsed = match values.next() {
         Some(Ok(v)) => v,
         Some(Err(e)) => return serde_error(text, &e),
-        None => {
-            // Only whitespace: the end of the input, as serde_json reports EOF.
-            let line = text.matches('\n').count() + 1;
-            let col = text.rsplit('\n').next().map_or(0, |l| l.trim_end_matches('\r').chars().count());
-            return invalid(line, col, "EOF while parsing a value");
-        }
+        // Nothing but whitespace (an empty file, a program that printed nothing).
+        None => return value_error("invalid JSON: the text is empty"),
     };
     // Exactly one value: anything but JSON whitespace after it is an error.
     let end = values.byte_offset();
@@ -116,6 +112,11 @@ fn serde_error<T>(text: &str, e: &serde_json::Error) -> Exec<T> {
         end += 1;
     }
     let col = text.get(start..end).map_or(e.column(), |s| s.chars().count());
+    // `"\ud800"`: half of a surrogate pair, which serde_json words as a hex escape problem.
+    let what = match what {
+        "unexpected end of hex escape" | "lone leading surrogate in hex escape" => "a \\u escape of half a surrogate pair (\\ud800 to \\udfff) without its other half, which isn't text",
+        w => w,
+    };
     invalid(e.line(), col, what)
 }
 
@@ -325,8 +326,9 @@ mod tests {
         assert_eq!(json(&d), r#"{"b":3,"a":2,"$v2":"plain"}"#);
         assert_eq!(parsed("[1, 2"), "invalid JSON at line 1 column 5: EOF while parsing a list");
         assert_eq!(parsed("1 2"), "invalid JSON at line 1 column 3: trailing characters");
-        assert_eq!(parsed(""), "invalid JSON at line 1 column 0: EOF while parsing a value");
-        assert_eq!(parsed("\n\n   "), "invalid JSON at line 3 column 3: EOF while parsing a value");
+        assert_eq!(parsed(""), "invalid JSON: the text is empty");
+        assert_eq!(parsed("\n\n   "), "invalid JSON: the text is empty");
+        assert!(parsed(r#""\uD800""#).ends_with("without its other half, which isn't text"), "{}", parsed(r#""\uD800""#));
         // Columns count chars, also in serde_json's own errors.
         assert_eq!(parsed("{\"ключ\": tru}"), "invalid JSON at line 1 column 13: expected ident");
         assert_eq!(parsed("[\"é\""), "invalid JSON at line 1 column 4: EOF while parsing a list");

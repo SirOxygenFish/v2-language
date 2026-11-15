@@ -1,0 +1,47 @@
+// requires: py js
+// A foreign exception's own simple fields are its e.data: Node's code, the n of process.exit(n)
+// and sys.exit(n) as exit_code, an OSError's errno and filename (DOCS 10.1, INTERNALS 9.6).
+@import { readFileSync } from js.fs
+func caught(f) {
+    try {
+        f()
+    } catch (e) {
+        return e
+    }
+}
+let missing = caught(func() => readFileSync("./no-such-v2-file.txt", "utf8"))
+print(missing.foreign_type, missing.data.code, missing.data.syscall)
+// Strings, numbers V2 holds exactly, booleans and null; nothing else.
+let custom = caught(func() {
+    @js {
+        const err = new Error("http 404")
+        err.status = 404
+        err.retry = false
+        err.big = 2 ** 64
+        err.response = {body: "x"}
+        throw err
+    }
+})
+print(custom.data)
+print(caught(func() {
+    @js {
+        process.exit(3)
+    }
+}).data)
+print(caught(func() {
+    @py {
+        import sys
+        sys.exit(4)
+    }
+}).data)
+let gone = caught(func() {
+    @py {
+        open("./no-such-v2-file.txt")
+    }
+})
+print(gone.foreign_type, gone.data.errno, gone.data.filename)
+print(caught(func() {
+    @py {
+        raise ValueError("plain")
+    }
+}).data)

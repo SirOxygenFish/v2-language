@@ -10,4 +10,4 @@ false
 2
 false
 mine 1
-'atob' is not exported by 'own' (did the block @export it?)
+'atob' is not exported by 'own' (its @export { * } exports only functions, and no name that starts with _: list a const, let or class by name, as in @export { atob })

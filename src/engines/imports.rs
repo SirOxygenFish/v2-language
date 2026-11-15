@@ -346,13 +346,21 @@ fn not_exported(name: &str, text: &str, names: &[Rc<str>]) -> String {
 type ModuleAnswer = (Value, Vec<Export>, Vec<Rc<str>>, Vec<Rc<str>>);
 
 /// 13.3 step 6: `name` isn't among what the block exports, with the closest of those names.
-/// `listed`: `exported` is the blocks' `@export` lists as written, where the typo may be.
-fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator<Item = &'a str>, listed: bool) -> String {
-    match did_you_mean(name, exported) {
-        Some(near) if listed => format!("'{name}' is not exported by '{text}' — did you mean '{near}'? (or should its @export say '{name}'?)"),
-        Some(near) => format!("'{name}' is not exported by '{text}' — did you mean '{near}'?"),
-        None => format!("'{name}' is not exported by '{text}' (did the block @export it?)"),
+/// `listed`: `exported` is the blocks' `@export` lists as written, where the typo may be. `star`:
+/// the block's tag, when it has `@export { * }`, which leaves some names out (DOCS 6.1).
+fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator<Item = &'a str>, listed: bool, star: Option<&str>) -> String {
+    match (did_you_mean(name, exported), star) {
+        (Some(near), _) if listed => format!("'{name}' is not exported by '{text}' — did you mean '{near}'? (or should its @export say '{name}'?)"),
+        (Some(near), _) => format!("'{name}' is not exported by '{text}' — did you mean '{near}'?"),
+        (None, Some("py")) => format!("'{name}' is not exported by '{text}' (its @export {{ * }} exports only the functions and classes it defines, and no name that starts with _: list others by name, as in @export {{ {name} }})"),
+        (None, Some(_)) => format!("'{name}' is not exported by '{text}' (its @export {{ * }} exports only functions, and no name that starts with _: list a const, let or class by name, as in @export {{ {name} }})"),
+        (None, None) => format!("'{name}' is not exported by '{text}' (did the block @export it?)"),
     }
+}
+
+/// The tag of a block with `@export { * }`.
+fn star_tag(b: &EngineBlock) -> Option<&str> {
+    b.directives.exports.as_ref().filter(|x| x.star.is_some()).map(|_| canonical_tag(&b.tag.text))
 }
 
 /// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
@@ -641,7 +649,7 @@ impl Interp {
                 .iter()
                 .find(|b| b.directives.exports.as_ref().is_some_and(|e| e.star.is_some()) && self.loaded_for(b, seen).is_none())
                 .cloned()
-                .ok_or_else(|| import_error(not_exported_by_block(name, &text, cands.iter().flat_map(|b| b.directives.exports.iter().flat_map(|x| x.items.iter().map(|i| &*i.text))), true))),
+                .ok_or_else(|| import_error(not_exported_by_block(name, &text, cands.iter().flat_map(|b| b.directives.exports.iter().flat_map(|x| x.items.iter().map(|i| &*i.text))), true, cands.iter().find_map(|b| star_tag(b))))),
             many => Err(self.ambiguous(name, &text, many)),
         }
     }
@@ -691,7 +699,7 @@ impl Interp {
         match self.loaded_for(&b, seen) {
             Some(exports) => match find(exports, name) {
                 Some(e) => Ok(e.value.clone()),
-                None => Err(import_error(not_exported_by_block(name, &self.selector_text(sel), exports.iter().map(|e| &*e.name), false))),
+                None => Err(import_error(not_exported_by_block(name, &self.selector_text(sel), exports.iter().map(|e| &*e.name), false, star_tag(&b)))),
             },
             None => Err(self.state_error(&b, None)),
         }
@@ -1066,7 +1074,7 @@ impl Interp {
         match self.loaded(&hit).map(|ex| find(ex, name).cloned()) {
             Some(Some(e)) if e.func => Ok(e.value),
             Some(Some(_)) => Err(constant_error(name)),
-            Some(None) => Err(import_error(not_exported_by_block(name, &self.selector_text(&imp.selector), self.loaded(&hit).into_iter().flat_map(|l| l.iter()).map(|e| &*e.name), false))),
+            Some(None) => Err(import_error(not_exported_by_block(name, &self.selector_text(&imp.selector), self.loaded(&hit).into_iter().flat_map(|l| l.iter()).map(|e| &*e.name), false, star_tag(&hit)))),
             None => Err(self.state_error(&hit, Some(name))),
         }
     }

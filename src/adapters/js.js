@@ -542,7 +542,10 @@ Module.syncBuiltinESMExports();
 // 3. A block can't end the worker; the original exit is kept for `bye` (9.10).
 process.exit = function (code) {
   const arg = code === undefined ? '' : String(code);
-  throw new Error(`process.exit(${arg}) can't end V2's JavaScript engine; throw an error instead, or end the program with V2's exit(${arg})`);
+  const err = new Error(`process.exit(${arg}) can't end V2's JavaScript engine; throw an error instead, or end the program with V2's exit(${arg})`);
+  // As e.data.exit_code in V2 (9.6), so `catch (e) { exit(e.data.exit_code) }` ends as asked.
+  err.exit_code = code === undefined ? 0 : code;
+  throw err;
 };
 
 // 4. The host owns Ctrl+C; errors with no call to attach to are printed and the worker goes on.
@@ -1025,7 +1028,39 @@ function serialize(e, depth = 0) {
   }
   const out = { type: 'ForeignError', message: wellFormed(errorMessage(e)), foreign_type: wellFormed(errorName(e)), trace };
   if (e !== null && typeof e === 'object' && e.cause !== undefined && depth < MAX_CAUSES) out.cause = serialize(e.cause, depth + 1);
+  const data = ownData(e);
+  if (data) out.data = data;
   return out;
+}
+
+// An error's own simple fields, as e.data in V2 (9.6): Node's code, errno, syscall and path, a
+// CLI library's exitCode. Strings, finite numbers, booleans and null only; at most 32.
+function ownData(e) {
+  if (e === null || typeof e !== 'object') return null;
+  let keys;
+  try {
+    keys = Object.keys(e);
+  } catch {
+    return null;
+  }
+  const data = {};
+  let n = 0;
+  for (const k of keys) {
+    if (n >= 32 || k === 'message' || k === 'stack' || k === 'cause' || k === '$v2') continue;
+    let v;
+    try {
+      v = e[k];
+    } catch {
+      continue;
+    }
+    // A number V2 holds exactly: a float, or an int within 2^53.
+    const num = typeof v === 'number' && Number.isFinite(v) && (!Number.isInteger(v) || Number.isSafeInteger(v));
+    if (typeof v === 'string') v = wellFormed(v);
+    else if (!(v === null || typeof v === 'boolean' || num)) continue;
+    data[wellFormed(k)] = v;
+    n++;
+  }
+  return n ? data : null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1704,11 +1739,13 @@ function toV2(x, depth = 0, open = new Walk()) {
   if (isV2Function(x) || x instanceof V2Error) return encode(x, depth, open); // V2's own values (10.7)
   if (depth >= MAX_DEPTH) throw new Fail('MarshalError', `to_v2(): value nested deeper than ${MAX_DEPTH} levels`);
   const isMap = util.types.isMap(x);
-  const list = Array.isArray(x) || util.types.isSet(x);
+  const isSet = util.types.isSet(x);
+  // A typed array (Float64Array, ...) is a list of its numbers; Uint8Array is bytes, above.
+  const list = Array.isArray(x) || isSet || util.types.isTypedArray(x);
   if (isMap || list || (typeof x === 'object' && isPlainObject(x))) {
     if (open.has(x)) throw new Fail('MarshalError', `to_v2(): can't convert a ${typeName(x)} that contains itself`);
     const keys = isMap || list ? null : Object.keys(x);
-    open.spend(2 * (keys ? keys.length : isMap || !Array.isArray(x) ? x.size : x.length));
+    open.spend(2 * (keys ? keys.length : isMap || isSet ? x.size : x.length));
     open.add(x);
     try {
       if (list) return Array.from(x, (v) => toV2(v, depth + 1, open));
@@ -1746,7 +1783,8 @@ function toV2(x, depth = 0, open = new Walk()) {
   }
   // A way that works for this object: a date's ISO text, a Map's entries, a Set's items, else its
   // own fields.
-  const how = x instanceof Date ? 'h.toISOString()' : x instanceof Map ? 'Object.fromEntries(h)' : x instanceof Set ? '[...h]' : '({ ...h })';
+  // Blocks make their values in a context of their own (14.1), where instanceof Date fails.
+  const how = util.types.isDate(x) ? 'h.toISOString()' : '({ ...h })';
   throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data: make plain data of it in a block first, as in @js(h) { ${how} }`);
 }
 

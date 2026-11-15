@@ -135,7 +135,8 @@ fn search(name: &str, l: &Lookup, wanted: usize) -> Vec<PathBuf> {
         return hits;
     }
     if name.contains(['/', '\\']) {
-        let p = l.cwd.join(as_path);
+        // `./x.bat` without the `.`, as cmd.exe shows a batch file's path.
+        let p: PathBuf = l.cwd.join(as_path).components().collect();
         if cfg!(windows) && !has_accepted_extension(as_path) {
             for ext in ACCEPTED {
                 consider(&mut hits, with_extension_appended(&p, ext), false);
@@ -191,7 +192,7 @@ pub struct RealProber;
 
 impl Prober for RealProber {
     fn probe(&self, argv: &[OsString], env: &[(OsString, OsString)], limit: Option<Duration>) -> ProbeOutcome {
-        match process::run_captured(argv, env, limit, None) {
+        match process::run_captured(argv, env, limit, None, false) {
             Err(e) => ProbeOutcome::SpawnFailed(e.message),
             Ok(c) if c.timed_out => ProbeOutcome::TimedOut,
             Ok(c) => match c.status.signal {
@@ -722,6 +723,21 @@ impl Resolver<'_> {
             } else {
                 None
             };
+            // A conda environment's or an installation's Python (`C:\Program Files\Python311`,
+            // `/usr`): never a place to run `-m venv` in, which would turn it into a venv of
+            // another Python. Nor is a folder that holds anything else.
+            let installed = |dir: &Path| -> Option<PathBuf> {
+                let names: &[&str] = if cfg!(windows) { &["python.exe"] } else { &["bin/python3", "bin/python"] };
+                names.iter().map(|n| dir.join(n)).find(|p| is_regular_file(p)).filter(|_| !is_venv(dir))
+            };
+            let free = |dir: &Path| std::fs::read_dir(dir).map_or(true, |mut d| d.next().is_none());
+            let command = |p: &Path| {
+                let p = p.display().to_string();
+                if p.contains('\\') { format!("[engines.py] command = ['{p}']") } else { format!("[engines.py] command = [\"{p}\"]") }
+            };
+            let not_a_venv = |what: &str, py: &Path| {
+                format!("[python] venv '{shown}' is {what}, not a virtual environment: name its python instead, {}, or make a virtual environment with it: {} -m venv .venv", command(py), pasted(py))
+            };
             // Its python links to one that is gone, as after the system's Python was upgraded.
             let dangling = candidates.iter().find_map(|c| std::fs::read_link(c).ok().filter(|_| !c.exists()));
             let message = if let Some(target) = dangling {
@@ -732,12 +748,27 @@ impl Resolver<'_> {
                 )
             } else if is_regular_file(venv) {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
-                let folder = venv.parent().and_then(Path::parent).filter(|f| is_venv(f));
-                let fix = folder.map_or_else(|| "the folder that holds pyvenv.cfg".to_string(), &write);
-                format!("[python] venv '{shown}' is a file: venv names the virtual environment's folder: write {fix}")
+                match venv.parent().and_then(Path::parent).filter(|f| is_venv(f)) {
+                    Some(folder) => format!("[python] venv '{shown}' is a file: venv names the virtual environment's folder: write {}", write(folder)),
+                    None => format!("[python] venv '{shown}' is a file: venv names a virtual environment's folder; for a Python that isn't in one, write {} instead of venv", command(venv)),
+                }
+            } else if let Some(folder) = inside.filter(|f| is_venv(f)) {
+                format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}", write(folder))
+            } else if let Some(py) = installed(venv) {
+                if venv.join("conda-meta").is_dir() {
+                    let name = venv.file_name().map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
+                    format!("[python] venv '{shown}' is a conda environment, not a virtual environment: run v2 where it is activated (conda activate {name}) and leave venv out, or name its python instead: {}", command(&py))
+                } else {
+                    not_a_venv("a Python installation", &py)
+                }
+            } else if let Some(py) = inside.and_then(installed) {
+                not_a_venv("a folder of a Python installation", &py)
             } else if let Some(folder) = inside {
-                let create = if is_venv(folder) { String::new() } else { format!(" (create it: {python} -m venv {})", pasted(folder)) };
+                let create = if !free(folder) { String::new() } else { format!(" (create it: {python} -m venv {})", pasted(folder)) };
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}{create}", write(folder))
+            } else if is_venv(venv) {
+                // A venv made on another system (`bin` where Windows wants `Scripts`), or damaged.
+                format!("[python] venv '{shown}' has no {want}, so it was made on another system or is damaged: make it again here, {python} -m venv --clear {}", pasted(venv))
             } else if let Some(var) = crate::config::unexpanded(&shown) {
                 format!("[python] venv '{shown}' has no {want}: V2 doesn't expand {var}: write the path out (a ~ at its start is your home folder)")
             } else if let Some(near) = venv
@@ -751,6 +782,8 @@ impl Resolver<'_> {
                 .min()
             {
                 format!("[python] venv '{shown}' has no {want}; there is a virtual environment in {}: did you mean {}?", near.display(), write(&near))
+            } else if !free(venv) {
+                format!("[python] venv '{shown}' has no {want}, and it isn't a virtual environment (it has no pyvenv.cfg): write the folder of one, or make one: {python} -m venv .venv")
             } else {
                 format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {})", pasted(venv))
             };
@@ -1488,6 +1521,61 @@ mod tests {
             let e = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
             assert_ne!(e.origin, Origin::Venv);
         }
+    }
+
+    #[test]
+    fn a_venv_that_isnt_one_never_gets_venv_run_in_it() {
+        // 7.6: a Python installation, a conda environment, or a folder of other things named as
+        // the venv: what to write instead, and never `-m venv` into it, which would make a venv
+        // of another Python over it.
+        let d = temp("notvenv");
+        let p = fake(|_| says("Python 3.12.1"));
+        let at = |v: &Path| Config { python_venv: Some(Sourced { value: v.to_path_buf(), from: project_source() }), ..Config::default() };
+        let (python, created) = if cfg!(windows) { ("py", "\"") } else { ("python3", "'") };
+        let root = d.join("Python311");
+        let bin = if cfg!(windows) { root.clone() } else { root.join("bin") };
+        std::fs::create_dir_all(&bin).unwrap();
+        let py = exe(&bin, if cfg!(windows) { "python" } else { "python3" });
+        // Windows: the folder itself (elsewhere its bin/python3 is simply used); everywhere: its
+        // bin folder, Scripts on Windows.
+        let mut named = vec![(root.join(if cfg!(windows) { "Scripts" } else { "bin" }), "a folder of a Python installation")];
+        if cfg!(windows) {
+            named.push((root.clone(), "a Python installation"));
+        }
+        for (v, what) in named {
+            let nf = resolve_with(&at(&v), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+            let head = format!("[python] venv '{}' is {what}, not a virtual environment: name its python instead, [engines.py] command = ", v.display());
+            assert!(nf.message.starts_with(&head) && nf.message.ends_with(" -m venv .venv"), "{}", nf.message);
+            assert!(nf.message.contains(&py.display().to_string()) && !nf.message.contains(&format!("-m venv {created}")), "{}", nf.message);
+        }
+        #[cfg(windows)]
+        {
+            let env = d.join("miniconda3").join("envs").join("sales");
+            std::fs::create_dir_all(env.join("conda-meta")).unwrap();
+            let conda_py = exe(&env, "python");
+            let nf = resolve_with(&at(&env), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+            let want = format!(
+                "[python] venv '{}' is a conda environment, not a virtual environment: run v2 where it is activated (conda activate sales) and leave venv out, or name its python instead: [engines.py] command = ['{}']",
+                env.display(),
+                conda_py.display()
+            );
+            assert_eq!(nf.message, want);
+        }
+        // The python itself, not in a venv: name it as the command.
+        let nf = resolve_with(&at(&py), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.contains("is a file: venv names a virtual environment's folder; for a Python that isn't in one, write [engines.py] command = "), "{}", nf.message);
+        // A folder of other things: nothing to create in it.
+        let src = d.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.py"), "").unwrap();
+        let nf = resolve_with(&at(&src), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("and it isn't a virtual environment (it has no pyvenv.cfg): write the folder of one, or make one: {python} -m venv .venv")), "{}", nf.message);
+        // A venv without the python this system needs (made on another one): make it again.
+        let other = d.join("wslenv");
+        std::fs::create_dir_all(other.join(if cfg!(windows) { "bin" } else { "Scripts" })).unwrap();
+        std::fs::write(other.join("pyvenv.cfg"), "home = x\n").unwrap();
+        let nf = resolve_with(&at(&other), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!(", so it was made on another system or is damaged: make it again here, {python} -m venv --clear {}", other.display())), "{}", nf.message);
     }
 
     #[cfg(windows)]

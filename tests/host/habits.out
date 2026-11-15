@@ -33,3 +33,8 @@ NameError 'parseInt' is not declared — V2 converts with int(s) and float(s)
 NameError 'floor' is not declared — V2 has int(x) (toward zero), round(x) and div(a, b); Python's math and JavaScript's Math work in a block
 TypeError list has no method 'find' — V2 writes xs.filter(f) (its first item: xs.filter(f)[0]), or xs.index_of(x) for a value
 TypeError dict has no method 'set' — V2 sets a key with d[key] = value
+TypeError list has no method 'remove' — V2 removes the item at an index with xs.pop(i) (xs.index_of(x) finds it), or keeps the others with xs.filter(func(y) => y != x)
+TypeError list has no method 'count' — V2 counts with len(xs.filter(func(y) => y == x))
+TypeError list has no method 'clear' — V2 starts over with a new one: xs = [] (or d = {})
+TypeError str has no method 'ljust' — V2 pads with " " * n, as in s + " " * (10 - len(s))
+KeyError key 'keys' not found

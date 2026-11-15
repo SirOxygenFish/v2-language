@@ -1,0 +1,12 @@
+// platform: unix
+// write_file to /dev/stdout goes through V2's own stdout, after what print wrote, so the output
+// keeps program order in a pipe and isn't cut short in a redirected file (DOCS 3.11, INTERNALS
+// 5.10). /dev/stderr likewise.
+print("1 print")
+write_file("/dev/stdout", "2 write_file\n", append: true)
+print("3 print")
+write_file("/dev/stdout", b"4 bytes\n")
+print("5 print")
+write_file("/dev/fd/1", "6 fd 1\n")
+write_file("/dev/stderr", "")
+print("7 print")

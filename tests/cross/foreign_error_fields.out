@@ -1,0 +1,6 @@
+Error ENOENT open
+{"status": 404, "retry": false}
+{"exit_code": 3}
+{"exit_code": 4}
+FileNotFoundError 2 ./no-such-v2-file.txt
+null

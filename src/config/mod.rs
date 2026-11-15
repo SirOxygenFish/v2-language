@@ -296,7 +296,9 @@ fn describe(v: &toml::Value) -> String {
 
 /// `unknown key [python] venvv (did you mean 'venv'?)`.
 fn unknown(place: &str, key: &str, known: &[&str]) -> String {
-    match did_you_mean(key, known.iter().copied()) {
+    // `venv_dir`, `command_line`: a known key with more after it.
+    let longer = || known.iter().copied().find(|k| k.len() >= 4 && key.len() > k.len() && key.starts_with(k) && !key[k.len()..].starts_with(char::is_alphanumeric));
+    match did_you_mean(key, known.iter().copied()).or_else(longer) {
         Some(s) => format!("unknown {place} (did you mean '{s}'?)"),
         None => format!("unknown {place}"),
     }
@@ -736,6 +738,8 @@ mod tests {
             ("[ffi]\nsearch_paths = []\n", "unknown section [ffi]"),
             ("[python]\npaths = [\"lib\"]\n", "unknown key [python] paths"),
             ("[python]\nvenvv = \".venv\"\n", "unknown key [python] venvv (did you mean 'venv'?)"),
+            // A known key with more after it.
+            ("[python]\nvenv_dir = \".venv\"\n", "unknown key [python] venv_dir (did you mean 'venv'?)"),
             ("[engines.py]\nflags = []\n", "[engines.py] flags only applies to c, cpp and rust"),
             ("[engines.rust]\nstartup_timeout = 5\n", "[engines.rust] startup_timeout only applies to py and js"),
         ] {

@@ -1,5 +1,5 @@
 4 2 handle
-sqrt | 'sqrt' is not exported by 'tools' (did the block @export it?)
-_private | '_private' is not exported by 'tools' (did the block @export it?)
-VALUE | 'VALUE' is not exported by 'tools' (did the block @export it?)
+sqrt | 'sqrt' is not exported by 'tools' (its @export { * } exports only the functions and classes it defines, and no name that starts with _: list others by name, as in @export { sqrt })
+_private | '_private' is not exported by 'tools' (its @export { * } exports only the functions and classes it defines, and no name that starts with _: list others by name, as in @export { _private })
+VALUE | 'VALUE' is not exported by 'tools' (its @export { * } exports only the functions and classes it defines, and no name that starts with _: list others by name, as in @export { VALUE })
 4.0 10

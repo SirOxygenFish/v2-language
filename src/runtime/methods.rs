@@ -228,6 +228,12 @@ pub fn key_error<T>(key: &str, d: &Dict) -> Exec<T> {
 /// imported .v2 file keeps such names to itself (6.4).
 pub fn member_key_error<T>(key: &str, d: &Dict) -> Exec<T> {
     let Err(Flow::Error(e)) = key_error::<T>(key, d) else { unreachable!("key_error fails") };
+    // `d.keys` without the call reads a key named keys.
+    if DICT_METHODS.iter().any(|m| m.name == key) {
+        let err = super::error::ErrorValue::new("KeyError", &*e.message);
+        let _ = err.hint.set(format!("{key} is a method of dicts, so call it, as in d.{key}()").into());
+        return Err(Flow::Error(Rc::new(err)));
+    }
     if !key.starts_with('_') {
         return Err(Flow::Error(e));
     }
@@ -292,7 +298,7 @@ fn list_sort(it: &mut Interp, r: &Value, a: Vec<Value>, at: Span) -> Exec<Value>
         _ => None,
     };
     if let Some(bad) = keys.iter().find(|v| kind(v).is_none()) {
-        let hint = if super::ops::is_handle(bad) { super::ops::HANDLE_HINT } else { "" };
+        let hint = super::ops::handle_hint(bad, "sorted(h)", "[...h].sort()");
         return type_error(format!("cannot sort a list containing {} (only numbers or strings){hint}", bad.type_name()));
     }
     if let (Some(first), Some(other)) = (keys.first(), keys.iter().find(|v| kind(v) != kind(&keys[0]))) {
