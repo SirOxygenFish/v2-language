@@ -1,0 +1,5 @@
+// requires: js ts
+// A TypeScript file is imported like a JavaScript one, on every Node V2 supports: before 22.18
+// the worker asks Node to strip its types (DOCS 7, INTERNALS 7.2).
+@import { norm, label } from ts."./fixtures/typed_helpers.ts"
+print(norm({x: 3, y: 4}), label)

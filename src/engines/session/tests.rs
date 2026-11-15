@@ -417,6 +417,7 @@ fn worker_command_and_env() {
         let older = ResolvedEngine { spec: js().spec.clone(), origin: Origin::Path, argv: vec!["node".into()], version: Some(version), skipped: Vec::new() };
         let (argv, _) = worker_command(&older, &adapter);
         assert_eq!(argv.iter().any(|a| a == "--experimental-strip-types"), flag, "{version}");
+        assert_eq!(argv.iter().any(|a| a == "--disable-warning=ExperimentalWarning"), flag, "{version}");
         assert_eq!(argv.last(), Some(&adapter.clone().into_os_string()), "the adapter stays last");
     }
 }

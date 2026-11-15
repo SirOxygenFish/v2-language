@@ -1465,6 +1465,15 @@ function syntaxFrame(e, req, name) {
   } catch {
     return null;
   }
+  // Node 22.13 to 22.17 report a TypeScript file as they report @ts blocks (12.5): a snippet of
+  // numbered lines and a caret, under a first line `  x what`, which becomes the message.
+  const snippet = /\.[cm]?ts$/i.test(file) && snippetPosition(String(e.message));
+  if (snippet) {
+    const what = /^\s*[x×] (.+)$/m.exec(String(e.message));
+    if (what) e.message = e.code ? `${what[1].trim()} (${e.code})` : what[1].trim();
+    const text = fs.readFileSync(file, 'utf8').split('\n')[snippet[0] - 1] ?? '';
+    return { file: wellFormed(file), line: snippet[0], col: codePointAtWidth(text, snippet[1], 4), func: null };
+  }
   if (!/\.(?:m?js|cjs)$/i.test(file)) return null;
   const r = require('child_process').spawnSync(process.execPath, ['--check', file], { encoding: 'utf8', timeout: 10000, windowsHide: true });
   return r.status ? at(r.stderr) : null;
