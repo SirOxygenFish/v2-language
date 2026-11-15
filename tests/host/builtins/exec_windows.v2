@@ -12,3 +12,5 @@ write_file(home + "/v2_exec_ff.bin", b"a\xffb")
 let typed = exec(["cmd", "/d", "/c", "type", home + r"\v2_exec_ff.bin"]).stdout
 let utf8 = "65001" in exec(["cmd", "/d", "/c", "chcp"]).stdout
 print(len(typed), ("\u{fffd}" in typed) == utf8)
+// UTF-16 output, as cmd /u writes it, is decoded (INTERNALS 5.10).
+print(json_stringify(exec(["cmd", "/d", "/u", "/c", "echo h\u{e9}llo"]).stdout))

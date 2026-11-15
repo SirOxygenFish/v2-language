@@ -32,7 +32,7 @@ null func <func hoisted> <builtin print> true
 RecursionError: maximum call depth (10000) exceeded
 ArityError: hoisted() takes 0 positional arguments but 1 was given
 ArityError: rest() missing required argument 'a'
-ArityError: defaults() got an unexpected argument 'z' — did you mean 'a'?
+ArityError: defaults() got an unexpected argument 'z'
 TypeError: spread argument must be a list, got int
 NameError: 'undefined_name' is not declared
 TypeError: 'int' is not callable

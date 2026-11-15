@@ -267,6 +267,9 @@ count += 1             // also -=, *=, /=, %=
   so building a long one with `s += piece` in a loop is fine, and other names keep the old text.
 - `const` stops reassignment of the name. A `const` list can still be changed with `.push()`.
 - Assigning to a name that was never declared is an error — there are no accidental globals.
+- A name is usable from its `let` on: reading it before that line runs is a `NameError` that says
+  where it is declared (`'total' is used before its let on line 12`), also from a function called
+  before then.
 
 ### 3.4 Operators
 
@@ -334,7 +337,8 @@ error (so a typo like `"\d"` is caught instead of silently kept).
 In an f-string, `{name}` without the `$` is Python's spelling, and a `SyntaxError`
 (`{name} in an f-string is Python's placeholder, which V2 doesn't use`, hint
 `write ${name} for its value, or ${"{name}"} for the text {name}`), so it can't print its braces by
-mistake. Doubled braces (`{{name}}`) and an escaped `\${name}` are text.
+mistake. Doubled braces are text as written: `f"{{name}}"` prints `{{name}}` (Python would print
+`{name}`), and an escaped `\${name}` prints `${name}`.
 
 Strings are indexed by character: `"héllo"[1]` is `"é"`, `"hello"[-1]` is `"o"`,
 `"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`.
@@ -372,8 +376,9 @@ print("email" in user)      // true
 print(user.get("phone", "none"))   // none
 ```
 
-Dict keys are always strings. In a literal, a bare word (`name:`) is a string key; write
-`[expr]: value` to compute a key. Reading a missing key with `d[k]` or `d.k` is a `KeyError`; use
+Dict keys are always strings. In a literal, a bare word (`name:`) is a string key, except V2's
+keywords (`from`, `if`, `in`, …), which are quoted: `{"from": a, to: b}` (after a dot they are fine:
+`d.from`); write `[expr]: value` to compute a key. Reading a missing key with `d[k]` or `d.k` is a `KeyError`; use
 `d.get(k, default)` when a key may be missing. `len(x)` is the number of items in a list or dict.
 
 | List method              | Effect                                        |
@@ -571,7 +576,7 @@ bigger come from the languages you embed.
 | `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int (so NaN and infinity are a `ValueError`), more gives a float, fewer is a `ValueError`; an int `x` comes back unchanged |
 | `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
-| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`) |
+| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error)  |
 | `list_dir(path)`                        | sorted list of the names in a folder                        |
@@ -583,7 +588,7 @@ bigger come from the languages you embed.
 | `args()`                                | command-line arguments after the script name                |
 | `sleep(seconds)`                        | wait (an int or float ≥ 0); Ctrl+C still stops the program  |
 | `time()`                                | seconds since 1970-01-01 UTC, as a float                    |
-| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; on Linux and macOS only the low 8 bits of `code` reach the shell |
+| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; `code` is a 32-bit signed int (else a `ValueError`), and on Linux and macOS only its low 8 bits reach the shell |
 | `error(type, message, data = null)`     | make an error value                                         |
 | `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
 | `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
@@ -606,10 +611,15 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 ```
 
 `argv` is a non-empty list of strings; a program name without a path separator is searched on
-`PATH` like engine commands. A `str` or `bytes` `input` becomes the program's standard input
-(with `null` it is empty). The result is a dict `{code, stdout, stderr}`, both outputs captured
-whole and decoded as UTF-8 (invalid bytes become U+FFFD; on Windows, output that isn't UTF-8 is
-read in the console's code page first, as `cmd` and other console programs write it). A non-zero
+`PATH` like engine commands, never in the current folder (as on Linux and macOS): a program there is
+run by its path, `exec(["./build.bat"])`. A script runs through its program:
+`exec(["python", "tool.py"])`, or for PowerShell
+`exec(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "build.ps1"])`. A `str` or `bytes`
+`input` becomes the program's standard input (with `null` it is empty). The result is a dict
+`{code, stdout, stderr}`, both outputs captured whole and decoded as UTF-8 (invalid bytes become
+U+FFFD; UTF-16 output, with a byte order mark or, on Windows, as `cmd /u` and `wsl --list` write it,
+is read as UTF-16; on Windows, other output that isn't UTF-8 is read in the console's code page
+first, as `cmd` and other console programs write it). A non-zero
 `code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
@@ -714,7 +724,9 @@ looks the function up when it is called, so blocks can import from each other in
 chapter 8.)
 
 If a definition block fails while loading (say, a Python exception in its top-level code), it
-stays failed: reaching it again raises the same error instead of running its code a second time.
+stays failed: the first reach raises that error, and reaching it again raises
+`ImportError: block 'stats' failed to load: <the original error>` instead of running its code a
+second time.
 Block args of a definition block are evaluated once, when it loads.
 
 Each block has its **own namespace**: a variable defined in one `@py` block is not visible in
@@ -807,7 +819,7 @@ mean the same thing: `@python stats` and `@py stats` are the same block kind.
 | engine not installed or too old                   | `EngineNotFound`, saying how to fix it  |
 | foreign syntax error in a py/js/ts block          | `ForeignError` pointing at the `.v2` line |
 | compile error in a c/cpp/rust block               | `BuildError` pointing at the `.v2` line |
-| reaching a definition block that failed to load   | the same error again                    |
+| reaching a definition block that failed to load   | `ImportError: block 'stats' failed to load: <the original error>` |
 
 ---
 
@@ -928,7 +940,7 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   stripping. Settings go in `[engines.js]`; `ts` has none of its own.
 - Types are **not checked** — run `tsc` yourself if you want checking.
 - Stripping only removes type syntax. `enum`, `namespace` and constructor parameter properties
-  raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on Node 22
+  raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on early Node 22 releases
   `ERR_INVALID_TYPESCRIPT_SYNTAX`): write TypeScript without them, or
   use `@js`.
 - `@js` and `@ts` blocks can import from each other directly.
@@ -1029,8 +1041,8 @@ Inside a block, on its own line:
 - A name that isn't a valid V2 name (JavaScript's `$x`) can be written in quotes: `@export { "$x" }`.
   Compiled blocks export functions by plain name; a quoted item there is a `SyntaxError`.
 - If your foreign code has a line that really starts with `@export` or `@import` (for example a
-  Python decorator with that name), write `@@export` / `@@import` and V2 passes it through with a
-  single `@`.
+  Python decorator with that name, or a CSS `@import` line in a template literal or a docstring),
+  write `@@export` / `@@import` and V2 passes it through with a single `@`.
 
 ### 6.2 `@import`
 
@@ -1063,7 +1075,9 @@ no `@import { * }`.
 
 Inside a block, `@import` brings in functions only: naming a constant that a block or package
 exports is an `ImportError` (`'VERSION' is a constant — pass it in as a block arg`), at the `@import`
-when V2 can already tell, otherwise when the name is first called.
+when V2 can already tell, otherwise when the name is first called. From `v2`, a variable that holds
+data (`let k = 5`) is one too (`'k' is an int, not a function`); one that holds `null`, or isn't
+declared yet, may still be given a function before the block calls it.
 
 ### 6.3 Ambiguity rules
 
@@ -1450,6 +1464,10 @@ if engine_available("rust") {
 }
 ```
 
+Call the optional language's functions only inside the `if`: naming one as a value
+(`let f = engine_available("js") ? fast : slow`) loads its `@import` at its own line, where a
+missing engine is an error.
+
 ---
 
 ## 11. Compiled blocks: C, C++, Rust
@@ -1672,8 +1690,8 @@ function not in the library), `MarshalError` (argument or result doesn't fit), a
 
 ## 13. Custom engines
 
-> **Not built yet** (ROADMAP Phase 3): a custom tag raises `EngineUnknown` and `define_engine` is a
-> `NameError` for now.
+> **Not built yet** (ROADMAP Phase 3): a custom tag raises `EngineUnknown`, and `define_engine`
+> raises `Error: define_engine (custom engines) isn't in this version of V2 yet`, for now.
 
 Any language can be added as a custom engine, declared in an `[engines.<tag>]` table in
 `v2.toml` ([chapter 14](#14-project-file-v2toml)) or with `define_engine` in the script
@@ -1825,7 +1843,7 @@ temp directory, and caches live in `~/.v2/`.
 | Command                        | Does                                                                 |
 | ------------------------------ | -------------------------------------------------------------------- |
 | `v2 file.v2 [args...]`         | run a script                                                         |
-| `v2 check file.v2`             | parse and check the script and every file it `import`s, without running or writing anything; prints the errors |
+| `v2 check file.v2`             | parse and check the script and every file it `import`s, without running or writing anything; prints the errors (each file up to its first syntax error: fix it and check again) |
 | `v2 doctor`                    | show every engine: found or not, command, version, and where the setting came from |
 | `v2 cache clean`               | delete V2's caches (compiled blocks and toolchain probe results)     |
 | `v2 --version`, `v2 --help`    | (`-h` is `--help` too)                                               |

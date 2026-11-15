@@ -1,0 +1,4 @@
+red is not a function of the module itself, but of its default export: write m.default.red(…), or import the default export with @import { "default" as m }
+<x>
+the module is not a function, but its default export is: call it through .default, as in m.default(…), or import it with @import { "default" as f }
+a b

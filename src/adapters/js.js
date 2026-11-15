@@ -1390,7 +1390,7 @@ function settle(v, k, what) {
   if (!isThenable(v)) return k(v);
   if (stack.length !== 1) {
     Promise.resolve(v).catch(() => {});
-    throw new Fail('Error', `${what} during a nested cross-language call; only an outermost call can be awaited`);
+    throw new Fail('Error', `${what} during a nested cross-language call; only an outermost call can be awaited: await it in JavaScript itself, or return a value, not a Promise`);
   }
   return Promise.resolve(v).then(k);
 }
@@ -1598,6 +1598,21 @@ function invoke(f, self, args) {
   return isConstructor(f) ? Reflect.construct(f, args) : Reflect.apply(f, self, args);
 }
 
+// `@import js.chalk as chalk`: an ES module's namespace, whose default export has what was called
+// (`chalk.red`), or is the function (`slugify(...)`), says how to reach it (13.5).
+const isNamespace = (o) => o !== null && typeof o === 'object' && Object.prototype.toString.call(o) === '[object Module]';
+
+function notAFunction(obj, name) {
+  const d = isNamespace(obj) ? obj.default : undefined;
+  if (name === undefined && typeof d === 'function') {
+    return new TypeError("the module is not a function, but its default export is: call it through .default, as in m.default(…), or import it with @import { \"default\" as f }");
+  }
+  if (name !== undefined && d !== null && (typeof d === 'object' || typeof d === 'function') && typeof d[name] === 'function') {
+    return new TypeError(`${name} is not a function of the module itself, but of its default export: write m.default.${name}(…), or import the default export with @import { "default" as m }`);
+  }
+  return new TypeError(`${name === undefined ? typeName(obj) : name} is not a function`);
+}
+
 function doCall(m) {
   const target = m.target || {};
   const args = (m.args || []).map(decode);
@@ -1617,11 +1632,11 @@ function doCall(m) {
   if ('method' in target) {
     name = target.method;
     const f = obj[name];
-    if (typeof f !== 'function') throw new TypeError(`${name} is not a function`);
+    if (typeof f !== 'function') throw notAFunction(obj, name);
     result = invoke(f, obj, args);
   } else {
     name = (typeof obj === 'function' && obj.name) || typeName(obj);
-    if (typeof obj !== 'function') throw new TypeError(`${typeName(obj)} is not a function`);
+    if (typeof obj !== 'function') throw notAFunction(obj, undefined);
     result = invoke(obj, undefined, args);
   }
   return settle(result, (v) => ({ value: encodeValue(v, 'value') }), `'${name}' returned a Promise`);

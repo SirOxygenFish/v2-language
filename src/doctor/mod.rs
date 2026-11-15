@@ -35,6 +35,8 @@ struct Checker {
     problems: Vec<Problem>,
     files: usize,
     errors: usize,
+    /// A file's parse stopped at an error, so the rest of it wasn't checked.
+    stopped: bool,
     done: HashSet<PathBuf>,
     /// When each loaded file was met, by `FileId`.
     met: HashMap<u32, usize>,
@@ -73,6 +75,7 @@ impl Checker {
             Ok(p) => p,
             Err(d) => {
                 self.diag(&d);
+                self.stopped = true;
                 return None;
             }
         };
@@ -181,7 +184,8 @@ pub fn check(file: &str) -> i32 {
     for p in &c.problems {
         stderr!("{}", p.text);
     }
-    stdoutln!("check {display}: {}, {}", plural(c.files, "file"), plural(c.errors, "error"));
+    let stopped = if c.stopped { " (a file is checked up to its first syntax error)" } else { "" };
+    stdoutln!("check {display}: {}, {}{stopped}", plural(c.files, "file"), plural(c.errors, "error"));
     if c.errors > 0 {
         1
     } else {
@@ -245,6 +249,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 };
                 rows.push([id.clone(), status.into(), command, version, from]);
                 let note = match (nf.status, rule.min_version, &nf.command) {
+                    // `env -i v2 doctor`: nothing was searched, so installing wouldn't help.
+                    (Status::Missing, _, _) if std::env::var_os("PATH").is_none_or(|p| p.is_empty()) => {
+                        let key = spec.session_of.as_deref().unwrap_or(&id);
+                        format!("not found: PATH isn't set, so nothing was searched; set it, or name the program in v2.toml, [engines.{key}] command")
+                    }
                     (Status::Missing, _, _) => format!("not found; install: {}", install_hint(&id)),
                     (Status::Old(v), Some(min), None) if v >= min => {
                         format!("not supported: found {v}, which has no type stripping; V2 needs {}; install: {}", rule.needs(min), install_hint(&id))
@@ -265,8 +274,14 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let others: Vec<(std::path::PathBuf, String)> =
                     nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
                 skipped(&others, &mut notes);
-                // A program that can't load a library: the package that has it (7.8).
-                notes.extend(nf.skipped.iter().filter_map(|(p, why)| crate::engines::resolve::library_fix(p, why)).map(|fix| format!("{id}: fix: {fix}")));
+                // A program that can't load a library: the package that has it (7.8). Any other
+                // that doesn't run: repair it, or install one, as for a missing engine.
+                let fixes: Vec<String> = nf.skipped.iter().filter_map(|(p, why)| crate::engines::resolve::library_fix(p, why)).map(|fix| format!("{id}: fix: {fix}")).collect();
+                if fixes.is_empty() && matches!(nf.status, Status::Broken) && nf.command.is_none() {
+                    let program = if id == "py" { "Python" } else { "Node.js" };
+                    notes.push(format!("{id}: fix: repair that {program}, or install one: {}", install_hint(&id)));
+                }
+                notes.extend(fixes);
                 not_ready.push(id);
             }
         }

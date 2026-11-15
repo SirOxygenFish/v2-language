@@ -2,5 +2,5 @@
 ["HI", false]
 ["NameError", "'late' is not defined at the top level of v2_selector.v2"]
 late
-["TypeError", "'DATA' is not a function"]
+["TypeError", "'DATA' is a list now, not a function — pass data in as a block arg"]
 ImportError | 'nowhere' is not a top-level name in v2_selector.v2

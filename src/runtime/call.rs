@@ -75,7 +75,8 @@ pub fn bind(fname: &str, params: &[Param], pos: Vec<Value>, named: Vec<(Rc<str>,
         match params.iter().position(|p| p.name == &*name) {
             None => {
                 let msg = format!("{fname}() got an unexpected argument '{name}'");
-                return arity(with_suggestion(msg, &name, params.iter().filter(|p| !p.rest).map(|p| p.name)));
+                let open = params.iter().zip(&bound).filter(|(p, b)| !p.rest && b.is_none()).map(|(p, _)| p.name);
+                return arity(with_suggestion(msg, &name, open));
             }
             Some(i) if params[i].rest => {
                 return arity(format!("{fname}() cannot take rest parameter '{name}' by name"));

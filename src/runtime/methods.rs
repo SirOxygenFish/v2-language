@@ -279,6 +279,10 @@ fn list_sort(it: &mut Interp, r: &Value, a: Vec<Value>, at: Span) -> Exec<Value>
             for x in &items {
                 keys.push(it.call_value(f, vec![x.clone()], Vec::new(), at)?);
             }
+            // Sorting would drop what the key function added or removed, as Python says (5.11).
+            if l.borrow().len() != items.len() {
+                return value_error("list modified during sort()");
+            }
             keys
         }
     };
