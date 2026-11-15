@@ -410,8 +410,15 @@ fn worker_command_and_env() {
     assert!(env.contains(&("PYTHONUTF8".into(), "1".into())) && env.contains(&("PYTHONIOENCODING".into(), "utf-8".into())));
     // js: Node finds packages itself; V2 sets no NODE_PATH (an inherited one stays as it is).
     let (argv, env) = worker_command(&js(), &adapter);
-    assert_eq!(argv, [OsString::from("node"), "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON".into(), adapter.into_os_string()]);
+    assert_eq!(argv, [OsString::from("node"), "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON".into(), adapter.clone().into_os_string()]);
     assert!(!env.iter().any(|(k, _)| k == "NODE_PATH"), "{env:?}");
+    // A Node that strips the types of .ts files only when asked gets the flag (7.2).
+    for (version, flag) in [(Version(22, 13, 0), true), (Version(22, 17, 9), true), (Version(22, 18, 0), false), (Version(23, 5, 0), true), (Version(23, 6, 0), false), (Version(24, 0, 0), false)] {
+        let older = ResolvedEngine { spec: js().spec.clone(), origin: Origin::Path, argv: vec!["node".into()], version: Some(version), skipped: Vec::new() };
+        let (argv, _) = worker_command(&older, &adapter);
+        assert_eq!(argv.iter().any(|a| a == "--experimental-strip-types"), flag, "{version}");
+        assert_eq!(argv.last(), Some(&adapter.clone().into_os_string()), "the adapter stays last");
+    }
 }
 
 #[test]
