@@ -10,3 +10,8 @@ for t in ["3,7", "2,5 kg", "abc", "1.5e3"] {
     try_it(func() => float(t))
 }
 try_it(func() => int(null))
+// Separators and digits of other scripts: what removes them, never "drop the rest".
+for t in ["1_000", "12 345", "1.234,56", "15.655.924", "١٢٣", "１２"] {
+    try_it(func() => int(t))
+}
+try_it(func() => float("0x1f"))

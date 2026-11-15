@@ -577,7 +577,10 @@ impl Interp {
         }
         let timer = self.timer(s, self.sessions[s].timeouts.call);
         let pending = Pending { id: 0, name: name.into(), timer, startup: false };
-        self.exchange(s, frame, pending, at)
+        let reply = self.exchange(s, frame, pending, at);
+        // A signal that came while the worker answered: the next statement doesn't run (6.5).
+        process::stop_if_interrupted();
+        reply
     }
 
     fn exchange(&mut self, s: SessionId, mut frame: Json, mut pending: Pending, at: Span) -> Exec<Reply> {
@@ -1032,7 +1035,7 @@ impl Interp {
                     }
                     let _ = lines.send(None);
                 };
-                if std::thread::Builder::new().name("v2-drain".into()).spawn(drain).is_ok() {
+                if process::spawn_helper(std::thread::Builder::new().name("v2-drain".into()), drain).is_ok() {
                     open += 1;
                 }
             }

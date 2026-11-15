@@ -184,7 +184,7 @@ pub fn check(file: &str) -> i32 {
     for p in &c.problems {
         stderr!("{}", p.text);
     }
-    let stopped = if c.stopped { " (a file is checked up to its first syntax error)" } else { "" };
+    let stopped = if c.stopped { " (a file with a syntax error shows only that error: fix it, then check again)" } else { "" };
     stdoutln!("check {display}: {}, {}{stopped}", plural(c.files, "file"), plural(c.errors, "error"));
     if c.errors > 0 {
         1

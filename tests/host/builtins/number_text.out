@@ -18,3 +18,17 @@ ValueError | invalid float: 'abc'
   hint: the text has no digits: a number is written with digits, as in 13
 TypeError | int() can't convert null
   hint: input() gives null when the input has ended, and a function without return gives null: check for null first
+ValueError | invalid int: '1_000'
+  hint: int() reads digits without _: int(x.replace("_", ""))
+ValueError | invalid int: '12 345'
+  hint: int() reads digits without spaces between them: int(x.replace(" ", ""))
+ValueError | invalid int: '1.234,56'
+  hint: the text has points between thousands and a decimal comma: float(x.replace(".", "").replace(",", "."))
+ValueError | invalid int: '15.655.924'
+  hint: the text has points between thousands: int(x.replace(".", ""))
+ValueError | invalid int: '١٢٣'
+  hint: int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+ValueError | invalid int: '１２'
+  hint: int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+ValueError | invalid float: '0x1f'
+  hint: float() reads decimal digits: for hex text, convert it in a block, as in @py(x) { int(x, 16) }

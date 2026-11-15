@@ -1482,14 +1482,27 @@ function settle(v, k, what) {
 
 // `let v = @js { {a: 1} }`: at the start of the code JavaScript reads `{` as a block of code (and
 // `a:` as a label), so the value would quietly be 1, or a SyntaxError for `{"a": 1}` (DOCS 4).
-const OBJECT_START = /^\s*\{\s*(?:\}|\.\.\.|(?:[A-Za-z_$][\w$]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\d+)\s*[:,}])/;
+// A key is any JavaScript identifier, `{şehir: 1}` and `{城市: 1}` too.
+const OBJECT_START = /^\s*\{\s*(?:\}|\.\.\.|(?:[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\d+)\s*[:,}])/u;
 
 function objectBraces(src, m) {
-  if (!OBJECT_START.test(src)) return;
-  const at = src.indexOf('{');
+  let at = OBJECT_START.test(src) ? src.indexOf('{') : -1;
+  let message = `an object as the block's value needs parentheses, as in @${m.lang} { ({a: 1}) }: at its start, JavaScript reads { as a block of code`;
+  if (at < 0) {
+    message = 'an object at the start of a statement needs parentheses, as in ({a: 1}): JavaScript reads { there as a block of code';
+    // The last line of a block of several, after a statement that ended: `{city: "Izmir"}` is a
+    // block with a label there too.
+    const lines = src.split('\n');
+    let last = lines.length - 1;
+    while (last >= 0 && !lines[last].trim()) last--;
+    let prev = last - 1;
+    while (prev >= 0 && !lines[prev].trim()) prev--;
+    if (prev < 0 || !OBJECT_START.test(lines[last]) || !/[;}\p{ID_Continue}$'"`]$/u.test(lines[prev].trimEnd())) return;
+    at = lines.slice(0, last).join('\n').length + 1 + lines[last].indexOf('{');
+  }
   const lineIdx = src.slice(0, at).split('\n').length - 1;
   const col = at - (src.lastIndexOf('\n', at - 1) + 1) + 1;
-  const err = new SyntaxError(`an object as the block's value needs parentheses, as in @${m.lang} { ({a: 1}) }: at its start, JavaScript reads { as a block of code`);
+  const err = new SyntaxError(message);
   const [line, cp] = realPosition(m.file, m.line + lineIdx, col);
   err.v2Frame = { file: m.file, line, col: cp, func: null };
   throw err;

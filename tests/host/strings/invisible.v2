@@ -1,0 +1,4 @@
+// In a list, invisible characters and spaces other than the plain one show as escapes, so a
+// no-break space from a web page is seen; a joiner inside an emoji or a word is kept (DOCS 3.2).
+print(["a\u{a0}b", "12\u{202f}345", "x\u{200b}y", "\u{200d}z"])
+print(["👨\u{200d}👩\u{200d}👧", "می\u{200c}خواهم"])

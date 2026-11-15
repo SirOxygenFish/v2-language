@@ -1,0 +1,12 @@
+// Paths and names refused with a message (round 15, DOCS 3.11): exists() refuses ~ and $VAR as
+// the other file functions do, an empty path is refused (make_dir("") made nothing, silently),
+// and a NUL in exec's argv or getenv's name is named and shown as \u{0}.
+print(exists(""))
+for p in ["~", "~/surely-not-there", "$HOME/x"] {
+    try { print(exists(p)) } catch (e) { print(e.type + ": " + e.message) }
+}
+try { make_dir("") } catch (e) { print(e.type + ": " + e.message) }
+try { read_file("") } catch (e) { print(e.type + ": " + e.message) }
+try { write_file("", "x") } catch (e) { print(e.type + ": " + e.message) }
+try { exec(["echo", "a\u{0}b"]) } catch (e) { print(e.type + ": " + e.message) }
+try { getenv("A\u{0}B") } catch (e) { print(e.type + ": " + e.message) }

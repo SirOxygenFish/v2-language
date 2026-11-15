@@ -1,0 +1,4 @@
+// lines() splits at \n, \r\n and a lone \r (an old Mac or Excel-for-Mac file), without the breaks;
+// a break at the very end makes no empty last line (DOCS 3.5).
+print("a\rb\r\nc\nd".lines())
+print("x\n".lines(), "".lines(), "\n\n".lines(), "e\r".lines(), "\r\n".lines())

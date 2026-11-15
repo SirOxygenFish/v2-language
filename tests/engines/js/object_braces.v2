@@ -24,3 +24,23 @@ print(@js { ({a: 1}) })
 // Its value unused, the same code is a block with a label, as JavaScript reads it.
 @js { {a: 1} }
 print("done")
+// A key in any script is an identifier too: the same error, not the value of a label.
+try {
+    let v = @js { {şehir: "İzmir"} }
+} catch (e) {
+    print(e.message)
+}
+try {
+    let v = @js { {城市: "北京"} }
+} catch (e) {
+    print(e.message)
+}
+// One key on the last line of a block of several: a block with a label there too.
+try {
+    let v = @js {
+        const city = "Izmir"
+        {city: city}
+    }
+} catch (e) {
+    print(e.message)
+}

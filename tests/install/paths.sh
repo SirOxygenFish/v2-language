@@ -223,6 +223,8 @@ if [ "$(id -u)" = 0 ] && [ "$(uname -s)" = Linux ] && mkdir -p "$tmp/noexec" && 
     ok=yes
     expect "$code" 1 "exit code"
     says "$tmp/noexec/bin doesn't let programs run (its file system is mounted noexec): install into a folder that does, with V2_INSTALL_DIR" || { echo "    no message"; ok=no; }
+    # Only that line: not the shell's own "v2.new: Permission denied" before it.
+    ! says "v2.new" || { echo "    the shell's error is shown too"; ok=no; }
     expect "$(ls -A "$tmp/noexec")" "" "files left in the folder"
     result "an install folder mounted noexec"
     umount "$tmp/noexec"

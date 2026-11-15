@@ -1,0 +1,2 @@
+OSError | getpass can't ask in a block: a block has no terminal, and V2's input() owns standard input; ask in V2 and pass the answer in as a block arg
+no_getpass

@@ -1,0 +1,15 @@
+// requires: py
+// stderr: warnings_in_calls.v2:11: UserWarning: from the block itself
+// stderr: UserWarning: careful with that (in a call from V2)
+// A library's warning about a call V2 made says so, instead of naming V2's own file in the temp
+// folder; one a block's own code raises keeps its .v2 line (INTERNALS 12.6).
+@py lib {
+    import warnings
+    def risky():
+        warnings.warn("careful with that", stacklevel=2)
+        return 1
+    warnings.warn("from the block itself")
+    @export { risky }
+}
+@import { risky } from lib
+print(risky())

@@ -56,3 +56,5 @@ print(err(func() => range()))
 print(kind(func() => float("x")), kind(func() => min(1, "a")), kind(func() => round(1.5, -1)), kind(func() => round(nan)))
 print(kind(func() => sum(["a"])), kind(func() => abs("a")), kind(func() => abs(-9223372036854775807 - 1)))
 print(kind(func() => div(1.5, 2)), kind(func() => div(-9223372036854775807 - 1, -1)))
+// Below 0.0001 floats print in exponent form too (DOCS 3.2).
+print(0.001, 0.0001, 0.00001, -0.00001)
