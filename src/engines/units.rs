@@ -95,9 +95,10 @@ fn hint_v2_variable(b: &EngineBlock, env: &Env, e: &ErrorValue) {
         _ => None,
     };
     let Some(name) = name.filter(|n| crate::syntax::lexer::is_plain_name(n)) else { return };
-    if b.args.iter().any(|(arg, _)| &*arg.text == name) || crate::runtime::env::lookup(env, name).is_none() {
+    if b.args.iter().any(|(arg, _)| &*arg.text == name) {
         return;
     }
+    let Some(found) = crate::runtime::env::lookup(env, name) else { return };
     let tag = &b.tag.text;
     // V2's own functions (`print` in a @js block): the block's language has its own way.
     if crate::runtime::builtins::BUILTINS.iter().any(|f| f.name == name) {
@@ -111,7 +112,18 @@ fn hint_v2_variable(b: &EngineBlock, env: &Env, e: &ErrorValue) {
         let _ = e.hint.set(text.into());
         return;
     }
-    let _ = e.hint.set(format!("'{name}' is a V2 variable, and blocks don't see V2 variables: pass it in, @{tag}({name}) {{ ... }}").into());
+    let text = match &found {
+        // A func of the file: what DOCS 6.2 shows for functions (round 16).
+        crate::runtime::value::Value::Func(f) if matches!(&**f, crate::runtime::value::Callable::Closure { .. }) => {
+            format!("'{name}' is a V2 function, and blocks don't see V2's names: import it in the block, @import {{ {name} }} from v2, or pass it in, @{tag}({name}) {{ ... }}")
+        }
+        // What the file imported from a language: the block imports it its own way.
+        crate::runtime::value::Value::Func(_) | crate::runtime::value::Value::Handle(_) => {
+            format!("'{name}' is a name V2 imported, and blocks don't see V2's names: import it in the block, as its language does, or pass it in, @{tag}({name}) {{ ... }}")
+        }
+        _ => format!("'{name}' is a V2 variable, and blocks don't see V2 variables: pass it in, @{tag}({name}) {{ ... }}"),
+    };
+    let _ = e.hint.set(text.into());
 }
 
 /// What Python writes for V2's builtin `name`, for the ones Python lacks.

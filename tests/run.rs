@@ -517,6 +517,9 @@ fn cross_language_mistakes_say_what_to_do() {
     let cases = [
         ("var.v2", "let n = 10\nlet h = @js { n * 2 }\n", "  hint: 'n' is a V2 variable, and blocks don't see V2 variables: pass it in, @js(n) { ... }\n"),
         ("loop.v2", "for i in 0..2 {\n    print(@py { i * 100 })\n}\n", "  hint: 'i' is a V2 variable, and blocks don't see V2 variables: pass it in, @py(i) { ... }\n"),
+        // Round 16: a V2 func, and a name the file imported, each get the way in that fits.
+        ("func.v2", "func helper() {\n    return 1\n}\nprint(@py { helper() })\n", "  hint: 'helper' is a V2 function, and blocks don't see V2's names: import it in the block, @import { helper } from v2, or pass it in, @py(helper) { ... }\n"),
+        ("imported.v2", "@import { mean } from py.statistics\nprint(@js { mean([1, 2]) })\n", "  hint: 'mean' is a name V2 imported, and blocks don't see V2's names: import it in the block, as its language does, or pass it in, @js(mean) { ... }\n"),
         (
             "nomod.v2",
             "@import { thing } from py.no_such_module_xyz\nprint(thing())\n",
@@ -2566,9 +2569,10 @@ fn a_virtual_memory_limit_gets_a_smaller_interpreter_stack() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n");
     // Round 15: the stack is at most a quarter of the limit, so deep recursion under 400 MB ends
     // in V2's own error (or works), not in an abort ("memory allocation of 104 bytes failed",
-    // exit 134) once the heap is used up; under 120 MB the error says why it came early.
+    // exit 134) once the heap is used up; under 50 MB too, as glibc then keeps one malloc arena
+    // (each holds 64 MiB of address space), and the error says why it came early.
     std::fs::write(home.0.join("d.v2"), "func f(n) {\n    if n == 0 { return 0 }\n    return 1 + f(n - 1)\n}\nprint(f(9000))\n").unwrap();
-    for (mb, must_fail) in [(400u64, false), (120, true)] {
+    for (mb, must_fail) in [(400u64, false), (50, true)] {
         let mut cmd = v2_command(&home.0);
         cmd.arg("d.v2").current_dir(&home.0).stdin(Stdio::null());
         // SAFETY: as above.
@@ -2589,6 +2593,27 @@ fn a_virtual_memory_limit_gets_a_smaller_interpreter_stack() {
             other => panic!("{mb} MB: {other:?} {stderr}"),
         }
     }
+    // Round 16: Node.js can't start under 400 MB, and the error names the limit.
+    if !needs("js", "a_virtual_memory_limit_gets_a_smaller_interpreter_stack") {
+        return;
+    }
+    std::fs::write(home.0.join("j.v2"), "print(@js { 1 })\n").unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("j.v2").current_dir(&home.0).stdin(Stdio::null());
+    // SAFETY: as above.
+    unsafe {
+        cmd.pre_exec(|| {
+            let limit = libc::rlimit { rlim_cur: 400 << 20, rlim_max: 400 << 20 };
+            if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("a memory limit (ulimit -v) of 400 MB is set for this shell, and Node.js reserves about 1 GB as it starts: raise it"), "{stderr}");
 }
 
 #[cfg(target_os = "linux")]
@@ -2665,6 +2690,80 @@ fn pythoninspect_doesnt_hold_the_python_worker() {
         return;
     }
     assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "2\natexit ran\n", ""));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_script_in_a_folder_whose_name_isnt_utf8_is_refused() {
+    // Round 16: given by its own name from inside such a folder, as given by its full path, the
+    // script is refused (script_dir() would name a folder that isn't there).
+    use std::os::unix::ffi::OsStrExt;
+    let home = TempHome::new();
+    let dir = home.0.join(std::ffi::OsStr::from_bytes(b"dir\xff"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("sd.v2"), "print(script_dir())\n").unwrap();
+    let out = v2_command(&home.0).arg("sd.v2").current_dir(&dir).stdin(Stdio::null()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("is not valid UTF-8, which V2 needs: a folder on the way has a name in another encoding; rename it"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_says_when_path_is_unset_or_python_is_python3() {
+    // Round 16: with no PATH nothing was searched, so say that; and where only python3 is on
+    // PATH (Ubuntu, macOS), exec(["python", …]) points at it.
+    use std::os::unix::fs::PermissionsExt;
+    let home = TempHome::new();
+    let bin = home.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("python3"), "#!/bin/sh\necho 3\n").unwrap();
+    std::fs::set_permissions(bin.join("python3"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let src = "for argv in [[\"ls\"], [\"python\", \"-V\"]] {\n    try { exec(argv) } catch (e) { print(e.message, \"|\", e.hint) }\n}\n";
+    std::fs::write(home.0.join("t.v2"), src).unwrap();
+    let out = v2_command(&home.0).arg("t.v2").current_dir(&home.0).env_remove("PATH").stdin(Stdio::null()).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "exec: cannot start 'ls': not found, as PATH isn't set: set it, or give the program's full path | null\nexec: cannot start 'python': not found, as PATH isn't set: set it, or give the program's full path | null\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = v2_command(&home.0).arg("t.v2").current_dir(&home.0).env("PATH", &bin).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "exec: cannot start 'ls': not found on PATH | null\nexec: cannot start 'python': not found on PATH | this system names it python3: write exec([\"python3\", …])\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn read_file_of_dev_stdin_gives_what_input_left() {
+    // Round 16: after input(), read_file("/dev/stdin") reads on from there, for a pipe, a file
+    // and a file the shell already read a line of (it reopened the path: a pipe lost input()'s
+    // buffer, a file started over).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("data.csv"), "header\nrow1\nrow2\n").unwrap();
+    std::fs::write(home.0.join("rest.v2"), "let h = input()\nprint(h, json_stringify(read_file(\"/dev/stdin\")), input())\n").unwrap();
+    std::fs::write(home.0.join("all.v2"), "print(json_stringify(read_file(\"/dev/fd/0\")))\n").unwrap();
+    let file = || std::fs::File::open(home.0.join("data.csv")).unwrap();
+    let out = v2_command(&home.0).arg("rest.v2").current_dir(&home.0).stdin(file()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "header \"row1\\nrow2\\n\" null\n", "{}", String::from_utf8_lossy(&out.stderr));
+    let child = v2_command(&home.0).arg("rest.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let out = wait_with_timeout(child, b"header\nrow1\nrow2\n".to_vec(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(0), "header \"row1\\nrow2\\n\" null\n"), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut sh = Command::new("sh");
+    sh.args(["-c", "{ read -r h; \"$0\" all.v2; } < data.csv"]).arg(BIN);
+    for (k, v) in v2_command(&home.0).get_envs() {
+        match v {
+            Some(v) => sh.env(k, v),
+            None => sh.env_remove(k),
+        };
+    }
+    let out = sh.current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "\"row1\\nrow2\\n\"\n", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[cfg(unix)]

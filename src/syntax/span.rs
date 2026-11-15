@@ -123,6 +123,14 @@ impl SourceMap {
         let canonical = std::fs::canonicalize(path)
             .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", path.display(), os_message(&e))))?;
         let canonical = strip_verbatim(&canonical);
+        // `v2 x.v2` in a folder whose name isn't UTF-8: script_dir() and messages couldn't name
+        // it, as main says for such a FILE (19.1, round 16).
+        if canonical.to_str().is_none() {
+            return Err(LoadError::Io(format!(
+                "the path '{}' is not valid UTF-8, which V2 needs: a folder on the way has a name in another encoding; rename it",
+                canonical.to_string_lossy()
+            )));
+        }
         if let Some(&id) = self.by_path.get(&canonical) {
             return Ok(id);
         }

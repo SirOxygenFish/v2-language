@@ -1,0 +1,31 @@
+// requires: py js
+// A V2 func in JavaScript has as many parameters as it has before its first default (fn.length),
+// and in Python a matching signature, so libraries that count them call it right (round 16,
+// INTERNALS 11.8): Express's 4-argument error handler, lodash's curry.
+func on_error(err, req, res, next) {
+    return "handled " + err
+}
+func add(a, b = 1) {
+    return a + b
+}
+func many(...xs) {
+    return len(xs)
+}
+let none = func() => 0
+print(@js(on_error, add, many, none) { [on_error.length, add.length, many.length, none.length] })
+print(@py(on_error, add, many, none) {
+    import inspect
+    [str(inspect.signature(f)) for f in (on_error, add, many, none)]
+})
+// A middleware chain that dispatches on the count, as Express does.
+print(@js(on_error) {
+    const chain = [(req) => { throw new Error("boom") }, on_error];
+    let err;
+    try { chain[0]({}) } catch (e) { err = e.message }
+    chain.find(f => f.length === 4)(err, {}, {}, () => {})
+})
+// curry waits for the parameters before the default.
+print(@js(add) {
+    const curry = (f) => { const go = (...a) => a.length >= f.length ? f(...a) : (...b) => go(...a, ...b); return go };
+    curry(add)(41)
+})

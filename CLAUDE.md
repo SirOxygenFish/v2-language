@@ -33,9 +33,10 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 15 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 16 next
-  on a new distro and sandbox (round 15's prompts: scratchpad/newcomer/prompt-*-r15.md, made by
-  scratchpad/make15.py; round 15's distro v2new24o, where paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
+  Rounds 1 to 16 found and fixed (ROADMAP log); the owner ended the rounds after round 16
+  (2026-11-15): no round 17 unless asked. Next: the final report to the owner. (Round 16's prompts:
+  scratchpad/newcomer/prompt-*-r16.md, made by scratchpad/setup_round16.py; its distro v2new24p, where
+  paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
   line endings). A swap-out proof in WSL: `touch` the restored files after the rsync, as rsync -a

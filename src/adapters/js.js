@@ -687,12 +687,15 @@ const finalizer = new FinalizationRegistry((cell) => {
   for (let i = 0; i < cell.n; i++) fnReleases.push(cell.id);
 });
 
-function stubFor(id, name) {
+function stubFor(id, name, params) {
   let s = stubs.get(id)?.deref();
   if (s === undefined) {
     const cell = { id, n: 0 };
     const label = name || 'function';
     s = { [label]: function (...args) { return hostCall({ fn: id }, args, label); } }[label];
+    // As many parameters as the V2 func has before its first default: Express calls a 4-argument
+    // function as error middleware, and curry waits for that many (11.8).
+    if (Array.isArray(params)) Object.defineProperty(s, 'length', { value: params.length });
     stubCells.set(s, cell);
     stubs.set(id, new WeakRef(s));
     finalizer.register(s, cell);
@@ -894,7 +897,7 @@ function decodeTag(j) {
       return entry.obj;
     }
     case 'fn':
-      return 'unit' in j ? realTarget(j.unit, j.name) : stubFor(j.id, j.name);
+      return 'unit' in j ? realTarget(j.unit, j.name) : stubFor(j.id, j.name, j.params);
     case 'int': {
       const n = BigInt(j.v);
       return n >= -(2n ** 53n - 1n) && n <= 2n ** 53n - 1n ? Number(n) : n;
@@ -1054,6 +1057,10 @@ function errorMessage(e) {
   }
 }
 
+// What to do about an error the adapter raises, sent as its `hint` (9.6); not an own property,
+// which would go in e.data.
+const errorHints = new WeakMap();
+
 function serialize(e, depth = 0) {
   // An exception, or any thrown value, as `err.error` (9.6).
   if (e instanceof Fail) return { type: e.kind, message: wellFormed(e.message), foreign_type: null, trace: [] };
@@ -1075,6 +1082,7 @@ function serialize(e, depth = 0) {
     return out;
   }
   const out = { type: 'ForeignError', message: wellFormed(errorMessage(e)), foreign_type: wellFormed(errorName(e)), trace };
+  if (e !== null && typeof e === 'object' && errorHints.has(e)) out.hint = errorHints.get(e);
   if (e !== null && typeof e === 'object' && e.cause !== undefined && depth < MAX_CAUSES) out.cause = serialize(e.cause, depth + 1);
   const data = ownData(e);
   if (data) out.data = data;
@@ -1538,7 +1546,14 @@ function doLoad(m) {
   bindImports(ctx, m.imports || [], m.kind !== 'action');
   const script = compileOrExplain(src, m);
   const before = new Set(Object.getOwnPropertyNames(ctx));
-  return settle(script.runInContext(ctx), (v) => {
+  let ran;
+  try {
+    ran = script.runInContext(ctx);
+  } catch (e) {
+    if (m.lang === 'ts') castHint(e, m.source);
+    throw e;
+  }
+  return settle(ran, (v) => {
     if (m.kind === 'action') return { value: m.want_value ? encodeValue(v, 'value') : null, exports: [], missing: [] };
     const unit = { ctx, get: new Map() };
     const reply = exportReply(unit, before, m.exports);
@@ -1546,6 +1561,15 @@ function doLoad(m) {
     if (reply.missing.length === 0) units.set(m.unit, unit);
     return reply;
   }, "the block's value is a Promise");
+}
+
+// `<number>a`: TypeScript's old cast, which type stripping leaves as code, where it reads as
+// comparisons with a name nothing defines (`5 < number > a`).
+function castHint(e, source) {
+  const name = e && e.name === 'ReferenceError' ? /^([\p{L}\p{N}_$]+) is not defined$/u.exec(String(e.message)) : null;
+  if (name && new RegExp(`<\\s*${name[1].replace(/\$/g, '\\$')}\\s*>`, 'u').test(source)) {
+    errorHints.set(e, "TypeScript's <T>x cast is code to Node, not a type it removes: write x as T");
+  }
 }
 
 function doInit() {
@@ -1795,7 +1819,7 @@ function toV2(x, depth = 0, open = new Walk()) {
   // would sit at, so a container at 256 or deeper is too deep, as for the host (10.5).
   if (x === undefined || x === null || typeof x === 'boolean' || typeof x === 'number' || typeof x === 'string') return encode(x, depth, open);
   if (typeof x === 'bigint') {
-    if (x < I64_MIN || x > I64_MAX) throw new Fail('MarshalError', "to_v2(): can't convert bigint to V2 data (it needs more than 64 bits)");
+    if (x < I64_MIN || x > I64_MAX) throw new Fail('MarshalError', "to_v2(): can't convert bigint to V2 data (it needs more than 64 bits): pass it as text, as in @js(h) { h.toString() }");
     return encode(x);
   }
   if (util.types.isUint8Array(x)) return encode(x, depth, open);

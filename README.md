@@ -151,7 +151,7 @@ from a new Notepad window adds `.txt` unless you choose "All files" under "Save 
 macOS and Linux:
 
 ```bash
-mkdir ~/v2-examples && cd ~/v2-examples
+mkdir -p ~/v2-examples && cd ~/v2-examples
 nano hello.v2
 ```
 
@@ -336,13 +336,15 @@ More of V2, in short:
   `@import { randint, choice } from py.random`; a program with a time limit with
   `@py(cmd) { __import__("subprocess").run(cmd, capture_output=True, text=True, timeout=5).stdout }`
   (exec has none: a program that never ends holds the script). To check a folder of scripts, loop
-  in the shell: `for f in *.v2; do v2 check "$f"; done`, in PowerShell
-  `Get-ChildItem *.v2 | ForEach-Object { v2 check $_.Name }`.
+  in the shell: `ok=0; for f in *.v2; do v2 check "$f" || ok=1; done`, in PowerShell
+  `$ok = 0; Get-ChildItem *.v2 | ForEach-Object { v2 check $_.Name; if ($LASTEXITCODE -ne 0) { $ok = 1 } }`;
+  a CI job then ends with `exit $ok`, so an error in any file fails it.
 - **Other `.v2` files:** their top-level names not starting with `_` are imported as a snapshot
   taken when that file finished running: read state that changes through its functions.
 - **Blocks** can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and a block's
-  last expression is its value (one that ends in a `with`, `for`, `if` or `try` statement has
-  the value `null`: put the value on a last line of its own). A block is one line, `@py { 1 + 2 }`, or its code starts on the
+  last expression is its value (one that ends in an assignment, `def` or `import` has the value
+  `null`; using the value of one that ends in a `with`, `for`, `if` or `try` statement is an
+  error: put the value on a last line of its own). A block is one line, `@py { 1 + 2 }`, or its code starts on the
   line after the `{` and its `}` stands on a line of its own; inside a larger expression it goes in
   parentheses, `(@py { 1 }) + 2`. A `@js` block whose value is an object literal needs them too,
   `@js { ({a: 1}) }`, or JavaScript reads the braces as code; and in a `@js` block of several
@@ -362,7 +364,7 @@ More of V2, in short:
   output; to see the output as it comes, run the program from a `@py` block with `subprocess.run`
   (what it prints goes to standard error). In a `@py` block, `shutil.rmtree(path)` removes a
   folder, `os.replace(a, b)` renames or moves a file, and `shutil.copy2(a, b)` copies one. On
-  Linux and macOS, `read_file("/dev/stdin")` reads all of standard input at once (anywhere:
+  Linux and macOS, `read_file("/dev/stdin")` reads the rest of standard input at once, after what `input()` read (anywhere:
   `input()` in a loop until it gives `null`), and `write_file("/dev/stdout", data)` writes text
   or bytes after what `print` wrote. A program `exec` starts has no terminal, so it can't ask
   for a password (`sudo -n`, ssh keys and git's credential helpers don't need one) or show a
@@ -461,8 +463,19 @@ Node.js on Linux, the steps are in the next entry: distributions' own packages a
 one (`brew install python`, or [python.org](https://www.python.org/downloads/)). For Node.js,
 Linux distributions often ship older versions than 22.13 (`apt install nodejs` gives 18 on Ubuntu
 24.04): get Node.js 22 or newer from [nodejs.org](https://nodejs.org/en/download). One way there:
-its Linux `.tar.xz`, unpacked into `/opt` (`sudo apt install xz-utils`, then
-`sudo tar -xf node-v22.*-linux-x64.tar.xz -C /opt`), and its `bin` folder put on PATH in your
+its Linux `.tar.xz`, checked and unpacked into `/opt`, from a terminal (leave out `sudo` if you
+are root):
+
+```bash
+sudo apt install curl xz-utils
+curl -fsSLO https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt
+f=$(grep -o 'node-v22[^ ]*-linux-x64.tar.xz' SHASUMS256.txt) && echo "$f"
+curl -fsSLO "https://nodejs.org/dist/latest-v22.x/$f"
+grep " $f\$" SHASUMS256.txt | sha256sum -c -
+sudo tar -xf "$f" -C /opt
+```
+
+Then put its `bin` folder (the name `echo` showed, without `.tar.xz`) on PATH in your
 shell's startup files (bash: `echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' |
 tee -a ~/.bashrc ~/.profile`, with the version you unpacked; zsh: `~/.zshenv`; fish:
 `fish_add_path /opt/node-v22.21.0-linux-x64/bin`), then a new terminal. Or, whatever the shell,

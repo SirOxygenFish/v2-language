@@ -103,6 +103,16 @@ try {
     Want $r2.code 0 'relative: exit code'
     Exists "$h\rel\bin\v2.exe" $true 'relative folder installed'
     Says $r2 "Installed v2 "
+    # A folder whose path has [ ] (round 16): Windows PowerShell started there as a file runs in
+    # its own folder, but relative paths still start where the command was typed.
+    $hb = Join-Path $h 'mods [beta]'
+    [IO.Directory]::CreateDirectory("$hb\dl") | Out-Null
+    [IO.File]::Copy($Archive, "$hb\dl\$name")
+    [IO.File]::Copy("$Archive.sha256", "$hb\dl\$name.sha256")
+    $r3 = Install $hb @{ V2_INSTALL_DIR = 'rel\bin'; V2_ARCHIVE = "dl\$name" }
+    Want $r3.code 0 '[ ] folder: exit code'
+    Exists "$hb\rel\bin\v2.exe" $true '[ ] folder: relative folder installed'
+    if ($r3.code -ne 0) { $script:problems += $r3.out }
     Result '~ and relative paths' $r2
 
     # A folder that is a file.

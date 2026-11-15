@@ -35,6 +35,12 @@ impl HandleRef {
     /// in `@py(h) { h.isoformat() }` (11.5).
     pub fn plain_way(&self) -> Option<String> {
         let t = &*self.type_name;
+        // An int beyond 64 bits (Python's int, a JavaScript bigint): to_v2 can't take it either.
+        match (&*self.tag, t) {
+            ("py", "int") => return Some("an int beyond 64 bits isn't V2 data: pass it as text, as in @py(h) { str(h) }".into()),
+            ("js" | "ts", "bigint") => return Some("a bigint beyond 64 bits isn't V2 data: pass it as text, as in @js(h) { h.toString() }".into()),
+            _ => {}
+        }
         let last = t.rsplit('.').next().unwrap_or(t);
         let how = match &*self.tag {
             "py" if matches!(last, "datetime" | "date" | "time" | "Timestamp") => "h.isoformat()",

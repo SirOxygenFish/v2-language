@@ -36,3 +36,12 @@ TypeError: cannot convert handle to JSON at ["ts"] (a datetime.datetime isn't da
   hint: none
 MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — a Date isn't data: make plain data of it in a block, as in @js(h) { h.toISOString() } (at args[0])
   hint: none
+MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — an int beyond 64 bits isn't V2 data: pass it as text, as in @py(h) { str(h) } (at pbig)
+  hint: none
+MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — a bigint beyond 64 bits isn't V2 data: pass it as text, as in @js(h) { h.toString() } (at jbig)
+  hint: none
+MarshalError: to_v2(): can't convert int to V2 data (it needs more than 64 bits): pass it as text, as in @py(h) { str(h) }
+  hint: none
+MarshalError: to_v2(): can't convert bigint to V2 data (it needs more than 64 bits): pass it as text, as in @js(h) { h.toString() }
+  hint: none
+true
