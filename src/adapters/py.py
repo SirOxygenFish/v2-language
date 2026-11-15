@@ -511,15 +511,32 @@ if __name__ == "__main__":
             self.n = 0
 
     class V2Function(object):
-        """A V2 function inside Python: calling it calls V2 (11.8)."""
+        """A V2 function inside Python: calling it calls V2 (DOCS 8.2)."""
 
-        def __init__(self, cell, name):
+        def __init__(self, cell, name, params=None, more=False):
             self._cell = cell
             self.__name__ = name
             self.__qualname__ = name
+            self._params = params
+            self._more = more
 
         def __call__(self, /, *args, **kwargs):
             return host_call({"fn": self._cell.id}, args, kwargs, self.__name__)
+
+        @property
+        def __signature__(self):
+            """The V2 func's parameters, for code that reads them (inspect.signature, 11.8);
+            inspect is imported only then."""
+            import inspect
+
+            P = inspect.Parameter
+            rest = [P("args", P.VAR_POSITIONAL), P("kwargs", P.VAR_KEYWORD)]
+            try:
+                named = [P(p, P.POSITIONAL_OR_KEYWORD) for p in self._params or ()]
+                return inspect.Signature(named + rest if self._more or self._params is None else named)
+            except ValueError:
+                # A V2 name that is a Python keyword, or clashes with args/kwargs.
+                return inspect.Signature(rest)
 
         def __repr__(self):
             return "<V2 function " + self.__name__ + ">"
@@ -544,11 +561,11 @@ if __name__ == "__main__":
         for _ in range(cell.n):
             _fn_releases.append(cell.id)
 
-    def stub_for(n, name):
+    def stub_for(n, name, params=None, more=False):
         s = _stubs.get(n)
         if s is None:
             cell = _Cell(n)
-            s = V2Function(cell, name or "function")
+            s = V2Function(cell, name or "function", params, more)
             _stubs[n] = s
             weakref.finalize(s, _release_fn, cell)
         s._cell.n += 1
@@ -709,7 +726,7 @@ if __name__ == "__main__":
                     raise Fail("ProtocolError", "unknown handle id %s" % j["id"])
                 return entry[0]
             if tag == "fn":
-                return unit_attr(j["unit"], j["name"]) if "unit" in j else stub_for(j["id"], j.get("name"))
+                return unit_attr(j["unit"], j["name"]) if "unit" in j else stub_for(j["id"], j.get("name"), j.get("params"), bool(j.get("more")))
             if tag == "int":
                 return int(j["v"])
             if tag == "bytes":
@@ -1280,8 +1297,8 @@ if __name__ == "__main__":
             if no_value:
                 # Once it has run to its end: a block that raises in its `try` says that instead.
                 word = compound[type(last)]
-                e = SyntaxError("the block's value is used, but its last statement is a `%s` statement, which has no value: "
-                                "put the value on a last line of its own, outside the `%s`" % (word, word))
+                e = SyntaxError("the block's value is used, but its last statement is %s `%s` statement, which has no value: "
+                                "put the value on a last line of its own, outside the `%s`" % ("an" if word == "if" else "a", word, word))
                 e.filename, e.lineno, e.offset = path, last.lineno, last.col_offset + 1
                 e.text = _lines.get(path, {}).get(last.lineno)
                 raise e.with_traceback(None)
@@ -1428,7 +1445,7 @@ if __name__ == "__main__":
         if isinstance(x, numbers.Integral):
             n = int(x)
             if not I64_MIN <= n <= I64_MAX:
-                raise Fail("MarshalError", "to_v2(): can't convert int to V2 data (it needs more than 64 bits)")
+                raise Fail("MarshalError", "to_v2(): can't convert int to V2 data (it needs more than 64 bits): pass it as text, as in @py(h) { str(h) }")
             return n
         if isinstance(x, float) or (is_numpy(x) and isinstance(x, numbers.Real)):
             return float_json(float(x))

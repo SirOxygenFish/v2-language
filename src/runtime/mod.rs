@@ -25,7 +25,7 @@ use interp::Interp;
 /// `v2 FILE [ARGS...]` on the interpreter thread; returns the exit code (6.1, 6.5).
 pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>) -> i32 {
     // A missing FILE or a folder: what to do next (19.1).
-    if let Some(msg) = crate::cli::entry_error(path, args.first().map(String::as_str), "v2") {
+    if let Some(msg) = crate::cli::entry_error(path, &args.iter().map(String::as_str).collect::<Vec<_>>(), "v2") {
         stderrln!("v2: {msg}");
         return 2;
     }

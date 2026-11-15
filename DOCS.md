@@ -579,7 +579,7 @@ bigger come from the languages you embed.
 | `input(prompt = "")`                    | read one line from standard input (without the newline); `null` at end of input |
 | `len(x)`                                | length of a str, bytes, list, dict or handle                |
 | `type(x)`                               | type name as a string                                       |
-| `str(x)`, `int(x)`, `float(x)`, `bool(x)` | conversions (`int("42")`, `str(3.5)`, …); `int` and `float` read the digits 0–9, a sign and a point, without `_`, spaces or thousands separators |
+| `str(x)`, `int(x)`, `float(x)`, `bool(x)` | conversions (`int("42")`, `str(3.5)`, …); `int` and `float` read the digits 0–9, a sign and a point, without `_`, spaces or thousands separators (spaces around the number are ignored; `float` also reads an exponent, `1e3`, and `inf` and `nan`) |
 | `range(end)`, `range(start, end, step = 1)` | list of ints; positional arguments only                 |
 | `min(...values)`, `max(...values)`      | smallest / largest of the arguments, or of a list's items when the only argument is a list (`max(xs)`); all numbers or all strings; on a tie the first wins; no values is a `ValueError` |
 | `sum(xs)`                               | sum of a list of numbers: a float if any item is one; `sum([])` is `0` |
@@ -616,7 +616,7 @@ real folder of the script, where the search for `v2.toml` starts too. `write_fil
 contents in place, not all at once: for a file another program reads, write a new file and rename
 it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
-wrote, and `read_file("/dev/stdin")` reads all of standard input. The file
+wrote, and `read_file("/dev/stdin")` reads the rest of standard input, after what `input()` read. The file
 functions raise `IOError` when they fail (`exists` just returns `false`). Paths are taken as
 written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path that starts with one is an
 `IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
@@ -632,8 +632,9 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 
 `argv` is a non-empty list of strings; a program name without a path separator is searched on
 `PATH` like engine commands, never in the current folder (as on Linux and macOS): a program there is
-run by its path, `exec(["./build.bat"])`. A script runs through its program:
-`exec(["python", "tool.py"])`, or for PowerShell
+run by its path, `exec(["./build.bat"])` (a `.bat` or `.cmd` whose path holds a `%` is refused, as
+cmd.exe would read it as a variable: keep it in a folder without one). A script runs through its
+program: `exec(["python3", "tool.py"])` (`python` on Windows), or for PowerShell
 `exec(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "build.ps1"])`. A `str` or `bytes`
 `input` becomes the program's standard input (with `null` it is empty). The result is a dict
 `{code, stdout, stderr}`, both outputs captured whole and decoded as UTF-8 (invalid bytes become
@@ -797,7 +798,10 @@ let when = @py {
 print(when.year)
 ```
 
-In a `py` block, if the last statement is not an expression, the block's value is `null`.
+In a `py` block, if the last statement is not an expression (an assignment, `def`, `import`), the
+block's value is `null`. If it is a compound statement (`with`, `for`, `if`, `try`, `while`,
+`match`), whose last line may look like the value but is inside it, using the block's value is a
+`SyntaxError` that says to put the value on a last line of its own.
 Definition blocks are statements only; using one as an expression is a syntax error.
 
 At the start of its code JavaScript reads `{` as a block of code, so a `js` block whose value is
@@ -1315,7 +1319,11 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   waiting on a cross-language call it made (JS → … → this JS function): its event loop can't run
   then, so returning a Promise is an error. Likewise a Python coroutine is awaited unless Python is
   already running an event loop on that thread (an async Python function called into V2, which
-  called back into Python).
+  called back into Python). An async generator (Python's `async def` with `yield`, JavaScript's
+  `async function*`) can't be walked by V2's `for`, which doesn't await each item: collect it in its
+  language (`@js(h) { Array.fromAsync(h) }`; in Python, an async function a block exports, as in
+  `async def collect(h): return [x async for x in h]`) and loop over the list; the error's hint
+  says so.
 - Foreign code can call into V2 (an imported function or a V2 callback) only while V2 is waiting
   on that engine — during a call or block V2 started. A call from a timer, background thread or
   event handler that fires while the engine is idle fails with an error inside the foreign
@@ -1904,6 +1912,7 @@ that isn't there.
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
 | `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped at once (what their open files still buffer is lost, and `atexit` doesn't run), what was printed is still written. On Linux and macOS v2 then ends by that signal, as a program without a handler does, so a shell shows 128 + its number (130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP) and stops a loop of `v2` runs |
 | `141`     | the output's reader went away (`v2 x.v2 \| head`): the run stops quietly, like Ctrl+C but with nothing more to show |
+| `0` for `v2 doctor` | it ran, even when an engine isn't ready (`2` for a configuration error): to fail a CI step without Python, test its summary, `v2 doctor \| grep -q '^ready:.* py'` |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 
 ---
@@ -1921,7 +1930,12 @@ that isn't there.
   are stopped when the call or block finishes or times out; processes started from Python or
   JavaScript code are stopped when V2 exits. On Linux and macOS one that detaches itself
   (`start_new_session`, `detached: true`, a daemon) lives on; on Windows only one created to break
-  away from V2's job (`CREATE_BREAKAWAY_FROM_JOB`) does.
+  away from V2's job (`CREATE_BREAKAWAY_FROM_JOB`) does. On Linux and macOS, if V2 itself is
+  killed with SIGKILL (`kill -9`, the out-of-memory killer, `timeout -s KILL`), it can't stop
+  anything: on Linux its workers and the programs `exec` started end with it, but what those
+  started (a `sleep` under `sh -c`, Python's `subprocess`) keeps running; on macOS the workers
+  end once their connection to V2 closes, and the rest keeps running. On Windows, V2's job ends
+  them all.
 - `extern` and compiled blocks run native code inside the V2 process. A mistake there can crash
   the program or corrupt memory; V2 checks the values it converts, but cannot check what native
   code does.

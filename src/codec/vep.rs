@@ -181,7 +181,20 @@ impl Encoder<'_, '_> {
         }
         let id = self.wire.callables.register(v);
         self.added.push(id);
-        Ok(json!({"$v2": "fn", "id": id, "name": name}))
+        let mut tag = json!({"$v2": "fn", "id": id, "name": name});
+        // A func's parameters before the first default, and whether more follow: libraries count
+        // them (Express's 4-argument error handlers, curry), so the stub has as many (11.8).
+        if let Value::Func(f) = v {
+            if let Callable::Closure { decl, .. } = &**f {
+                let params: Vec<&str> = decl.params.iter().take_while(|(_, d)| d.is_none()).map(|(n, _)| &*n.text).collect();
+                let more = params.len() < decl.params.len() || decl.rest.is_some();
+                tag["params"] = json!(params);
+                if more {
+                    tag["more"] = json!(true);
+                }
+            }
+        }
+        Ok(tag)
     }
 
     /// A V2 error, with its location and frames (10.3). It is a nesting level, like a list or a

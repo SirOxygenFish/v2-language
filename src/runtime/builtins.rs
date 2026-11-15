@@ -866,7 +866,7 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
     shell_shorthand("read", &path)?;
     let binary = bool_arg(&args[1], "read_file", "binary")?;
-    let bytes = match std::fs::read(&*path) {
+    let bytes = match read_path(&path) {
         Ok(b) => b,
         Err(e) => {
             // A relative path starts in the folder v2 runs in; the file may be next to the script.
@@ -898,6 +898,18 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             Err(Flow::Error(Rc::new(err)))
         }
     }
+}
+
+/// Unix: standard input by any of its names is V2's own stream, as for input(): what input()
+/// holds comes first, then the rest from where the descriptor is (after what the shell read, for
+/// a file). Opened again, a pipe would lose the one and a file would start over (5.10).
+fn read_path(path: &str) -> std::io::Result<Vec<u8>> {
+    if cfg!(unix) && matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0") {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buf)?;
+        return Ok(buf);
+    }
+    std::fs::read(path)
 }
 
 /// `write_file(path, data, append: false)`: a str as UTF-8 or bytes as is; creates or
@@ -1113,12 +1125,21 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             p.into_os_string()
         }
         None => {
-            let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': not found on PATH"));
+            // `env -i`, cron: nothing was searched (round 16).
+            let unset = lookup.path.as_ref().is_none_or(|p| p.is_empty());
+            let err = ErrorValue::new(
+                "IOError",
+                if unset { format!("exec: cannot start '{name}': not found, as PATH isn't set: set it, or give the program's full path") } else { format!("exec: cannot start '{name}': not found on PATH") },
+            );
+            // Ubuntu and macOS have python3 and no python.
+            let python3 = (&**name == "python" && !unset).then(|| first_program("python3", &lookup)).flatten();
             // Windows' own shells run a program in the current folder by its bare name; V2
             // looks only on PATH, as a Unix shell does (5.10).
             let here = first_program(&format!("./{name}"), &lookup).and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
             if let Some(hint) = shell_command_hint(name, &items) {
                 let _ = err.hint.set(hint.into());
+            } else if python3.is_some() {
+                let _ = err.hint.set("this system names it python3: write exec([\"python3\", …])".into());
             } else if let Some(file) = here {
                 let shown = format!("./{file}");
                 let mut path = String::new();

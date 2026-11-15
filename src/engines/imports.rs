@@ -33,6 +33,8 @@ pub struct FileScope {
     top: HashMap<Rc<str>, (Span, &'static str)>,
     /// The definition blocks that may wait for their language (12.7).
     waiting: HashSet<UnitId>,
+    /// The blocks that are statements of the file itself, not inside an `if`, a loop or a function.
+    top_blocks: HashSet<UnitId>,
     /// The `@import` statements that may, by span start (13.4).
     eligible: HashSet<u32>,
     /// Names declared inside a nested body, by name: where, that body's span and what it is
@@ -60,7 +62,11 @@ impl FileScope {
         let mut top = HashMap::new();
         let mut waiting = HashSet::new();
         let mut eligible = HashSet::new();
+        let mut top_blocks = HashSet::new();
         for s in program {
+            if let StmtKind::Block(b) = &s.kind {
+                top_blocks.insert(b.unit_id);
+            }
             match &s.kind {
                 StmtKind::Block(b) if may_wait(b) => {
                     waiting.insert(b.unit_id);
@@ -80,7 +86,7 @@ impl FileScope {
             };
             top.extend(crate::syntax::check::declarations(s).into_iter().map(|(n, at)| (n, (at, how))));
         }
-        FileScope { frame, blocks, bodies, top, waiting, eligible, inner }
+        FileScope { frame, blocks, bodies, top, waiting, top_blocks, eligible, inner }
     }
 
     pub(crate) fn block_may_wait(&self, id: UnitId) -> bool {
@@ -589,17 +595,41 @@ fn commonjs_hint(message: &str, spec: &str, dir: &Path) -> Option<String> {
         return None;
     }
     let file = absolute_clean(&dir.join(local));
-    let pkg = file.ancestors().skip(1).map(|d| d.join("package.json")).find(|p| p.is_file())?;
-    let text = std::fs::read_to_string(&pkg).ok()?;
-    let json: Json = serde_json::from_str(&text).ok()?;
-    if json.get("type").and_then(Json::as_str) != Some("commonjs") {
-        return None;
-    }
+    let pkg = commonjs_package(&file)?;
     let ts = file.extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts"));
     Some(format!(
         "{} says \"type\": \"commonjs\" (npm init writes that since npm 11), so Node loads this file as CommonJS, without import and export: set \"type\": \"module\" there, or rename the file to .{}",
         pkg.display(),
         if ts { "mts" } else { "mjs" }
+    ))
+}
+
+/// The nearest package.json above `file`, when it says `"type": "commonjs"`.
+fn commonjs_package(file: &Path) -> Option<PathBuf> {
+    let pkg = file.ancestors().skip(1).map(|d| d.join("package.json")).find(|p| p.is_file())?;
+    let text = std::fs::read_to_string(&pkg).ok()?;
+    let json: Json = serde_json::from_str(&text).ok()?;
+    (json.get("type").and_then(Json::as_str) == Some("commonjs")).then_some(pkg)
+}
+
+/// `import { add } from './vec.ts'` in an ES module V2 imported, where package.json makes vec.ts
+/// CommonJS: Node says vec.ts has no export named 'add' (13.5, round 16).
+fn nested_commonjs_hint(message: &str, spec: &str, dir: &Path) -> Option<String> {
+    let module = message.split("The requested module '").nth(1)?.split('\'').next()?;
+    if !(module.starts_with("./") || module.starts_with("../")) {
+        return None;
+    }
+    let importer = absolute_clean(&dir.join(spec.trim_matches('"')));
+    let file = absolute_clean(&importer.parent()?.join(module));
+    let ext = file.extension()?.to_string_lossy().to_ascii_lowercase();
+    if !matches!(ext.as_str(), "js" | "ts") {
+        return None;
+    }
+    let pkg = commonjs_package(&file)?;
+    Some(format!(
+        "{} says \"type\": \"commonjs\", so Node loads {module} as CommonJS, whose exports an import can't name: set \"type\": \"module\" there, or rename it to .{}",
+        pkg.display(),
+        if ext == "ts" { "mts" } else { "mjs" }
     ))
 }
 
@@ -900,6 +930,11 @@ impl Interp {
             Some(UnitState::Loading) => format!("{who} is still loading — its exports exist once its top-level code finishes"),
             _ => match call {
                 Some(name) => format!("{who} has not run yet — '{name}' can't be called before it loads"),
+                // `if use_py { @py helpers {…} }`: below it already, but that code didn't run.
+                None if self.files.get(&b.unit_id.file).is_some_and(|f| !f.top_blocks.contains(&b.unit_id)) => {
+                    let line = self.sm.line_col(b.unit_id.file, b.unit_id.offset).0;
+                    format!("{who} (line {line}) is inside an `if`, a loop or a function, which hasn't run it: a block runs when the code it is in reaches it — move it to the top level, or this @import into that code")
+                }
                 None => format!("{who} has not run yet — move this @import below it"),
             },
         })
@@ -1116,7 +1151,9 @@ impl Interp {
             if let Flow::Error(e) = f {
                 let hint = match &*e.kind {
                     "ImportError" => missing_package_hint(&e.message, &dir, python.as_deref()),
-                    "ForeignError" => ts_import_hint(&e.message).or_else(|| commonjs_hint(&e.message, &joined, &dir)),
+                    "ForeignError" => nested_commonjs_hint(&e.message, &joined, &dir)
+                        .or_else(|| ts_import_hint(&e.message))
+                        .or_else(|| commonjs_hint(&e.message, &joined, &dir)),
                     _ => None,
                 };
                 if let Some(hint) = hint {
@@ -1396,6 +1433,20 @@ mod tests {
             hint(&m, &d),
             "'@scope/esm-only' can be loaded only with import(), which a @js block can do: async function load() { return await import(\"@scope/esm-only\") }, then @export { load } and call load()"
         );
+    }
+
+    #[test]
+    fn an_es_module_importing_from_a_commonjs_sibling_is_told_why() {
+        // Round 16: `import { add } from './vec.ts'` in physics.mts, where package.json says
+        // "type": "commonjs": Node says vec.ts has no export 'add'.
+        let d = temp("cjs-sibling");
+        std::fs::write(d.join("package.json"), "{\"type\": \"commonjs\"}").unwrap();
+        let m = "The requested module './vec.ts' does not provide an export named 'add'";
+        let hint = nested_commonjs_hint(m, "\"./physics.mts\"", &d).unwrap();
+        assert!(hint.ends_with("says \"type\": \"commonjs\", so Node loads ./vec.ts as CommonJS, whose exports an import can't name: set \"type\": \"module\" there, or rename it to .mts"), "{hint}");
+        assert!(nested_commonjs_hint(&m.replace("vec.ts", "vec.mts"), "\"./physics.mts\"", &d).is_none(), "an .mts is ESM anyway");
+        std::fs::write(d.join("package.json"), "{\"type\": \"module\"}").unwrap();
+        assert!(nested_commonjs_hint(m, "\"./physics.mts\"", &d).is_none(), "an ES module package: the import-type hint applies");
     }
 
     #[test]

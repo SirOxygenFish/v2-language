@@ -159,7 +159,7 @@ fn plural(n: usize, word: &str) -> String {
 
 /// `v2 check FILE` (19.3): diagnostics to stderr, the summary to stdout; exit 1 on any error.
 pub fn check(file: &str) -> i32 {
-    if let Some(msg) = crate::cli::entry_error(file, None, "v2 check") {
+    if let Some(msg) = crate::cli::entry_error(file, &[], "v2 check") {
         stderrln!("v2: {msg}");
         return 2;
     }
