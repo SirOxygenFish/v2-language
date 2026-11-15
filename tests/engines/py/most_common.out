@@ -1,0 +1,4 @@
+TypeError | V2 doesn't unpack pairs: for name, count in c.most_common() would give each pair's index and the pair
+loop with one variable and read its parts: for pair in c.most_common(…) { print(pair[0], pair[1]) }
+İzmir 2
+Ankara 1

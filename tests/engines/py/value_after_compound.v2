@@ -1,0 +1,25 @@
+// requires: py
+// A block whose value is used, ending in a compound statement: its last line looks like the value
+// but is inside the statement, so that is an error, not a quiet null (DOCS 4.5, INTERNALS 14.3).
+let path = "x"
+try {
+    let counts = @py(path) {
+        import collections
+        with open(__file__, encoding="utf-8") as f:
+            dict(collections.Counter(f.read()))
+    }
+} catch (e) {
+    print(e.type, e.foreign_type, "|", e.message)
+}
+let ok = @py {
+    total = 0
+    for i in range(3):
+        total += i
+    total
+}
+print(ok)
+@py {
+    for i in range(1):
+        pass
+}
+print("statement blocks are fine")

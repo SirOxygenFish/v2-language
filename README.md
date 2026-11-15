@@ -320,7 +320,7 @@ More of V2, in short:
   `~` and `%USERPROFILE%` are a shell's, so write `getenv("HOME")` (`getenv("USERPROFILE")` on
   Windows) instead; a path that starts with one is refused rather than read or made as a folder
   named `~` (`./~` reaches a folder that is really named so).
-- **Strings** have `split`, `lines` (Windows line endings too), `upper`, `lower`, `replace`, `trim`,
+- **Strings** have `split`, `lines` (Windows and old Mac line endings too), `upper`, `lower`, `replace`, `trim`,
   `starts_with`, `ends_with` and `index_of`; **lists** `push`, `pop`, `insert`,
   `sort(key: f, reverse: true)` and `reverse` (they change the list and return `null`), `map` and
   `filter` (they return new lists), `join`, `index_of`, `get(i, default)` (the default past the
@@ -404,7 +404,8 @@ and V2 says so when another came first).
 - **Python on Windows:** `py -m pip install numpy`. If `v2 doctor` shows another Python, use its
   path, with `&` in front in PowerShell: `& "C:\Program Files\Python313\python.exe" -m pip install
   numpy`. For a virtual environment: `py -m venv .venv`, then
-  `.venv\Scripts\python -m pip install numpy`, and the `v2.toml` shown below.
+  `.venv\Scripts\python -m pip install numpy`, and a file named `v2.toml` next to your script
+  that says which venv to use, two lines: `[python]`, then `venv = ".venv"` (as shown below).
 - **Python on Linux and macOS:** the system's and Homebrew's Python refuse `pip install` outside a
   virtual environment ("externally-managed-environment"), so make one in your project folder:
 
@@ -495,8 +496,10 @@ macOS, V2 and its blocks always read and write UTF-8, whatever `LANG` says: use 
 (`C.UTF-8`, `de_DE.UTF-8`), or convert with `iconv`.
 
 **`UnicodeDecodeError` when a `@py` block reads a file that plain Python reads.** Blocks run in
-Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass
-`open(path, encoding="cp1252")`.
+Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass the
+code page of the Windows that saved it, `open(path, encoding="cp1252")` for Western European
+text (`cp1250` Central European, `cp1251` Cyrillic, `cp1254` Turkish, `cp1255` Hebrew, `cp1256`
+Arabic, `gbk` Chinese, `cp932` Japanese).
 
 **`cannot find 'hello.v2'`.** Your terminal is in another folder: `cd` to the folder with the file,
 or give its full path. The message says where V2 looked and which `.v2` files are there.
@@ -524,8 +527,13 @@ For `npm` ("npm.ps1 cannot be loaded"), type `npm.cmd` instead. A virtual enviro
 
 **`v2: Permission denied`, or the installer says a folder "doesn't let programs run".** That
 folder's file system is mounted `noexec`, as servers often have it: install into another folder
-with `V2_INSTALL_DIR`. Under a memory limit (`ulimit -v`), V2 needs about 300 MB of address space,
-and `@js` blocks over 1.2 GB, as Node.js reserves that much when it starts.
+with `V2_INSTALL_DIR`.
+
+**`Fatal process out of memory`, `memory allocation of … bytes failed`, or `left V2 a smaller
+stack`.** A memory limit is set for this shell (`ulimit -v`, common on shared servers). Plain
+scripts need little, but deep recursion needs about 300 MB, and `@js` blocks about 1 GB, as
+Node.js reserves that much when it starts. Raise the limit (`ulimit -v unlimited`, where that's
+allowed) or ask the server's admin.
 
 **A script hangs.** Press Ctrl+C: V2 stops it, and its Python and Node.js workers, with exit
 code 130 (on Linux and macOS, v2 ends by the signal, as other programs do, so a shell loop of
@@ -625,7 +633,8 @@ Node.js workers.
   between shows at the next call, or when the program ends. When the script ends, what
   JavaScript timers and promises and Python threads still have to do runs, for at most a second.
 - **A block's functions and classes can't go to another process:** `multiprocessing` with spawn
-  (the default on Windows and macOS) or forkserver can't import them, and a pickle of a block's
+  (the default on Windows and macOS) or forkserver (on Linux from Python 3.14) can't import them:
+  each worker prints why, and a `Pool` using them hangs (press Ctrl+C). A pickle of a block's
   class loads only in the same run. Put them in a `.py` file next to the script, and import that
   in the block.
 - **Each block has its own variables**, also in JavaScript: share them with `@export`. Each `@js`

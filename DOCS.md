@@ -224,7 +224,7 @@ digits and `_`, not starting with a digit. Keywords are listed in the [appendix]
 `type(x)` returns the type name as a string: `type(3)` is `"int"`, `type([])` is `"list"`.
 
 `str(x)` and `print` show strings inside containers quoted, and whole-number floats keep their
-`.0` (from `1e16` on they print in exponent form): `print({k: [1, "a", 2.0]})` shows `{"k": [1, "a", 2.0]}`, while `print("a")` shows `a`.
+`.0` (from `1e16` on, and below `0.0001`, they print in exponent form: `1e16`, `1e-5`): `print({k: [1, "a", 2.0]})` shows `{"k": [1, "a", 2.0]}`, while `print("a")` shows `a`.
 
 **Truthiness.** `null`, `false`, `0`, `0.0`, `""`, `b""`, `[]` and `{}` are *falsy*. Everything
 else, including every handle, is *truthy*.
@@ -345,7 +345,14 @@ mistake. Doubled braces are text as written: `f"{{name}}"` prints `{{name}}` (Py
 `{name}`), and an escaped `\${name}` prints `${name}`.
 
 Strings are indexed by character: `"héllo"[1]` is `"é"`, `"hello"[-1]` is `"o"`,
-`"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`.
+`"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`. A character is a Unicode code point, as in
+Python: an emoji with a skin tone is 2, a family emoji 7, and an `é` written as `e` plus an accent
+is 2. Strings are compared as written, not normalized (`@import { normalize } from
+py.unicodedata`, then `normalize("NFC", s)`, makes one form). JavaScript counts differently:
+its `.length` and `indexOf` count UTF-16 units, so an index from JavaScript isn't one in V2.
+Case and order are the same in every language (`"İ".lower()` is `"i̇"`, and `sort` puts `Ç` after
+`z`): for a language's own, use a @js block, as in `names.sort(new Intl.Collator("tr").compare)`
+and `s.toLocaleUpperCase("tr")`.
 
 String methods:
 
@@ -354,7 +361,7 @@ String methods:
 | `s.upper()`, `s.lower()`     | changed case                                     |
 | `s.trim()`                   | without leading/trailing whitespace              |
 | `s.split(sep = null)`        | list of parts; without `sep`, split on runs of whitespace with no empty parts: `" a  b ".split()` is `["a", "b"]` |
-| `s.lines()`                  | list of lines                                    |
+| `s.lines()`                  | list of lines, split at `\n`, `\r\n` and a lone `\r` (old Mac files) |
 | `s.replace(old, new)`        | every `old` replaced                             |
 | `s.starts_with(p)`, `s.ends_with(p)` | `bool`                                   |
 | `s.index_of(sub)`            | character index of the first match, or `-1`      |
@@ -572,7 +579,7 @@ bigger come from the languages you embed.
 | `input(prompt = "")`                    | read one line from standard input (without the newline); `null` at end of input |
 | `len(x)`                                | length of a str, bytes, list, dict or handle                |
 | `type(x)`                               | type name as a string                                       |
-| `str(x)`, `int(x)`, `float(x)`, `bool(x)` | conversions (`int("42")`, `str(3.5)`, …)                  |
+| `str(x)`, `int(x)`, `float(x)`, `bool(x)` | conversions (`int("42")`, `str(3.5)`, …); `int` and `float` read the digits 0–9, a sign and a point, without `_`, spaces or thousands separators |
 | `range(end)`, `range(start, end, step = 1)` | list of ints; positional arguments only                 |
 | `min(...values)`, `max(...values)`      | smallest / largest of the arguments, or of a list's items when the only argument is a list (`max(xs)`); all numbers or all strings; on a tie the first wins; no values is a `ValueError` |
 | `sum(xs)`                               | sum of a list of numbers: a float if any item is one; `sum([])` is `0` |
@@ -582,7 +589,7 @@ bigger come from the languages you embed.
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
 | `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
-| `exists(path)`                          | `true` if a file or folder is there (`false` on any error)  |
+| `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME` is refused, below) |
 | `list_dir(path)`                        | sorted list of the names in a folder                        |
 | `make_dir(path)`                        | create a folder and any missing parents; an existing folder is fine |
 | `remove_file(path)`                     | delete a file (not a folder)                                |
@@ -611,8 +618,10 @@ it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
 wrote, and `read_file("/dev/stdin")` reads all of standard input. The file
 functions raise `IOError` when they fail (`exists` just returns `false`). Paths are taken as
-written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so build such a path with `getenv`
-(the error's hint says so). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
+written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path that starts with one is an
+`IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
+in paths`, `./~` for a folder really named so): build such a path with `getenv` (the error's hint
+says so). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
 
 `exec` runs a program directly, without a shell, so its arguments reach it exactly as given:
 
@@ -912,7 +921,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - If a Python function returns a coroutine, V2 waits for it (see [8.4](#84-rules) for the one
   exception).
 - Output is UTF-8 on every platform: blocks run in Python's UTF-8 mode, so `open()` also reads
-  and writes UTF-8 unless given an encoding (an Excel CSV file: `encoding="cp1252"`), and Python
+  and writes UTF-8 unless given an encoding (an Excel CSV file: the code page of the Windows that saved it,
+  `encoding="cp1252"` for Western European text, `cp1254` Turkish, `cp1256` Arabic), and Python
   programs a block starts run in it too.
 - The value of a block is its last expression, like in a Jupyter cell
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
@@ -1820,6 +1830,12 @@ folder is the project root. Every key is optional, except that a custom engine n
 to the folder of the `v2.toml`, and a path that starts with `~` is in your home folder; nothing
 else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
 
+> **Not built yet** (ROADMAP Phase 3): a custom engine's table (`[engines.lua]`) is read but not
+> checked for now (`kind`, `command`, `{file}`, the tag's spelling), and `v2 doctor` lists it as
+> not in this version. The tables of the built-in engines are checked:
+> `[engines.py] command = "python3"` stops V2 with
+> `[engines.py] command must be an array: write ["python3"]`.
+
 ```toml
 [engines.py]
 # command = ["C:/Python312/python.exe"]   # skips auto-detection
@@ -1868,7 +1884,7 @@ temp directory, and caches live in `~/.v2/`.
 | Command                        | Does                                                                 |
 | ------------------------------ | -------------------------------------------------------------------- |
 | `v2 file.v2 [args...]`         | run a script                                                         |
-| `v2 check file.v2`             | parse and check the script and every file it `import`s, without running or writing anything; prints the errors (each file up to its first syntax error: fix it and check again) |
+| `v2 check file.v2`             | parse and check the script and every file it `import`s, without running or writing anything; prints the errors (a file with a syntax error shows only that one: fix it and check again) |
 | `v2 doctor`                    | show every engine: found or not, command, version, and where the setting came from |
 | `v2 cache clean`               | delete V2's caches (compiled blocks and toolchain probe results)     |
 | `v2 --version`, `v2 --help`    | (`-h` is `--help` too)                                               |

@@ -906,7 +906,7 @@ mod tests {
     fn overrides_of_custom_and_undeclared_tags() {
         // A custom engine gets command[0]; a tag nobody declares is ignored (18.4).
         let env = [("V2_ENGINE_RUBY", "r3"), ("V2_ENGINE_LUA", "lua5")];
-        let cfg = project_env("custom", "[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n", &env).unwrap();
+        let cfg = project_env("custom-env", "[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n", &env).unwrap();
         let ruby = cfg.custom["ruby"]["command"].as_array().unwrap();
         assert!(ruby[0].as_str() == Some("r3") && ruby[1].as_str() == Some("{file}"));
         assert!(!cfg.custom.contains_key("lua") && !cfg.engines.contains_key("lua"));

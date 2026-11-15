@@ -612,7 +612,10 @@ impl Resolver<'_> {
             Judged::Usable(v) => Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: Some(v), skipped: Vec::new() }),
             other => {
                 let reason = other.reason().unwrap_or_default();
-                let hint = if reason.starts_with("version probe timed out") {
+                let hint = if reason.starts_with("version probe timed out") && start > 0.0 && start < PROBE_LIMIT.as_secs_f64() {
+                    // `startup_timeout = 2` and a message saying 10 s: probes never wait less.
+                    format!("; a probe waits at least {} s: raise [engines.{}] startup_timeout above that if the program is only slow", PROBE_LIMIT.as_secs(), spec.id)
+                } else if reason.starts_with("version probe timed out") {
                     format!("; raise [engines.{}] startup_timeout if it is only slow", spec.id)
                 } else if reason == PLACEHOLDER {
                     format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id))
@@ -1358,6 +1361,14 @@ mod tests {
         cfg.engines.get_mut("js").unwrap().startup_timeout = Some(Sourced { value: 1e300, from: project_source() });
         resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap();
         assert_eq!(*limits.borrow(), [Some(Duration::from_secs(30)), None, None]);
+        // Round 15: under 10 s the probe still waits 10 s, and the hint says so.
+        let slow = fake(|_| ProbeOutcome::TimedOut);
+        cfg.engines.get_mut("js").unwrap().startup_timeout = Some(Sourced { value: 2.0, from: project_source() });
+        let nf = resolve_with(&cfg, &l, &slow, &mut ProbeCache::off(), "js").unwrap_err();
+        assert!(nf.message.ends_with("version probe timed out (10 s); a probe waits at least 10 s: raise [engines.js] startup_timeout above that if the program is only slow"), "{}", nf.message);
+        cfg.engines.get_mut("js").unwrap().startup_timeout = Some(Sourced { value: 20.0, from: project_source() });
+        let nf = resolve_with(&cfg, &l, &slow, &mut ProbeCache::off(), "js").unwrap_err();
+        assert!(nf.message.ends_with("version probe timed out (20 s); raise [engines.js] startup_timeout if it is only slow"), "{}", nf.message);
     }
 
     #[test]

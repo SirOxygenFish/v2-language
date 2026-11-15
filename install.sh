@@ -155,7 +155,7 @@ if [ "$ran" -ne 0 ]; then
     rm -f "$staged"
     staged=""
     [ -z "$made" ] || rmdir "$made" 2>/dev/null || true
-    cat "$tmp/error" >&2
+    # The shell's own words ("v2.new: Permission denied") only where no line below says it better.
     if grep -qi 'permission denied' "$tmp/error"; then
         fail "$dir doesn't let programs run (its file system is mounted noexec): install into a folder that does, with V2_INSTALL_DIR"
     fi
@@ -166,6 +166,7 @@ if [ "$ran" -ne 0 ]; then
     if grep -qi 'exec format\|cannot execute' "$tmp/error"; then
         fail "that v2 is for another kind of computer: this one needs $name"
     fi
+    cat "$tmp/error" >&2
     if [ "$checked" = no ]; then
         fail "the v2 in $shown_archive doesn't run here (see above): if the file may be damaged, download it again with its .sha256, so it gets checked; else $from_source"
     fi

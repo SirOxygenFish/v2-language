@@ -40,3 +40,4 @@ ArityError: range() missing required argument 'end'
 ValueError TypeError ValueError ValueError
 TypeError TypeError ValueError
 TypeError ValueError
+0.001 0.0001 1e-5 -1e-5

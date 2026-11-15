@@ -1,0 +1,16 @@
+// requires: py
+// Counter.most_common(n) gives (item, count) pairs: two loop variables would be each pair's index
+// and the pair, so V2 says so, as for .items() (INTERNALS 5.8).
+@import { Counter } from py.collections
+let c = Counter(["İzmir", "Ankara", "İzmir"])
+try {
+    for name, count in c.most_common(2) {
+        print(name, count)
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+    print(e.hint)
+}
+for pair in c.most_common(2) {
+    print(pair[0], pair[1])
+}

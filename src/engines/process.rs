@@ -1220,13 +1220,14 @@ impl Read for UntilExit {
 }
 
 fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
+    spawn_helper(std::thread::Builder::new(), move || {
         let mut out = Vec::new();
         if let Some(mut s) = stream {
             let _ = s.read_to_end(&mut out);
         }
         out
     })
+    .expect("start a reader thread")
 }
 
 /// Run `argv` to its end with stdout and stderr captured, and at most `limit`. Stdin is the null
@@ -1244,9 +1245,10 @@ pub fn run_captured(
     let mut child = ChildProc::spawn(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped, keep: &[], raw_tail })?;
     // A child that exits without reading gets a write error here, which is not the caller's.
     let feed = input.zip(child.take_stdin()).map(|(bytes, mut pipe)| {
-        std::thread::spawn(move || {
+        spawn_helper(std::thread::Builder::new(), move || {
             let _ = std::io::Write::write_all(&mut pipe, &bytes);
         })
+        .expect("start a writer thread")
     });
     let out = drain(child.take_stdout());
     let err = drain(child.take_stderr());
@@ -1267,6 +1269,58 @@ pub fn run_captured(
 // ---------------------------------------------------------------------------------------------
 // The interrupt handlers (6.5)
 
+/// Unix: the signals that interrupt a run.
+#[cfg(unix)]
+const INTERRUPTS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+#[cfg(unix)]
+fn interrupt_set() -> libc::sigset_t {
+    // SAFETY: sigemptyset and sigaddset fill a zeroed set.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in INTERRUPTS {
+            libc::sigaddset(&mut set, sig);
+        }
+        set
+    }
+}
+
+/// Unix: whether this thread takes the interrupt signals. Main blocks them before it starts any
+/// thread, so only the interpreter thread, which takes them, gets them: the kernel runs the
+/// handler there, ending the wait of an `exec` or a worker request, so a signal sent while one
+/// runs (its program's `kill $PPID`) is seen as it returns, not a statement later (6.5).
+#[cfg(unix)]
+pub fn take_interrupts(take: bool) {
+    let set = interrupt_set();
+    // SAFETY: changes this thread's mask only.
+    unsafe {
+        libc::pthread_sigmask(if take { libc::SIG_UNBLOCK } else { libc::SIG_BLOCK }, &set, std::ptr::null_mut());
+    }
+}
+
+/// A helper thread, started with the interrupt signals blocked, as it never takes them
+/// (`take_interrupts`).
+pub fn spawn_helper<F, T>(b: std::thread::Builder, f: F) -> std::io::Result<JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(unix)]
+    {
+        let set = interrupt_set();
+        // SAFETY: blocks, then restores, this thread's mask around the spawn; the new thread
+        // keeps the blocked one.
+        let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old) };
+        let r = b.spawn(f);
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+        r
+    }
+    #[cfg(not(unix))]
+    b.spawn(f)
+}
+
 /// Unix: SIGINT, SIGTERM, SIGHUP and SIGQUIT set `INTERRUPTED`, an async-signal-safe store. A signal
 /// ignored when v2 starts (`nohup`, background jobs of a shell without job control) stays
 /// ignored (6.5).
@@ -1281,7 +1335,7 @@ fn install_interrupt_handler() {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
         libc::sigemptyset(&mut action.sa_mask);
-        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+        for sig in INTERRUPTS {
             let mut old: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(sig, std::ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_IGN {
                 continue;

@@ -26,6 +26,23 @@ if __name__ == "__main__":
     IMPORTLIB = os.path.normcase(os.path.dirname(os.path.abspath(importlib.__file__)))
     DISPATCH = threading.get_ident()
 
+    # A library's warning about a call V2 made (`warnings.warn(..., stacklevel=2)`, matplotlib's
+    # missing glyphs) would name this file's own line in the temp folder: it says where it came
+    # from instead (12.6).
+    import warnings
+    _show_warning = warnings.showwarning
+
+    def show_warning(message, category, filename, lineno, file=None, line=None):
+        if isinstance(filename, str) and os.path.normcase(os.path.abspath(filename)) == ADAPTER:
+            try:
+                (file if file is not None else sys.stderr).write("%s: %s (in a call from V2)\n" % (category.__name__, message))
+            except Exception:
+                pass
+            return
+        _show_warning(message, category, filename, lineno, file, line)
+
+    warnings.showwarning = show_warning
+
     # 2. The protocol moves to private copies of fds 0 and 1; fd 0 becomes the null device and
     # fd 1 points at stderr, so C extensions, os.write(1, ...) and inheriting children write to
     # stderr and read end of input (9.9).
@@ -393,6 +410,17 @@ if __name__ == "__main__":
 
         def __iter__(self):
             self._refuse()
+
+    if os.name != "nt":
+        import getpass
+
+        def no_getpass(prompt="Password: ", stream=None):
+            """The worker has no terminal (8.3): getpass's fallback would warn that the input
+            may be echoed and print the prompt, then fail on stdin (DOCS 4.6). On Windows it
+            reads V2's console, as DOCS says."""
+            raise OSError("getpass can't ask in a block: a block has no terminal, and V2's input() owns standard input; ask in V2 and pass the answer in as a block arg")
+
+        getpass.getpass = no_getpass
 
     sys.stdout = Output("stdout", 1)
     sys.stderr = Output("stderr", 2)
@@ -985,6 +1013,13 @@ if __name__ == "__main__":
         top = name.split(".")[0]
         loaded = getattr(sys.modules.get(top), "__file__", None)
         if not isinstance(loaded, str):
+            # `math`, `time`, `sys`: built into Python, so a math.py of yours is never read.
+            origin = getattr(getattr(sys.modules.get(top), "__spec__", None), "origin", None)
+            if top in sys.modules and (top in sys.builtin_module_names or origin in ("built-in", "frozen")):
+                for p in lead:
+                    mine = os.path.join(p, top + ".py")
+                    if os.path.isfile(mine):
+                        return (top, "Python's built-in %s module" % top, mine)
             return None
         for p in lead:
             for mine in (os.path.join(p, top + ".py"), os.path.join(p, top, "__init__.py")):
@@ -1216,6 +1251,16 @@ if __name__ == "__main__":
                 e.filename, e.lineno, e.offset = path, node.lineno, node.col_offset + 1
                 e.text = _lines.get(path, {}).get(node.lineno)
                 raise e.with_traceback(None)
+        # A value asked for from a block that ends in a compound statement: its last line looks
+        # like the value, but is inside the statement, so the value would be None (DOCS 4.5).
+        compound = {ast.With: "with", ast.AsyncWith: "async with", ast.For: "for", ast.AsyncFor: "async for",
+                    ast.If: "if", ast.Try: "try", ast.While: "while"}
+        if hasattr(ast, "Match"):
+            compound[ast.Match] = "match"
+        if hasattr(ast, "TryStar"):
+            compound[ast.TryStar] = "try"
+        last = tree.body[-1] if tree.body else None
+        no_value = m["kind"] == "action" and m.get("want_value") and type(last) in compound
         tail = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):
             tail = ast.Expression(tree.body.pop().value)
@@ -1232,6 +1277,14 @@ if __name__ == "__main__":
         keep = False
         try:
             exec(code, g)
+            if no_value:
+                # Once it has run to its end: a block that raises in its `try` says that instead.
+                word = compound[type(last)]
+                e = SyntaxError("the block's value is used, but its last statement is a `%s` statement, which has no value: "
+                                "put the value on a last line of its own, outside the `%s`" % (word, word))
+                e.filename, e.lineno, e.offset = path, last.lineno, last.col_offset + 1
+                e.text = _lines.get(path, {}).get(last.lineno)
+                raise e.with_traceback(None)
             value = eval(tail_code, g) if tail_code is not None else None
             value = await_if_awaitable(value, "the block's value is a coroutine while another coroutine is being awaited in this thread")
             if m["kind"] == "action":

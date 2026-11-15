@@ -1,0 +1,10 @@
+// requires: py
+// platform: unix
+// getpass in a block fails at once, with no warning about echo and no prompt (round 15, DOCS
+// 4.6): the worker has no terminal and V2's input() owns stdin.
+try {
+    @py { import getpass; getpass.getpass("pw: ") }
+} catch (e) {
+    print(e.foreign_type, "|", e.message)
+}
+print(@py { from getpass import getpass; getpass.__name__ })
