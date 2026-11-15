@@ -1,0 +1,16 @@
+// requires: js
+// exit: 1
+// stderr: uncaught exception: V2Error: V2 function
+// stderr: called outside an active V2 call: JavaScript called it while V2 wasn't waiting on JavaScript
+// stderr: (the same error again; further repeats are not shown)
+// A server or timer that calls V2 after the call returned: said once, with what to do, then a
+// note for the repeats (INTERNALS 9.8, 12.6).
+@js t {
+    function start(f) {
+        for (let i = 0; i < 3; i++) setTimeout(() => f(), 0)
+    }
+    @export { start }
+}
+@import { start } from t
+start(func() => 1)
+print("done")

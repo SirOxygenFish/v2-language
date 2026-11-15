@@ -3,3 +3,4 @@
 3 true
 "héllo\r\n"
 0 a.txt
+ArityError | exec takes argv and input only: for a variable or another folder, start a shell, as in exec(["cmd", "/c", "cd /d web && set \"NODE_ENV=production\" && npm run build"])

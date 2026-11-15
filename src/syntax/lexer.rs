@@ -12,6 +12,8 @@ use super::Diag;
 
 /// What a `:` in an interpolation can start (3.5).
 pub const ONLY_FIXED: &str = "the only format in ${…} is :.Nf, with N up to 99";
+/// What to write for `${x:>5}` and other formats V2 doesn't have.
+pub const PAD_HINT: &str = "pad with \" \" * n, as in let s = str(x), then \" \" * (5 - len(s)) + s for 5 wide";
 
 /// Past this many nested `${…}`, lexing stops with `nested too deeply` (4.1).
 const MAX_INTERP_DEPTH: u32 = 256;
@@ -601,8 +603,10 @@ impl<'a> Lexer<'a> {
             if int_part == "0" && matches!(c, 'b' | 'o' | 'B' | 'O' | 'X') {
                 return Err(Diag::new("V2 has only decimal and 0x hex integer literals", span));
             }
-            let msg = if self.in_format(m.pos) { ONLY_FIXED } else { "a number can't be followed directly by a letter" };
-            return Err(Diag::new(msg, span));
+            if self.in_format(m.pos) {
+                return Err(Diag::new(ONLY_FIXED, span).hint(PAD_HINT));
+            }
+            return Err(Diag::new("a number can't be followed directly by a letter", span));
         }
         let text = &self.src[start..self.pos];
         let span = self.span_from(m);

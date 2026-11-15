@@ -341,6 +341,38 @@ fn not_exported(name: &str, text: &str, names: &[Rc<str>]) -> String {
     }
 }
 
+/// `'f' is not exported by 'js.util'` while the script's own util.js sits next to it: `js.util`
+/// is a package (Node's own, or one from npm), and a file of yours is imported by its path.
+fn shadowed_hint(text: &str, dir: &Path) -> Option<String> {
+    let (tag, name) = text.split_once('.')?;
+    if !matches!(tag, "js" | "ts") || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return None;
+    }
+    let file = OWN_EXTS.iter().map(|e| format!("{name}.{e}")).find(|f| dir.join(f).is_file())?;
+    Some(format!("{text} is a package (Node's own or one from npm), not your {file}: a file of yours is imported by its path, as in {}.\"./{file}\"", file_lang(&file)))
+}
+
+/// The extensions of a JavaScript or TypeScript file of your own.
+const OWN_EXTS: [&str; 6] = ["js", "mjs", "cjs", "ts", "mts", "cts"];
+
+/// `ts` for a TypeScript file's name, else `js`.
+fn file_lang(file: &str) -> &'static str {
+    if Path::new(file).extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts")) {
+        "ts"
+    } else {
+        "js"
+    }
+}
+
+/// `js.name`, or `js."name"` when the name isn't a plain one (`js."util.js"`), as it is written.
+fn written(name: &str) -> String {
+    if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        format!("js.{name}")
+    } else {
+        format!("js.\"{name}\"")
+    }
+}
+
 /// A `module` request's answer (13.5): the module or null, the names asked for that it has, the
 /// ones it lacks, and, when it lacks some, its public names for the did-you-mean.
 type ModuleAnswer = (Value, Vec<Export>, Vec<Rc<str>>, Vec<Rc<str>>);
@@ -397,6 +429,10 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
                 format!("'{parent}' is there, but has no '{part}': check the name after '{parent}.'")
             });
         }
+        // A helper of the project's own in a folder below: `py.stages.clean` for stages/clean.py.
+        if let Some(dotted) = module_below(dir, &name) {
+            return Some(format!("there is a {} in a folder below: import it as py.{dotted}", dotted.replace('.', "/") + ".py"));
+        }
         let install = format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps");
         // A virtual environment made in the project (the file's folder or up to three above it),
         // but not named in a v2.toml.
@@ -414,6 +450,12 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
     }
     let name = quoted("Cannot find module '")?;
     if name.starts_with(['.', '/']) || name.contains(':') {
+        // `ts."./money"` for money.ts: Node finds a file by its whole name.
+        let relative = name.starts_with("./") || name.starts_with("../");
+        if let Some(ext) = OWN_EXTS.iter().find(|e| relative && dir.join(format!("{name}.{e}")).is_file()) {
+            let file = format!("{name}.{ext}");
+            return Some(format!("did you mean {}.\"{file}\"? a file is named with its extension", file_lang(&file)));
+        }
         return Some("a local file is found from the .v2 file's folder: check the path".to_string());
     }
     // The package is the first part of the specifier (`@scope/name` for a scoped one).
@@ -430,15 +472,14 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
     }
     // `js.helpers` for the script's own helpers.js: a file is imported by its path, and
     // `npm install helpers` would fetch whatever package has that name.
-    const EXTS: [&str; 6] = ["js", "mjs", "cjs", "ts", "mts", "cts"];
-    let with_ext = Path::new(&name).extension().and_then(|e| e.to_str()).is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()));
-    let own = if with_ext { vec![dir.join(&name)] } else { EXTS.iter().map(|e| dir.join(format!("{name}.{e}"))).collect() };
-    let lang = |file: &str| if Path::new(file).extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts")) { "ts" } else { "js" };
+    let with_ext = Path::new(&name).extension().and_then(|e| e.to_str()).is_some_and(|e| OWN_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    let own = if with_ext { vec![dir.join(&name)] } else { OWN_EXTS.iter().map(|e| dir.join(format!("{name}.{e}"))).collect() };
+    let lang = file_lang;
     if let Some(file) = own.iter().find(|p| p.is_file()).and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()) {
-        return Some(format!("your own {file} is imported by its path from the .v2 file's folder: @import {{ … }} from {}.\"./{file}\" (js.{name}, without ./, names an npm package)", lang(&file)));
+        return Some(format!("your own {file} is imported by its path from the .v2 file's folder: @import {{ … }} from {}.\"./{file}\" ({}, without ./, names an npm package)", lang(&file), written(&name)));
     }
     if with_ext {
-        return Some(format!("a file of your own is imported by its path from the .v2 file's folder, as in {}.\"./{name}\": check its name (js.{name}, without ./, names an npm package)", lang(&name)));
+        return Some(format!("a file of your own is imported by its path from the .v2 file's folder, as in {}.\"./{name}\": check its name ({}, without ./, names an npm package)", lang(&name), written(&name)));
     }
     let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| format!("did you mean js.{n}? "));
@@ -448,6 +489,60 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
         "{}if '{package}' isn't misspelled, install it with npm install {package} in {} or a folder above it, where Node looks for this file",
         near.unwrap_or_default(),
         dir.display()
+    ))
+}
+
+/// `stages.clean` when `dir`'s folders, up to three levels down, hold `stages/clean.py` (the
+/// nearest first). Hidden folders, virtual environments and node_modules aren't looked in.
+fn module_below(dir: &Path, name: &str) -> Option<String> {
+    let mut level: Vec<(PathBuf, String)> = vec![(dir.to_path_buf(), String::new())];
+    let mut seen = 0;
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for (folder, dotted) in level {
+            for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+                seen += 1;
+                if seen > 5000 {
+                    return None;
+                }
+                let Ok(sub) = entry.file_name().into_string() else { continue };
+                let skip = sub.starts_with('.') || matches!(sub.as_str(), "node_modules" | "venv" | "__pycache__" | "site-packages");
+                if skip || !entry.file_type().is_ok_and(|t| t.is_dir()) || !sub.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    continue;
+                }
+                let path = if dotted.is_empty() { sub.clone() } else { format!("{dotted}.{sub}") };
+                if entry.path().join(format!("{name}.py")).is_file() {
+                    return Some(format!("{path}.{name}"));
+                }
+                next.push((entry.path(), path));
+            }
+        }
+        next.sort();
+        level = next;
+    }
+    None
+}
+
+/// A local file that uses `import`/`export` in a folder whose package.json says `"type":
+/// "commonjs"` (what `npm init -y` writes), which turns off Node's own detection (13.5).
+fn commonjs_hint(message: &str, spec: &str, dir: &Path) -> Option<String> {
+    let esm = message.contains("Unexpected token 'export'") || message.contains("Cannot use import statement outside a module");
+    let local = spec.trim_matches('"');
+    if !esm || !(local.starts_with("./") || local.starts_with("../")) {
+        return None;
+    }
+    let file = absolute_clean(&dir.join(local));
+    let pkg = file.ancestors().skip(1).map(|d| d.join("package.json")).find(|p| p.is_file())?;
+    let text = std::fs::read_to_string(&pkg).ok()?;
+    let json: Json = serde_json::from_str(&text).ok()?;
+    if json.get("type").and_then(Json::as_str) != Some("commonjs") {
+        return None;
+    }
+    let ts = file.extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts"));
+    Some(format!(
+        "{} says \"type\": \"commonjs\" (npm init writes that), so Node loads this file as CommonJS, without import and export: set \"type\": \"module\" there, or rename the file to .{}",
+        pkg.display(),
+        if ts { "mts" } else { "mjs" }
     ))
 }
 
@@ -832,7 +927,7 @@ impl Interp {
                         for (name, alias, span) in named_items(list) {
                             match find(&exports, &name) {
                                 Some(e) if !missing.contains(&name) => bound.push((alias, e.value.clone())),
-                                _ => return Err(self.raise(import_error(not_exported(&name, &text, &have)), span)),
+                                _ => return Err(self.raise(self.not_exported_error(file, &name, &text, &have), span)),
                             }
                         }
                     }
@@ -942,7 +1037,7 @@ impl Interp {
             if let Flow::Error(e) = f {
                 let hint = match &*e.kind {
                     "ImportError" => missing_package_hint(&e.message, &dir, venv_set),
-                    "ForeignError" => ts_import_hint(&e.message),
+                    "ForeignError" => ts_import_hint(&e.message).or_else(|| commonjs_hint(&e.message, &joined, &dir)),
                     _ => None,
                 };
                 if let Some(hint) = hint {
@@ -953,6 +1048,16 @@ impl Interp {
         let unit: Rc<str> = unit.into();
         let exports = reply.exports.into_iter().map(|(name, v)| export(s, &unit, name, v)).collect();
         Ok((reply.value, exports, reply.missing, reply.names))
+    }
+
+    /// 13.5's not-exported error, with a hint when a file of the script's own has that name.
+    fn not_exported_error(&self, file: FileId, name: &str, text: &str, have: &[Rc<str>]) -> Flow {
+        let f = import_error(not_exported(name, text, have));
+        let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
+        if let (Flow::Error(e), Some(hint)) = (&f, shadowed_hint(text, &dir)) {
+            let _ = e.hint.set(hint.into());
+        }
+        f
     }
 
     /// The route for one item of an inner `@import`; a later load of the importer resets it (13.6).
@@ -1018,10 +1123,17 @@ impl Interp {
                     for (name, alias, span) in named_items(list) {
                         let found = find(&exports, &name).filter(|_| !missing.contains(&name));
                         let Some(e) = found else {
-                            return Err(self.raise(import_error(not_exported(&name, &text, &have)), span));
+                            return Err(self.raise(self.not_exported_error(file, &name, &text, &have), span));
                         };
                         if !e.func {
-                            return Err(self.raise(constant_error(&name), span));
+                            // A package's object (zod's `z`): the block's language imports it itself.
+                            let f = constant_error(&name);
+                            if let Flow::Error(err) = &f {
+                                let module = path.iter().map(|n| &*n.text).collect::<Vec<_>>().join(".");
+                                let own = if key == "py" { format!("from {module} import {name}") } else { format!("const {{ {name} }} = require(\"{}\")", module.trim_matches('"')) };
+                                let _ = err.hint.set(format!("a block imports only functions; in the block, import the package the language's own way: {own}").into());
+                            }
+                            return Err(self.raise(f, span));
                         }
                         let Value::Func(f) = &e.value else { unreachable!("a func export is a Proxy") };
                         let Callable::Proxy { unit, .. } = &**f else { unreachable!("a module export is a Proxy") };
@@ -1101,7 +1213,7 @@ impl Interp {
             return match find(&exports, name) {
                 Some(e) if !missing.contains(name) && e.func => Ok(e.value.clone()),
                 Some(_) if !missing.contains(name) => Err(constant_error(name)),
-                _ => Err(import_error(not_exported(name, &self.selector_text(&imp.selector), &have))),
+                _ => Err(self.not_exported_error(file, name, &self.selector_text(&imp.selector), &have)),
             };
         }
         // What can only fail starts nothing (13.3).
@@ -1157,6 +1269,11 @@ mod tests {
         let expected = format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; or {pip}", proj.join(".venv").display());
         assert_eq!(hint("No module named 'numpy'", &proj.join("sub")), expected);
         assert_eq!(missing_package_hint("No module named 'numpy'", &proj, true).as_deref(), Some(pip), "a venv in v2.toml");
+        // A helper of the project's own in a folder below.
+        std::fs::create_dir_all(proj.join("stages").join("deep")).unwrap();
+        std::fs::write(proj.join("stages").join("deep").join("clean.py"), "").unwrap();
+        assert_eq!(hint("No module named 'clean'", &proj), "there is a stages/deep/clean.py in a folder below: import it as py.stages.deep.clean");
+        assert_eq!(hint("No module named 'clean'", &proj.join("stages")), "there is a deep/clean.py in a folder below: import it as py.deep.clean");
         // npm: a subpath of an installed package, a near name, a scoped package.
         let js = temp("npm");
         std::fs::create_dir_all(js.join("node_modules").join("lodash")).unwrap();
@@ -1169,8 +1286,18 @@ mod tests {
         std::fs::write(js.join("helpers.js"), "").unwrap();
         let own = "your own helpers.js is imported by its path from the .v2 file's folder: @import { … } from js.\"./helpers.js\" (js.helpers, without ./, names an npm package)";
         assert_eq!(hint("Cannot find module 'helpers'", &js), own);
-        assert_eq!(hint("Cannot find module 'helpers.js'", &js), own.replace("js.helpers,", "js.helpers.js,"));
-        assert_eq!(hint("Cannot find module 'util.ts'", &js), "a file of your own is imported by its path from the .v2 file's folder, as in ts.\"./util.ts\": check its name (js.util.ts, without ./, names an npm package)");
+        // What was written: `js."helpers.js"`, quoted.
+        assert_eq!(hint("Cannot find module 'helpers.js'", &js), own.replace("js.helpers,", "js.\"helpers.js\","));
+        assert_eq!(hint("Cannot find module 'util.ts'", &js), "a file of your own is imported by its path from the .v2 file's folder, as in ts.\"./util.ts\": check its name (js.\"util.ts\", without ./, names an npm package)");
+        // A local path without its extension, when the file is there.
+        std::fs::write(js.join("money.ts"), "").unwrap();
+        assert_eq!(hint("Cannot find module './money'", &js), "did you mean ts.\"./money.ts\"? a file is named with its extension");
+        assert_eq!(hint("Cannot find module './mony'", &js), "a local file is found from the .v2 file's folder: check the path");
+        // A package name that is also a file of the script's own.
+        std::fs::write(js.join("util.js"), "").unwrap();
+        assert_eq!(shadowed_hint("js.util", &js).as_deref(), Some("js.util is a package (Node's own or one from npm), not your util.js: a file of yours is imported by its path, as in js.\"./util.js\""));
+        assert_eq!(shadowed_hint("js.path", &js), None, "no path.js there");
+        assert_eq!(shadowed_hint("py.util", &js), None);
         assert_eq!(missing_package_hint("something else", &d, false), None);
         // A package that offers only `import` (an ES module's `exports`).
         let m = format!("No \"exports\" main defined in {}", d.join("node_modules").join("@scope").join("esm-only").join("package.json").display());

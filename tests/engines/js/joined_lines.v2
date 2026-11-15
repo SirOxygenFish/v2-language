@@ -20,3 +20,24 @@ let v = @js {
     (f() + 1)
 }
 print(v)
+// A line in the middle that JavaScript joined to the one above, found when it fails: the same
+// advice as a hint (INTERNALS 12.6).
+try {
+    let joined = @js {
+        const a = [1, 2]
+        [3, 4].forEach(x => a.push(x))
+        a
+    }
+} catch (e) {
+    print(e.foreign_type, e.message)
+    print(e.hint)
+}
+// A failing line that doesn't start so gets no such hint.
+try {
+    let other = @js {
+        const a = null
+        a.length
+    }
+} catch (e) {
+    print(e.hint)
+}

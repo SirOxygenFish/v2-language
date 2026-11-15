@@ -1,0 +1,32 @@
+// requires: py js
+// A V2 error caught in JavaScript or Python reads as a log shows it: its V2 type and where V2
+// raised it, then the caller's frames, without the adapter's own (INTERNALS 14.2).
+func flaky(n) {
+    throw error("IOError", f"disk hiccup ${n}")
+}
+@js j {
+    @import { flaky } from v2
+    function check_user() {
+        try { flaky(0) } catch (e) { return e.stack.split("\n") }
+    }
+    @export { check_user }
+}
+@py p {
+    @import { flaky } from v2
+    import sys, traceback
+    def logged():
+        try:
+            flaky(1)
+        except V2Error as e:
+            text = traceback.format_exc()
+            note = "raised in V2 as IOError, at flaky (" in text and "v2error_stack.v2:5)" in text
+            return [text.count("adapters"), text.rstrip().splitlines()[-2 if note else -1], note or sys.version_info < (3, 11)]
+    @export { logged }
+}
+@import { check_user } from j
+@import { logged } from p
+let lines = check_user()
+print(lines[0])
+print(lines[1].trim().starts_with("at flaky (") && lines[1].ends_with("v2error_stack.v2:5)"))
+print(lines[2].trim().starts_with("at check_user ("), len(lines), "adapters" in lines.join("\n"))
+print(logged())

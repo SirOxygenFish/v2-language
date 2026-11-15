@@ -1212,7 +1212,15 @@ impl Interp {
                 if !named.is_empty() && POSITIONAL_ONLY.contains(&def.name) {
                     return self.fail_at("ArityError", format!("{}() takes positional arguments only", def.name), call_site);
                 }
-                let args = self.at(bind_spec(def.name, def.params, pos, named), call_site)?;
+                let guess = named.first().map(|(n, _)| n.clone());
+                let args = self.at(bind_spec(def.name, def.params, pos, named), call_site).inspect_err(|f| {
+                    // `exec(argv, env: …)`, `exec(argv, cwd: …)`: what to do instead.
+                    if let (Flow::Error(e), Some(hint)) = (f, guess.and_then(|g| crate::runtime::builtins::named_hint(def.name, &g))) {
+                        if &*e.kind == "ArityError" {
+                            let _ = e.hint.set(hint.into());
+                        }
+                    }
+                })?;
                 let r = (def.f)(self, args, call_site);
                 self.at(r, call_site)
             }

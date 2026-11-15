@@ -1,0 +1,6 @@
+ImportError | 'shared' is not exported by 'js.util'
+  hint: js.util is a package (Node's own or one from npm), not your util.js: a file of yours is imported by its path, as in js."./util.js"
+ImportError | Cannot find module './tla'
+  hint: did you mean js."./tla.mjs"? a file is named with its extension
+ImportError | 'VERSION' is a constant — pass it in as a block arg
+  hint: a block imports only functions; in the block, import the package the language's own way: const { VERSION } = require("v2-test-pkg")
