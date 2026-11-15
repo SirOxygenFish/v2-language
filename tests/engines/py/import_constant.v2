@@ -21,3 +21,21 @@ show(func() {
     @import { twice } from v2
     print(twice(4))
 }
+// A let that holds data is data too; one that holds null may get a function before the call.
+let k = 5
+let later = null
+show(func() {
+    @py {
+        @import { k } from v2
+        print(k)
+    }
+})
+@py {
+    @import { later } from v2
+    def go():
+        return later(2)
+    @export { go }
+}
+@import { go } from @py
+later = twice
+print(go())

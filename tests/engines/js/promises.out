@@ -2,7 +2,7 @@
 async value
 ForeignError TypeError rejected
 awaited in statement position
-Error | the block's value is a Promise during a nested cross-language call; only an outermost call can be awaited
+Error | the block's value is a Promise during a nested cross-language call; only an outermost call can be awaited: await it in JavaScript itself, or return a value, not a Promise
 still running
 Error | the block's value is a Promise that can never settle: nothing is left for it to wait on
 Error | the block's value is a Promise that can never settle: nothing is left for it to wait on

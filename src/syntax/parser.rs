@@ -72,7 +72,11 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         }
         (Some("new"), Some(kind), _) => format!("V2 has no new: call it, as in {kind}(…)"),
         // Python's `"big" if x > 2 else "small"`.
-        _ if matches!(tok(0), Some(Tok::Kw(Kw::If))) && !matches!(tok(1), None | Some(Tok::Newline | Tok::Semi | Tok::LBrace(_) | Tok::RBrace | Tok::Kw(Kw::Else))) => {
+        // `if x = 2 {`, `while x = 1 {`: a comparison written with one `=`.
+        (_, _, Some(Op::Eq)) if matches!(toks[line_start(toks, i)].tok, Tok::Kw(Kw::If | Kw::Elif | Kw::While)) => {
+            "V2 compares with ==, as in if x == 2 { ... }".into()
+        }
+        _ if matches!(tok(0), Some(Tok::Kw(Kw::If))) && !matches!(tok(1), None | Some(Tok::Newline | Tok::Semi | Tok::LBrace(_) | Tok::RBrace | Tok::Kw(Kw::Else | Kw::Func))) => {
             "V2 writes a conditional value as cond ? a : b, as in x > 2 ? \"big\" : \"small\"".into()
         }
         (Some("print"), _, _) if matches!(tok(0), Some(Tok::Str(_) | Tok::FStr(_) | Tok::Ident(_) | Tok::Int(_) | Tok::Float(_))) => {
@@ -265,13 +269,19 @@ fn slice_step(toks: &[Token], i: usize) -> bool {
     false
 }
 
-/// The name that starts the line of token `i`, if a name does.
-fn first_word_of_line(toks: &[Token], i: usize) -> Option<&str> {
+/// The index of the token that starts the statement of token `i` on its line.
+fn line_start(toks: &[Token], i: usize) -> usize {
     let line = toks[i].span.line;
     let mut j = i;
     while j > 0 && toks[j - 1].span.line == line && !matches!(toks[j - 1].tok, Tok::Newline | Tok::Semi) {
         j -= 1;
     }
+    j
+}
+
+/// The name that starts the line of token `i`, if a name does.
+fn first_word_of_line(toks: &[Token], i: usize) -> Option<&str> {
+    let j = line_start(toks, i);
     match &toks[j].tok {
         Tok::Ident(w) => Some(w),
         _ => None,
@@ -1621,6 +1631,8 @@ impl<'a> Parser<'a> {
     /// `{ key: value, … }` after a dict `{`.
     fn dict_entries(&mut self) -> Result<Vec<(DictKey, Expr)>, Diag> {
         let mut entries = Vec::new();
+        // The `{` just read: at the start of a statement, JavaScript's habit of a bare block.
+        let statement = self.pos < 2 || matches!(self.toks[self.pos - 2].tok, Tok::Newline | Tok::Semi | Tok::RBrace | Tok::LBrace(BraceKind::Body));
         loop {
             if matches!(self.peek(), Tok::RBrace) {
                 self.bump();
@@ -1633,6 +1645,14 @@ impl<'a> Parser<'a> {
                     let k = self.expr()?;
                     self.expect_op(Op::RBracket)?;
                     DictKey::Computed(k)
+                }
+                Tok::Kw(_) if statement && entries.is_empty() => {
+                    return Err(Diag::new("V2 has no bare { } blocks: a { that starts a statement is a dict", t.span)
+                        .hint("write the statements without the braces, or in a function"))
+                }
+                // `{from: a}`, as JavaScript allows: a key, so its own hint, not 4.1's `=>` one.
+                Tok::Kw(k) if self.at_op(Op::Colon) => {
+                    return Err(Diag::new(format!("{} can't be a bare dict key: quote it", t.tok), t.span).hint(format!("write \"{}\": as the key", k.as_str())))
                 }
                 Tok::Kw(_) => return Err(Diag::new(format!("{} can't be a bare dict key: quote it", t.tok), t.span)),
                 // Python's `{1: "x"}`: V2's keys are strings.
@@ -1924,6 +1944,13 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let xs = [1]\nprint(xs[1:5:2])"), step);
         assert_eq!(hint("let a = [1]\nlet b = [0, ...a]"), "... spreads a list into a call's arguments only: join lists with +, as in [0] + a");
         assert_eq!(hint("let f = func() => {1: \"x\"}"), "dict keys are strings: write \"1\": or [str(1)]:");
+        // A keyword before `:` is a key; one that starts a statement is a block after `=>`.
+        assert_eq!(hint("let f = func() => {if: 1}"), "write \"if\": as the key");
+        assert_eq!(hint("let c = {from: 1}"), "write \"from\": as the key");
+        assert_eq!(hint("let f = func(x) => { return x }"), "`=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }");
+        assert_eq!(hint("let x = 1\nif x = 2 {\n    print(x)\n}"), "V2 compares with ==, as in if x == 2 { ... }");
+        assert_eq!(hint("let x = 1\nwhile x = 1 {\n}"), "V2 compares with ==, as in if x == 2 { ... }");
+        assert_eq!(hint("{\n    let a = 1\n}"), "write the statements without the braces, or in a function");
         let class = "V2 has no classes: keep the data in a dict and write functions for the rest, or write the class in a @py or @js block";
         assert_eq!(hint("class Point {\n}"), class);
         assert_eq!(hint("class Point:\n    pass"), class);

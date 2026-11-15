@@ -129,8 +129,10 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
         if c == name {
             continue;
         }
-        let d = osa(&target, &c.to_lowercase().chars().collect::<Vec<_>>());
-        if d <= limit && best.is_none_or(|(bd, _)| d < bd) {
+        let cand: Vec<char> = c.to_lowercase().chars().collect();
+        let d = osa(&target, &cand);
+        // A suggestion keeps some of the name: `y` isn't a typo of `f`.
+        if d <= limit && d < target.len().max(cand.len()) && best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, c));
         }
     }
@@ -422,6 +424,10 @@ mod tests {
         assert_eq!(did_you_mean("lne", names), Some("len"));
         assert_eq!(did_you_mean("xyz", names), None);
         assert_eq!(did_you_mean("print", names), None);
+        // One-letter names: every other one-letter name is one edit away, so none is suggested.
+        assert_eq!(did_you_mean("y", ["f", "x"]), None);
+        assert_eq!(did_you_mean("x", ["xs"]), Some("xs"));
+        assert_eq!(did_you_mean("ab", ["ba"]), Some("ba"));
     }
 
     fn sm_with(text: &str) -> (SourceMap, FileId) {

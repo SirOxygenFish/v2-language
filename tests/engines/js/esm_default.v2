@@ -1,0 +1,17 @@
+// requires: js
+// An ES module imported whole is its namespace: what its default export holds is reached through
+// .default, and calling the wrong one says so (DOCS 7, INTERNALS 13.5).
+@import js."./fixtures/esm_default.mjs" as chalk
+try {
+    print(chalk.red("x"))
+} catch (e) {
+    print(e.message)
+}
+print(chalk.default.red("x"))
+@import js."./fixtures/esm_fn.mjs" as slug
+try {
+    print(slug("A B"))
+} catch (e) {
+    print(e.message)
+}
+print(slug.default("A B"))

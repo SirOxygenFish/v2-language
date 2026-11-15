@@ -479,6 +479,15 @@ impl Value {
         }
     }
 
+    /// The type name as a message says it: `an int`, `a str`, `null`.
+    pub fn a_type_name(&self) -> String {
+        match self.type_name() {
+            "null" => "null".to_string(),
+            t @ ("int" | "error") => format!("an {t}"),
+            t => format!("a {t}"),
+        }
+    }
+
     /// Falsy: `null`, `false`, `0`, `0.0`, `-0.0` and empty str, bytes, list, dict (5.2).
     pub fn truthy(&self) -> bool {
         match self {

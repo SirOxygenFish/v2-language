@@ -32,12 +32,13 @@ ys.sort(key: func(x) {
     return -x
 })
 print(ys, calls)
-// A key that changes the list: the sorted snapshot replaces its contents.
+// A key that changes the list's length is a ValueError, and the list keeps what the key did.
 let zs = [2, 1]
-zs.sort(key: func(x) {
+func grow(x) {
     zs.push(99)
     return x
-})
+}
+show(func() => zs.sort(key: grow))
 print(zs)
 // An error in the key leaves the list as it was.
 let ws = [2, 1]

@@ -174,6 +174,11 @@ pub fn grow(target: &mut Value, old: Str, piece: &str) -> Result<(), Str> {
     }
 }
 
+/// Whether `f`'s scope declares `name`, by now or later (a `let` that hasn't run yet, 5.9).
+pub fn scope_declares(f: &Frame, name: &str) -> bool {
+    f.layout.borrow().iter().any(|n| &**n == name)
+}
+
 /// Where `name` is declared by now in `f` itself.
 fn position(f: &Frame, name: &str) -> Option<usize> {
     let index = f.layout.borrow().iter().position(|n| &**n == name)?;

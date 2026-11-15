@@ -475,7 +475,8 @@ impl<'a> Lexer<'a> {
         let r = self.rest();
         for bad in ["<<", ">>", "&", "|", "^", "~"] {
             if r.starts_with(bad) && !r.starts_with("&&") && !r.starts_with("||") {
-                return Err(Diag::new("V2 has no bitwise operators", self.span_here(bad.chars().count())));
+                let d = Diag::new("V2 has no bitwise operators", self.span_here(bad.chars().count()));
+                return Err(if bad == "^" { d.hint("V2 writes a power as 2 ** 3") } else { d });
             }
         }
         for &(text, op) in OPS {
@@ -1707,6 +1708,10 @@ let n = names
         assert_eq!(kinds("x += 1"), "x += 1 EOF");
         assert_eq!(err("a & b"), "V2 has no bitwise operators");
         assert_eq!(err("a << 1"), "V2 has no bitwise operators");
+        // `^` is Python's and JavaScript's xor, and a power in other languages.
+        let mut sm = SourceMap::new();
+        let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), "print(2 ^ 3)");
+        assert_eq!(lex(&sm, id).unwrap_err().hint.as_deref(), Some("V2 writes a power as 2 ** 3"));
         assert_eq!(kinds("a && b || c"), "a && b || c EOF");
     }
 

@@ -2,7 +2,7 @@
 //! names (13.3), binding at V2 level (13.4), module units (13.5), routes (13.6) and the `imports`
 //! entries of a block's `load` (13.7).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -28,8 +28,9 @@ pub struct FileScope {
     blocks: Vec<Rc<EngineBlock>>,
     /// Every block, by body line, for mapping foreign frames (2.3, 12.6).
     pub bodies: Vec<Rc<EngineBlock>>,
-    /// The names declared at the top level, for the `v2` selector (13.7).
-    top: HashSet<Rc<str>>,
+    /// The names declared at the top level, for the `v2` selector (13.7), with where and how
+    /// (`let`, `const`, …), for a use before that line (5.9).
+    top: HashMap<Rc<str>, (Span, &'static str)>,
     /// The definition blocks that may wait for their language (12.7).
     waiting: HashSet<UnitId>,
     /// The `@import` statements that may, by span start (13.4).
@@ -44,7 +45,7 @@ impl FileScope {
         let mut bodies = std::mem::take(&mut walk.bodies);
         bodies.sort_by_key(|b| b.unit_id.offset);
         let blocks = bodies.iter().filter(|b| b.directives.exports.is_some()).cloned().collect();
-        let mut top = HashSet::new();
+        let mut top = HashMap::new();
         let mut waiting = HashSet::new();
         let mut eligible = HashSet::new();
         for s in program {
@@ -57,7 +58,15 @@ impl FileScope {
                 }
                 _ => {}
             }
-            top.extend(crate::syntax::check::declarations(s).into_iter().map(|(n, _)| n));
+            let how = match &s.kind {
+                StmtKind::Let(..) => "let",
+                StmtKind::Const(..) => "const",
+                StmtKind::Func(_) => "func",
+                StmtKind::Import { .. } => "import",
+                StmtKind::EngineImport(_) => "@import",
+                _ => "extern",
+            };
+            top.extend(crate::syntax::check::declarations(s).into_iter().map(|(n, at)| (n, (at, how))));
         }
         FileScope { frame, blocks, bodies, top, waiting, eligible }
     }
@@ -512,6 +521,24 @@ impl Interp {
 
     /// A NameError's hint (5.9): a block of the file exports `name`, or `name` is a block's label,
     /// so the `@import` that would bring it in is missing.
+    /// A name whose scope declares it, but further on (5.9): `'y' is used before its let on line
+    /// 3`. `env` is where the lookup started.
+    pub(crate) fn declared_later(&self, file: FileId, name: &str, env: &Env) -> Option<String> {
+        let mut cur = Some(env);
+        while let Some(f) = cur {
+            if crate::runtime::env::scope_declares(f, name) {
+                let scope = self.files.get(&file)?;
+                if Rc::ptr_eq(f, &scope.frame) {
+                    let (at, how) = scope.top.get(name)?;
+                    return Some(format!("'{name}' is used before its {how} on line {}", at.line));
+                }
+                return Some(format!("'{name}' is used before it is declared: its declaration comes later"));
+            }
+            cur = f.parent.as_ref();
+        }
+        None
+    }
+
     pub(crate) fn import_hint(&self, file: FileId, name: &str) -> Option<String> {
         let bodies = &self.files.get(&file)?.bodies;
         let exporter = bodies.iter().find(|b| b.directives.exports.as_ref().is_some_and(|x| x.items.iter().any(|i| &*i.text == name)));
@@ -903,15 +930,21 @@ impl Interp {
                 Selector::V2 { .. } => {
                     let ImportItems::Names(list) = &imp.items else { unreachable!("a static error in blocks") };
                     for (name, alias, span) in named_items(list) {
-                        if !self.files[&file].top.contains(&name) {
+                        if !self.files[&file].top.contains_key(&name) {
                             let msg = format!("'{name}' is not a top-level name in {}", self.sm.file(file).display);
                             return Err(self.raise(import_error(msg), span));
                         }
                         // A block imports functions; a constant that isn't one can't become one
-                        // (DOCS 6.2). A `let` may still be given a function before the first call.
-                        let value = crate::runtime::env::own_const(&self.files[&file].frame, &name);
-                        if value.is_some_and(|v| !matches!(&v, Value::Func(_)) && !matches!(&v, Value::Handle(h) if h.callable)) {
+                        // (DOCS 6.2). A `let` that holds null, or isn't declared yet, may still be
+                        // given a function before the first call; one that holds data is data.
+                        let frame = &self.files[&file].frame;
+                        let not_func = |v: &Value| !matches!(v, Value::Func(_)) && !matches!(v, Value::Handle(h) if h.callable);
+                        if crate::runtime::env::own_const(frame, &name).is_some_and(|v| not_func(&v)) {
                             return Err(self.raise(constant_error(&name), span));
+                        }
+                        if let Some(v) = own_value(frame, &name).filter(|v| not_func(v) && !matches!(v, Value::Null)) {
+                            let msg = format!("'{name}' is {}, not a function — pass it in as a block arg", v.a_type_name());
+                            return Err(self.raise(import_error(msg), span));
                         }
                         let r = self.route(b.unit_id, i, &name, Route::V2 { file, name: name.clone() });
                         entries.push(json!({"as": &*alias, "route": r}));
@@ -987,7 +1020,10 @@ impl Interp {
                 match found {
                     Some(f @ Value::Func(_)) => f,
                     Some(Value::Handle(h)) if h.callable => Value::Handle(h),
-                    Some(_) => return Err(self.raise(error("TypeError", format!("'{name}' is not a function")), at)),
+                    Some(v) => {
+                        let msg = format!("'{name}' is {} now, not a function — pass data in as a block arg", v.a_type_name());
+                        return Err(self.raise(error("TypeError", msg), at));
+                    }
                     None => {
                         let msg = format!("'{name}' is not defined at the top level of {}", self.sm.file(file).display);
                         return Err(self.raise(error("NameError", msg), at));

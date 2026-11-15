@@ -152,6 +152,27 @@ pub fn write_pending(wait: Duration) {
     }
 }
 
+/// The thread that writes what `Out` held once it is `OUT_HOLD` old, so a line printed before a
+/// long computation reaches a file or a pipe while it runs (5.10). It writes under `PENDING`'s
+/// lock, as `Out` does, so nothing changes order; a failed write leaves the bytes for `Out`'s next
+/// write, which reports it. Started at the first held write.
+fn flusher() -> Option<&'static std::thread::Thread> {
+    static FLUSHER: std::sync::OnceLock<Option<std::thread::Thread>> = std::sync::OnceLock::new();
+    FLUSHER
+        .get_or_init(|| {
+            let run = || loop {
+                std::thread::park();
+                std::thread::sleep(OUT_HOLD);
+                let mut pending = lock(&PENDING);
+                if !pending.is_empty() {
+                    let _ = drain(&mut *raw_stdout(), &mut pending);
+                }
+            };
+            std::thread::Builder::new().name("v2-flush".into()).spawn(run).ok().map(|h| h.thread().clone())
+        })
+        .as_ref()
+}
+
 /// Stdout's descriptor as a file that is never closed.
 fn raw_stdout() -> std::mem::ManuallyDrop<std::fs::File> {
     #[cfg(unix)]
@@ -211,6 +232,9 @@ impl Out {
         let mut pending = lock(self.pending);
         pending.extend_from_slice(s.as_bytes());
         if !self.tty && pending.len() < OUT_BUFFER && self.flushed.elapsed() < OUT_HOLD {
+            if let Some(t) = flusher() {
+                t.unpark();
+            }
             return Ok(());
         }
         let r = drain(&mut *self.w, &mut pending);
@@ -264,6 +288,9 @@ impl Out {
 /// console programs (`cmd /c dir`) write in the console's code page (850, 437, …), and is decoded
 /// with it; what is left invalid becomes U+FFFD.
 fn child_text(bytes: &[u8]) -> String {
+    if let Some(s) = utf16_text(bytes) {
+        return s;
+    }
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
@@ -272,6 +299,34 @@ fn child_text(bytes: &[u8]) -> String {
         return s;
     }
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// A child's output in UTF-16 (`cmd /u`, `wsl --list`, a program that set its console to
+/// Unicode): it starts with a byte order mark, or, on Windows, at least half of its odd bytes
+/// are NUL and its even ones nearly never are, as Latin text in UTF-16LE is. Text in UTF-8 or a
+/// code page has no NULs (5.10).
+fn utf16_text(bytes: &[u8]) -> Option<String> {
+    let decode = |b: &[u8], le: bool| {
+        let (pairs, tail) = b.split_at(b.len() & !1);
+        let units: Vec<u16> = pairs.chunks(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }).collect();
+        let mut s = String::from_utf16_lossy(&units);
+        if !tail.is_empty() {
+            s.push('\u{FFFD}');
+        }
+        s
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return Some(decode(rest, true));
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return Some(decode(rest, false));
+    }
+    if !cfg!(windows) || bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let odd = bytes.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+    let even = bytes.iter().step_by(2).filter(|&&b| b == 0).count();
+    (odd * 2 >= bytes.len() / 2 && even * 4 <= odd).then(|| decode(bytes, true))
 }
 
 /// `bytes` in the console's output code page, or the OEM code page with no console; `None` for
@@ -342,11 +397,17 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     // A file where a folder goes, or the other way round: Windows says "Access is denied", "The
     // directory name is invalid" or "Cannot create a file when that file already exists".
     let p = std::path::Path::new(path);
+    // A file where the path goes on (`notes.txt/sub`), or a folder that isn't there: the OS's
+    // words for them ("The system cannot find the path specified") don't say which part.
+    let in_the_way = p.ancestors().skip(1).find(|a| !a.as_os_str().is_empty() && a.exists()).filter(|a| a.is_file());
+    let no_folder = p.parent().filter(|d| !d.as_os_str().is_empty() && !d.exists() && e.kind() == std::io::ErrorKind::NotFound);
     let why = match verb {
         "remove" if p.is_dir() => "it is a folder, and remove_file removes files only".to_string(),
         "read" | "write" if p.is_dir() => "it is a folder".to_string(),
         "list" if p.is_file() => "it is a file, not a folder".to_string(),
         "create" if p.is_file() => "a file has that name".to_string(),
+        _ if in_the_way.is_some() => format!("'{}' is a file, not a folder", in_the_way.map(|a| shown_path(&a.to_string_lossy())).unwrap_or_default()),
+        _ if no_folder.is_some() => format!("there is no folder '{}'", no_folder.map(|d| shown_path(&d.to_string_lossy())).unwrap_or_default()),
         _ => os_message(e),
     };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
@@ -367,7 +428,34 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     } else if let Some(var) = crate::config::unexpanded(path).filter(|_| !p.exists()) {
         let name = var.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
         let _ = err.hint.set(format!("V2 doesn't expand {var} in paths: write getenv(\"{name}\") in its place").into());
+    } else if let Some(d) = no_folder.filter(|_| verb == "write") {
+        let mut folder = String::new();
+        super::value::quoted(&d.to_string_lossy(), &mut folder);
+        let _ = err.hint.set(format!("make the folder first, with make_dir({folder})").into());
     }
+    Err(Flow::Error(Rc::new(err)))
+}
+
+/// A path whose first part a shell would have expanded (`~`, `$HOME`, `%USERPROFILE%`): V2 takes
+/// paths as written, so `make_dir("~/out")` would quietly make a folder named `~` here, and a
+/// later `rm -rf ~` would take the home folder. Refused with what to write; `./~` is a folder
+/// that is really named so (5.10).
+fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
+    let first = path.split(['/', '\\']).next().unwrap_or_default();
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let write = if first == "~" {
+        match &path[1..] {
+            "" => format!("getenv(\"{home}\")"),
+            rest => format!("getenv(\"{home}\") + \"{rest}\""),
+        }
+    } else if crate::config::unexpanded(first) == Some(first) {
+        let name = first.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
+        format!("getenv(\"{name}\") in its place")
+    } else {
+        return Ok(());
+    };
+    let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': V2 doesn't expand {first} in paths", shown_path(path)));
+    let _ = err.hint.set(format!("write {write}, or ./{first} for a folder that is really named {first}").into());
     Err(Flow::Error(Rc::new(err)))
 }
 
@@ -400,6 +488,24 @@ fn shell_command_hint(name: &str, argv: &[Value]) -> Option<String> {
     let call = if cfg!(windows) { format!("exec([\"cmd\", \"/c\", {}])", rest.join(", ")) } else { format!("exec([\"sh\", \"-c\", {}])", quoted(&words.join(" "))) };
     let also = if lower == "dir" { " (or list_dir(path) for the names in a folder)" } else { "" };
     Some(format!("'{name}' is a command of {shell}, not a program: write {call}{also}"))
+}
+
+/// A script that doesn't start by itself (`./build.ps1`, `./tool.py` on Windows; one without
+/// `#!` or the execute bit elsewhere): the program that runs it (5.10).
+fn script_hint(name: &str) -> Option<String> {
+    let ext = std::path::Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    let mut path = String::new();
+    super::value::quoted(name, &mut path);
+    let call = match ext.as_str() {
+        "ps1" if cfg!(windows) => format!("exec([\"powershell\", \"-NoProfile\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", {path}])"),
+        "ps1" => format!("exec([\"pwsh\", \"-File\", {path}])"),
+        "py" => format!("exec([\"{}\", {path}]), or run its code in a @py block", if cfg!(windows) { "python" } else { "python3" }),
+        "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" => format!("exec([\"node\", {path}])"),
+        "sh" => format!("exec([\"{}\", {path}])", if cfg!(windows) { "bash" } else { "sh" }),
+        "v2" => format!("exec([\"v2\", {path}])"),
+        _ => return None,
+    };
+    Some(format!("a .{ext} file runs through its program: write {call}"))
 }
 
 /// What text that isn't UTF-8 probably is (5.10).
@@ -560,6 +666,7 @@ fn json_stringify(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> 
 /// without one leading BOM (Windows tools write one), no newline translation (5.10).
 fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
+    shell_shorthand("read", &path)?;
     let binary = bool_arg(&args[1], "read_file", "binary")?;
     let bytes = match std::fs::read(&*path) {
         Ok(b) => b,
@@ -596,6 +703,7 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
 /// truncates, or with `append` adds to the end, creating a missing file (5.10).
 fn write_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "write_file", "path")?;
+    shell_shorthand("write", &path)?;
     let bytes: &[u8] = match &args[1] {
         Value::Str(s) => s.as_bytes(),
         Value::Bytes(b) => b,
@@ -621,6 +729,7 @@ fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `list_dir(path)`: the entry names, sorted by code point (5.10).
 fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "list_dir", "path")?;
+    shell_shorthand("list", &path)?;
     let failed = |e: std::io::Error| file_error("list", &path, &e);
     let entries = match std::fs::read_dir(&*path) {
         Ok(rd) => rd,
@@ -647,6 +756,7 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `make_dir(path)`: with any missing parents; an existing folder is fine (5.10).
 fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "make_dir", "path")?;
+    shell_shorthand("create", &path)?;
     match std::fs::create_dir_all(&*path) {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("create", &path, &e),
@@ -656,6 +766,7 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `remove_file(path)`: a file, never a folder (5.10).
 fn remove_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "remove_file", "path")?;
+    shell_shorthand("remove", &path)?;
     match std::fs::remove_file(&*path) {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("remove", &path, &e),
@@ -714,12 +825,25 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         None if is_drive_relative(std::path::Path::new(&**name)) => {
             return io_error(format!("exec: cannot start '{name}': a drive-relative path: write it relative to the working directory, or absolute"));
         }
-        // A path that names nothing usable: starting it gives the OS's reason.
-        None if name.contains(['/', '\\']) => lookup.cwd.join(&**name).into_os_string(),
+        None if name.contains(['/', '\\']) => {
+            let p = lookup.cwd.join(&**name);
+            if p.is_dir() {
+                return io_error(format!("exec: cannot start '{name}': it is a folder, not a program"));
+            }
+            // A path that names nothing usable: starting it gives the OS's reason.
+            p.into_os_string()
+        }
         None => {
             let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': not found on PATH"));
+            // Windows' own shells run a program in the current folder by its bare name; V2
+            // looks only on PATH, as a Unix shell does (5.10).
+            let here = first_program(&format!("./{name}"), &lookup).and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
             if let Some(hint) = shell_command_hint(name, &items) {
                 let _ = err.hint.set(hint.into());
+            } else if let Some(file) = here {
+                let mut path = String::new();
+                super::value::quoted(&format!("./{file}"), &mut path);
+                let _ = err.hint.set(format!("V2 doesn't look in the current folder for a bare name: write exec([{path}])").into());
             }
             return Err(Flow::Error(Rc::new(err)));
         }
@@ -730,7 +854,13 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let utf8 = std::env::var_os("PYTHONIOENCODING").is_none().then(|| (OsString::from("PYTHONIOENCODING"), OsString::from("utf-8")));
     let c = match process::run_captured(&argv, utf8.as_slice(), None, input) {
         Ok(c) => c,
-        Err(e) => return io_error(format!("exec: cannot start '{name}': {}", e.reason)),
+        Err(e) => {
+            let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': {}", e.reason));
+            if let Some(h) = script_hint(name).filter(|_| std::path::Path::new(&argv[0]).is_file()) {
+                let _ = err.hint.set(h.into());
+            }
+            return Err(Flow::Error(Rc::new(err)));
+        }
     };
     let code = match (c.status.code, c.status.signal) {
         (_, Some(signal)) => 128 + signal as i64,
@@ -961,4 +1091,32 @@ fn error(_it: &mut Interp, mut args: Vec<Value>, _at: Span) -> Exec<Value> {
     let message = str_arg(&args[1], "error", "message")?;
     let data = args.pop().unwrap_or(Value::Null);
     Ok(Value::Error(Rc::new(ErrorValue::with_data((&kind).into(), (&message).into(), data))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utf16le(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn utf16_output_is_decoded() {
+        // With a byte order mark, on every system; an odd last byte is U+FFFD.
+        let mut bom = vec![0xFF, 0xFE];
+        bom.extend(utf16le("héllo 日本"));
+        assert_eq!(child_text(&bom), "héllo 日本");
+        bom.push(b'x');
+        assert_eq!(child_text(&bom), "héllo 日本\u{FFFD}");
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain("ok".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(child_text(&be), "ok");
+        // Without one (`cmd /u`, `wsl --list`): Windows only, where programs write it.
+        let plain = utf16le("Ubuntu\r\ndocker-desktop\r\n");
+        assert_eq!(child_text(&plain), if cfg!(windows) { "Ubuntu\r\ndocker-desktop\r\n".to_string() } else { String::from_utf8_lossy(&plain).into_owned() });
+        // UTF-8, and binary data with NULs on both sides, stay as they were.
+        assert_eq!(child_text("café\n".as_bytes()), "café\n");
+        let ints = [1u8, 0, 0, 0, 2, 0, 0, 0];
+        assert_eq!(child_text(&ints), String::from_utf8_lossy(&ints));
+    }
 }
