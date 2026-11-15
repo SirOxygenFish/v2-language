@@ -95,6 +95,10 @@ fn stack_here() -> usize {
 /// `func has no method 'cwd'`, and for an imported name the way to its members (DOCS 6.1).
 fn no_member(o: &Value, what: &str, n: &str) -> String {
     let msg = format!("{} has no {what} '{n}'", o.type_name());
+    // `s.upper` without the call: a method, read as a field (5.11).
+    if what == "field" && super::methods::table(o).is_some_and(|t| t.iter().any(|m| m.name == n)) {
+        return format!("{msg}: {n} is a method, so call it, as in x.{n}()");
+    }
     match o {
         // A block's unit is `file:offset`; a package's is `py:name` (13.5), which can be imported
         // whole.
@@ -552,6 +556,10 @@ impl Interp {
         if name == "define_engine" {
             return Err(self.not_yet("define_engine (custom engines)", span));
         }
+        // Declared, but further on: no did-you-mean, as it isn't a typo.
+        if let Some(msg) = self.declared_later(span.file, name, env) {
+            return self.fail_at("NameError", msg, span);
+        }
         let names = env::visible_names(env);
         let base = format!("'{name}' is not declared");
         // Python's and JavaScript's names for what V2 spells differently (5.9).
@@ -872,7 +880,7 @@ impl Interp {
         // `let str = ""`, then `str(i)`: the variable hides the builtin of that name (5.7).
         if let (ExprKind::Name(name, _), false) = (&callee.kind, matches!(f, Value::Func(_) | Value::Handle(_))) {
             if super::builtins::BUILTINS.iter().any(|b| b.name == &**name) {
-                let err = ErrorValue::new("TypeError", format!("'{name}' is a {} here, not a function", f.type_name()));
+                let err = ErrorValue::new("TypeError", format!("'{name}' is {} here, not a function", f.a_type_name()));
                 let _ = err.hint.set(format!("a variable named '{name}' hides V2's {name}(): give the variable another name").into());
                 return Err(self.raise(Flow::Error(Rc::new(err)), callee.span));
             }
@@ -1106,6 +1114,11 @@ impl Interp {
                         }
                         Some(n) => {
                             let n = *n as usize;
+                            // An int is exact: its digits, then the zeros (not through a float, 3.7).
+                            if let Value::Int(i) = v {
+                                s.push_str(&if n == 0 { i.to_string() } else { format!("{i}.{}", "0".repeat(n)) });
+                                continue;
+                            }
                             let x = match v {
                                 Value::Int(i) => i as f64,
                                 Value::Float(x) => x,

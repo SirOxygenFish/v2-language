@@ -18,4 +18,4 @@ from catch: kept
 inner finally
 outer caught a
 KeyError 69 13
-V2 doesn't expand %NO_SUCH_V2_VAR% in paths: write getenv("NO_SUCH_V2_VAR") in its place
+write getenv("NO_SUCH_V2_VAR") in its place, or ./%NO_SUCH_V2_VAR% for a folder that is really named %NO_SUCH_V2_VAR%

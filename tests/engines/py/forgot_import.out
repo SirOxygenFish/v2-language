@@ -1,5 +1,6 @@
-'spread' is not declared — block 'tools' exports it: add @import { spread } from tools
+'first' is not declared — block 'tools' exports it: add @import { first } from tools
+'spread' is used before its @import on line 26
 'tools' is not declared — it is a block's label: bring the block's names in with @import { … } from tools
-'f' is not declared — @py block at forgot_import.v2:9 exports it: add @import { f } from @py
+'f' is not declared — @py block at forgot_import.v2:11 exports it: add @import { f } from @py
 no block in this file is labeled 'py' — did you mean @py? (from @py takes the names this file's @py blocks export)
 4

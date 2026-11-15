@@ -295,7 +295,7 @@ ForeignError ZeroDivisionError division by zero
 | `print(x, file=sys.stderr)`, `console.error(x)` | `print(x, stderr: true)`                  |
 | `open(f).read()`, `fs.readFileSync(f, "utf8")` | `read_file(f)`, and `write_file(f, text)`  |
 | `sys.exit(1)`, `process.exit(1)`          | `exit(1)`                                       |
-| `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`) |
+| `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`); `args().get(0, "out.txt")` for one that may be missing |
 | `input()`                                 | `input()` (`null` at the end of input)          |
 
 More of V2, in short:
@@ -313,11 +313,13 @@ More of V2, in short:
   Python's `os.walk` in a block. File paths are relative to the folder you run `v2` from; for a
   file next to the script, `read_file(f"${script_dir()}/data.csv")`. They are taken as written:
   `~` and `%USERPROFILE%` are a shell's, so write `getenv("HOME")` (`getenv("USERPROFILE")` on
-  Windows) instead.
+  Windows) instead; a path that starts with one is refused rather than read or made as a folder
+  named `~` (`./~` reaches a folder that is really named so).
 - **Strings** have `split`, `lines` (Windows line endings too), `upper`, `lower`, `replace`, `trim`,
   `starts_with`, `ends_with` and `index_of`; **lists** `push`, `pop`, `insert`,
   `sort(key: f, reverse: true)` and `reverse` (they change the list and return `null`), `map` and
-  `filter` (they return new lists), `join`, `index_of` and `copy`;
+  `filter` (they return new lists), `join`, `index_of`, `get(i, default)` (the default past the
+  end, where `xs[i]` is an `IndexError`) and `copy`;
   **dicts**, whose keys are strings, `keys`, `values`, `get`, `remove` and `copy`. Lists and
   strings slice as `xs[1:3]`, and `x in xs`, `key in d` and `"lo" in "hello"` test membership.
 - **Syntax:** `cond ? a : b` picks a value, `a ?? b` is `b` when `a` is `null`, `x?.y` is `null`
@@ -371,7 +373,8 @@ and V2 says so when another came first).
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
   `@import { f } from js."./helpers.js"` (a TypeScript one, `ts."./helpers.ts"`). A function
   imported by name brings none of its own properties: for `dayjs.extend` or lodash's `_.chunk`,
-  import the module itself, `@import js.dayjs as dayjs`.
+  import the module itself, `@import js.dayjs as dayjs`. For an ES module imported whole, what
+  its default export holds is under `.default`: `chalk.default.red("x")`.
 - **Python on Windows:** `py -m pip install numpy`. If `v2 doctor` shows another Python, use its
   path, with `&` in front in PowerShell: `& "C:\Program Files\Python313\python.exe" -m pip install
   numpy`. For a virtual environment: `py -m venv .venv`, then
@@ -397,7 +400,8 @@ and V2 says so when another came first).
 
 Python and Node.js start when the script first needs them, and then every package a file imports
 from that language loads, in order: at the first call of an imported name (for
-`@import py.numpy as np`, the first use of `np.something`), not at the `@import` lines. A name used
+`@import py.numpy as np`, the first use of `np.something`), not at the `@import` lines. Once that
+language runs, a later `@import` loads its package at its own line. A name used
 as a value (`let f = mean`, `print(mean)`) loads its package at its `@import` line instead. What a
 package prints when it loads, and the error for a misspelled package name, come at that point.
 
@@ -407,8 +411,9 @@ package prints when it loads, and the error for a misspelled package name, come 
 only terminals opened after the install. Still not found? Check that the folder is on your PATH
 (Windows: `$env:Path -split ';'`; macOS and Linux: `echo $PATH`), or run V2 by its full path
 (`~/.v2/bin/v2`; in PowerShell, `& "$env:USERPROFILE\.v2\bin\v2.exe"`). Changed your shell (to zsh
-or fish) after installing? Run the install command again in a new terminal of that shell: it sets
-up the shell it runs in.
+or fish) after installing? Run the install command again in a new terminal of that shell, once
+it is your login shell (after `chsh`, log out and in first): it sets up the shell that `$SHELL`
+names.
 
 **`EngineNotFound: engine 'py' (Python) not found`** (or `'js'`, Node.js). Install it with the
 command the message shows, open a new terminal, and run `v2 doctor`. On Windows, if Python is

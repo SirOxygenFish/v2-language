@@ -701,6 +701,10 @@ fn check_reports_every_file_and_exits_1_on_errors() {
     let clean = [("main.v2", "print(\"must not print\")\nimport \"./util.v2\" as u\n"), ("util.v2", "func f() { }\n")];
     let (code, stdout, stderr) = run_in_project(&clean, ".", &["check", "main.v2"]);
     assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "check main.v2: 2 files, 0 errors\n", ""));
+    // A file whose parse stops at a syntax error: the summary says the rest wasn't checked.
+    let broken = [("main.v2", "let x = (1\nlet y = ]\n")];
+    let (code, stdout, stderr) = run_in_project(&broken, ".", &["check", "main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 1 error (a file is checked up to its first syntax error)\n"), "{stderr}");
     // A bad v2.toml is a configuration error for check too (exit 2, nothing checked).
     let files = [("v2.toml", "[engines.py]\ncomand = \"x\"\n"), ("main.v2", "let x = 1\n")];
     let (code, stdout, stderr) = run_in_project(&files, ".", &["check", "main.v2"]);
@@ -1155,6 +1159,34 @@ fn a_blocks_output_reaches_a_pipe_as_it_comes() {
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     assert_eq!((line.as_str(), rest.as_str()), ("started\n", "done\n"));
     assert!(took < Duration::from_secs(3), "the first line came after {took:?}; the block sleeps 4 s");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn a_line_printed_before_a_long_computation_reaches_a_pipe() {
+    // INTERNALS 5.10: what `Out` holds for a file or a pipe goes out 100 ms later even when the
+    // program prints nothing more, so a CI log or `| tee` shows "started" while V2 computes.
+    let home = TempHome::new();
+    let src = "print(\"started\")\nlet t = time()\nwhile time() - t < 4 {\n}\nprint(\"done\")\n";
+    std::fs::write(home.0.join("busy.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("busy.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let start = Instant::now();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+    let took = start.elapsed();
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!((line.as_str(), rest.as_str()), ("started\n", "done\n"));
+    assert!(took < Duration::from_secs(3), "the first line came after {took:?}; the loop runs 4 s");
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -2484,6 +2516,17 @@ fn doctor_names_the_programs_it_could_not_use() {
     assert!(stdout.contains(&below), "{stdout}");
     // ts runs on that node: js's notes, fix included, are its own (19.2).
     assert!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), "{stdout}");
+    // The only Python fails with no word: repair it, or install one, as for a missing one.
+    if cfg!(windows) {
+        std::fs::write(&py, "@exit /b 109\r\n").unwrap();
+    } else {
+        std::fs::write(&py, "#!/bin/sh\nexit 109\n").unwrap();
+    }
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[("PATH", bin.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(doctor_rows(&stdout)["py"][0], "broken", "{stdout}");
+    let note = format!("\n  py: skipped {py} (version probe failed (exit code 109))\n  py: fix: repair that Python, or install one: ");
+    assert!(stdout.contains(&note), "{stdout}");
 }
 
 #[test]
@@ -2540,9 +2583,12 @@ fn file_and_exec_errors_say_what_to_write() {
     // and a folder given to remove_file get a hint with what to write instead.
     let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     let mut cases: Vec<(&str, String)> = vec![
-        ("read_file(\"~/no-such-v2-file.txt\")\n", format!("V2 doesn't expand ~ in paths: write getenv(\"{home}\") + \"/no-such-v2-file.txt\"")),
-        ("read_file(\"%NO_SUCH_V2_VAR%/x.txt\")\n", "V2 doesn't expand %NO_SUCH_V2_VAR% in paths: write getenv(\"NO_SUCH_V2_VAR\") in its place".into()),
-        ("write_file(\"$env:NO_SUCH_V2_VAR/x.txt\", \"x\")\n", "V2 doesn't expand $env:NO_SUCH_V2_VAR in paths: write getenv(\"NO_SUCH_V2_VAR\") in its place".into()),
+        ("read_file(\"~/no-such-v2-file.txt\")\n", format!("write getenv(\"{home}\") + \"/no-such-v2-file.txt\", or ./~ for a folder that is really named ~")),
+        ("read_file(\"%NO_SUCH_V2_VAR%/x.txt\")\n", "write getenv(\"NO_SUCH_V2_VAR\") in its place, or ./%NO_SUCH_V2_VAR% for a folder that is really named %NO_SUCH_V2_VAR%".into()),
+        ("write_file(\"$env:NO_SUCH_V2_VAR/x.txt\", \"x\")\n", "write getenv(\"NO_SUCH_V2_VAR\") in its place, or ./$env:NO_SUCH_V2_VAR for a folder that is really named $env:NO_SUCH_V2_VAR".into()),
+        // Written as is, these would make a folder named ~ (or $HOME) here (5.10).
+        ("make_dir(\"~/out\")\n", format!("write getenv(\"{home}\") + \"/out\", or ./~ for a folder that is really named ~")),
+        ("write_file(\"$HOME/x.txt\", \"a\")\n", "write getenv(\"HOME\") in its place, or ./$HOME for a folder that is really named $HOME".into()),
         ("make_dir(\"fold\")\nremove_file(\"fold\")\n", "a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into()),
     ];
     // macOS has /usr/bin/cd, a program.
@@ -2557,6 +2603,50 @@ fn file_and_exec_errors_say_what_to_write() {
         let (code, _, stderr) = run_generated("hint.v2", src);
         assert_eq!(code, Some(1), "{src}{stderr}");
         assert!(stderr.contains(&format!("\n  hint: {hint}\n")), "{src}{stderr}");
+    }
+}
+
+#[test]
+fn exec_and_file_errors_name_the_part_that_is_wrong() {
+    // 5.10: a program in the current folder by its bare name, a script the OS doesn't start by
+    // itself, a folder, a batch file given a line break, a missing folder and a file in the way.
+    let script = if cfg!(windows) { ("tool.cmd", "@echo off\r\necho hi\r\n") } else { ("tool.sh", "echo hi\n") };
+    let bare = if cfg!(windows) { "tool" } else { "tool.sh" };
+    let mut cases: Vec<(String, String, Option<String>)> = vec![
+        (
+            format!("exec([\"{bare}\"])\n"),
+            format!("IOError: exec: cannot start '{bare}': not found on PATH"),
+            Some(format!("V2 doesn't look in the current folder for a bare name: write exec([\"./{}\"])", script.0)),
+        ),
+        ("exec([\"./sub\"])\n".into(), "IOError: exec: cannot start './sub': it is a folder, not a program".into(), None),
+        ("write_file(\"out/r.html\", \"x\")\n".into(), "IOError: cannot write 'out/r.html': there is no folder 'out'".into(), Some("make the folder first, with make_dir(\"out\")".into())),
+        ("make_dir(\"notes.txt/sub\")\n".into(), "IOError: cannot create 'notes.txt/sub': 'notes.txt' is a file, not a folder".into(), None),
+        ("read_file(\"notes.txt/a.txt\")\n".into(), "IOError: cannot read 'notes.txt/a.txt': 'notes.txt' is a file, not a folder".into(), None),
+    ];
+    if cfg!(windows) {
+        cases.push((
+            "exec([\"./run.ps1\"])\n".into(),
+            "IOError: exec: cannot start './run.ps1': ".into(),
+            Some("a .ps1 file runs through its program: write exec([\"powershell\", \"-NoProfile\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", \"./run.ps1\"])".into()),
+        ));
+        cases.push((
+            "exec([\"./tool.cmd\", \"a\\nb\"])\n".into(),
+            "IOError: exec: cannot start './tool.cmd': a batch file can't take an argument with a line break: pass the text as input, as in exec(argv, input: text)".into(),
+            None,
+        ));
+    } else {
+        // Not executable: the OS says "Permission denied".
+        cases.push(("exec([\"./tool.sh\"])\n".into(), "IOError: exec: cannot start './tool.sh': ".into(), Some("a .sh file runs through its program: write exec([\"sh\", \"./tool.sh\"])".into())));
+    }
+    for (src, message, hint) in cases {
+        let files = [("x.v2", src.as_str()), script, ("run.ps1", "Write-Output hi\n"), ("sub/keep.txt", "k"), ("notes.txt", "n")];
+        let (code, _, stderr, _home) = run_with_files(&files, &["x.v2"]);
+        assert_eq!(code, Some(1), "{src}{stderr}");
+        assert!(stderr.contains(&message), "{src}{stderr}");
+        match hint {
+            Some(h) => assert!(stderr.contains(&format!("\n  hint: {h}\n")), "{src}{stderr}"),
+            None => assert!(!stderr.contains("hint:"), "{src}{stderr}"),
+        }
     }
 }
 
@@ -2888,6 +2978,10 @@ fn doctor_without_engines_notes_install_hints() {
         assert_eq!(rows[id], ["missing", "-", "-", "-"], "{stdout}");
         assert!(stdout.contains(&format!("\n  {id}: not found; install: ")), "{stdout}");
     }
+    // With no PATH at all, installing wouldn't help: nothing was searched (19.2).
+    let (_, unset, _) = run_in_home(&home.0, &["doctor"], &[("PATH", std::ffi::OsStr::new(""))]);
+    assert!(unset.contains("\n  py: not found: PATH isn't set, so nothing was searched; set it, or name the program in v2.toml, [engines.py] command\n"), "{unset}");
+    assert!(unset.contains("\n  ts: not found: PATH isn't set, so nothing was searched; set it, or name the program in v2.toml, [engines.js] command\n"), "{unset}");
     // Then the version line for bug reports and what it means for the user's scripts (19.2).
     let end = format!(
         "config file: none\nv2 {} (VEP/1), {} {}\nready: none\nnot ready: py, js, ts (see the notes); plain V2 scripts still run\n",

@@ -474,6 +474,10 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
                     if k != "venv" {
                         return Err(f.error(unknown(&format!("key [python] {k}"), k, PYTHON_KEYS)));
                     }
+                    // `venv = ""` would be the project folder itself (18.3).
+                    if v.as_str().is_some_and(|s| s.trim().is_empty()) {
+                        return Err(f.error("[python] venv is empty: name the virtual environment's folder, as in venv = \".venv\"".into()));
+                    }
                     cfg.python_venv = Some(f.sourced(f.path("[python] venv", v)?));
                 }
             }
@@ -585,6 +589,13 @@ mod tests {
 
     fn project(name: &str, toml_text: &str) -> Result<Config, ConfigError> {
         project_env(name, toml_text, &[])
+    }
+
+    #[test]
+    fn an_empty_venv_is_an_error() {
+        // 18.3: `venv = ""` would name the project folder itself.
+        let e = project("emptyvenv", "[python]\nvenv = \"\"\n").unwrap_err().0;
+        assert!(e.ends_with("[python] venv is empty: name the virtual environment's folder, as in venv = \".venv\""), "{e}");
     }
 
     #[test]

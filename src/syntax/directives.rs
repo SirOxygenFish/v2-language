@@ -97,7 +97,14 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         let lead = lines[i].text.len() - t.len();
         if is_directive(t, "@export") || is_directive(t, "@import") {
             let mut p = DirParser::new(sm, file, &lines, i, lead);
-            let last = p.directive(&mut directives, tag, compiled)?;
+            // A line that doesn't parse may be the block's own code: a CSS @import in a template
+            // literal or a docstring (4.4).
+            let (word, example) = if is_directive(t, "@export") { ("@export", "") } else { ("@import", " (a CSS @import in a string)") };
+            let escape = |d: Diag| match d.hint {
+                Some(_) => d,
+                None => d.hint(format!("a line that starts with {word} is V2's; for code of the block's own language that starts with {word}{example}, write @{word}")),
+            };
+            let last = p.directive(&mut directives, tag, compiled).map_err(escape)?;
             for line in &mut lines[i..=last] {
                 line.text.clear();
             }
@@ -958,6 +965,19 @@ mod tests {
             assert_eq!((d.message.as_str(), d.hint.as_deref()), ("the whole-module form of @import is only valid in V2 code", Some(hint)), "{src}");
             assert_eq!((d.span.line, d.span.col), (2, 3), "at the @import: {src}");
         }
+    }
+
+    #[test]
+    fn a_directive_line_that_doesnt_parse_says_how_to_escape_it() {
+        // 4.4: a CSS @import in a template literal or a docstring is read as V2's line; the
+        // error says how to write the block's own.
+        let hint = "a line that starts with @import is V2's; for code of the block's own language that starts with @import (a CSS @import in a string), write @@import";
+        for src in ["@js {\n  const css = `\n@import url(\"theme.css\");\n`\n}", "@py {\n  s = '''\n@import \"theme.css\";\n'''\n}"] {
+            assert_eq!(diag(src).hint.as_deref(), Some(hint), "{src}");
+        }
+        // The line escaped is the block's own.
+        let (p, _) = run("@js {\n  const css = `\n@@import url(\"theme.css\");\n`\n}").unwrap();
+        assert!(p.body.contains("\n@import url(\"theme.css\");\n"), "{:?}", p.body);
     }
 
     #[test]

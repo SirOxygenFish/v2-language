@@ -33,9 +33,9 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 8 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 9 next
-  on a new distro and sandbox (round 8's prompts: scratchpad/newcomer/prompt-*-r8.md, made by
-  scratchpad/setup_round8.py; agents may read the archive's DOCS.md; the Windows one forbids
+  Rounds 1 to 9 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 10 next
+  on a new distro and sandbox (round 9's prompts: scratchpad/newcomer/prompt-*-r9.md, made by
+  scratchpad/setup_round9.py; round 9's distro v2new24i; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
   line endings).
@@ -132,7 +132,7 @@ it is loaded automatically into every session and every subagent.
   collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
-  `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
+  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
   `fail(..)`; the caller places it at the call site.
 - `Flow { Error, Return, Break, Continue, Exit }`, `Exec<T> = Result<T, Flow>`. Interrupts are

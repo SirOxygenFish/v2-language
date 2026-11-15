@@ -1,0 +1,30 @@
+// Messages that say what happened and what to write (INTERNALS 5.7, 5.11, 3.7).
+let xs = [3, 1, 2]
+try {
+    xs.sort(key: func(x) {
+        xs.push(9)
+        return x
+    })
+} catch (e) {
+    print(e.type, e.message)
+}
+// An int formats exactly, not through a float.
+print(f"${9223372036854775807:.2f}", f"${-3:.1f}", f"${7:.0f}")
+// A suggestion among the arguments not given yet, and none for a one-letter name.
+func area(width, height = 2) { return width * height }
+try { area(1, widht: 2) } catch (e) { print(e.message) }
+try { area(1, hieght: 2) } catch (e) { print(e.message) }
+try { area(1, h: 2) } catch (e) { print(e.message) }
+// A name used before the line that declares it.
+func later() { return total }
+try { later() } catch (e) { print(e.message) }
+try { print(count) } catch (e) { print(e.message) }
+func inner() {
+    try { print(step) } catch (e) { print(e.message) }
+    let step = 1
+}
+inner()
+let total = 1
+const count = 2
+// A method read as a field.
+try { print("abc".upper) } catch (e) { print(e.message) }

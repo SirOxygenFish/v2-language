@@ -1,2 +1,4 @@
 ImportError | 'LIMIT' is a constant — pass it in as a block arg
 8
+ImportError | 'k' is an int, not a function — pass it in as a block arg
+4

@@ -905,8 +905,15 @@ impl ChildProc {
         // Windows runs a batch file through cmd.exe, which would expand `%NAME%` in its path
         // (Rust escapes only the arguments) and run something else (7.5).
         let ext = std::path::Path::new(program).extension().map(|e| e.to_ascii_lowercase());
-        if cfg!(windows) && (ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref())) && program.to_string_lossy().contains('%') {
+        let batch = cfg!(windows) && (ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref()));
+        if batch && program.to_string_lossy().contains('%') {
             let reason = "a batch file whose path contains '%' can't be started safely: move it to a folder whose path has no %, or start the program it runs directly".to_string();
+            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
+        }
+        // Rust refuses them ("batch file arguments are invalid"): cmd.exe would end the command
+        // line there.
+        if batch && s.argv[1..].iter().any(|a| a.as_encoded_bytes().iter().any(|b| matches!(b, b'\n' | b'\r'))) {
+            let reason = "a batch file can't take an argument with a line break: pass the text as input, as in exec(argv, input: text)".to_string();
             return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
         }
         let mut cmd = Command::new(program);

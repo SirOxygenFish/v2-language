@@ -1,0 +1,9 @@
+ValueError list modified during sort()
+9223372036854775807.00 -3.0 7
+area() got an unexpected argument 'widht'
+area() got an unexpected argument 'hieght' — did you mean 'height'?
+area() got an unexpected argument 'h'
+'total' is used before its let on line 27
+'count' is used before its const on line 28
+'step' is used before it is declared: its declaration comes later
+str has no field 'upper': upper is a method, so call it, as in x.upper()

@@ -722,7 +722,15 @@ impl Resolver<'_> {
             } else {
                 None
             };
-            let message = if is_regular_file(venv) {
+            // Its python links to one that is gone, as after the system's Python was upgraded.
+            let dangling = candidates.iter().find_map(|c| std::fs::read_link(c).ok().filter(|_| !c.exists()));
+            let message = if let Some(target) = dangling {
+                format!(
+                    "[python] venv '{shown}' has a python that links to {}, which isn't there (was Python upgraded?): make the venv again, {python} -m venv --clear {}, and install its packages again",
+                    target.display(),
+                    pasted(venv)
+                )
+            } else if is_regular_file(venv) {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
                 let folder = venv.parent().and_then(Path::parent).filter(|f| is_venv(f));
                 let fix = folder.map_or_else(|| "the folder that holds pyvenv.cfg".to_string(), &write);
@@ -985,6 +993,25 @@ mod tests {
         assert_eq!(e.version, Some(Version(3, 12, 1)));
         assert_eq!(e.origin, Origin::Path);
         assert_eq!(e.skipped, [(alias, "Microsoft Store placeholder".to_string())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_venv_whose_python_is_gone_says_so() {
+        // 7.6: an upgrade of the system's Python leaves a venv's bin/python linking to nothing.
+        let d = temp("goneven");
+        let bin = d.join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(d.join(".venv").join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        std::os::unix::fs::symlink("/nonexistent/python3.99", bin.join("python")).unwrap();
+        let cfg = Config { python_venv: Some(Sourced { value: d.join(".venv"), from: project_source() }), ..Config::default() };
+        let nf = resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        let want = format!(
+            "[python] venv '{}' has a python that links to /nonexistent/python3.99, which isn't there (was Python upgraded?): make the venv again, python3 -m venv --clear {}, and install its packages again",
+            d.join(".venv").display(),
+            d.join(".venv").display()
+        );
+        assert_eq!(nf.message, want);
     }
 
     #[test]
