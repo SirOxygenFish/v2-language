@@ -139,7 +139,7 @@ fn drain(w: &mut dyn Write, buf: &mut Vec<u8>) -> std::io::Result<()> {
 /// reading can't hold the exit longer than `wait`.
 pub fn write_pending(wait: Duration) {
     let (done, finished) = std::sync::mpsc::channel();
-    let writer = std::thread::Builder::new().spawn(move || {
+    let writer = crate::engines::process::spawn_helper(std::thread::Builder::new(), move || {
         let mut pending = lock(&PENDING);
         if !pending.is_empty() {
             let _ = raw_stdout().write_all(&pending);
@@ -168,7 +168,7 @@ fn flusher() -> Option<&'static std::thread::Thread> {
                     let _ = drain(&mut *raw_stdout(), &mut pending);
                 }
             };
-            std::thread::Builder::new().name("v2-flush".into()).spawn(run).ok().map(|h| h.thread().clone())
+            crate::engines::process::spawn_helper(std::thread::Builder::new().name("v2-flush".into()), run).ok().map(|h| h.thread().clone())
         })
         .as_ref()
 }
@@ -452,6 +452,11 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
 /// later `rm -rf ~` would take the home folder. Refused with what to write; `./~` is a folder
 /// that is really named so (5.10).
 fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
+    // Every file builtin starts here: after an interrupt nothing is read or written (6.5).
+    stop_if_interrupted();
+    if path.is_empty() {
+        return io_error(format!("cannot {verb} '': the path is empty"));
+    }
     let first = path.split(['/', '\\']).next().unwrap_or_default();
     let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     let write = if first == "~" {
@@ -512,6 +517,12 @@ fn shell_command_hint(name: &str, argv: &[Value]) -> Option<String> {
 /// A script that doesn't start by itself (`./build.ps1`, `./tool.py` on Windows; one without
 /// `#!` or the execute bit elsewhere): the program that runs it (5.10).
 fn script_hint(name: &str) -> Option<String> {
+    let (ext, call) = script_call(name)?;
+    Some(format!("a .{ext} file runs through its program: write {call}"))
+}
+
+/// The exec call that runs a script through its program, and the script's extension.
+fn script_call(name: &str) -> Option<(String, String)> {
     let ext = std::path::Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
     let mut path = String::new();
     super::value::quoted(name, &mut path);
@@ -524,7 +535,57 @@ fn script_hint(name: &str) -> Option<String> {
         "v2" => format!("exec([\"v2\", {path}])"),
         _ => return None,
     };
-    Some(format!("a .{ext} file runs through its program: write {call}"))
+    Some((ext, call))
+}
+
+/// Unix: a file with no x bit, which exec can run only through its program (5.10): what to
+/// write, with the path as the program gave it (`bare`: given by its name alone).
+fn unmarked_hint(file: &std::path::Path, shown: &str, bare: bool) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(file).ok()?;
+        if !meta.is_file() || meta.permissions().mode() & 0o111 != 0 {
+            return None;
+        }
+        // For the shell: quoted unless it is plain.
+        let word = if shown.chars().all(|c| c.is_ascii_alphanumeric() || "._/-+".contains(c)) {
+            shown.to_string()
+        } else {
+            format!("'{}'", shown.replace('\'', "'\\''"))
+        };
+        let mut q = String::new();
+        super::value::quoted(shown, &mut q);
+        let (start, mark) = if bare {
+            ("V2 doesn't look in the current folder for a bare name, and ", format!("mark it once with chmod +x {word} and write exec([{q}])"))
+        } else {
+            ("", format!("mark it once with chmod +x {word}"))
+        };
+        Some(match script_call(shown) {
+            Some((_, call)) => format!("{start}{shown} isn't marked as a program: write {call}, or {mark}"),
+            None => format!("{start}{shown} isn't marked as a program: {mark}, or run it through its program, as in exec([\"sh\", {q}])"),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, shown, bare);
+        None
+    }
+}
+
+/// How a block reads a file in an old Windows code page: the one of the Windows that saved it,
+/// this Windows' own first (`GetACP`: cp1254 on a Turkish one), then the common others (5.10).
+fn code_page_way() -> String {
+    #[cfg(windows)]
+    // SAFETY: a plain query.
+    let here = format!("cp{}", unsafe { windows_sys::Win32::Globalization::GetACP() });
+    #[cfg(not(windows))]
+    let here = "cp1252".to_string();
+    // Said only where it isn't the usual one, so the hint reads the same on most machines.
+    let own = if here != "cp1252" { format!(" (this Windows saves {here})") } else { String::new() };
+    format!(
+        "the code page of the Windows that saved it, as in @py(path) {{ open(path, encoding=\"{here}\").read() }}{own}: cp1252 for Western European text, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp1254 Turkish, cp1255 Hebrew, cp1256 Arabic, gbk Chinese, cp932 Japanese"
+    )
 }
 
 /// What text that isn't UTF-8 probably is (5.10). `start`: `bytes` begin a file or stream, where
@@ -589,7 +650,7 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             let err = ErrorValue::new("IOError", format!("input line {n} is not valid UTF-8: {}: send UTF-8 text", not_utf8_kind(e.as_bytes(), n == 1)));
             if stdin_is_file() {
                 // `v2 x.v2 < data.txt`: no shell setting changes a file's bytes.
-                let _ = err.hint.set("the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with its encoding, as in @py(path) { open(path, encoding=\"cp1252\").read() }".into());
+                let _ = err.hint.set(format!("the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with {}", code_page_way()).into());
             } else if cfg!(windows) {
                 // A Windows shell sends its console's old code page unless told otherwise.
                 let _ = err.hint.set("in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run".into());
@@ -661,16 +722,31 @@ fn int(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 fn number_text(message: String, t: &str, int: bool) -> Flow {
     let err = ErrorValue::new("ValueError", message);
     let f = if int { "int" } else { "float" };
+    let number = |x: &str| x.parse::<f64>().is_ok();
     // The number the text starts with: digits, a sign, a point or a comma.
     let lead: String = t.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | ',')).collect();
+    let spaces = |c: char| matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}');
     let hint = if t.is_empty() {
         Some("the text is empty: an empty line from input() is \"\"".to_string())
-    } else if int && (t.starts_with("0x") || t.starts_with("0X")) {
-        Some("int() reads decimal digits: for hex text, convert it in a block, as in @py(x) { int(x, 16) }".to_string())
+    } else if t.starts_with("0x") || t.starts_with("0X") {
+        Some(format!("{f}() reads decimal digits: for hex text, convert it in a block, as in @py(x) {{ int(x, 16) }}"))
+    } else if t.contains('_') && number(&t.replace('_', "")) {
+        // `1_000`: as a V2 literal it works; as text the _ has to go.
+        Some(format!("{f}() reads digits without _: {f}(x.replace(\"_\", \"\"))"))
+    } else if t.chars().any(spaces) && number(&t.replace(spaces, "")) {
+        Some(format!("{f}() reads digits without spaces between them: {f}(x.replace(\" \", \"\"))"))
+    } else if t.contains('.') && t.contains(',') && t.rfind(',') > t.rfind('.') && t.replace('.', "").replace(',', ".").parse::<f64>().is_ok() {
+        // `1.234,56`: points between thousands and a decimal comma, as German and Turkish write.
+        Some("the text has points between thousands and a decimal comma: float(x.replace(\".\", \"\").replace(\",\", \".\"))".to_string())
+    } else if t.matches('.').count() > 1 && t.replace('.', "").parse::<i64>().is_ok() {
+        Some(format!("the text has points between thousands: {f}(x.replace(\".\", \"\"))"))
     } else if lead.contains(',') && lead.replace(',', ".").parse::<f64>().is_ok() {
         Some("write the decimal point as a point, as in 3.7: x.replace(\",\", \".\") changes it".to_string())
     } else if int && lead.parse::<i64>().is_err() && lead.parse::<f64>().is_ok() {
         Some(format!("int() reads whole numbers, as in 13: for {lead}, use float(x), or int(float(x)) to drop what is after the point"))
+    } else if t.chars().any(|c| c.is_numeric() && !c.is_ascii_digit()) {
+        // `١٢٣`, `１２`: digits of another script, which Python reads.
+        Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {f}(x) }}"))
     } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() {
         Some(format!("{f}() reads the number alone, without other text: '{lead}' would work"))
     } else if !t.chars().any(|c| c.is_ascii_digit()) {
@@ -814,8 +890,9 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             let fix = match kind {
                 k if k.ends_with("binary data") => "read it with binary: true",
                 k if k.starts_with("it is UTF-16") => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"utf-16\").read() }",
-                _ => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"cp1252\").read() }",
+                _ => "",
             };
+            let fix = if fix.is_empty() { format!("save it as UTF-8, or read it in a @py block with {}", code_page_way()) } else { fix.to_string() };
             let err = ErrorValue::new("IOError", format!("'{}' is not valid UTF-8: {kind}", shown_path(&path)));
             let _ = err.hint.set(fix.into());
             Err(Flow::Error(Rc::new(err)))
@@ -879,6 +956,11 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `exists(path)`: whether `fs::metadata` succeeds, symlinks followed; never an error (5.10).
 fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "exists", "path")?;
+    if path.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    // `exists("~/.config/x")` would be false for a file that is there: refused as in the others.
+    shell_shorthand("check", &path)?;
     Ok(Value::Bool(std::fs::metadata(&*path).is_ok()))
 }
 
@@ -993,6 +1075,12 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let mut argv = Vec::with_capacity(items.len());
     for (i, v) in items.iter().enumerate() {
         match v {
+            // Rust's "nul byte found in provided data" would name the program, not the item.
+            Value::Str(s) if s.contains('\0') => {
+                let mut q = String::new();
+                super::value::quoted(s, &mut q);
+                return value_error(format!("exec() argument 'argv' holds a NUL character at [{i}]: {q}: a program's name and arguments can't contain one"));
+            }
             Value::Str(s) => argv.push(OsString::from(&**s)),
             other => return type_error(format!("exec() argument 'argv' must hold only str, got {} at [{i}]", other.type_name())),
         }
@@ -1032,9 +1120,12 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             if let Some(hint) = shell_command_hint(name, &items) {
                 let _ = err.hint.set(hint.into());
             } else if let Some(file) = here {
+                let shown = format!("./{file}");
                 let mut path = String::new();
-                super::value::quoted(&format!("./{file}"), &mut path);
-                let _ = err.hint.set(format!("V2 doesn't look in the current folder for a bare name: write exec([{path}])").into());
+                super::value::quoted(&shown, &mut path);
+                let hint = unmarked_hint(&lookup.cwd.join(&file), &shown, true)
+                    .unwrap_or_else(|| format!("V2 doesn't look in the current folder for a bare name: write exec([{path}])"));
+                let _ = err.hint.set(hint.into());
             } else if npm_tool(name) {
                 // A tool an npm package installed for the project (prettier, tsc, eslint).
                 let mut quoted = String::new();
@@ -1052,11 +1143,15 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // for cmd.exe, which reads it as typed; quoted for a program (`\"`), cmd would misread it.
     let is_cmd = std::path::Path::new(&argv[0]).file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
     let raw_tail = cfg!(windows) && is_cmd && argv.len() >= 3 && argv[argv.len() - 2].to_str().is_some_and(|s| s.eq_ignore_ascii_case("/c") || s.eq_ignore_ascii_case("/k"));
-    let c = match process::run_captured(&argv, utf8.as_slice(), None, input, raw_tail) {
+    let ran = process::run_captured(&argv, utf8.as_slice(), None, input, raw_tail);
+    // A signal that came while the program ran (its own `kill $PPID` too) ends the run here.
+    stop_if_interrupted();
+    let c = match ran {
         Ok(c) => c,
         Err(e) => {
             let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': {}", e.reason));
-            if let Some(h) = script_hint(name).filter(|_| std::path::Path::new(&argv[0]).is_file()) {
+            let file = std::path::Path::new(&argv[0]);
+            if let Some(h) = unmarked_hint(file, name, false).or_else(|| script_hint(name).filter(|_| file.is_file())) {
                 let _ = err.hint.set(h.into());
             }
             return Err(Flow::Error(Rc::new(err)));
@@ -1216,7 +1311,12 @@ fn assert(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `getenv(name, default = null)`, decoded lossily (5.10).
 fn getenv(_it: &mut Interp, mut args: Vec<Value>, _at: Span) -> Exec<Value> {
     let name = str_arg(&args[0], "getenv", "name")?;
-    if name.is_empty() || name.contains(['=', '\0']) {
+    if name.contains('\0') {
+        let mut q = String::new();
+        super::value::quoted(&name, &mut q);
+        return value_error(format!("invalid environment variable name: {q}: a name can't contain a NUL character"));
+    }
+    if name.is_empty() || name.contains('=') {
         return value_error(format!("invalid environment variable name: '{name}'"));
     }
     Ok(match std::env::var_os(&*name) {

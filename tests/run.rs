@@ -722,7 +722,7 @@ fn check_reports_every_file_and_exits_1_on_errors() {
     // A file whose parse stops at a syntax error: the summary says the rest wasn't checked.
     let broken = [("main.v2", "let x = (1\nlet y = ]\n")];
     let (code, stdout, stderr) = run_in_project(&broken, ".", &["check", "main.v2"]);
-    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 1 error (a file is checked up to its first syntax error)\n"), "{stderr}");
+    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 1 error (a file with a syntax error shows only that error: fix it, then check again)\n"), "{stderr}");
     // A bad v2.toml is a configuration error for check too (exit 2, nothing checked).
     let files = [("v2.toml", "[engines.py]\ncomand = \"x\"\n"), ("main.v2", "let x = 1\n")];
     let (code, stdout, stderr) = run_in_project(&files, ".", &["check", "main.v2"]);
@@ -1217,7 +1217,7 @@ fn input_from_a_file_that_isnt_utf8_says_to_convert_the_file() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(1), "ok\n"), "{stderr}");
     assert!(stderr.contains("IOError: input line 2 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text"), "{stderr}");
-    assert!(stderr.contains("\n  hint: the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with its encoding"), "{stderr}");
+    assert!(stderr.contains("\n  hint: the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with the code page of the Windows that saved it"), "{stderr}");
     // The same bytes through a pipe (a shell sent them): not the file's hint.
     let child = v2_command(&home.0).arg("r.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("start v2");
     let out = wait_with_timeout(child, b"ok\n\xff\xfe bad\n".to_vec(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
@@ -2564,6 +2564,31 @@ fn a_virtual_memory_limit_gets_a_smaller_interpreter_stack() {
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n");
+    // Round 15: the stack is at most a quarter of the limit, so deep recursion under 400 MB ends
+    // in V2's own error (or works), not in an abort ("memory allocation of 104 bytes failed",
+    // exit 134) once the heap is used up; under 120 MB the error says why it came early.
+    std::fs::write(home.0.join("d.v2"), "func f(n) {\n    if n == 0 { return 0 }\n    return 1 + f(n - 1)\n}\nprint(f(9000))\n").unwrap();
+    for (mb, must_fail) in [(400u64, false), (120, true)] {
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("d.v2").current_dir(&home.0).stdin(Stdio::null());
+        // SAFETY: as above.
+        unsafe {
+            cmd.pre_exec(move || {
+                let limit = libc::rlimit { rlim_cur: mb << 20, rlim_max: mb << 20 };
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match out.status.code() {
+            Some(0) if !must_fail => assert_eq!(String::from_utf8_lossy(&out.stdout), "9000\n"),
+            Some(1) => assert!(stderr.contains("RecursionError: maximum call depth exceeded at ") && stderr.contains("(ulimit -v) left V2 a smaller stack"), "{mb} MB: {stderr}"),
+            other => panic!("{mb} MB: {other:?} {stderr}"),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2640,6 +2665,53 @@ fn pythoninspect_doesnt_hold_the_python_worker() {
         return;
     }
     assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "2\natexit ran\n", ""));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_of_a_file_not_marked_as_a_program_says_what_works() {
+    // Round 15: a script in the current folder without its x bit, by its bare name or its path,
+    // gets a hint whose line works (the bare-name hint alone led to "Permission denied").
+    use std::os::unix::fs::PermissionsExt;
+    let home = TempHome::new();
+    for f in ["job.sh", "tool"] {
+        std::fs::write(home.0.join(f), "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(home.0.join(f), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let src = "for argv in [[\"job.sh\"], [\"./job.sh\"], [\"tool\"], [\"./tool\"]] {\n    try { exec(argv) } catch (e) { print(e.hint) }\n}\nprint(exec([\"sh\", \"./job.sh\"]).stdout.trim())\n";
+    std::fs::write(home.0.join("t.v2"), src).unwrap();
+    let out = v2_command(&home.0).arg("t.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let expected = concat!(
+        "V2 doesn't look in the current folder for a bare name, and ./job.sh isn't marked as a program: write exec([\"sh\", \"./job.sh\"]), or mark it once with chmod +x ./job.sh and write exec([\"./job.sh\"])\n",
+        "./job.sh isn't marked as a program: write exec([\"sh\", \"./job.sh\"]), or mark it once with chmod +x ./job.sh\n",
+        "V2 doesn't look in the current folder for a bare name, and ./tool isn't marked as a program: mark it once with chmod +x ./tool and write exec([\"./tool\"]), or run it through its program, as in exec([\"sh\", \"./tool\"])\n",
+        "./tool isn't marked as a program: mark it once with chmod +x ./tool, or run it through its program, as in exec([\"sh\", \"./tool\"])\n",
+        "hi\n",
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_signal_during_exec_stops_the_next_statement() {
+    // INTERNALS 6.5: a SIGTERM that lands while exec runs (here the program's own `kill $PPID`)
+    // ends the run as exec returns: the write after it never happens.
+    let home = TempHome::new();
+    // No sleep after the kill: exec returns before the watchdog's next tick (round 15).
+    let src = "exec([\"sh\", \"-c\", \"kill -TERM $PPID\"])\nprint(\"after\")\nwrite_file(\"after.txt\", \"written after the signal\")\n";
+    std::fs::write(home.0.join("t.v2"), src).unwrap();
+    let out = v2_command(&home.0).arg("t.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_interrupted(&out.status, libc::SIGTERM, &String::from_utf8_lossy(&out.stderr));
+    assert!(!home.0.join("after.txt").exists(), "the write ran after the signal");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    // The same from a worker that signals v2 while it answers a block (the session's request).
+    let src = "if engine_available(\"py\") {\n    @py { import os, signal; os.kill(os.getppid(), signal.SIGTERM) }\n} else {\n    exec([\"sh\", \"-c\", \"kill -TERM $PPID\"])\n}\nprint(\"after\")\nwrite_file(\"after.txt\", \"written after the signal\")\n";
+    std::fs::write(home.0.join("t.v2"), src).unwrap();
+    let out = v2_command(&home.0).arg("t.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_interrupted(&out.status, libc::SIGTERM, &String::from_utf8_lossy(&out.stderr));
+    assert!(!home.0.join("after.txt").exists(), "the write ran after the worker's signal");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
 }
 
 #[test]
@@ -2854,7 +2926,12 @@ fn exec_and_file_errors_name_the_part_that_is_wrong() {
         (
             format!("exec([\"{bare}\"])\n"),
             format!("IOError: exec: cannot start '{bare}': not found on PATH"),
-            Some(format!("V2 doesn't look in the current folder for a bare name: write exec([\"./{}\"])", script.0)),
+            // On Unix the file has no execute bit, so the hint says what works (round 15).
+            Some(if cfg!(windows) {
+                format!("V2 doesn't look in the current folder for a bare name: write exec([\"./{}\"])", script.0)
+            } else {
+                "V2 doesn't look in the current folder for a bare name, and ./tool.sh isn't marked as a program: write exec([\"sh\", \"./tool.sh\"]), or mark it once with chmod +x ./tool.sh and write exec([\"./tool.sh\"])".into()
+            }),
         ),
         ("exec([\"./sub\"])\n".into(), "IOError: exec: cannot start './sub': it is a folder, not a program".into(), None),
         ("write_file(\"out/r.html\", \"x\")\n".into(), "IOError: cannot write 'out/r.html': there is no folder 'out'".into(), Some("make the folder first, with make_dir(\"out\")".into())),
@@ -2873,8 +2950,12 @@ fn exec_and_file_errors_name_the_part_that_is_wrong() {
             None,
         ));
     } else {
-        // Not executable: the OS says "Permission denied".
-        cases.push(("exec([\"./tool.sh\"])\n".into(), "IOError: exec: cannot start './tool.sh': ".into(), Some("a .sh file runs through its program: write exec([\"sh\", \"./tool.sh\"])".into())));
+        // Not executable: the OS says "Permission denied"; round 15's hint says what works.
+        cases.push((
+            "exec([\"./tool.sh\"])\n".into(),
+            "IOError: exec: cannot start './tool.sh': ".into(),
+            Some("./tool.sh isn't marked as a program: write exec([\"sh\", \"./tool.sh\"]), or mark it once with chmod +x ./tool.sh".into()),
+        ));
     }
     for (src, message, hint) in cases {
         let files = [("x.v2", src.as_str()), script, ("run.ps1", "Write-Output hi\n"), ("sub/keep.txt", "k"), ("notes.txt", "n")];

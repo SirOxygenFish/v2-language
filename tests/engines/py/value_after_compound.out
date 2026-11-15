@@ -1,0 +1,3 @@
+ForeignError SyntaxError | the block's value is used, but its last statement is a `with` statement, which has no value: put the value on a last line of its own, outside the `with`
+3
+statement blocks are fine

@@ -1,0 +1,11 @@
+// requires: py
+// A math.py next to the script, where Python's math is built in (INTERNALS 13.5): Python finds
+// built-in modules before it looks in folders, so it never reads the file, and the error says
+// so. Where math is a file of its own (macOS), Python reads the script's math.py, and so does V2.
+let builtin = @py { import sys; "math" in sys.builtin_module_names }
+try {
+    @import { hello } from py.math
+    print(!builtin && hello() == "my math")
+} catch (e) {
+    print(builtin && e.type == "ImportError" && "which was loaded first, not your" in e.message && e.message.ends_with("math.py: give your file another name (one Python serves the whole run, with one module per name)"))
+}

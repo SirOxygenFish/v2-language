@@ -538,14 +538,26 @@ pub fn bytes_repr(b: &[u8]) -> String {
 /// characters, a soft hyphen), so `["\u{feff}name"]` shows what `==` will see (5.10).
 pub fn quoted(s: &str, out: &mut String) {
     out.push('"');
-    for c in s.chars() {
+    let chars: Vec<char> = s.chars().collect();
+    // A joiner between two letters or emoji (a family emoji, a Persian word) is part of how they
+    // read; next to ASCII, a space or an end it is a stray invisible character.
+    let joins = |i: usize| {
+        let shown = |c: Option<&char>| c.is_some_and(|c| !c.is_ascii() && !c.is_whitespace());
+        shown(i.checked_sub(1).and_then(|j| chars.get(j))) && shown(chars.get(i + 1))
+    };
+    for (i, &c) in chars.iter().enumerate() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || matches!(c as u32, 0x00AD | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2064 | 0xFEFF) => {
+            '\u{200C}' | '\u{200D}' if joins(i) => out.push(c),
+            // Invisible characters, and spaces other than the plain one (a no-break space from a
+            // web page or Excel looks like one and isn't equal to it).
+            c if c.is_control()
+                || matches!(c as u32, 0x00A0 | 0x00AD | 0x1680 | 0x2000..=0x200F | 0x2028..=0x202F | 0x205F..=0x2064 | 0x3000 | 0xFEFF) =>
+            {
                 out.push_str(&format!("\\u{{{:x}}}", c as u32))
             }
             c => out.push(c),

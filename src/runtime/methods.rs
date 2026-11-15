@@ -30,7 +30,7 @@ pub static STR_METHODS: &[MethodDef] = &[
     m("lower", NONE, |_, r, _, _| Ok(Value::Str(the_str(r).to_lowercase().into()))),
     m("trim", NONE, |_, r, _, _| Ok(Value::str(the_str(r).trim()))),
     m("split", &[ParamSpec::opt("sep", || Value::Null)], str_split),
-    m("lines", NONE, |_, r, _, _| Ok(Value::list(the_str(r).lines().map(Value::str).collect()))),
+    m("lines", NONE, |_, r, _, _| Ok(Value::list(text_lines(the_str(r)).into_iter().map(Value::str).collect()))),
     m("replace", &[ParamSpec::req("old"), ParamSpec::req("new")], str_replace),
     m("starts_with", &[ParamSpec::req("p")], |_, r, a, _| {
         Ok(Value::Bool(the_str(r).starts_with(&*str_arg(&a[0], "str.starts_with", "p")?)))
@@ -238,6 +238,27 @@ pub fn member_key_error<T>(key: &str, d: &Dict) -> Exec<T> {
         return Err(Flow::Error(e));
     }
     fail("KeyError", format!("{} (an imported .v2 file keeps names that start with _ to itself)", e.message))
+}
+
+/// `lines()`: the text split at `\n`, `\r\n` and a lone `\r` (an old Mac file), without the
+/// breaks; a break at the very end makes no empty last line (5.11).
+pub fn text_lines(s: &str) -> Vec<&str> {
+    let b = s.as_bytes();
+    let (mut out, mut start, mut i) = (Vec::new(), 0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'\n' | b'\r' => {
+                out.push(&s[start..i]);
+                i += if b[i] == b'\r' && b.get(i + 1) == Some(&b'\n') { 2 } else { 1 };
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < s.len() {
+        out.push(&s[start..]);
+    }
+    out
 }
 
 /// `split(sep = null)`: without `sep`, on runs of whitespace with no empty parts (5.11).

@@ -58,12 +58,30 @@ pub fn interp_stack_bytes() -> usize {
     INTERP_STACK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Unix: under an address-space limit (`ulimit -v`), a stack bigger than a quarter of it leaves
+/// too little for the heap, and deep recursion ends in an abort ("memory allocation of 104 bytes
+/// failed") instead of V2's stack error.
+fn stack_cap() -> usize {
+    #[cfg(unix)]
+    {
+        // SAFETY: getrlimit fills a zeroed struct.
+        let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut r) } == 0 && r.rlim_cur != libc::RLIM_INFINITY {
+            return usize::try_from(r.rlim_cur / 4).unwrap_or(usize::MAX);
+        }
+    }
+    usize::MAX
+}
+
 /// Exit code for usage and configuration errors (INTERNALS 18.5, 19.1).
 const EXIT_USAGE: i32 = 2;
 /// Exit code for an internal panic (INTERNALS 6.5).
 const EXIT_PANIC: i32 = 101;
 
 fn main() {
+    // Before any thread starts: only the interpreter thread takes SIGINT and the others (6.5).
+    #[cfg(unix)]
+    engines::process::take_interrupts(false);
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // A file V2 couldn't name in its messages and paths: said so, not "no such file" (19.1).
     let file = raw.get(usize::from(raw.first().is_some_and(|w| w == "check")));
@@ -121,13 +139,19 @@ fn main() {
     let mut command = Some(command);
     let mut interpreter = None;
     let mut refused = None;
-    for size in INTERP_STACKS {
+    let cap = stack_cap();
+    let smallest = INTERP_STACKS[INTERP_STACKS.len() - 1];
+    for size in INTERP_STACKS.into_iter().filter(|&s| s <= cap || s == smallest) {
         INTERP_STACK_BYTES.store(size, std::sync::atomic::Ordering::Relaxed);
         // The closure gets the command only when the thread starts.
         let (tx, rx) = std::sync::mpsc::channel::<Command>();
-        match std::thread::Builder::new().name("v2-interp".into()).stack_size(size).spawn(move || match rx.recv() {
-            Ok(c) => run(c),
-            Err(_) => 0,
+        match std::thread::Builder::new().name("v2-interp".into()).stack_size(size).spawn(move || {
+            #[cfg(unix)]
+            engines::process::take_interrupts(true);
+            match rx.recv() {
+                Ok(c) => run(c),
+                Err(_) => 0,
+            }
         }) {
             Ok(handle) => {
                 let _ = tx.send(command.take().expect("sent once"));
@@ -138,13 +162,19 @@ fn main() {
         }
     }
     let code = match interpreter {
-        Some(handle) => handle.join().unwrap_or(EXIT_PANIC),
+        Some(handle) => {
+            let code = handle.join().unwrap_or(EXIT_PANIC);
+            // A signal that came as the run ended is handled here, then checked below.
+            #[cfg(unix)]
+            engines::process::take_interrupts(true);
+            code
+        }
         // The system's limit, not a bug in V2.
         None => {
             let why = refused.map(|e| e.to_string()).unwrap_or_default();
             // The same error for a memory limit and a process limit: both are named.
             stderrln!("v2: cannot start the interpreter thread: {why}");
-            stderrln!("a limit set for this shell may be too low: on memory (ulimit -v; V2 needs about 300 MB) or on processes and threads (ulimit -u)");
+            stderrln!("a limit set for this shell may be too low: on memory (ulimit -v; V2 needs about 50 MB, deep recursion about 300 MB) or on processes and threads (ulimit -u)");
             1
         }
     };

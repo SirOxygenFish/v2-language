@@ -64,12 +64,33 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         return Some(format!("V2's own words are written in small letters: {kw}"));
     }
     // Python's tuples, comprehensions and unpacking.
-    let opener = (0..i).rev().find(|&j| matches!(toks[j].tok, Tok::Op(Op::LParen | Op::LBracket) | Tok::Newline)).map(|j| &toks[j].tok);
+    // The bracket still open where the parser stopped (`idxmax()` before it is closed).
+    let mut depth = 0usize;
+    let mut open_at = None;
+    for j in (0..i).rev() {
+        match toks[j].tok {
+            Tok::Op(Op::RParen | Op::RBracket) => depth += 1,
+            Tok::Op(Op::LParen | Op::LBracket) if depth > 0 => depth -= 1,
+            Tok::Op(Op::LParen | Op::LBracket) | Tok::Newline => {
+                open_at = Some(j);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let opener = open_at.map(|j| &toks[j].tok);
     let after_let = (0..i).rev().take_while(|&j| !matches!(toks[j].tok, Tok::Newline | Tok::Semi)).last().is_some_and(|j| matches!(toks[j].tok, Tok::Kw(Kw::Let | Kw::Const)));
     let after_return = (0..i).rev().take_while(|&j| !matches!(toks[j].tok, Tok::Newline | Tok::Semi | Tok::LBrace(_))).last().is_some_and(|j| matches!(toks[j].tok, Tok::Kw(Kw::Return)));
     match tok(0) {
         Some(Tok::Op(Op::Comma)) if matches!(opener, Some(Tok::Op(Op::LParen))) && !matches!(tok(1), Some(Tok::Op(Op::LParen))) => {
             return Some("V2 has no tuples: write a list, as in [1, 2]".into())
+        }
+        // `df.loc[r, "col"]`, `a[i, j]`: an index takes one key.
+        Some(Tok::Op(Op::Comma))
+            if matches!(opener, Some(Tok::Op(Op::LBracket)))
+                && open_at.and_then(|j| j.checked_sub(1)).is_some_and(|j| matches!(toks[j].tok, Tok::Ident(_) | Tok::Op(Op::RParen | Op::RBracket) | Tok::Str(_))) =>
+        {
+            return Some("an index takes one key: write x[a][b], or, for a pandas or numpy handle, do it in a block, as in @py(df) { df.loc[r, \"col\"] }".into())
         }
         // `let preis = 2,50`: a decimal comma.
         Some(Tok::Op(Op::Comma))
@@ -2069,6 +2090,10 @@ if x and x {
         assert_eq!(hint("let x = 1\nIf x > 0 {\n}"), "V2's own words are written in small letters: if");
         assert_eq!(hint("if true {\n} Else {\n}"), "V2's own words are written in small letters: else");
         assert_eq!(hint("let p = (1, 2)"), "V2 has no tuples: write a list, as in [1, 2]");
+        // A comma in an index, also after a call that is closed (`idxmax()`).
+        let index = "an index takes one key: write x[a][b], or, for a pandas or numpy handle, do it in a block, as in @py(df) { df.loc[r, \"col\"] }";
+        assert_eq!(hint("let df = 1\nprint(df.loc[df.idxmax(), \"x\"])"), index);
+        assert_eq!(hint("let a = [1]\nprint(a[0, 1])"), index);
         assert_eq!(hint("let xs = [1]\nlet ys = [x * 2 for x in xs]"), "V2 has no comprehensions: write xs.map(func(x) => x * 2), or xs.filter(func(x) => x > 0)");
         assert_eq!(hint("let a, b = 1, 2"), "V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])");
         assert_eq!(hint("func f() {\n    return 1, 2\n}"), "V2 returns one value: return a list, as in return [a, b]");

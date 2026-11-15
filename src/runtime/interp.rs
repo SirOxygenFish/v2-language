@@ -170,10 +170,11 @@ fn null_from(name: &str, value: &str) -> Option<String> {
 fn pairs_call(e: &Expr) -> Option<(&'static str, Span)> {
     let ExprKind::Call { callee, args, .. } = &e.kind else { return None };
     let ExprKind::Member { obj, name, .. } = &callee.kind else { return None };
-    if !args.is_empty() {
+    // Counter's `most_common(n)` takes an argument, and gives (item, count) pairs.
+    if !args.is_empty() && &*name.text != "most_common" {
         return None;
     }
-    ["items", "iteritems", "iterrows", "entries"].into_iter().find(|m| *m == &*name.text).map(|m| (m, obj.span))
+    ["items", "iteritems", "iterrows", "entries", "most_common"].into_iter().find(|m| *m == &*name.text).map(|m| (m, obj.span))
 }
 
 /// What V2 writes for a Python or JavaScript method or field name on its own values (5.9):
@@ -429,9 +430,20 @@ impl Interp {
     /// does (5.9).
     fn guard(&self, span: Span) -> Exec<()> {
         if self.stack_base.saturating_sub(stack_here()) > self.stack_limit {
-            return self.fail_at("RecursionError", format!("maximum call depth ({MAX_CALLS}) exceeded"), span);
+            return self.stack_exhausted(span);
         }
         Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn stack_exhausted(&self, span: Span) -> Exec<()> {
+        // A memory limit gave the thread a smaller stack (main.rs `stack_cap`): the depth isn't 10,000.
+        if crate::interp_stack_bytes() < crate::INTERP_STACKS[0] {
+            let n = self.calls.len();
+            return self.fail_at("RecursionError", format!("maximum call depth exceeded at {n} calls deep: a memory limit for this shell (ulimit -v) left V2 a smaller stack"), span);
+        }
+        self.fail_at("RecursionError", format!("maximum call depth ({MAX_CALLS}) exceeded"), span)
     }
 
     /// Active V2 calls (5.8): the frames below a request to a worker.
@@ -853,7 +865,7 @@ impl Interp {
                 None => match self.eval(e, env)? {
                     // Python's `for k, v in d.items()` unpacks each pair; V2's two variables would be
                     // its index and the pair (5.8).
-                    Value::Handle(_) if second.is_some() && pairs_call(e).is_some() => {
+                    Value::Handle(_) | Value::List(_) if second.is_some() && pairs_call(e).is_some() => {
                         let (method, obj) = pairs_call(e).unwrap_or(("items", e.span));
                         let text = &self.sm.file(obj.file).text[obj.lo as usize..obj.hi as usize];
                         let x = if text.len() <= 40 && !text.contains('\n') { text } else { "x" };
@@ -861,6 +873,8 @@ impl Interp {
                         let err = ErrorValue::new("TypeError", format!("V2 doesn't unpack pairs: for {vars} in {x}.{method}() would give each pair's index and the pair"));
                         let hint = if method == "iterrows" {
                             format!("loop over its rows with for row in {x}.itertuples() and read their fields, as in row.Index")
+                        } else if method == "most_common" {
+                            format!("loop with one variable and read its parts: for pair in {x}.most_common(…) {{ print(pair[0], pair[1]) }}")
                         } else {
                             format!("write for {vars} in {x}: two variables loop over a mapping's keys and values, and over a Python object's items()")
                         };

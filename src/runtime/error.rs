@@ -169,8 +169,18 @@ pub fn excerpt(sm: &SourceMap, span: Span) -> String {
         caret = caret - start + if start > 0 { 3 } else { 0 };
         text = s;
     }
-    // The caret goes under its character in a terminal, where wide characters take two columns.
-    let pad: usize = text.chars().take(caret).map(columns).sum();
+    // The caret goes under its character in a terminal, where wide characters take two columns;
+    // an emoji joined to the one before (`👩‍💻`, after a zero-width joiner) shares its glyph.
+    let mut prev = ' ';
+    let pad: usize = text
+        .chars()
+        .take(caret)
+        .map(|c| {
+            let w = if prev == '\u{200D}' { 0 } else { columns(c) };
+            prev = c;
+            w
+        })
+        .sum();
     format!("    {text}\n    {}^\n", " ".repeat(pad))
 }
 
@@ -471,6 +481,13 @@ mod tests {
         let (sm, id) = sm_with("print(\"नमस्ते\", nope)\n");
         let d = Diag::new("x", sm.span(id, 28, 32));
         assert_eq!(render_diag(&sm, &d), format!("main.v2:1:17: SyntaxError: x\n    print(\"नमस्ते\", nope)\n    {}^\n", " ".repeat(14)));
+        // An emoji sequence joined with ZWJ (👩🏽‍💻: woman, skin tone, ZWJ, laptop) is one glyph,
+        // two columns: before `nope`, `print("` 7, the glyph 2, `", ` 3.
+        let text = "print(\"\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}\", nope)\n";
+        let (sm, id) = sm_with(text);
+        let at = text.find("nope").unwrap() as u32;
+        let d = Diag::new("x", sm.span(id, at, at + 4));
+        assert!(render_diag(&sm, &d).ends_with(&format!("\n    {}^\n", " ".repeat(12))), "{}", render_diag(&sm, &d));
     }
 
     #[test]

@@ -33,12 +33,13 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 14 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 15 next
-  on a new distro and sandbox (round 14's prompts: scratchpad/newcomer/prompt-*-r14.md, made by
-  scratchpad/setup_round14.py; round 14's distro v2new24n, where paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
+  Rounds 1 to 15 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 16 next
+  on a new distro and sandbox (round 15's prompts: scratchpad/newcomer/prompt-*-r15.md, made by
+  scratchpad/make15.py; round 15's distro v2new24o, where paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
-  line endings).
+  line endings). A swap-out proof in WSL: `touch` the restored files after the rsync, as rsync -a
+  keeps Windows' older mtimes and cargo would keep the swapped-out build.
   CI's minimum Node (22.13) for local checks: WSL Ubuntu's ~/node2213/node-v22.13.0-linux-x64/bin
   first on PATH (copied from round 5's distro, which checked it against nodejs.org's SHASUMS).
   Newcomer agents work as root only: no user accounts, not even in a throwaway distro (the
@@ -150,7 +151,8 @@ it is loaded automatically into every session and every subagent.
   `SpawnError { message, reason }`; batch paths with `%` refused), the watchdog (only the top timer
   runs, not while paused; exit check every 250 ms; SIGCHLD reset),
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
-  the run dir), parking (`allow_parking`, `Watch::due_to_park`; a thread per trim; debug builds
+  the run dir), `take_interrupts`/`spawn_helper` (Unix: only the interpreter thread takes
+  SIGINT/TERM/HUP/QUIT; **start every helper thread with `spawn_helper`**), parking (`allow_parking`, `Watch::due_to_park`; a thread per trim; debug builds
   take `V2_TEST_PARK_MS`). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
   timers must hold `engines::process::tests::serial()`** (the watchdog is global).
 - `engines/spec.rs` (py/js/ts table, `Version`, `too_old`: Python 3.10+, one Node rule for js

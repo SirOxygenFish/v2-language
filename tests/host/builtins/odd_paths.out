@@ -1,0 +1,9 @@
+false
+IOError: cannot check '~': V2 doesn't expand ~ in paths
+IOError: cannot check '~/surely-not-there': V2 doesn't expand ~ in paths
+IOError: cannot check '$HOME/x': V2 doesn't expand $HOME in paths
+IOError: cannot create '': the path is empty
+IOError: cannot read '': the path is empty
+IOError: cannot write '': the path is empty
+ValueError: exec() argument 'argv' holds a NUL character at [1]: "a\u{0}b": a program's name and arguments can't contain one
+ValueError: invalid environment variable name: "A\u{0}B": a name can't contain a NUL character
