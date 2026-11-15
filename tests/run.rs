@@ -818,7 +818,9 @@ func show(f) {
     }
 }
 show(func() => exec([]))
-show(func() => exec(v2))
+show(func() => exec("git  status --short"))
+// A program's path stays one item, even with a space in it.
+try { exec(v2) } catch (e) { print(e.message.ends_with("as in exec([" + json_stringify(v2) + "]): exec runs a program, without a shell")) }
 show(func() => exec([v2, 1]))
 show(func() => exec([v2], input: 5))
 try { exec(["v2_no_such_program_here"]) } catch (e) { print(e.type + ": " + e.message) }
@@ -838,7 +840,8 @@ try { exec(["./no_such_dir/prog"]) } catch (e) { print(e.message.ends_with("not 
             "[]\ngot three\n",
             "[]\n",
             "ValueError: exec() argument 'argv' must not be empty\n",
-            "TypeError: exec() argument 'argv' must be a list, got str\n",
+            "TypeError: exec() argument 'argv' must be a list, got str — as in exec([\"git\", \"status\", \"--short\"]): exec runs a program, without a shell\n",
+            "true\n",
             "TypeError: exec() argument 'argv' must hold only str, got int at [1]\n",
             "TypeError: exec() argument 'input' must be a str, bytes or null, got int\n",
             "IOError: exec: cannot start 'v2_no_such_program_here': not found on PATH\n",
@@ -2270,6 +2273,66 @@ fn an_imported_files_syntax_error_shows_its_line_and_hint() {
         "main.v2:1:1: ImportError: cannot import './lib/util.v2': {shown}:1:15: SyntaxError: expected {{, found `=>`\n    import \"./lib/util.v2\" as util\n    ^\n  in {shown}:\n    func shout(s) => s.upper()\n                  ^\n  hint: a named function has a {{ }} body: func shout(s) {{ return … }}, or write let shout = func(s) => …\n"
     );
     assert!(err.starts_with(&want), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_script_run_through_a_symlink_uses_its_own_folders_v2_toml() {
+    // 18.1: the config is searched for from the real file's folder, as script_dir() sees it.
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("proj")).unwrap();
+    std::fs::create_dir_all(home.0.join("links")).unwrap();
+    std::fs::write(home.0.join("proj/v2.toml"), "[engines.py]\ncommand = [\"missing/python\"]\n").unwrap();
+    std::fs::write(home.0.join("proj/s.v2"), "print(engine_available(\"py\"))\n").unwrap();
+    std::os::unix::fs::symlink(home.0.join("proj/s.v2"), home.0.join("links/s.v2")).unwrap();
+    let (code, out, err) = run_in_home(&home.0, &["links/s.v2"], &[]);
+    assert_eq!((code, out.as_str()), (Some(0), "false\n"), "{err}");
+}
+
+#[test]
+fn a_temp_folder_that_doesnt_exist_is_named() {
+    // 20.3 and 19.2: blocks need a temp folder; the message and doctor name the variable.
+    let home = TempHome::new();
+    let missing = home.0.join("no such temp");
+    let var = if cfg!(windows) { "TMP" } else { "TMPDIR" };
+    let env = [(var, missing.as_os_str())];
+    let (code, out, _err) = run_in_home(&home.0, &["doctor"], &env);
+    assert_eq!(code, Some(0));
+    let problem = format!("{var} names {}, which doesn't exist: blocks can't run until it names a folder you can write to", missing.display());
+    assert!(out.contains(&format!("\n  temp: {problem}\n")), "{out}");
+    assert!(out.contains("not ready: ") && out.contains("blocks"), "{out}");
+    if !needs("py", "a_temp_folder_that_doesnt_exist_is_named") {
+        return;
+    }
+    std::fs::write(home.0.join("b.v2"), "print(@py { 1 })\n").unwrap();
+    let (code, _out, err) = run_in_home(&home.0, &["b.v2"], &env);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("IOError: cannot create a private temp folder in ") && err.contains(&format!("; {problem}")), "{err}");
+}
+
+#[test]
+fn a_home_folder_that_doesnt_exist_gets_no_cache() {
+    // 18.1: no folder is made for a HOME that isn't there.
+    let home = TempHome::new();
+    let missing = home.0.join("nonexistent");
+    std::fs::write(home.0.join("p.v2"), "print(engine_available(\"py\"))\n").unwrap();
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let (code, _out, err) = run_in_home(&home.0, &["p.v2"], &[(var, missing.as_os_str())]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(!missing.exists(), "{} was created", missing.display());
+}
+
+#[test]
+fn a_relative_path_next_to_the_script_gets_a_hint() {
+    // 5.10: run from another folder, a relative path misses the file beside the script.
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("proj")).unwrap();
+    std::fs::write(home.0.join("proj/data.csv"), "a,b\n").unwrap();
+    std::fs::write(home.0.join("proj/rel.v2"), "print(read_file(\"data.csv\"))\n").unwrap();
+    let (code, _out, err) = run_in_home(&home.0, &["proj/rel.v2"], &[]);
+    assert_eq!(code, Some(1), "{err}");
+    let hint = "\n  hint: relative paths start in the folder you ran v2 from; for the file next to the script: read_file(f\"${script_dir()}/data.csv\")\n";
+    assert!(err.contains("IOError: cannot read 'data.csv': ") && err.contains(hint), "{err}");
 }
 
 #[test]

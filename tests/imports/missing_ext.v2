@@ -1,0 +1,6 @@
+// A .v2 import without its extension says which file was meant (INTERNALS 6.4).
+try {
+    import "./fixtures/one" as one
+} catch (e) {
+    print(e.type, e.message.split(" (looked for")[0], e.message.ends_with(" — did you mean './fixtures/one.v2'?"))
+}

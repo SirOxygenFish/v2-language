@@ -283,7 +283,8 @@ From lowest to highest precedence:
 
 Rules worth knowing:
 
-- `/` always produces a `float`: `7 / 2` is `3.5`. `%` follows the sign of the divisor:
+- `/` always produces a `float`: `7 / 2` is `3.5`; `div(7, 2)` rounds down to `3` (`7 // 2` would
+  be `7` and a comment, so V2 reports a line like that). `%` follows the sign of the divisor:
   `-7 % 3` is `2`. Dividing by zero (with `/` or `%`) is a `ValueError`, and so is an `int` result
   that doesn't fit in 64 bits.
 - `+` joins two strings, two lists or two bytes values. `"a" + 1` is a `TypeError` — use
@@ -534,7 +535,7 @@ import "./util.v2" as util
 print(util.slug("Hello World"))    // hello-world
 ```
 
-- Paths are relative to the importing file.
+- Paths are relative to the importing file and end in `.v2`.
 - A module runs once, the first time it is imported; later imports reuse it.
 - `util` is a dict of the module's exported names, taken when the module finishes running.
   Reassigning a module variable later does not change what importers see — export a function
@@ -1089,11 +1090,13 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
 - `js.name` imports an npm package (or Node built-in, e.g. `js.fs`, `js.path`). Package names with
   unusual characters are quoted: `@import { format } from js."date-fns"`,
   `@import { z } from js."@scope/pkg"`. A local JavaScript file is a quoted relative path, from
-  the `.v2` file's folder: `@import { render } from js."./helpers.js"`.
+  the `.v2` file's folder: `@import { render } from js."./helpers.js"` (TypeScript:
+  `ts."./helpers.ts"`).
 - A JavaScript default export is imported by name: `@import { "default" as dayjs } from js.dayjs`.
 - **Whole module as a handle:** `@import py.numpy as np` gives you the module itself. If a
   JavaScript package *is* a function (`module.exports = function …`), the handle can be called
-  directly.
+  directly. A function imported by name is a V2 `func` and brings none of its own properties: for
+  `dayjs.extend` or `_.chunk`, import the whole module, `@import js.dayjs as dayjs`.
 
 ```v2
 @import py.numpy as np
@@ -1797,11 +1800,12 @@ temp directory, and caches live in `~/.v2/`.
 | `v2 cache clean`               | delete V2's caches (compiled blocks and toolchain probe results)     |
 | `v2 --version`, `v2 --help`    | (`-h` is `--help` too)                                               |
 
-There are no other flags. A first word that is exactly `check`, `doctor` or `cache` is a command;
-to run a script with such a name, write it as a path: `v2 ./doctor`. A script that isn't there, or
-a folder given as one, is a usage error whose message says what to do next: the folder V2 looked
-in, and the file you probably meant (`did you mean 'hello.v2'?`, or the `hello.v2.txt` your editor
-saved), or the folder on the way that isn't there.
+There are no other flags, and V2 doesn't read a script from standard input. A first word that is
+exactly `check`, `doctor` or `cache` is a command; to run a script with such a name, write it as a
+path: `v2 ./doctor`. A script that isn't there, or a folder given as one, is a usage error whose
+message says what to do next: the folder V2 looked in, and the file you probably meant
+(`did you mean 'hello.v2'?`, or the `hello.v2.txt` your editor saved), or the folder on the way
+that isn't there.
 
 | Exit code | Meaning                                                                  |
 | --------- | ------------------------------------------------------------------------ |

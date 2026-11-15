@@ -73,7 +73,12 @@ pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         return Err(format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"));
     }
     let target = resolve(sm, importer, spec);
-    canonical(&target).ok_or_else(|| format!("cannot find module '{spec}' (looked for {})", shown(&target)))
+    canonical(&target).ok_or_else(|| {
+        // `import "./util" as util` for util.v2.
+        let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+        let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
+        format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target))
+    })
 }
 
 /// `fs::canonicalize` without the `\\?\` prefix, or `None` when the file is missing.

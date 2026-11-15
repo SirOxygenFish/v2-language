@@ -24,11 +24,51 @@ pub fn remove() {
     }
 }
 
+/// The variable the temp folder comes from, as the OS reads them: `TMP`, then `TEMP` on Windows,
+/// `TMPDIR` elsewhere; `None` when it is the system's default.
+fn temp_variable() -> Option<&'static str> {
+    let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty());
+    if cfg!(windows) {
+        ["TMP", "TEMP"].into_iter().find(|v| set(v))
+    } else {
+        set("TMPDIR").then_some("TMPDIR")
+    }
+}
+
+/// What is wrong with the temp folder blocks need, and what to do (20.3): `None` when it is a
+/// folder. Doctor says it too (19.2).
+pub fn temp_problem() -> Option<String> {
+    let base = std::env::temp_dir();
+    if base.is_dir() {
+        return None;
+    }
+    let what = if base.exists() { "isn't a folder" } else { "doesn't exist" };
+    let shown = shown(&base);
+    Some(match temp_variable() {
+        Some(var) => format!("{var} names {shown}, which {what}: blocks can't run until it names a folder you can write to"),
+        None => format!("the temp folder {shown} {what}: blocks can't run until it does"),
+    })
+}
+
+/// The temp folder as messages show it: without the separator Windows ends it with.
+fn shown(base: &Path) -> String {
+    let text = base.display().to_string();
+    match text.trim_end_matches(['\\', '/']) {
+        "" => text,
+        trimmed => trimmed.to_string(),
+    }
+}
+
 fn create() -> Result<PathBuf, String> {
     let base = std::env::temp_dir();
     let fail = |e: Option<&Error>| {
         let why = e.map_or_else(String::new, |e| format!(": {}", crate::syntax::span::os_message(e)));
-        format!("cannot create a private temp folder in {}{why}", base.display())
+        let next = match (temp_problem(), temp_variable()) {
+            (Some(problem), _) => format!("; {problem}"),
+            (None, Some(var)) => format!("; {var} must name a folder you can write to"),
+            (None, None) => String::new(),
+        };
+        format!("cannot create a private temp folder in {}{why}{next}", shown(&base))
     };
     for _ in 0..8 {
         let bytes = random16().map_err(|e| fail(Some(&e)))?;

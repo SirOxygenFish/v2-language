@@ -1,5 +1,5 @@
 // exit: 1
-// stderr: TypeError: func has no method 'cwd' — an imported class is only a function here; @import its module as m to reach m.Path.cwd
+// stderr: TypeError: func has no method 'cwd' — an imported function or class brings none of its own properties; reach them through the module: @import py.pathlib as m, then m.Path.cwd
 // requires: py
 // DOCS 6.1.
 @import { Path } from py.pathlib

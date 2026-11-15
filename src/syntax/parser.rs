@@ -192,6 +192,15 @@ fn package_selector(text: &str) -> Option<String> {
     Some(format!("py.{}", segments.join(".")))
 }
 
+/// Another .v2 file, named where a package goes: V2's own import of it, with `alias` or the file's
+/// name, and how a name from it is reached (2.4).
+fn v2_file_hint(path: &str, alias: Option<&str>, name: Option<&str>) -> String {
+    let stem = path.rsplit(['/', '\\']).next().unwrap_or(path).trim_end_matches(".v2");
+    let alias = alias.map_or_else(|| alias_for(stem), str::to_string);
+    let then = name.map(|n| format!(", then {alias}.{n}(…)")).unwrap_or_default();
+    format!("another .v2 file is imported with import \"{path}\" as {alias}{then}")
+}
+
 /// A name for `@import js."date-fns" as …`: the package's last part, with other characters as `_`.
 fn alias_for(package: &str) -> String {
     let last = package.rsplit('/').next().unwrap_or(package);
@@ -892,7 +901,13 @@ impl<'a> Parser<'a> {
             (Tok::Kw(Kw::From), Tok::Str(p)) => package_selector(&format!("\"{p}\"")),
             _ => None,
         };
+        // A `from "./x.v2"`: another V2 file, not a package.
+        let v2_file = |k: usize| match (self.peek_at(k), self.peek_at(k + 1)) {
+            (Tok::Kw(Kw::From), Tok::Str(p)) if p.ends_with(".v2") => Some(p.to_string()),
+            _ => None,
+        };
         match t {
+            Tok::Ident(m) if self.at_kw(Kw::From) && v2_file(0).is_some() => v2_file_hint(&v2_file(0).unwrap_or_default(), Some(&**m), None),
             Tok::Ident(m) if self.at_kw(Kw::From) => {
                 let sel = from_at(0).unwrap_or_else(|| "js.package".into());
                 format!("V2 imports a JavaScript default export with @import {{ \"default\" as {m} }} from {sel}")
@@ -927,11 +942,18 @@ impl<'a> Parser<'a> {
                     }
                     k += 1;
                 }
+                if let Some(path) = matches!(self.peek_at(k), Tok::RBrace).then(|| v2_file(k + 1)).flatten() {
+                    return v2_file_hint(&path, None, names.first().and_then(|n| n.split(" as ").next()));
+                }
                 let sel = matches!(self.peek_at(k), Tok::RBrace).then(|| from_at(k + 1)).flatten();
                 match (names.is_empty(), sel) {
                     (false, Some(sel)) => format!("V2 imports names with @import {{ {} }} from {sel}", names.join(", ")),
                     _ => "V2 imports names with @import { a, b } from js.package (or py.module, or a block's label)".into(),
                 }
+            }
+            Tok::Op(Op::Star) if matches!((self.peek_at(0), self.peek_at(1)), (Tok::Kw(Kw::As), Tok::Ident(_))) && v2_file(2).is_some() => {
+                let alias = if let Tok::Ident(a) = self.peek_at(1) { a.to_string() } else { String::new() };
+                v2_file_hint(&v2_file(2).unwrap_or_default(), Some(&alias), None)
             }
             Tok::Op(Op::Star) => match (self.peek_at(0), self.peek_at(1), from_at(2)) {
                 (Tok::Kw(Kw::As), Tok::Ident(a), Some(sel)) => format!("V2 imports a whole package with @import {sel} as {a}"),
@@ -988,6 +1010,13 @@ impl<'a> Parser<'a> {
                         self.bump();
                         path.push(self.segment()?);
                     }
+                    // `js."./util.v2"`: Node would read a V2 file as JavaScript.
+                    if let [seg] = &path[..] {
+                        if seg.text.ends_with(".v2") {
+                            return Err(Diag::new(format!("a .v2 file isn't a {} module", if &*lang.text == "py" { "Python" } else { "JavaScript" }), seg.span)
+                                .hint(v2_file_hint(&seg.text, None, None) + " (a statement of its own, not @import)"));
+                        }
+                    }
                     Ok(Selector::Module { lang, path })
                 } else if &*n == "v2" {
                     Ok(Selector::V2 { span: t.span })
@@ -996,6 +1025,8 @@ impl<'a> Parser<'a> {
                 }
             }
             // `from "py.statistics"`: the package selector, quoted whole by mistake.
+            // `@import { f } from "./util.v2"`: V2 files have their own import.
+            Tok::Str(s) if s.ends_with(".v2") => Err(Diag::new("a block label can't be a string", t.span).hint(v2_file_hint(&s, None, None) + " (a statement of its own, not @import)")),
             Tok::Str(s) if ["py.", "js.", "ts."].iter().any(|p| s.starts_with(p)) => {
                 let sel = package_selector(&format!("\"{s}\"")).unwrap_or_else(|| s.to_string());
                 let hint = if sel.contains('"') {
@@ -1036,7 +1067,9 @@ impl<'a> Parser<'a> {
         let file = raw.text_span.file;
         let at = |lo: usize, hi: usize| self.sm.span(file, base + lo as u32, base + hi.max(lo + 1) as u32);
         let parsed = cdecl::parse_extern(&raw.text).map_err(|e| {
-            let d = Diag::new(e.message, at(e.lo, e.hi));
+            // The body holds C declarations, and extern itself comes with compiled blocks (7.3).
+            let d = Diag::new(e.message, at(e.lo, e.hi))
+                .hint("an extern body holds C declarations, as in double cos(double x); (extern itself isn't in this version of V2 yet)");
             match e.note {
                 Some((text, lo, hi)) => d.note(text, at(lo, hi)),
                 None => d,
@@ -1848,6 +1881,12 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("import x from \"./x.js\""), "V2 imports a JavaScript default export with @import { \"default\" as x } from js.\"./x.js\"");
         assert_eq!(hint("import { chunk, zip as z } from \"lodash\""), "V2 imports names with @import { chunk, zip as z } from js.lodash");
         assert_eq!(hint("import * as fs from \"node:fs\""), "V2 imports a whole package with @import js.\"node:fs\" as fs");
+        // Another .v2 file, in each form.
+        assert_eq!(hint("import { bump } from \"./lib/side.v2\""), "another .v2 file is imported with import \"./lib/side.v2\" as side, then side.bump(…)");
+        assert_eq!(hint("import util from \"./util.v2\""), "another .v2 file is imported with import \"./util.v2\" as util");
+        assert_eq!(hint("import * as u from \"./util.v2\""), "another .v2 file is imported with import \"./util.v2\" as u");
+        assert_eq!(hint("@import { bump } from \"./lib/side.v2\""), "another .v2 file is imported with import \"./lib/side.v2\" as side (a statement of its own, not @import)");
+        assert_eq!(hint("@import { f } from js.\"./util.v2\""), "another .v2 file is imported with import \"./util.v2\" as util (a statement of its own, not @import)");
         assert_eq!(hint("from statistics import mean"), "V2 imports names with @import { mean } from py.statistics");
         assert_eq!(hint("from os.path import join, exists as e"), "V2 imports names with @import { join, exists as e } from py.os.path");
         // The selector as written: a label, a tag, JavaScript's quoted package, a dashed name.

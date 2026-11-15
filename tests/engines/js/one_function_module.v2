@@ -1,0 +1,10 @@
+// requires: js
+// A module that is one function, imported by its own name (INTERNALS 13.5).
+try {
+    @import { cjs_fn } from js."./fixtures/cjs_fn.js"
+    print(cjs_fn([1]))
+} catch (e) {
+    print(e.message)
+}
+@import { "default" as cjs_fn } from js."./fixtures/cjs_fn.js"
+print(cjs_fn([1]))

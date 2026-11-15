@@ -68,6 +68,8 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         },
         "-help" | "-?" | "--h" | "-H" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--help`?)"))),
         "-v" | "-V" | "-version" | "--v" => Err(UsageError(format!("unknown flag `{word}` (did you mean `--version`?)"))),
+        "-" => Err(UsageError("V2 doesn't read a script from standard input: save it as a .v2 file and run v2 FILE".into())),
+        "--" => Err(UsageError("unknown flag `--`: to run a file whose name starts with -, write v2 ./-name.v2".into())),
         s if s.starts_with('-') => Err(UsageError(format!("unknown flag `{s}`"))),
         // `--help` after a command is a request for help, not a file or a typo.
         "check" | "doctor" | "cache" if rest.first().is_some_and(|w| w == "--help" || w == "-h") => Ok(Command::Help),
@@ -150,6 +152,7 @@ mod tests {
         assert_eq!(p(&["-H"]).unwrap_err().0, "unknown flag `-H` (did you mean `--help`?)");
         assert_eq!(p(&["-V"]).unwrap_err().0, "unknown flag `-V` (did you mean `--version`?)");
         assert!(p(&["--", "x.v2"]).is_err());
-        assert_eq!(p(&["-"]).unwrap_err().0, "unknown flag `-`");
+        assert_eq!(p(&["-"]).unwrap_err().0, "V2 doesn't read a script from standard input: save it as a .v2 file and run v2 FILE");
+        assert_eq!(p(&["--", "x.v2"]).unwrap_err().0, "unknown flag `--`: to run a file whose name starts with -, write v2 ./-name.v2");
     }
 }

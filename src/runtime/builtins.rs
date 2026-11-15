@@ -280,12 +280,19 @@ fn shown_path(path: &str) -> String {
 /// A file builtin's OS failure (5.10): `cannot read 'x': <why>`, a folder said as such, and for
 /// a path holding a control character the hint that `\n` and `\t` in `"…"` are escapes.
 fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
+    file_error_hint(verb, path, e, None)
+}
+
+/// `file_error`, with a hint of the caller's when the path itself needs none.
+fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<String>) -> Exec<T> {
     let why = if verb == "read" && std::path::Path::new(path).is_dir() { "it is a folder".to_string() } else { os_message(e) };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
     if path.chars().any(char::is_control) {
         let _ = err
             .hint
             .set(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write Windows paths with / or \\, as in "notes/new.txt""#.into());
+    } else if let Some(h) = hint {
+        let _ = err.hint.set(h.into());
     }
     Err(Flow::Error(Rc::new(err)))
 }
@@ -438,12 +445,20 @@ fn json_stringify(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> 
 
 /// `read_file(path, binary: false)`: relative to the working directory; text is strict UTF-8
 /// without one leading BOM (Windows tools write one), no newline translation (5.10).
-fn read_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
+fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
     let binary = bool_arg(&args[1], "read_file", "binary")?;
     let bytes = match std::fs::read(&*path) {
         Ok(b) => b,
-        Err(e) => return file_error("read", &path, &e),
+        Err(e) => {
+            // A relative path starts in the folder v2 runs in; the file may be next to the script.
+            let p = std::path::Path::new(&*path);
+            let beside = it.sm.file(at.file).path.parent().filter(|dir| e.kind() == std::io::ErrorKind::NotFound && p.is_relative() && dir.join(p).is_file());
+            let hint = beside.map(|_| {
+                format!("relative paths start in the folder you ran v2 from; for the file next to the script: read_file(f\"${{script_dir()}}/{}\")", path.replace('\\', "/"))
+            });
+            return file_error_hint("read", &path, &e, hint);
+        }
     };
     if binary {
         return Ok(Value::Bytes(bytes.into()));
@@ -538,6 +553,22 @@ fn script_dir(it: &mut Interp, _args: Vec<Value>, at: Span) -> Exec<Value> {
 fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let items = match &args[0] {
         Value::List(l) => l.borrow().clone(),
+        // `exec("git status")`: its words, as the list exec takes; a program's path with a space
+        // stays whole.
+        Value::Str(s) => {
+            let words: Vec<&str> = if std::path::Path::new(&**s).is_file() { vec![&**s] } else { s.split_whitespace().collect() };
+            if words.is_empty() {
+                return type_error("exec() argument 'argv' must be a list, got str");
+            }
+            let mut list = String::new();
+            for (i, w) in words.iter().enumerate() {
+                if i > 0 {
+                    list.push_str(", ");
+                }
+                super::value::quoted(w, &mut list);
+            }
+            return type_error(format!("exec() argument 'argv' must be a list, got str — as in exec([{list}]): exec runs a program, without a shell"));
+        }
         other => return type_error(format!("exec() argument 'argv' must be a list, got {}", other.type_name())),
     };
     let mut argv = Vec::with_capacity(items.len());

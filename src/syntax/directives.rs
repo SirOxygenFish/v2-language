@@ -141,6 +141,23 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         }
     }
 
+    // A no-break space (or another Unicode space) pasted from a web page into a Python line's
+    // indentation: Python rejects it, and may report another line (4.4). JavaScript takes it as
+    // a space. Python's own indentation is spaces, tabs and form feeds.
+    let python = matches!(profile_for(tag), Profile::Python);
+    for line in lines.iter().filter(|l| python && !l.header_line && l.in_code) {
+        let lead = line.text.find(|c: char| !c.is_whitespace()).unwrap_or(line.text.len());
+        if let Some((i, c)) = line.text[..lead].char_indices().find(|&(_, c)| !matches!(c, ' ' | '\t' | '\x0c')) {
+            let (name, hint) = super::lexer::shown_char(c);
+            let at = line.offset as u32 + i as u32;
+            let d = Diag::new(format!("unexpected character {name} in the block's indentation"), sm.span(file, at, at + c.len_utf8() as u32));
+            return Err(match hint {
+                Some(h) => d.hint(h),
+                None => d,
+            });
+        }
+    }
+
     // Step 3: dedent the code lines. A line that is only a comment doesn't set the indentation:
     // the language doesn't care where it starts.
     let profile = profile_for(tag);
@@ -414,7 +431,8 @@ impl<'a> DirParser<'a> {
 
     fn export_list(&mut self, exports: &mut Exports, compiled: bool) -> Result<(), Diag> {
         if *self.peek() != DK::LBrace {
-            return Err(Diag::new("expected { after @export", self.span()));
+            // A Python decorator named `export` (`@export.something`) is the language's own line.
+            return Err(Diag::new("expected { after @export", self.span()).hint("a line that starts with @export is V2's; for code of the block's own language that starts with @export, write @@export"));
         }
         let open = self.bump().span;
         if *self.peek() == DK::RBrace {
@@ -992,10 +1010,16 @@ mod tests {
     #[test]
     fn mixed_indentation_is_an_error_but_deeper_tabs_are_fine() {
         assert_eq!(err("@py {\n    a = 1\n\tb = 2\n}"), "block indentation mixes tabs and spaces");
+        // A no-break space pasted into the indentation, reported at its own line (4.4).
+        assert_eq!(err("@py {\n    a = 1\n\u{a0}   b = 2\n}"), "unexpected character U+00A0 (a no-break space) in the block's indentation");
+        assert!(run("@py {\n\ta = 1\n\tb = 2\n}").is_ok(), "tabs alone are fine");
+        assert!(run("@py {\na = 1\n\x0c\nb = 2\n}").is_ok(), "Python takes a form feed");
+        assert_eq!(err("@py {\n    a = 1\n\u{a0}\n    b = 2\n}"), "unexpected character U+00A0 (a no-break space) in the block's indentation");
         let (p, _) = run("@py {\n\tif x:\n\t\ty = 1\n}").unwrap();
         assert_eq!(&*p.body, "if x:\n\ty = 1\n");
-        // NBSP is content, not indentation, and doesn't panic.
-        assert!(run("@py {\n  a\n  \u{a0}b\n}").is_ok());
+        // NBSP is content, not indentation, for a language that takes it, and doesn't panic.
+        assert!(run("@js {\n  a\n  \u{a0}b\n}").is_ok());
+        assert_eq!(err("@py {\n  a\n  \u{a0}b\n}"), "unexpected character U+00A0 (a no-break space) in the block's indentation");
     }
 
     #[test]
