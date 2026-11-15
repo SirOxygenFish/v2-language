@@ -1,0 +1,11 @@
+// requires: js
+// A CommonJS module that is one function (lodash, dayjs): imported as "default" it brings none of
+// its own properties, which come through the module (INTERNALS 13.5, 5.9).
+@import { "default" as f } from js."./fixtures/cjs_fn.js"
+try {
+    print(f.extra)
+} catch (e) {
+    print(e.message)
+}
+@import js."./fixtures/cjs_fn.js" as m
+print(m.extra, m([1, 2]))

@@ -410,7 +410,7 @@ fn worker_command_and_env() {
     assert!(env.contains(&("PYTHONUTF8".into(), "1".into())) && env.contains(&("PYTHONIOENCODING".into(), "utf-8".into())));
     // js: Node finds packages itself; V2 sets no NODE_PATH (an inherited one stays as it is).
     let (argv, env) = worker_command(&js(), &adapter);
-    assert_eq!(argv, [OsString::from("node"), adapter.into_os_string()]);
+    assert_eq!(argv, [OsString::from("node"), "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON".into(), adapter.into_os_string()]);
     assert!(!env.iter().any(|(k, _)| k == "NODE_PATH"), "{env:?}");
 }
 

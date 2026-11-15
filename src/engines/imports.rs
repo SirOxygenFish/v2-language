@@ -316,6 +316,18 @@ type Item = (Rc<str>, Rc<str>, Span);
 
 /// A package that isn't installed (Python's `No module named 'x'`, Node's `Cannot find module
 /// 'x'`): the hint says how to install it (7). V2 installs nothing itself.
+/// `'chunk' is not exported by 'js."lodash/chunk"'`: and when the name is the package's own last
+/// part, the form for a module that is one function (`module.exports = function`) (13.5).
+fn not_exported(name: &str, text: &str) -> String {
+    let base = format!("'{name}' is not exported by '{text}'");
+    let package = text.strip_prefix("js.").or_else(|| text.strip_prefix("ts.")).map(|p| p.trim_matches('"'));
+    let stem = |last: &str| [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"].iter().find_map(|e| last.strip_suffix(e)).unwrap_or(last).to_string();
+    match package.and_then(|p| p.rsplit('/').next()).map(stem) {
+        Some(last) if last == name => format!("{base}; a module that is one function is imported with @import {{ \"default\" as {name} }} from {text}"),
+        _ => base,
+    }
+}
+
 fn hint_missing_package(f: &Flow) {
     let Flow::Error(e) = f else { return };
     if &*e.kind != "ImportError" {
@@ -639,10 +651,7 @@ impl Interp {
                         for (name, alias, span) in named_items(list) {
                             match find(&exports, &name) {
                                 Some(e) if !missing.contains(&name) => bound.push((alias, e.value.clone())),
-                                _ => {
-                                    let msg = format!("'{name}' is not exported by '{text}'");
-                                    return Err(self.raise(import_error(msg), span));
-                                }
+                                _ => return Err(self.raise(import_error(not_exported(&name, &text)), span)),
                             }
                         }
                     }
@@ -801,8 +810,7 @@ impl Interp {
                     for (name, alias, span) in named_items(list) {
                         let found = find(&exports, &name).filter(|_| !missing.contains(&name));
                         let Some(e) = found else {
-                            let msg = format!("'{name}' is not exported by '{text}'");
-                            return Err(self.raise(import_error(msg), span));
+                            return Err(self.raise(import_error(not_exported(&name, &text)), span));
                         };
                         if !e.func {
                             return Err(self.raise(constant_error(&name), span));

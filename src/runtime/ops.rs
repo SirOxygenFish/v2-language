@@ -167,7 +167,7 @@ fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
 }
 
 /// What a TypeError about a handle operand adds (11.7).
-pub const HANDLE_HINT: &str = " — do it inside a block, or convert it with to_v2(h) first";
+pub const HANDLE_HINT: &str = " — do it inside a block of its language, as in @py(h) { h + 1 } or @js(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)";
 
 /// The hint for an operation on a handle: for an integer too big for V2's 64-bit int (a Python
 /// `int`, a JavaScript `bigint`), `to_v2` can't help, so the work stays in the block (9.1).
