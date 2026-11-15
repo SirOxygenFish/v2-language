@@ -1,0 +1,34 @@
+// requires: py js
+// A Python object that a Python function returns to JavaScript can't go there: the MarshalError
+// says what that code can do, and the object's method, which goes as a function, works (11.5).
+@py pymod {
+    class Counter:
+        def __init__(self, n):
+            self.n = n
+        def inc(self, k):
+            self.n += k
+            return self.n
+    def make_counter(n):
+        return Counter(n)
+    def counter_inc(n):
+        return Counter(n).inc
+    @export { make_counter, counter_inc }
+}
+@js jsmod {
+    @import { make_counter, counter_inc } from pymod
+    function useObject(x) {
+        return make_counter(x).inc(5)
+    }
+    function useMethod(x) {
+        const inc = counter_inc(x)
+        return inc(5)
+    }
+    @export { useObject, useMethod }
+}
+@import { useObject, useMethod } from jsmod
+try {
+    print(useObject(1))
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(useMethod(1))

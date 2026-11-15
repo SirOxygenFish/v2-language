@@ -1,0 +1,2 @@
+MarshalError | this handle belongs to engine 'py' and can't be passed to 'js' — a Python object can't go to JavaScript: have the function return plain data instead (a dict or a list; in V2, to_v2(h)), or the object's methods, which go as functions (at the result)
+6

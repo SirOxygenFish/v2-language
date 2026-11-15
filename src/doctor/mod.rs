@@ -290,6 +290,13 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
             }
         }
     }
+    // An engine table in v2.toml for a language this version doesn't run yet (17.1).
+    for tag in cfg.custom.keys() {
+        notes.push(match crate::engines::registry::later_language(tag) {
+            Some(_) => format!("{tag}: [engines.{tag}] in v2.toml configures @{tag}, which isn't in this version of V2 yet"),
+            None => format!("{tag}: [engines.{tag}] in v2.toml is a custom engine, and custom engines aren't in this version of V2 yet: @{tag} blocks won't run"),
+        });
+    }
     // Blocks also need a temp folder (20.3).
     if let Some(problem) = crate::config::rundir::temp_problem() {
         notes.push(format!("temp: {problem}"));

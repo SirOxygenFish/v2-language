@@ -4,3 +4,4 @@
 "héllo\r\n"
 0 a.txt
 ArityError | exec takes argv and input only: for a variable or another folder, start a shell, as in exec(["cmd", "/c", "cd /d web && set \"NODE_ENV=production\" && npm run build"])
+exec() argument 'argv' must be a list, got str | 'dir' is a command of cmd.exe, not a program: write exec(["cmd", "/c", "dir"]) (or list_dir(path) for the names in a folder)

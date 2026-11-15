@@ -19,5 +19,5 @@ ValueError: range() step must not be zero
 TypeError: range() argument 'end' must be an int, got float
 ArityError: range() missing required argument 'end'
 TypeError: range() argument 'start' must be an int, got str
-ValueError: range too large
+ValueError: range too large: a list of 9223372036854775807 items (100000000 at most)
 ArityError: type() missing required argument 'x'

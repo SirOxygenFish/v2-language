@@ -161,8 +161,15 @@ fn overflow<T>(op: &str) -> Exec<T> {
 
 fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
     let mut msg = format!("unsupported operand types for {op}: '{}' and '{}'", a.type_name(), b.type_name());
+    let seq = |v: &Value| matches!(v, Value::Str(_) | Value::List(_) | Value::Bytes(_));
     if is_handle(a) || is_handle(b) {
         msg.push_str(&operand_hint(a, b, &format!("h {op} 1")));
+    } else if matches!(a, Value::Null) || matches!(b, Value::Null) {
+        // Where the null came from is the interpreter's to say (5.3).
+    } else if op == "*" && ((seq(a) && matches!(b, Value::Float(_))) || (matches!(a, Value::Float(_)) && seq(b))) {
+        msg.push_str(" — repeat with a whole number, as in \"ab\" * 2");
+    } else if op == "+" && matches!(a, Value::List(_)) && !matches!(b, Value::List(_)) {
+        msg.push_str(" — add an item with xs.push(x), or join lists with xs + [x]");
     } else if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
         msg.push_str(" — to join text, use f\"...${x}\" or str(x); to count with text such as input() gives, convert it: int(x) or float(x)");
     } else if text_and_number(a, b) {
@@ -202,18 +209,19 @@ pub fn is_handle(v: &Value) -> bool {
 
 /// `count` copies of a sequence of `len` items: the size is checked and the buffer reserved
 /// before anything is copied (5.3).
-fn repeat_capacity(len: usize, count: i64) -> Exec<usize> {
+fn repeat_capacity(len: usize, count: i64, limit: u64, unit: &str, most: &str) -> Exec<usize> {
     if count <= 0 {
         return Ok(0);
     }
     match len.checked_mul(count as usize) {
+        Some(n) if n as u64 > limit => value_error(format!("repetition result too large: {n} {unit} ({most} at most)")),
         Some(n) => Ok(n),
         None => value_error("repetition result too large"),
     }
 }
 
 fn repeat_str(s: &str, count: i64) -> Exec<Value> {
-    let n = repeat_capacity(s.len(), count)?;
+    let n = repeat_capacity(s.len(), count, 1 << 30, "bytes of text", "1 GiB")?;
     if n == 0 {
         return Ok(Value::str(""));
     }
@@ -228,7 +236,7 @@ fn repeat_str(s: &str, count: i64) -> Exec<Value> {
 }
 
 fn repeat_list(items: &[Value], count: i64) -> Exec<Value> {
-    let n = repeat_capacity(items.len(), count)?;
+    let n = repeat_capacity(items.len(), count, crate::runtime::builtins::MAX_ITEMS, "items", "100000000")?;
     if n == 0 {
         return Ok(Value::list(Vec::new()));
     }
@@ -441,7 +449,10 @@ mod tests {
         assert_eq!(err(BinOp::Sub, Value::str("a"), Int(1)), format!("TypeError: unsupported operand types for -: 'str' and 'int' — {count}"));
         assert_eq!(ok(BinOp::Mul, Value::str("ab"), Int(3)), "\"ababab\"");
         assert_eq!(ok(BinOp::Mul, Int(-1), Value::str("ab")), "\"\"");
-        assert_eq!(err(BinOp::Mul, Value::str("ab"), Int(i64::MAX)), "ValueError: repetition result too large");
+        // Past what memory holds: refused before anything is reserved (5.3).
+        assert_eq!(err(BinOp::Mul, Value::str("ab"), Int(i64::MAX)), "ValueError: repetition result too large: 18446744073709551614 bytes of text (1 GiB at most)");
+        assert_eq!(err(BinOp::Mul, Value::list(vec![Int(0)]), Int(200_000_000)), "ValueError: repetition result too large: 200000000 items (100000000 at most)");
+        assert_eq!(err(BinOp::Mul, Value::str("abc"), Int(i64::MAX)), "ValueError: repetition result too large");
     }
 
     #[test]

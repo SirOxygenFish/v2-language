@@ -1,0 +1,24 @@
+// Where a null came from, and other operand and loop mistakes a beginner makes, with what to do
+// (DOCS 3.4, 3.11, INTERNALS 5.3, 5.8).
+func doppelt(x) {
+    let d = x * 2
+}
+func try_it(f) {
+    try { f() } catch (e) { print(e.type, "|", e.message); print("  hint:", e.hint) }
+}
+try_it(func() => doppelt(4) + 1)
+let xs = [3, 1, 2]
+let sortiert = xs.sort()
+try_it(func() => sortiert[0])
+let name = null
+try_it(func() => "Hallo " + name)
+try_it(func() { for i in 10 { print(i) } })
+try_it(func() => xs + 3)
+try_it(func() => "ab" * 2.5)
+try_it(func() => [0] * 1000000000)
+try_it(func() => "x" * 3000000000)
+try_it(func() => range(1000000000))
+let s = 0
+for i in range(100000) { s += i }
+print(s)
+for i, x in range(10, 0, -3) { print(i, x) }

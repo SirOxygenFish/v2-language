@@ -1061,6 +1061,10 @@ fn a_script_named_like_a_flag_is_shown_how_to_run() {
     }
     let (code, stdout, stderr) = run_in_home(&home.0, &["./-dash.v2"], &[]);
     assert_eq!((code, stdout.as_str()), (Some(0), "1\n"), "{stderr}");
+    // `v2 check -dash.v2` as PowerShell splits it.
+    let (code, _, stderr) = run_in_home(&home.0, &["check", "-dash", ".v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("\nto check the file -dash.v2, write: v2 check ./-dash.v2\nrun `v2 --help` for usage\n"), "{stderr}");
 }
 
 #[test]
@@ -2516,6 +2520,36 @@ fn doctor_rows(stdout: &str) -> HashMap<String, Vec<String>> {
         rows.insert(id, [0, 3, 1, 2].into_iter().map(cell).collect());
     }
     rows
+}
+
+#[test]
+fn a_local_es_module_under_commonjs_shows_v2s_hint_without_nodes_warning() {
+    // INTERNALS 13.5: Node's "Failed to load the ES module" warning says what V2's hint says
+    // better, so a file of the user's gets only V2's.
+    let files = [
+        ("package.json", "{\"type\": \"commonjs\"}\n"),
+        ("math.ts", "export function add(a: number, b: number): number {\n  return a + b\n}\n"),
+        ("m.v2", "@import { add } from ts.\"./math.ts\"\nprint(add(1, 2))\n"),
+    ];
+    let (code, _, stderr, _home) = run_with_files(&files, &["m.v2"]);
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default().split([',', ' ']).any(|t| t == "ts");
+    if stderr.contains("EngineNotFound") && !required {
+        return;
+    }
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("says \"type\": \"commonjs\""), "{stderr}");
+    assert!(!stderr.contains("Failed to load the ES module"), "{stderr}");
+}
+
+#[test]
+fn doctor_notes_engine_tables_of_later_versions() {
+    // INTERNALS 19.2: a v2.toml written for R or @sh says, before any block is written, that
+    // this version doesn't run them.
+    let toml = "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\n\n[engines.sh]\ncommand = [\"bash\"]\n";
+    let (code, stdout, stderr, _home) = run_with_files(&[("v2.toml", toml)], &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("\n  r: [engines.r] in v2.toml is a custom engine, and custom engines aren't in this version of V2 yet: @r blocks won't run\n"), "{stdout}");
+    assert!(stdout.contains("\n  sh: [engines.sh] in v2.toml configures @sh, which isn't in this version of V2 yet\n"), "{stdout}");
 }
 
 #[test]

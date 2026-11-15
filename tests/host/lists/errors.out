@@ -3,7 +3,7 @@ KeyError: key 'x' not found
 TypeError: dict keys must be str, got int
 KeyError: key 'zzz' not found
 TypeError: dict.get() argument 'k' must be a str, got int
-TypeError: dict has no method 'frobnicate'
+TypeError: dict has no key or method 'frobnicate'
 TypeError: dict keys must be str, got int
 TypeError: list has no field 'len' — V2 writes len(x)
 TypeError: list has no method 'len' — V2 writes len(x)

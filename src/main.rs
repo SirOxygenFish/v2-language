@@ -77,12 +77,19 @@ fn main() {
             stderrln!("v2: {msg}");
             // `v2 -dash.v2`: a script whose name starts with -, which PowerShell even splits
             // before its dot (`-dash` `.v2`) (19.1).
-            if msg.starts_with("unknown flag") {
-                let first = &args[0];
-                let split = args.get(1).filter(|n| n.starts_with('.')).map(|n| format!("{first}{n}"));
+            // `v2 check -dash.v2` the same way, split or not.
+            let check = args.first().is_some_and(|a| a == "check") && args.get(1).is_some_and(|f| f.starts_with('-'));
+            if msg.starts_with("unknown flag") || check {
+                let at = usize::from(check);
+                let first = &args[at];
+                let split = args.get(at + 1).filter(|n| n.starts_with('.')).map(|n| format!("{first}{n}"));
                 let named = [Some(first.clone()), split, Some(format!("{first}.v2"))].into_iter().flatten().find(|f| std::path::Path::new(f).is_file());
                 if let Some(file) = named {
-                    stderrln!("to run the file {file}, write: v2 ./{file}");
+                    if check {
+                        stderrln!("to check the file {file}, write: v2 check ./{file}");
+                    } else {
+                        stderrln!("to run the file {file}, write: v2 ./{file}");
+                    }
                 }
             }
             stderrln!("run `v2 --help` for usage");

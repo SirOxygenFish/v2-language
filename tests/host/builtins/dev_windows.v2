@@ -7,3 +7,10 @@ try {
     print(e.message)
     print(e.hint)
 }
+// A ':' after the drive names a hidden stream on Windows: refused before anything is written.
+try {
+    write_file("notes 12:30.txt", "x")
+} catch (e) {
+    print(e.message)
+    print(e.hint, exists("notes 12"))
+}

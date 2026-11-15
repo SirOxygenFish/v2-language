@@ -1,0 +1,12 @@
+// int() and float() of the text a student types, with what the text needs to be (DOCS 3.11,
+// INTERNALS 5.10).
+func try_it(f) {
+    try { f() } catch (e) { print(e.type, "|", e.message); print("  hint:", e.hint) }
+}
+for t in ["13.5", "13.5 kg", "13 Jahre", "dreizehn", " 7 ", "", "0x1F"] {
+    try_it(func() => int(t))
+}
+for t in ["3,7", "2,5 kg", "abc", "1.5e3"] {
+    try_it(func() => float(t))
+}
+try_it(func() => int(null))

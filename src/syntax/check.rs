@@ -1,5 +1,6 @@
 //! Static checks that need the whole tree (INTERNALS 4.5): block labels, the reserved `v2`
-//! name, `break`/`continue`/`return` placement, redeclarations and unused expression values.
+//! name, `break`/`continue`/`return` placement, redeclarations, unused expression values and a
+//! loop's `let x = x + 1` that hides the `x` outside it.
 //! A file that parses gets every check, and all violations are reported in source order.
 //! (Checks that the grammar decides locally are parse errors, raised by the parser.)
 
@@ -11,8 +12,8 @@ use super::span::Span;
 use super::Diag;
 
 pub fn check(program: &[Stmt]) -> Vec<Diag> {
-    let mut c = Checker { diags: Vec::new(), labels: HashMap::new() };
-    c.body(&program.iter().collect::<Vec<_>>(), Ctx { in_loop: false, in_func: false }, &[]);
+    let mut c = Checker { diags: Vec::new(), labels: HashMap::new(), scopes: Vec::new(), tail: None };
+    c.body(&program.iter().collect::<Vec<_>>(), Ctx { in_loop: false, in_func: false }, &[], Kind::Plain);
     c.diags.sort_by_key(|d| (d.span.file.0, d.span.lo));
     c.diags
 }
@@ -23,29 +24,49 @@ struct Ctx {
     in_func: bool,
 }
 
+/// What a body belongs to, for the checks that depend on it.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Plain,
+    Loop,
+    Func,
+}
+
 struct Checker {
     diags: Vec<Diag>,
     /// Block labels seen so far in the file, with where.
     labels: HashMap<Rc<str>, Span>,
+    /// The names declared so far in each enclosing body, innermost last.
+    scopes: Vec<HashMap<Rc<str>, Span>>,
+    /// The start of a function body's last statement, when it is an expression.
+    tail: Option<u32>,
 }
 
 impl Checker {
     /// One body: names declared directly in it (seeded with what the body introduces:
     /// parameters, loop variables, the catch name) must be unique (DOCS 3.3).
-    fn body(&mut self, stmts: &[&Stmt], ctx: Ctx, introduced: &[&Name]) {
-        let mut declared: HashMap<Rc<str>, Span> = HashMap::new();
+    fn body(&mut self, stmts: &[&Stmt], ctx: Ctx, introduced: &[&Name], kind: Kind) {
+        self.scopes.push(HashMap::new());
         for n in introduced {
-            self.declare(&mut declared, n.text.clone(), n.span);
+            self.declare(n.text.clone(), n.span);
         }
-        for s in stmts {
-            for (name, span) in declarations(s) {
-                self.declare(&mut declared, name, span);
+        for (i, s) in stmts.iter().enumerate() {
+            if kind == Kind::Loop {
+                self.hidden_by_let(s);
             }
+            for (name, span) in declarations(s) {
+                self.declare(name, span);
+            }
+            let tail = (kind == Kind::Func && i + 1 == stmts.len()).then_some(s.span.lo);
+            let outer = std::mem::replace(&mut self.tail, tail);
             self.stmt(s, ctx);
+            self.tail = outer;
         }
+        self.scopes.pop();
     }
 
-    fn declare(&mut self, declared: &mut HashMap<Rc<str>, Span>, name: Rc<str>, span: Span) {
+    fn declare(&mut self, name: Rc<str>, span: Span) {
+        let declared = self.scopes.last_mut().expect("a body's scope");
         match declared.get(&name) {
             Some(&first) => self
                 .diags
@@ -53,6 +74,18 @@ impl Checker {
             None => {
                 declared.insert(name, span);
             }
+        }
+    }
+
+    /// `while i < 5 { let i = i + 1 }`: the let makes a new `i` for one turn of the loop, so the
+    /// one outside never changes (4.5). A direct statement of a loop's body that declares a name
+    /// declared outside the loop, from a value that reads it.
+    fn hidden_by_let(&mut self, s: &Stmt) {
+        let StmtKind::Let(n, Some(value)) = &s.kind else { return };
+        let outer = self.scopes[..self.scopes.len() - 1].iter().rev().find_map(|d| d.get(&n.text).copied());
+        if let Some(first) = outer.filter(|_| reads(value, &n.text)) {
+            let msg = format!("this let makes a new '{0}' for one turn of the loop, so the '{0}' outside it never changes", n.text);
+            self.diags.push(Diag::new(msg, n.span).note("declared here", first).hint(format!("to change that one, leave out let: {} = …", n.text)));
         }
     }
 
@@ -67,17 +100,38 @@ impl Checker {
         if matches!(last, ExprKind::Call { .. } | ExprKind::Block(_)) {
             return;
         }
+        // What the line was meant to do, by its shape: a function's last line, a function not
+        // called, a variable not changed.
+        let op = |op: &BinOp| match op {
+            BinOp::Add => Some("+"),
+            BinOp::Sub => Some("-"),
+            BinOp::Mul => Some("*"),
+            BinOp::Div => Some("/"),
+            _ => None,
+        };
         let hint = match &e.kind {
-            ExprKind::Unary(..) => "to continue the previous line, end that line with the operator",
-            ExprKind::Binary(BinOp::Eq, ..) => "did you mean '='?",
-            _ => "assign it with let, or remove it",
+            ExprKind::Unary(..) => "to continue the previous line, end that line with the operator".to_string(),
+            ExprKind::Binary(BinOp::Eq, ..) => "did you mean '='?".to_string(),
+            _ if self.tail == Some(e.span.lo) => "to give it back from the function, write return in front of it".to_string(),
+            ExprKind::Name(n, _) => format!("to call it, write {0}(); to show it, print({0})", n),
+            ExprKind::Member { name, .. } => format!("to call it, add the brackets: {}()", name.text),
+            ExprKind::Binary(o, _, a, _) if op(o).is_some() && matches!(a.kind, ExprKind::Name(..)) => {
+                let ExprKind::Name(n, _) = &a.kind else { unreachable!("matched above") };
+                let o = op(o).unwrap_or("+");
+                format!("to change {0}, write {0} {o}= … (or {0} = {0} {o} …)", n)
+            }
+            _ => "keep it with let x = …, print it, or remove the line".to_string(),
         };
         self.diags.push(Diag::new("this expression's value is not used", e.span).hint(hint));
     }
 
     fn body_of(&mut self, body: &Body, ctx: Ctx, introduced: &[&Name]) {
+        self.body_kind(body, ctx, introduced, Kind::Plain);
+    }
+
+    fn body_kind(&mut self, body: &Body, ctx: Ctx, introduced: &[&Name], kind: Kind) {
         let stmts: Vec<&Stmt> = body.stmts.iter().collect();
-        self.body(&stmts, ctx, introduced);
+        self.body(&stmts, ctx, introduced, kind);
     }
 
     fn stmt(&mut self, s: &Stmt, ctx: Ctx) {
@@ -125,7 +179,7 @@ impl Checker {
             }
             StmtKind::While { cond, body } => {
                 self.expr(cond, ctx);
-                self.body_of(body, Ctx { in_loop: true, ..ctx }, &[]);
+                self.body_kind(body, Ctx { in_loop: true, ..ctx }, &[], Kind::Loop);
             }
             StmtKind::For { first, second, iter, body } => {
                 match iter {
@@ -139,7 +193,7 @@ impl Checker {
                 if let Some(s) = second {
                     vars.push(s);
                 }
-                self.body_of(body, Ctx { in_loop: true, ..ctx }, &vars);
+                self.body_kind(body, Ctx { in_loop: true, ..ctx }, &vars, Kind::Loop);
             }
             StmtKind::Try { body, catch, finally } => {
                 self.body_of(body, ctx, &[]);
@@ -175,7 +229,7 @@ impl Checker {
             introduced.push(r);
         }
         match &f.body {
-            FuncBody::Block(b) => self.body_of(b, ctx, &introduced),
+            FuncBody::Block(b) => self.body_kind(b, ctx, &introduced, Kind::Func),
             FuncBody::Expr(e) => self.expr(e, ctx),
         }
     }
@@ -269,6 +323,26 @@ impl Checker {
             ExprKind::Func(f) => self.func(f),
             ExprKind::Block(b) => self.block(b, ctx),
         }
+    }
+}
+
+/// Whether `e` reads the name `name` (not inside a function it makes, which runs later).
+fn reads(e: &Expr, name: &str) -> bool {
+    let r = |x: &Expr| reads(x, name);
+    match &e.kind {
+        ExprKind::Name(n, _) => &**n == name,
+        ExprKind::Null | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bytes(_) => false,
+        ExprKind::Func(_) | ExprKind::Block(_) => false,
+        ExprKind::FStr(parts) => parts.iter().any(|p| matches!(p, FPart::Expr { expr, .. } if r(expr))),
+        ExprKind::List(items) => items.iter().any(r),
+        ExprKind::Dict(entries) => entries.iter().any(|(k, v)| matches!(k, DictKey::Computed(k) if r(k)) || r(v)),
+        ExprKind::Unary(_, _, x) | ExprKind::OptChain(x) => r(x),
+        ExprKind::Binary(_, _, a, b) | ExprKind::And(a, b) | ExprKind::Or(a, b) | ExprKind::Coalesce(a, b) => r(a) || r(b),
+        ExprKind::Ternary(c, a, b) => r(c) || r(a) || r(b),
+        ExprKind::Call { callee, args, .. } => r(callee) || args.iter().any(|a| matches!(a, Arg::Pos(x) | Arg::Named(_, x) | Arg::Spread(x) if r(x))),
+        ExprKind::Index { obj, index, .. } => r(obj) || r(index),
+        ExprKind::Slice { obj, lo, hi, .. } => r(obj) || [lo, hi].into_iter().flatten().any(|x| r(x)),
+        ExprKind::Member { obj, .. } => r(obj),
     }
 }
 

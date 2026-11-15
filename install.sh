@@ -152,7 +152,7 @@ if ! "$bin" --version >"$tmp/version" 2>"$tmp/error"; then
     if [ "$checked" = no ]; then
         fail "the v2 in $shown_archive doesn't run here (see above): if the file may be damaged, download it again with its .sha256, so it gets checked; else $from_source"
     fi
-    fail "the downloaded v2 doesn't run here (see above): $from_source"
+    fail "the v2 in $shown_archive doesn't run here (see above): $from_source"
 fi
 installed=$(cut -d ' ' -f 1-2 <"$tmp/version")
 

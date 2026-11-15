@@ -258,7 +258,9 @@ count += 1             // also -=, *=, /=, %=
   There is no bare `{ ... }` block: a `{` that starts a statement is a dict.
 - Declaring the same name twice in the same block is an error; an inner block may *shadow* it.
   A function's parameters, a loop's variables and a `catch` name count as declared in the body they
-  belong to, so `func f(x) { let x = 1 }` is an error.
+  belong to, so `func f(x) { let x = 1 }` is an error. In a loop's body, `let i = i + 1` for an `i`
+  declared outside the loop is an error too: it would make a new `i` each turn, and the one the
+  loop tests would never change. Write `i = i + 1` (or `i += 1`).
 - Lists and dicts that point at each other (a parent pointer, a doubly linked list, a list holding
   itself) are not freed: V2 has no general cycle collector. Break the link when you are done.
 - `x += y` always means `x = x + y`. On a list that makes a **new** list, a full copy each time:
@@ -302,6 +304,8 @@ Rules worth knowing:
   Values of different types are simply not equal. Two handles are equal when they point at the
   same foreign object.
 - `<`, `>` and friends work on numbers and on strings. Comparing anything else is a `TypeError`.
+  Strings compare by Unicode code point, so `"Z" < "a" < "Ä"`: to sort without regard to case,
+  use `xs.sort(key: func(s) => s.lower())`.
 - Comparisons don't chain: `a < b < c` and `a == b == c` are a `SyntaxError`; write
   `a < b && b < c`.
 - `x in list` checks elements, `k in dict` checks keys (`false` when `k` isn't a string),
@@ -1259,6 +1263,9 @@ JavaScript calls a callback with everything it has (`xs.map(f)` passes the item,
 array), and a JavaScript function ignores what it doesn't take. A V2 function called from
 JavaScript does the same, passed in or brought in with `@import { f } from v2`, so `xs.map(f)` and
 `xs.forEach(f)` work with `func f(x)`; one with `...rest` gets them all. From Python, extra arguments are an `ArityError`, as they are in Python.
+Fewer arguments than the V2 function declares are an `ArityError` from both, as in V2 itself (Node
+often calls back with fewer, as `emitter.emit("data")` does): give such parameters a default,
+`func(x, y = null)`.
 
 A V2 function that foreign code keeps (a listener, a callback stored on an object) keeps the
 function that made it alive, with all its variables, until the foreign side lets go. Python lets

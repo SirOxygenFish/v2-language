@@ -71,6 +71,14 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         Some(Tok::Op(Op::Comma)) if matches!(opener, Some(Tok::Op(Op::LParen))) && !matches!(tok(1), Some(Tok::Op(Op::LParen))) => {
             return Some("V2 has no tuples: write a list, as in [1, 2]".into())
         }
+        // `let preis = 2,50`: a decimal comma.
+        Some(Tok::Op(Op::Comma))
+            if after_let
+                && matches!(tok(1), Some(Tok::Int(_)))
+                && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Int(_)) && t.span.lo == at.hi && toks[i - 1].span.hi == at.lo) =>
+        {
+            return Some("decimal numbers use a point: 2.50, not 2,50".into())
+        }
         Some(Tok::Op(Op::Comma)) if after_let => return Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()),
         Some(Tok::Op(Op::Comma)) if after_return => return Some("V2 returns one value: return a list, as in return [a, b]".into()),
         Some(Tok::Kw(Kw::For)) if matches!(opener, Some(Tok::Op(Op::LBracket))) => {
@@ -81,6 +89,34 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
     let hint = match (word(1), word(0), op(0)) {
         (Some("fn" | "def" | "function" | "fun" | "sub"), Some(name), _) => format!("V2 writes functions as func {name}(a, b) {{ ... }}"),
         (Some("var"), Some(_), _) => "V2 declares variables with let: let x = 1".into(),
+        // `let mein name = 1`, `let mein-name = 1`: a name is one word.
+        (Some(first), Some(_), _) if matches!(tok(2), Some(Tok::Kw(Kw::Let | Kw::Const))) => {
+            format!("a name is one word, without spaces: {first}_{}", word(0).unwrap_or("name"))
+        }
+        (Some(first), _, Some(Op::Minus)) if matches!(tok(2), Some(Tok::Kw(Kw::Let | Kw::Const))) && matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Ident(_))) => {
+            let second = match toks.get(i + 1).map(|t| &t.tok) {
+                Some(Tok::Ident(w)) => w.to_string(),
+                _ => "name".into(),
+            };
+            format!("a name can't have a - in it: {first}_{second}")
+        }
+        // `elif` or `else` with no `if` before it, or a second `else`.
+        _ if matches!(tok(0), Some(Tok::Kw(Kw::Elif))) && starts(0) => "elif goes right after an if's }: if x { ... } elif y { ... }".into(),
+        _ if matches!(tok(0), Some(Tok::Kw(Kw::Else))) && matches!(tok(1), Some(Tok::RBrace)) => {
+            "an if has one else, at its end: for more cases, put elif x { ... } before it".into()
+        }
+        _ if matches!(tok(0), Some(Tok::Kw(Kw::Else))) && starts(0) => "else goes right after an if's }: if x { ... } else { ... }".into(),
+        // `quadrat(x) {`: a function written without func.
+        _ if matches!(tok(0), Some(Tok::LBrace(_))) && matches!(tok(1), Some(Tok::Op(Op::RParen))) && {
+            let j = line_start(toks, i);
+            // Other languages' statements that look the same keep their own hints.
+            let other = matches!(&toks[j].tok, Tok::Ident(w) if matches!(&**w, "switch" | "match" | "foreach" | "elseif" | "elsif" | "unless" | "until" | "with" | "using" | "lock" | "synchronized"));
+            matches!(toks[j].tok, Tok::Ident(_)) && !other && matches!(toks.get(j + 1).map(|t| &t.tok), Some(Tok::Op(Op::LParen)))
+        } =>
+        {
+            let name = first_word_of_line(toks, i).unwrap_or("name");
+            format!("a function is written with func: func {name}(…) {{ ... }}")
+        }
         // JavaScript's and Python's `await f()`.
         (Some("await"), Some(name), _) => format!("V2 has no await: when a call returns a Promise or a coroutine, V2 waits for its result, so write {name}(…)"),
         (_, Some("and" | "or"), _) => "V2 writes and, or and not as &&, || and !".into(),
@@ -642,12 +678,12 @@ impl<'a> Parser<'a> {
             }
             Tok::Kw(Kw::If) => {
                 self.bump();
-                let mut arms = vec![(self.expr()?, self.body("if")?)];
+                let mut arms = vec![(self.condition("if")?, self.body("if")?)];
                 let mut else_ = None;
                 loop {
                     if self.newlines_before(Kw::Elif) {
                         self.bump();
-                        arms.push((self.expr()?, self.body("elif")?));
+                        arms.push((self.condition("elif")?, self.body("elif")?));
                     } else if self.newlines_before(Kw::Else) {
                         self.bump();
                         if self.at_kw(Kw::If) {
@@ -663,7 +699,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Kw(Kw::While) => {
                 self.bump();
-                let cond = self.expr()?;
+                let cond = self.condition("while")?;
                 StmtKind::While { cond, body: self.body("while")? }
             }
             Tok::Kw(Kw::For) => self.for_stmt()?,
@@ -789,7 +825,19 @@ impl<'a> Parser<'a> {
 
     /// `( params ) body` of a `func` statement, or `( params ) ( => expr | body )` of an
     /// anonymous `func` expression.
+    /// The condition of `if`, `elif` or `while`; a `{` right away means there is none.
+    fn condition(&mut self, what: &str) -> Result<Expr, Diag> {
+        if matches!(self.peek(), Tok::LBrace(_)) {
+            return Err(Diag::new(format!("{what} needs a condition before its {{"), self.span()).hint(format!("as in {what} x < 3 {{ ... }}")));
+        }
+        self.expr()
+    }
+
     fn func_rest(&mut self, name: Option<Name>, start: Span) -> Result<FuncDecl, Diag> {
+        // `func hallo {`: the brackets are needed, empty or not.
+        if let (Tok::LBrace(_), Some(n)) = (self.peek(), &name) {
+            return Err(Diag::new("expected `(`, found `{`", self.span()).hint(format!("a function has brackets for its parameters, even none: func {}() {{ ... }}", n.text)));
+        }
         self.expect_op(Op::LParen)?;
         let (params, rest) = self.params()?;
         if let (Some(n), true) = (&name, self.at_op(Op::FatArrow)) {

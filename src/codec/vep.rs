@@ -84,7 +84,19 @@ impl Encoder<'_, '_> {
     #[cold]
     #[inline(never)]
     fn foreign_handle<T>(&self, h: &HandleRef) -> Exec<T> {
-        let how = h.plain_way().unwrap_or_else(|| "convert it with to_v2(h) first".to_string());
+        let lang = |tag: &str| if tag == "py" { "Python" } else if matches!(tag, "js" | "ts") { "JavaScript" } else { "its language" };
+        let how = h.plain_way().unwrap_or_else(|| {
+            // What a function another language called returned: that code has no to_v2.
+            if self.root == "the result" {
+                format!(
+                    "a {} object can't go to {}: have the function return plain data instead (a dict or a list; in V2, to_v2(h)), or the object's methods, which go as functions",
+                    lang(&h.tag),
+                    lang(&self.wire.tag)
+                )
+            } else {
+                "convert it with to_v2(h) first".to_string()
+            }
+        });
         self.fail(format!("this handle belongs to engine '{}' and can't be passed to '{}' — {how}", h.tag, self.wire.tag))
     }
 

@@ -33,9 +33,9 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 12 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 13 next
-  on a new distro and sandbox (round 12's prompts: scratchpad/newcomer/prompt-*-r12.md, made by
-  scratchpad/setup_round12.py; round 12's distro v2new24l; agents may read the archive's DOCS.md; the Windows one forbids
+  Rounds 1 to 13 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 14 next
+  on a new distro and sandbox (round 13's prompts: scratchpad/newcomer/prompt-*-r13.md, made by
+  scratchpad/setup_round13.py; round 13's distro v2new24m; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
   line endings).
@@ -46,7 +46,8 @@ it is loaded automatically into every session and every subagent.
   Installer test changes run on Windows, WSL and the Mac before they are pushed. Installer tests: tests/install/paths.{sh,ps1} (paths.ps1 never
   changes the user PATH without -ModifyPath, CI only).
   Newcomer prompts: scratchpad/newcomer/prompt-{linux,windows}.md (session-local; rewrite if gone).
-  Owner decisions still open: `#!` lines, static members of imported classes.
+  Owner decisions still open: `#!` lines, static members of imported classes, `v2 check` finding
+  undeclared names.
   Then, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order.
 - `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
   commit it; it is in `.git/info/exclude`.
@@ -116,7 +117,7 @@ it is loaded automatically into every session and every subagent.
   `canonical_tag`), `directives` (@export/@import, dedent), `resolve` (layouts, `Loc`, after
   `check`, in `parse_file`, the entry path and `parse_str`), `parser` (MAX_DEPTH 256, expression
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
-  (static checks, 4.5, incl. "this expression's value is not used"), `ast`.
+  (static checks, 4.5, incl. "this expression's value is not used" and a loop's `let i = i + 1`), `ast`.
 - `runtime/`: `interp` (exec/eval take `&Env` and keep only the common cases, the rest in
   `exec_other`/`eval_other`; `binary` has an int fast path, `direct_call` puts args straight in the
   frame; stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
