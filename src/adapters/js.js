@@ -944,7 +944,8 @@ function frames(e) {
     const [real, cp] = realPosition(file, Number(lineNo), Number(col));
     out.push({
       file: wellFormed(file), line: real, col: cp,
-      func: func ? wellFormed(func.replace(/^(?:async |new )/, '')) : null,
+      // `Module.f`: V8's name for a function called through a module's namespace.
+      func: func ? wellFormed(func.replace(/^(?:async |new )/, '').replace(/^Module\./, '')) : null,
     });
   }
   return out;
@@ -1434,9 +1435,39 @@ function doModule(m) {
     if (e && e.code === 'ERR_REQUIRE_ASYNC_MODULE' && !ran) {
       return settle(import(entryUrl(m.name, m.from)), loaded, `the module '${m.name}' uses top-level await, so its import is a Promise`);
     }
+    if (e && e.name === 'SyntaxError') {
+      try {
+        e.v2Frame = syntaxFrame(e, req, m.name) || e.v2Frame;
+      } catch {} // a frozen error keeps the frames it has
+    }
     throw e;
   }
   return loaded(mod);
+}
+
+function syntaxFrame(e, req, name) {
+  // Where a SyntaxError in a module file is (13.5, 12.6): the `file:line` Node puts first on the
+  // stack, above the line and a caret (a CommonJS or TypeScript file); else, for an ES module,
+  // whose error carries no location, what `node --check` says about the file itself.
+  const at = (text) => {
+    const lines = String(text).split(/\r?\n/);
+    const m = /^(.+):(\d+)$/.exec(lines[0] || '');
+    if (!m || /^[A-Za-z]*Error\b/.test(lines[0])) return null;
+    const caret = lines.findIndex((l, i) => i > 0 && /^\s*\^+\s*$/.test(l));
+    const file = m[1].startsWith('file://') ? url.fileURLToPath(m[1]) : m[1];
+    return { file: wellFormed(file), line: Number(m[2]), col: caret > 0 ? lines[caret].indexOf('^') + 1 : null, func: null };
+  };
+  const found = at(e.stack);
+  if (found) return found;
+  let file;
+  try {
+    file = req.resolve(name);
+  } catch {
+    return null;
+  }
+  if (!/\.(?:m?js|cjs)$/i.test(file)) return null;
+  const r = require('child_process').spawnSync(process.execPath, ['--check', file], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+  return r.status ? at(r.stderr) : null;
 }
 
 const NOT_FOUND = new Set(['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_UNKNOWN_BUILTIN_MODULE']);
@@ -1617,7 +1648,7 @@ function toV2(x, depth = 0, open = new Walk()) {
       }
     }
   }
-  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data`);
+  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data: make plain data of it in a block first, as in @js(h) { ({ ...h }) } or @js(h) { h.toISOString() }`);
 }
 
 function isEager(obj) {

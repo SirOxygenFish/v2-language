@@ -289,16 +289,22 @@ ForeignError ZeroDivisionError division by zero
 | `try: … except E as e:`, `catch (e) { }`  | `try { ... } catch (e) { ... }`                 |
 | `raise ValueError("bad")`, `throw new Error("bad")` | `throw error("ValueError", "bad")`, or `throw "bad"` |
 | `print(x, end="")`, `process.stdout.write(x)` | `print(x, end: "")`                         |
+| `print(x, file=sys.stderr)`, `console.error(x)` | `print(x, stderr: true)`                  |
 | `open(f).read()`, `fs.readFileSync(f, "utf8")` | `read_file(f)`, and `write_file(f, text)`  |
 | `sys.exit(1)`, `process.exit(1)`          | `exit(1)`                                       |
 | `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`) |
 | `input()`                                 | `input()` (`null` at the end of input)          |
 
 V2's own functions include `int`, `float`, `str`, `round`, `abs`, `min`, `max`, `sum`, `range`,
-`type` and `len`; strings have `split`, `upper`, `lower`, `replace`, `trim`, `starts_with` and
-`ends_with`; lists `push`, `pop`, `sort` and `join`; dicts `keys`, `values`, `get` and `remove`.
-`cond ? a : b` picks a value, `r"C:\new"` keeps its backslashes, and a caught error has `e.type`
-and `e.message`. In another `.v2` file, every top-level name not starting with `_` can be imported.
+`type` and `len`; for files and the system `exists`, `list_dir`, `make_dir`, `remove_file`,
+`getenv`, `exec`, `sleep` and `time`; and `json_parse` and `json_stringify`. Strings have `split`,
+`upper`, `lower`, `replace`, `trim`, `starts_with` and `ends_with`; lists `push`, `pop`, `sort`,
+`map` and `join`; dicts `keys`, `values`, `get` and `remove`; and lists and strings slice as
+`xs[1:3]`. `cond ? a : b` picks a value, `f"${x:.2f}"` formats a number, `r"C:\new"` keeps its
+backslashes, a `"""` at the end of a line starts a string of several lines, and a caught error has
+`e.type` and `e.message`. Another `.v2` file's top-level names not starting with `_` are imported
+as a snapshot taken when that file finished running: read state that changes through its
+functions.
 A block can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and its last
 expression is its value. File paths are relative to the folder you run `v2` from; for a file next
 to the script, `read_file(f"${script_dir()}/data.csv")`. `v2 check FILE` checks a script's V2
@@ -320,11 +326,13 @@ packages installed for them. A Python package is imported with `@import py.numpy
   `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
   `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
-  `@import { f } from js."./helpers.js"`.
+  `@import { f } from js."./helpers.js"` (a TypeScript one, `ts."./helpers.ts"`). A function
+  imported by name brings none of its own properties: for `dayjs.extend` or lodash's `_.chunk`,
+  import the module itself, `@import js.dayjs as dayjs`.
 - **Python on Windows:** `py -m pip install numpy`. If `v2 doctor` shows another Python, use its
   path, with `&` in front in PowerShell: `& "C:\Program Files\Python313\python.exe" -m pip install
-  numpy`. A virtual environment works as below, with `py -m venv .venv` and
-  `.venv\Scripts\pip install numpy`.
+  numpy`. For a virtual environment: `py -m venv .venv`, then `.venv\Scripts\pip install numpy`,
+  and the `v2.toml` shown below.
 - **Python on Linux and macOS:** the system's and Homebrew's Python refuse `pip install` outside a
   virtual environment ("externally-managed-environment"), so make one in your project folder:
 
@@ -343,6 +351,9 @@ packages installed for them. A Python package is imported with `@import py.numpy
   ```
 
   (Activating it, `source .venv/bin/activate`, before running `v2` works too.)
+
+A package is loaded where it is first used, not at its `@import` line: what it prints when it loads
+comes then, and so does the error for a misspelled package name.
 
 ## Troubleshooting
 
@@ -373,7 +384,7 @@ and `Out-File` write UTF-16: use an editor, or `Set-Content -Encoding utf8`.
 **Non-ASCII text turns into `├╝` or `?` when piped in Windows PowerShell 5.1.** It decodes and
 encodes what passes through pipes with the console's old code page. Run
 `[Console]::OutputEncoding = $OutputEncoding = [Text.UTF8Encoding]::new()` first in that window,
-or use PowerShell 7 or cmd.exe.
+or use PowerShell 7. In cmd.exe, run `chcp 65001` first.
 
 **`UnicodeDecodeError` when a `@py` block reads a file that plain Python reads.** Blocks run in
 Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass
@@ -385,8 +396,10 @@ or give its full path. The message says where V2 looked and which `.v2` files ar
 **`unexpected character U+00A0 (a no-break space)`, `'“' (a curly quote)`.** Code copied from a
 web page or a chat can bring characters that look like spaces or quotes: retype them.
 
-**`v2 doctor` says Node.js `doesn't run`, with `libatomic.so.1`.** Node.js's own Linux download
-needs a library that minimal systems lack: `sudo apt install libatomic1`.
+**`v2 doctor` says node `needs libatomic.so.1`.** Node.js's own Linux download needs a library
+that minimal systems lack: `sudo apt install libatomic1`. On such a system (a container, a fresh
+WSL distro) you may be root without `sudo`: leave it out; unpacking Node.js's `.tar.xz` also needs
+`apt install xz-utils`.
 
 **`v2` works in a terminal but not in cron or `ssh host v2 ...`.** Those may not read your shell's
 startup files: use the full path, `~/.v2/bin/v2`.
@@ -417,8 +430,9 @@ The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
 program's path, without quotes, does the same for one run.
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,
-so `add("2", 3)` runs. Run `tsc` yourself for checking. `enum` and `namespace` aren't supported
-there.
+so `add("2", 3)` runs. Run `tsc` yourself for checking. Only TypeScript whose types can simply be
+removed runs: not `enum`, `namespace`, `constructor(public x)` parameter properties, `<T>x` casts
+(write `x as T`) or decorators.
 
 **Does V2 leave files around?** No. Temporary files go to a private folder in your temp directory
 and are removed when V2 exits (if V2 was killed, the next script that runs a block removes
@@ -451,7 +465,14 @@ Node.js workers.
   the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep.
   V2's integers are 64-bit: a bigger Python or JavaScript integer arrives as a handle, so do big
   number math inside the block. A handle works only in its own language: `to_v2(h)` makes plain
-  data that any language takes (functions are the exception: they can be passed anywhere).
+  data that any language takes. Operators don't work on handles (call a method, or do it in the
+  block), a handle is always true, and `==` on two handles means the same object.
+- **A V2 function given to Python or JavaScript** can be called while that call runs, on its
+  thread: not later from a timer or an event, and not from another thread.
+- **JavaScript's event loop runs only while V2 is in a call to JavaScript:** a server, timer or
+  socket in a `@js` block waits in between. Output a Python or JavaScript thread prints in
+  between shows at the next call, or when the program ends.
+- **Each block has its own variables**, also in JavaScript: share them with `@export`.
 - **Blocks can't read standard input:** V2's `input()` owns it. Read the input in V2 and pass it
   in.
 - **Programs a block starts print to standard error**, not standard output (`subprocess.run`,
@@ -466,6 +487,7 @@ Node.js workers.
 - **`v2 check` checks V2's syntax only:** names, engine tags and the code inside blocks are checked
   when the script runs.
 - **A `#!` first line is an error:** delete it, and run scripts with `v2 file.v2`.
+- **Ctrl+C stops at once:** `finally` blocks don't run.
 - **No REPL, no package manager of its own, no editor plugins.**
 - **It's an alpha:** syntax and behavior may still change before 0.1.0.
 
@@ -476,7 +498,7 @@ Node.js workers.
    `v2` (`v2.exe`, and a `v2.exe.old` if there is one) from that folder, not the folder.
 2. Take it off your PATH. Windows: Settings, search "Edit environment variables for your account",
    select `Path`, delete the `.v2\bin` entry. macOS and Linux: in each startup file `install.sh`
-   changed (`~/.bashrc`, `~/.profile` or `~/.bash_profile`, `~/.zshenv`; `grep -l 'added by
+   changed (`~/.bashrc`, `~/.profile` or `~/.bash_profile`, `~/.zshenv`; `grep -ls 'added by
    install.sh' ~/.bashrc ~/.profile ~/.bash_profile ~/.zshenv` lists them), delete the line
    `# V2 (added by install.sh)` and the line under it; with fish, delete
    `~/.config/fish/conf.d/v2.fish` (under `$XDG_CONFIG_HOME` instead, if you set it).

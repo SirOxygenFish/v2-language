@@ -1,0 +1,9 @@
+// requires: py
+// A module file that doesn't compile: its own file and line come first, the import machinery
+// is left out (INTERNALS 12.6, 13.5).
+try {
+    @import { ok } from py.syntax_bad_module
+    print(ok(1))
+} catch (e) {
+    print(e.foreign_type, e.message, "importlib" in str(e.trace), e.trace[0].ends_with("syntax_bad_module.py:2, in py"))
+}

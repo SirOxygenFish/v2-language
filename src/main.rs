@@ -147,9 +147,12 @@ fn run(command: Command) -> i32 {
     }
 }
 
-/// The folder a script lives in (its config's start folder, 18.1).
+/// The folder a script lives in (its config's start folder, 18.1): the real file's, a symlink
+/// followed, as `script_dir()` and imports see it.
 fn folder_of(file: &str) -> std::path::PathBuf {
-    match std::path::Path::new(file).parent() {
+    let real = std::fs::canonicalize(file).map(|p| syntax::span::strip_verbatim(&p)).ok();
+    let path = real.unwrap_or_else(|| std::path::PathBuf::from(file));
+    match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::PathBuf::from("."),
     }

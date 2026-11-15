@@ -21,6 +21,8 @@ if __name__ == "__main__":
     KINDS = ("ForeignError", "ImportError", "NameError", "ValueError", "MarshalError", "ProtocolError", "Error")
     MAX_CAUSES = 8  # chained causes sent (9.6)
     ADAPTER = os.path.normcase(os.path.abspath(__file__))
+    # The import machinery's own frames, between an @import and the module it loads (12.6).
+    IMPORTLIB = os.path.normcase(os.path.dirname(os.path.abspath(importlib.__file__)))
     DISPATCH = threading.get_ident()
 
     # 2. The protocol moves to private copies of fds 0 and 1; fd 0 becomes the null device and
@@ -688,11 +690,14 @@ if __name__ == "__main__":
             lines[first + i] = text
 
     def frames(tb):
-        """Innermost first; adapter frames and engine internals left out (12.6)."""
+        """Innermost first; adapter frames and engine internals (the import machinery) left out
+        (12.6)."""
         out = []
         for fs in reversed(traceback.extract_tb(tb)):
             name = fs.filename or ""
             if name.startswith("<frozen ") or os.path.normcase(os.path.abspath(name)) == ADAPTER:
+                continue
+            if os.path.normcase(os.path.dirname(os.path.abspath(name))) == IMPORTLIB:
                 continue
             col = None
             text = _lines.get(name, {}).get(fs.lineno)
@@ -756,7 +761,9 @@ if __name__ == "__main__":
         if isinstance(e, Fail):
             return {"type": e.kind, "message": well_formed(e.message), "foreign_type": None, "trace": []}
         trace = frames(e.__traceback__)
-        if isinstance(e, SyntaxError) and e.filename in _lines and e.lineno:
+        # A SyntaxError's place is the error itself: a block's line, or the line of a module file
+        # it couldn't compile (12.6, 13.5).
+        if isinstance(e, SyntaxError) and isinstance(e.filename, str) and e.lineno and not e.filename.startswith("<"):
             trace.insert(0, {"file": well_formed(e.filename), "line": e.lineno, "col": e.offset or None, "func": None})
         if isinstance(e, V2Error):
             kind = e.type if e.type in KINDS else "ForeignError"
@@ -1219,7 +1226,7 @@ if __name__ == "__main__":
                 finally:
                     path.hooks -= 1
                     path.discard(id(x))
-        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data" % type_name(x))
+        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data: make plain data of it in a block first, as in @py(h) { list(h) } or @py(h) { vars(h) }" % type_name(x))
 
     def do_op(m):
         op = m.get("op")

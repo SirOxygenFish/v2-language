@@ -1,0 +1,2 @@
+'cjs_fn' is not exported by 'js."./fixtures/cjs_fn.js"'; a module that is one function is imported with @import { "default" as cjs_fn } from js."./fixtures/cjs_fn.js"
+[1, 1]

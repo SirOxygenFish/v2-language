@@ -20,3 +20,6 @@ ArityError error() needs a type and a message, as in error("ValueError", "my err
 NameError 'process' is not declared — V2 gets the script's arguments with args() and prints without a newline with print(x, end: "")
 NameError 'sys' is not declared — V2 gets the script's arguments with args() and stops with exit(n); a Python module is imported with @import py.sys as sys
 NameError 'Math' is not declared — V2 has min, max, abs, round, sum and div(a, b) built in; JavaScript's Math works in a @js block
+NameError 'JSON' is not declared — V2 reads JSON with json_parse(text) and writes it with json_stringify(value)
+NameError 'os' is not declared — V2 has getenv(name), list_dir(path), exists(path) and exec([...]) built in; a Python module is imported with @import py.os as os
+NameError 'env' is not declared — V2 reads an environment variable with getenv(name)

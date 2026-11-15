@@ -1,0 +1,2 @@
+func has no field 'extra' — an imported function or class brings none of its own properties; reach them through the module: @import its file as a module, as in @import js."./file.js" as m, then m.extra (for an ES module's default export, m.default.extra)
+extra [1, 2, 1, 2]

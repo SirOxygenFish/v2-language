@@ -217,6 +217,9 @@ impl<'a> Lexer<'a> {
                     self.line_break(m)?;
                 }
                 '/' if self.peek_at(1) == Some('/') => {
+                    if let Some(d) = self.floor_division(m) {
+                        return Err(d);
+                    }
                     while !matches!(self.peek(), None | Some('\n')) {
                         self.bump();
                     }
@@ -680,7 +683,7 @@ impl<'a> Lexer<'a> {
             match self.peek() {
                 None | Some('\n') => {
                     return Err(Diag::new("unterminated string", Span { hi: q.pos as u32 + 1, ..self.span_from(q) })
-                        .hint("write \\n for a line break, or use a \"\"\" string"));
+                        .hint("write \\n for a line break, or use a \"\"\" string: \"\"\" at the end of the line, the text on the lines after it, and \"\"\" alone on the last line"));
                 }
                 Some(c) if c == quote => {
                     self.bump();
@@ -1238,6 +1241,30 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    /// Python's floor division, `n // 2`: in V2 the rest of the line is a comment, so it would
+    /// silently mean `n` (3.2). A comment that is only a number, right after a name or a number
+    /// with at most one space on each side, is that habit; a result written after code
+    /// (`print(x)    // 3`) is not.
+    fn floor_division(&self, m: Mark) -> Option<Diag> {
+        let prev = self.toks.last().filter(|t| t.span.line == m.line)?;
+        let left = match &prev.tok {
+            Tok::Ident(n) => n.to_string(),
+            Tok::Int(i) => i.to_string(),
+            _ => return None,
+        };
+        let gap = &self.src[prev.span.hi as usize..m.pos];
+        let after = self.rest()[2..].split('\n').next().unwrap_or("");
+        let number = after.strip_prefix(' ').unwrap_or(after).trim_end();
+        let is_number = number.starts_with(|c: char| c.is_ascii_digit()) && number.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '.');
+        if !matches!(gap, "" | " ") || !is_number {
+            return None;
+        }
+        Some(
+            Diag::new(format!("`// {number}` starts a comment in V2, so this line doesn't divide"), self.span_of_mark(m, 2))
+                .hint(format!("V2 divides rounding down with div(a, b), as in div({left}, {number})")),
+        )
+    }
+
     fn skip_blanks(&mut self) {
         while matches!(self.peek(), Some(' ' | '\t')) {
             self.bump();
@@ -1664,6 +1691,12 @@ let n = names
         assert_eq!(err(r#""\x4""#), "\\x takes exactly 2 hex digits");
         assert_eq!(err(r#""\u{110000}""#), "\\u{…} must name a Unicode scalar value in 1 to 6 hex digits");
         assert_eq!(err("\"abc\nx\""), "unterminated string");
+        // Python's `n // 2` (3.2), and the comments that are not that habit.
+        assert_eq!(err("let half = n // 2"), "`// 2` starts a comment in V2, so this line doesn't divide");
+        assert_eq!(err("let x = 7//2\n"), "`// 2` starts a comment in V2, so this line doesn't divide");
+        for src in ["print(x)    // 3", "let n = count    // 3", "let n = 3 // 3 retries", "let d = n // half", "let a = n\n// 2"] {
+            assert!(lex_str(src).is_ok(), "{src}");
+        }
         assert_eq!(err("rf\"x\""), "unknown string prefix `rf`");
         assert_eq!(err("B\"x\""), "unknown string prefix `B`");
     }

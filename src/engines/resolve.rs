@@ -223,6 +223,10 @@ impl Judged {
 /// The skip reason of the Store's fake `python.exe` (7.6): the one skip the cache remembers (7.7).
 const PLACEHOLDER: &str = "Microsoft Store placeholder";
 
+/// The skip reason of a `py` launcher left with no Python (7.6): like the placeholder, no Python
+/// is installed, so the engine is missing, not broken (7.8).
+const NO_RUNTIME: &str = "a py launcher with no Python installed";
+
 fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<Duration>) -> Judged {
     match outcome {
         ProbeOutcome::SpawnFailed(msg) => Judged::Skipped(msg.clone()),
@@ -232,6 +236,10 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<D
             // The placeholder prints "Python was not found" and exits 9009 (7.6).
             if alias && (*code == Some(9009) || output.contains("Python was not found")) {
                 return Judged::Skipped(PLACEHOLDER.into());
+            }
+            // What the launcher says once Python is uninstalled.
+            if *code != Some(0) && output.contains("No suitable Python runtime found") {
+                return Judged::Skipped(NO_RUNTIME.into());
             }
             if *code != Some(0) {
                 // What the program said, first line, so a missing library shows (7.6).
@@ -243,7 +251,9 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<D
             }
             let Some((args, pattern)) = &spec.probe else { return Judged::Skipped("no version probe".into()) };
             let Some(version) = pattern.find(output) else {
-                return Judged::Skipped(format!("no version in its {} output", args.join(" ")));
+                // `V2_ENGINE_JS` naming Python: what it printed says so.
+                let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(" (it printed: {})", l.chars().take(80).collect::<String>()));
+                return Judged::Skipped(format!("no version in its {} output{}", args.join(" "), said.unwrap_or_default()));
             };
             match spec.too_old(version) {
                 Some(why) => Judged::TooOld(version, why),
@@ -277,9 +287,11 @@ pub struct ProbeCache {
 }
 
 impl ProbeCache {
-    /// The cache under `home`; an unreadable file or an unknown `format` counts as empty.
+    /// The cache under `home`; an unreadable file or an unknown `format` counts as empty. A home
+    /// folder that doesn't exist (`/nonexistent`, a service account's) has no cache, rather than
+    /// one V2 would create it for (18.1).
     pub fn open(home: Option<&Path>, mode: CacheMode) -> ProbeCache {
-        let file = home.filter(|_| mode != CacheMode::Off).map(|h| h.join(".v2").join("cache").join("toolchains.json"));
+        let file = home.filter(|h| mode != CacheMode::Off && h.is_dir()).map(|h| h.join(".v2").join("cache").join("toolchains.json"));
         let entries = file.as_deref().and_then(read_cache).unwrap_or_default();
         ProbeCache { file, mode, entries, changed: Vec::new() }
     }
@@ -599,12 +611,24 @@ impl Resolver<'_> {
     fn configured(&mut self, spec: &Rc<EngineSpec>, command: &[String], from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let name = &command[0];
         let Some(path) = first_program(name, self.lookup) else {
-            // `V2_ENGINE_PY="py -3"`: the variable holds one program, never split (18.4).
+            // `V2_ENGINE_PY="C:\Python311"`: a folder; `V2_ENGINE_PY="py -3"`: the variable holds
+            // one program, never split (18.4).
+            let first = name.split_whitespace().next().unwrap_or_default();
+            let quote = |w: &str| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
             let hint = match from {
-                ConfigSource::Env(var) if name.trim().contains(char::is_whitespace) => format!(
+                ConfigSource::Env(var) if Path::new(name).is_dir() => {
+                    let program = match (&*spec.id, cfg!(windows)) {
+                        ("py", true) => "python.exe",
+                        ("py", false) => "python3",
+                        (_, true) => "node.exe",
+                        _ => "node",
+                    };
+                    format!("; {var} names a folder: point it at the program in it, as in {}", Path::new(name).join(program).display())
+                }
+                ConfigSource::Env(var) if name.trim().contains(char::is_whitespace) && first_program(first, self.lookup).is_some() => format!(
                     "; {var} names one program, without arguments: for a command with arguments, write [engines.{}] command = [{}] in v2.toml",
                     spec.id,
-                    name.split_whitespace().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(", ")
+                    name.split_whitespace().map(quote).collect::<Vec<_>>().join(", ")
                 ),
                 _ => String::new(),
             };
@@ -661,7 +685,9 @@ impl Resolver<'_> {
                 let arg = if shown.contains(' ') { format!("\"{shown}\"") } else { shown.clone() };
                 format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {arg})")
             };
-            return Err(NotFound::broken(message, candidates[0].display().to_string(), from));
+            // COMMAND: the venv as given when it names a file, not a path inside it (19.2).
+            let shown_command = if is_regular_file(venv) { shown.clone() } else { candidates[0].display().to_string() };
+            return Err(NotFound::broken(message, shown_command, from));
         };
         let what = format!("[python] venv '{}'", venv.display());
         self.usable(spec, vec![exe.clone().into_os_string()], Origin::Venv, &what, from)
@@ -712,7 +738,7 @@ impl Resolver<'_> {
                         skipped.push((hit, reason));
                     }
                     Judged::Skipped(reason) => {
-                        failed |= reason != PLACEHOLDER;
+                        failed |= reason != PLACEHOLDER && reason != NO_RUNTIME;
                         skipped.push((hit, reason));
                     }
                 }
@@ -1122,7 +1148,7 @@ mod tests {
                 ProbeOutcome::Exited { code: Some(127), output: "\nnode: error while loading shared libraries: libatomic.so.1: cannot open shared object file\n".into() },
                 "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file",
             ),
-            (says("node, but no version"), "no version in its --version output"),
+            (says("node, but no version"), "no version in its --version output (it printed: node, but no version)"),
         ] {
             let p = fake(move |_| outcome.clone());
             let nf = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
@@ -1232,10 +1258,29 @@ mod tests {
         assert_eq!(library_fix(node, reason).as_deref(), Some("/usr/local/bin/node needs libatomic.so.1: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic"));
         assert!(library_fix(node, "version probe failed (exit code 127): x: error while loading shared libraries: libfoo.so.2: nope").unwrap().ends_with("needs libfoo.so.2, which isn't installed: install it with your system's package manager"));
         assert_eq!(library_fix(node, "version probe failed (exit code 1)"), None);
-        // V2_ENGINE_PY holds one program (18.4).
+        // V2_ENGINE_PY holds one program (18.4): a command with arguments when its program is
+        // on PATH, a folder as a folder, anything else as not found.
+        let d = temp("onecmd");
+        exe(&d, "py");
         let cfg = with_command("py", &["py -3"], ConfigSource::Env("V2_ENGINE_PY".into()));
-        let nf = resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with("; V2_ENGINE_PY names one program, without arguments: for a command with arguments, write [engines.py] command = [\"py\", \"-3\"] in v2.toml"), "{}", nf.message);
+        let folder = d.join("Python Folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        let cfg = with_command("py", &[&folder.to_string_lossy()], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        let inside = folder.join(if cfg!(windows) { "python.exe" } else { "python3" });
+        assert!(nf.message.ends_with(&format!("; V2_ENGINE_PY names a folder: point it at the program in it, as in {}", inside.display())), "{}", nf.message);
+        let cfg = with_command("py", &["no such python"], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with("not found (set by V2_ENGINE_PY)"), "{}", nf.message);
+        // A py launcher with no Python behind it: Python is missing, not broken (7.8).
+        let launcher = temp("noruntime");
+        exe(&launcher, if cfg!(windows) { "py" } else { "python3" });
+        let p = fake(|_| ProbeOutcome::Exited { code: Some(103), output: "No suitable Python runtime found\nPass --list (-0) to see all detected environments on your machine\n".into() });
+        let nf = resolve_with(&Config::default(), &lookup(&[&launcher], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.status, Status::Missing, "{}", nf.message);
+        assert!(nf.message.contains("(a py launcher with no Python installed)"), "{}", nf.message);
     }
 
     #[test]

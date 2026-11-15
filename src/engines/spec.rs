@@ -120,7 +120,9 @@ pub fn builtins() -> Vec<EngineSpec> {
             aliases: strs(&["javascript"]),
             session_of: None,
             candidates: vec![strs(&["node"])],
-            fixed_args: strs(&["{adapter}"]),
+            // A .ts file that imports another, in a folder whose package.json has no "type", makes
+            // Node advise "type": "module", which would break CommonJS files there (7.2).
+            fixed_args: strs(&["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "{adapter}"]),
             env: Vec::new(),
             min_version: Some(Version(22, 13, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Node)),

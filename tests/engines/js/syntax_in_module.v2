@@ -1,0 +1,24 @@
+// requires: js ts
+// A module file that doesn't compile: its own file and line come first (INTERNALS 12.6, 13.5),
+// for an ES module (whose error has no location), CommonJS and TypeScript (in ts).
+func show(e, file, lang) {
+    print(e.foreign_type, e.trace[0].ends_with(f"${file}:2, in ${lang}"))
+}
+try {
+    @import { ok } from js."./fixtures/syntax_bad.mjs"
+    print(ok(1))
+} catch (e) {
+    show(e, "syntax_bad.mjs", "js")
+}
+try {
+    @import { ok } from js."./fixtures/syntax_bad.cjs"
+    print(ok(1))
+} catch (e) {
+    show(e, "syntax_bad.cjs", "js")
+}
+try {
+    @import { ok } from ts."./fixtures/syntax_bad.ts"
+    print(ok(1))
+} catch (e) {
+    show(e, "syntax_bad.ts", "ts")
+}

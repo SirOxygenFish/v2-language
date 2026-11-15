@@ -99,8 +99,22 @@ fn no_member(o: &Value, what: &str, n: &str) -> String {
         Value::Func(f) if matches!(&**f, Callable::Proxy { unit, .. } if unit.starts_with(|c: char| c.is_ascii_digit())) => {
             format!("{msg} — an imported class is only a function here; @export a function from the block that uses {}.{n}", f.name())
         }
+        // A package's function or class: its members are reached through the module, where a
+        // CommonJS package (lodash, dayjs) is itself the function, and an ES module's default
+        // export is `m.default` (13.5).
         Value::Func(f) if matches!(**f, Callable::Proxy { .. }) => {
-            format!("{msg} — an imported class is only a function here; @import its module as m to reach m.{}.{n}", f.name())
+            let Callable::Proxy { unit, .. } = &**f else { return msg };
+            let (lang, pkg) = unit.split_once(':').unwrap_or(("py", unit));
+            let name = f.name();
+            let module = if std::path::Path::new(pkg).is_absolute() {
+                "@import its file as a module, as in @import js.\"./file.js\" as m".to_string()
+            } else if lang == "py" || crate::syntax::lexer::is_plain_name(pkg) {
+                format!("@import {lang}.{pkg} as m")
+            } else {
+                format!("@import {lang}.\"{pkg}\" as m")
+            };
+            let reach = if name == "default" { format!("m.{n} (for an ES module's default export, m.default.{n})") } else { format!("m.{name}.{n}") };
+            format!("{msg} — an imported function or class brings none of its own properties; reach them through the module: {module}, then {reach}")
         }
         _ => match habit(o, n) {
             Some(h) => format!("{msg} — {h}"),
@@ -541,6 +555,9 @@ impl Interp {
             "process" => Some("V2 gets the script's arguments with args() and prints without a newline with print(x, end: \"\")".to_string()),
             "sys" => Some("V2 gets the script's arguments with args() and stops with exit(n); a Python module is imported with @import py.sys as sys".to_string()),
             "Math" => Some("V2 has min, max, abs, round, sum and div(a, b) built in; JavaScript's Math works in a @js block".to_string()),
+            "json" | "JSON" => Some("V2 reads JSON with json_parse(text) and writes it with json_stringify(value)".to_string()),
+            "os" => Some("V2 has getenv(name), list_dir(path), exists(path) and exec([...]) built in; a Python module is imported with @import py.os as os".to_string()),
+            "env" | "environ" | "ENV" => Some("V2 reads an environment variable with getenv(name)".to_string()),
             _ => None,
         };
         if let Some(h) = habit {

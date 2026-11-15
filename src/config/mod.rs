@@ -307,10 +307,11 @@ impl File {
     fn path(&self, what: &str, v: &toml::Value) -> Result<PathBuf, ConfigError> {
         let text = unquoted(&self.string_of(what, v)?).to_string();
         if let Some(home) = home_relative(&text) {
-            return Ok(home);
+            return Ok(absolute_clean(&home));
         }
         self.not_drive_relative(what, &text)?;
-        Ok(self.base.join(text))
+        // `../venvs/.venv` shown and used without the `..` (doctor prints it).
+        Ok(absolute_clean(&self.base.join(text)))
     }
 
     /// An array of strings. For a `command`, a string gets the array to write instead (18.2):

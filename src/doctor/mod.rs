@@ -264,6 +264,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
             }
         }
     }
+    // Blocks also need a temp folder (20.3).
+    if let Some(problem) = crate::config::rundir::temp_problem() {
+        notes.push(format!("temp: {problem}"));
+        not_ready.push("blocks".into());
+    }
     let widths: Vec<usize> = (0..5).map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0) + 2).collect();
     for row in &rows {
         let mut line = String::new();
