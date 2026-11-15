@@ -15,7 +15,7 @@ sys=/usr/bin:/bin:/usr/sbin:/sbin
 os=$(uname -s)
 failed=0
 n=0
-line='export PATH="$HOME/.v2/bin:$PATH"'
+line='case ":$PATH:" in *":$HOME/.v2/bin:"*) ;; *) export PATH="$HOME/.v2/bin:$PATH" ;; esac'
 
 fresh() {
     n=$((n + 1))
@@ -258,6 +258,53 @@ install /bin/bash V2_ARCHIVE="$h/v2-x86_64-pc-windows-msvc.zip"
 expect "$code" 1 "exit code for a .zip"
 says "v2-x86_64-pc-windows-msvc.zip is the download for Windows: this computer needs $mine" || { echo "    no message for a .zip"; ok=no; }
 result "an archive for another computer"
+
+# Folder names with characters the shell treats specially still work in new shells.
+fresh
+odd="$h/my \"v2\" \$x \`t\` dir"
+mkdir -p "$odd"
+install /bin/bash V2_INSTALL_DIR="$odd"
+ok=yes
+expect "$code" 0 "exit code"
+found=$(env -i HOME="$h" PATH="$sys" bash -lc 'command -v v2' 2>&1 || true)
+expect "$found" "$odd/v2" "bash -lc finds"
+if command -v fish >/dev/null 2>&1; then
+    install /usr/bin/fish V2_INSTALL_DIR="$odd"
+    found=$(env -i HOME="$h" PATH="$sys" LANG=C.UTF-8 fish -c 'command -v v2' 2>&1 || true)
+    expect "$found" "$odd/v2" "fish -c finds"
+fi
+result "a folder named with \", \$ and \`"
+
+# A folder already on PATH: no startup file changes. A shell that reads two files gets it once.
+fresh
+install /bin/bash PATH="$h/.v2/bin:$sys"
+ok=yes
+says "$h/.v2/bin is already on your PATH, so no startup file was changed" || { echo "    no message"; ok=no; }
+expect "$(ls -A "$h")" .v2 "files written"
+install /bin/bash
+twice=$(env -i HOME="$h" PATH="$sys" bash -lc '. "$HOME/.bashrc"; printf "%s" "$PATH"' | tr ':' '\n' | grep -cxF "$h/.v2/bin")
+expect "$twice" 1 "times on PATH after .profile and .bashrc"
+result "a folder already on PATH, and only once"
+
+# fish's startup folder follows XDG_CONFIG_HOME.
+fresh
+install /usr/bin/fish XDG_CONFIG_HOME="$h/xdg"
+ok=yes
+expect "$([ -f "$h/xdg/fish/conf.d/v2.fish" ] && echo yes || echo no)" yes "xdg/fish/conf.d/v2.fish"
+result "fish with XDG_CONFIG_HOME"
+
+# An update into another folder says where the v2 this terminal runs is; latest isn't a release.
+fresh
+mkdir "$h/old"
+printf '#!/bin/sh\necho old\n' >"$h/old/v2"
+chmod 755 "$h/old/v2"
+install /bin/bash PATH="$h/old:$sys"
+ok=yes
+says "Note: this terminal runs another v2, $h/old/v2; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=$h/old" || { echo "    no note"; ok=no; }
+install /bin/bash V2_VERSION=latest
+expect "$code" 1 "exit code for latest"
+says "V2_VERSION=latest isn't a release name: leave V2_VERSION unset" || { echo "    no message for latest"; ok=no; }
+result "another v2 elsewhere, and V2_VERSION=latest"
 
 # Another v2 that comes first.
 fresh

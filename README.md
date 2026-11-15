@@ -55,7 +55,8 @@ wget -qO- https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/insta
 Both download from this repository's
 [Releases](https://github.com/SirOxygenFish/v2-language/releases), check the file's SHA-256, run
 `v2 --version` to make sure it works on your computer before it replaces anything, and tell you if
-another `v2` comes first on your PATH. Running one again updates V2. Settings:
+another `v2` comes first on your PATH. Running one again updates V2 (with the same `V2_INSTALL_DIR`,
+if you used one). Settings:
 
 | Setting               | Does                                                          |
 | --------------------- | ------------------------------------------------------------- |
@@ -248,7 +249,7 @@ print(f"best: ${best}")
 try {
     @py { 1 / 0 }
 } catch (e) {
-    print(e.type, e.foreign_type)
+    print(e.type, e.foreign_type, e.message)
 }
 ```
 
@@ -260,7 +261,7 @@ grace: B
 linus: keep going
 ["ada", "grace"] 2 true
 best: ada
-ForeignError ZeroDivisionError
+ForeignError ZeroDivisionError division by zero
 ```
 
 ### Coming from Python or JavaScript
@@ -269,6 +270,8 @@ ForeignError ZeroDivisionError
 | ----------------------------------------- | ----------------------------------------------- |
 | `def f(x, y=2):`, `function f(x, y = 2) { }` | `func f(x, y = 2) { ... }`                   |
 | `lambda x: x * 2`, `x => x * 2`           | `func(x) => x * 2`                              |
+| `function (x) { ... }` (several statements) | `func(x) { ... }`                             |
+| `import util`, `import ... from "./util.js"` (a file of yours) | `import "./util.v2" as util`, then `util.f()` |
 | `x = 1`, `var x = 1`, `let x = 1`         | `let x = 1` (and `const` for a constant)        |
 | `True`, `False`, `None`, `null`, `undefined` | `true`, `false`, `null`                      |
 | `and`, `or`, `not`                        | `&&`, `\|\|`, `!`                                |
@@ -291,6 +294,11 @@ ForeignError ZeroDivisionError
 | `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`) |
 | `input()`                                 | `input()` (`null` at the end of input)          |
 
+V2's own functions include `int`, `float`, `str`, `round`, `abs`, `min`, `max`, `sum`, `range`,
+`type` and `len`; strings have `split`, `upper`, `lower`, `replace`, `trim`, `starts_with` and
+`ends_with`; lists `push`, `pop`, `sort` and `join`; dicts `keys`, `values`, `get` and `remove`.
+`cond ? a : b` picks a value, `r"C:\new"` keeps its backslashes, and a caught error has `e.type`
+and `e.message`. In another `.v2` file, every top-level name not starting with `_` can be imported.
 A block can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and its last
 expression is its value. File paths are relative to the folder you run `v2` from; for a file next
 to the script, `read_file(f"${script_dir()}/data.csv")`. `v2 check FILE` checks a script's V2
@@ -305,18 +313,18 @@ and a [cookbook](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#
 ## Python and npm packages
 
 V2 doesn't install packages: it uses the Python and Node.js that `v2 doctor` shows, with the
-packages installed for them.
+packages installed for them. A Python package is imported with `@import py.numpy as np` (or
+`@import { mean } from py.statistics`), and a `helpers.py` next to the script is `py.helpers`.
 
 - **npm:** in your project folder, `npm install lodash`, then
   `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
   `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
   `@import { f } from js."./helpers.js"`.
-- **Python on Windows:** `py -m pip install numpy`, then `@import py.numpy as np`. If
-  `v2 doctor` shows another Python, use its path, with `&` in front in PowerShell:
-  `& "C:\Program Files\Python313\python.exe" -m pip install numpy`. A virtual environment works
-  as below, with `py -m venv .venv` and `.venv\Scripts\pip install numpy`. A `helpers.py` next
-  to the script is `py.helpers`.
+- **Python on Windows:** `py -m pip install numpy`. If `v2 doctor` shows another Python, use its
+  path, with `&` in front in PowerShell: `& "C:\Program Files\Python313\python.exe" -m pip install
+  numpy`. A virtual environment works as below, with `py -m venv .venv` and
+  `.venv\Scripts\pip install numpy`.
 - **Python on Linux and macOS:** the system's and Homebrew's Python refuse `pip install` outside a
   virtual environment ("externally-managed-environment"), so make one in your project folder:
 
@@ -325,7 +333,9 @@ packages installed for them.
   .venv/bin/pip install numpy
   ```
 
-  and tell V2 to use it with a file named `v2.toml` next to your script:
+  and tell V2 to use it with a file named `v2.toml` next to your script (V2 uses the nearest
+  `v2.toml` in the script's folder or a folder above it; `venv` names the folder, not its
+  `python`):
 
   ```toml
   [python]
@@ -360,6 +370,15 @@ shows which version V2 found, and where.
 **`SyntaxError: file is not valid UTF-8`.** Save the file as UTF-8. In Windows PowerShell 5, `>`
 and `Out-File` write UTF-16: use an editor, or `Set-Content -Encoding utf8`.
 
+**Non-ASCII text turns into `├╝` or `?` when piped in Windows PowerShell 5.1.** It decodes and
+encodes what passes through pipes with the console's old code page. Run
+`[Console]::OutputEncoding = $OutputEncoding = [Text.UTF8Encoding]::new()` first in that window,
+or use PowerShell 7 or cmd.exe.
+
+**`UnicodeDecodeError` when a `@py` block reads a file that plain Python reads.** Blocks run in
+Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass
+`open(path, encoding="cp1252")`.
+
 **`cannot find 'hello.v2'`.** Your terminal is in another folder: `cd` to the folder with the file,
 or give its full path. The message says where V2 looked and which `.v2` files are there.
 
@@ -389,7 +408,8 @@ code 130.
 says what's ready.
 
 **Which Python and Node.js does V2 use?** The first suitable `python3`, `python` (on Windows also
-`py -3`) and `node` on your PATH; `v2 doctor` shows them. To pick one, put a `v2.toml` in your
+`py -3`) and `node` on your PATH, unless a `v2.toml` says otherwise; `v2 doctor`, run in the
+script's folder, shows them. To pick one, put a `v2.toml` in your
 project folder ([docs, chapter 14](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#14-project-file-v2toml)):
 `[python]` `venv = ".venv"` for a virtual environment, or `[engines.py]`
 `command = ["C:/Python313/python.exe"]` (on macOS, for example, `["/opt/homebrew/bin/python3"]`).
@@ -434,6 +454,10 @@ Node.js workers.
   data that any language takes (functions are the exception: they can be passed anywhere).
 - **Blocks can't read standard input:** V2's `input()` owns it. Read the input in V2 and pass it
   in.
+- **Programs a block starts print to standard error**, not standard output (`subprocess.run`,
+  `os.system`, `child_process`), so `v2 x.v2 > out.txt` doesn't catch what they print. Capture
+  their output in the block and print it, or run them with V2's own `exec(["git", "status"])`,
+  which returns `{code, stdout, stderr}`.
 - **Output from blocks is text:** bytes that aren't UTF-8 come out as U+FFFD, so write binary data
   to a file.
 - **A class imported from a block is a function here:** you can make objects and call their
@@ -447,13 +471,15 @@ Node.js workers.
 
 ## Uninstall
 
-1. Delete the folder `.v2` in your home folder (`%USERPROFILE%\.v2` on Windows): it holds V2
-   and its caches. If you installed with `V2_INSTALL_DIR`, delete just `v2` (`v2.exe`) from that
-   folder, not the folder.
+1. Delete the folder `.v2` in your home folder (`%USERPROFILE%\.v2` on Windows): it holds V2's
+   caches, and V2 itself unless you installed with `V2_INSTALL_DIR`. If you did, also delete just
+   `v2` (`v2.exe`, and a `v2.exe.old` if there is one) from that folder, not the folder.
 2. Take it off your PATH. Windows: Settings, search "Edit environment variables for your account",
    select `Path`, delete the `.v2\bin` entry. macOS and Linux: in each startup file `install.sh`
-   named, delete the line `# V2 (added by install.sh)` and the line under it; with fish, delete
-   `~/.config/fish/conf.d/v2.fish`.
+   changed (`~/.bashrc`, `~/.profile` or `~/.bash_profile`, `~/.zshenv`; `grep -l 'added by
+   install.sh' ~/.bashrc ~/.profile ~/.bash_profile ~/.zshenv` lists them), delete the line
+   `# V2 (added by install.sh)` and the line under it; with fish, delete
+   `~/.config/fish/conf.d/v2.fish` (under `$XDG_CONFIG_HOME` instead, if you set it).
 
 ## Reporting bugs
 

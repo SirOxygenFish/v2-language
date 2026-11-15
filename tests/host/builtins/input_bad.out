@@ -1,0 +1,2 @@
+[ok]
+IOError input line 2 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text, or read the file with read_file(path, binary: true)

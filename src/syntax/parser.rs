@@ -60,6 +60,17 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         (_, Some("and" | "or"), _) => "V2 writes and, or and not as &&, || and !".into(),
         (_, Some("is"), _) => "V2 compares with == and !=, as in x == null".into(),
         (Some("lambda"), Some(_), _) => "V2 writes an anonymous function as func(x) => x * 2".into(),
+        // `raise ValueError("bad")`, `throw new Error("bad")`, `new Foo()`.
+        (Some("raise"), Some(kind), _) => format!("V2 throws an error with throw error(\"{kind}\", {})", message_after(toks, i)),
+        (Some("new"), Some(kind), _) if matches!(tok(2), Some(Tok::Kw(Kw::Throw))) => {
+            let message = message_after(toks, i);
+            format!("V2 has no new: throw error(\"{kind}\", {message}), or throw {message} for a plain Error")
+        }
+        (Some("new"), Some(kind), _) => format!("V2 has no new: call it, as in {kind}(…)"),
+        // Python's `"big" if x > 2 else "small"`.
+        _ if matches!(tok(0), Some(Tok::Kw(Kw::If))) && !matches!(tok(1), None | Some(Tok::Newline | Tok::Semi | Tok::LBrace(_) | Tok::RBrace | Tok::Kw(Kw::Else))) => {
+            "V2 writes a conditional value as cond ? a : b, as in x > 2 ? \"big\" : \"small\"".into()
+        }
         (Some("print"), _, _) if matches!(tok(0), Some(Tok::Str(_) | Tok::FStr(_) | Tok::Ident(_) | Tok::Int(_) | Tok::Float(_))) => {
             "print is a function in V2: print(\"hello\")".into()
         }
@@ -126,6 +137,14 @@ fn from_import_hint(toks: &[Token]) -> Option<String> {
         return None;
     }
     Some(format!("V2 imports names with @import {{ {} }} from py.{module}", names.join(", ")))
+}
+
+/// The message of `raise ValueError("bad")` as written (the string after `(`), else `"text"`.
+fn message_after(toks: &[Token], i: usize) -> String {
+    match (toks.get(i + 1).map(|t| &t.tok), toks.get(i + 2).map(|t| &t.tok)) {
+        (Some(Tok::Op(Op::LParen)), Some(Tok::Str(m))) => format!("{:?}", &**m),
+        _ => "\"text\"".into(),
+    }
 }
 
 /// The package name written at byte `lo` of `text`, with its dashes and digits (`date-fns`,
@@ -580,7 +599,14 @@ impl<'a> Parser<'a> {
                     finally = Some(self.body("finally")?);
                 }
                 if catch.is_none() && finally.is_none() {
-                    return Err(Diag::new("try needs a catch or a finally", start));
+                    let d = Diag::new("try needs a catch or a finally", start);
+                    // Python's `except`, on the same line or the next.
+                    let mut k = 0;
+                    while matches!(self.peek_at(k), Tok::Newline) {
+                        k += 1;
+                    }
+                    let except = matches!(self.peek_at(k), Tok::Ident(w) if &**w == "except");
+                    return Err(if except { d.hint("V2 writes except as catch: try { ... } catch (e) { ... }") } else { d });
                 }
                 StmtKind::Try { body, catch, finally }
             }
@@ -656,6 +682,12 @@ impl<'a> Parser<'a> {
     fn func_rest(&mut self, name: Option<Name>, start: Span) -> Result<FuncDecl, Diag> {
         self.expect_op(Op::LParen)?;
         let (params, rest) = self.params()?;
+        if let (Some(n), true) = (&name, self.at_op(Op::FatArrow)) {
+            let names: Vec<&str> = params.iter().map(|(p, _)| &*p.text).collect();
+            let (f, args) = (&n.text, names.join(", "));
+            return Err(Diag::new("expected {, found `=>`", self.span())
+                .hint(format!("a named function has a {{ }} body: func {f}({args}) {{ return … }}, or write let {f} = func({args}) => …")));
+        }
         let body = if name.is_none() && self.at_op(Op::FatArrow) {
             self.bump();
             // `=> {` starts a dict: the JS habit of a block after `=>` lands here.
@@ -1801,6 +1833,13 @@ extern "m" as m { double cos(double x); }
             "write @import { slugify } from js.\"@sindresorhus/slugify\" (a default export: @import { \"default\" as slugify } from js.\"@sindresorhus/slugify\"), or @import js.\"@sindresorhus/slugify\" as slugify for the whole module"
         );
         assert_eq!(hint("let f = lambda x: x * 2"), "V2 writes an anonymous function as func(x) => x * 2");
+        assert_eq!(hint("raise ValueError(\"bad\")"), "V2 throws an error with throw error(\"ValueError\", \"bad\")");
+        assert_eq!(hint("throw new Error(\"bad\")"), "V2 has no new: throw error(\"Error\", \"bad\"), or throw \"bad\" for a plain Error");
+        assert_eq!(hint("let d = new Date()"), "V2 has no new: call it, as in Date(…)");
+        assert_eq!(hint("let s = \"big\" if x > 2 else \"small\""), "V2 writes a conditional value as cond ? a : b, as in x > 2 ? \"big\" : \"small\"");
+        assert_eq!(hint("try {\n} except (e) {\n}"), "V2 writes except as catch: try { ... } catch (e) { ... }");
+        assert_eq!(hint("try {\n}\nexcept (e) {\n}"), "V2 writes except as catch: try { ... } catch (e) { ... }");
+        assert_eq!(hint("func by_len(s) => len(s)"), "a named function has a { } body: func by_len(s) { return … }, or write let by_len = func(s) => …");
         assert_eq!(hint("print \"hi\""), "print is a function in V2: print(\"hello\")");
         assert_eq!(hint("import numpy as np"), "a Python module is imported with @import py.numpy as np; another .v2 file with import \"./util.v2\" as util");
         assert_eq!(hint("import os.path"), "a Python module is imported with @import py.os.path as path; another .v2 file with import \"./util.v2\" as util");

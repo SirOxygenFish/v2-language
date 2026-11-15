@@ -17,3 +17,6 @@ NameError 'open' is not declared — V2 reads a file with read_file(path) and wr
 NameError 'sorted' is not declared — V2 sorts a list with xs.sort()
 TypeError str has no method 'join' — V2 joins a list with xs.join(sep)
 ArityError error() needs a type and a message, as in error("ValueError", "my error"); throw "my error" throws a plain Error
+NameError 'process' is not declared — V2 gets the script's arguments with args() and prints without a newline with print(x, end: "")
+NameError 'sys' is not declared — V2 gets the script's arguments with args() and stops with exit(n); a Python module is imported with @import py.sys as sys
+NameError 'Math' is not declared — V2 has min, max, abs, round, sum and div(a, b) built in; JavaScript's Math works in a @js block

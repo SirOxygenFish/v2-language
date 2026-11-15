@@ -261,6 +261,46 @@ fn io_error<T>(message: String) -> Exec<T> {
     fail("IOError", message)
 }
 
+/// A path as messages show it: control characters escaped, so the line break that `"C:\new"`
+/// holds can't split the message (5.10).
+fn shown_path(path: &str) -> String {
+    let mut out = String::new();
+    for c in path.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A file builtin's OS failure (5.10): `cannot read 'x': <why>`, a folder said as such, and for
+/// a path holding a control character the hint that `\n` and `\t` in `"…"` are escapes.
+fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
+    let why = if verb == "read" && std::path::Path::new(path).is_dir() { "it is a folder".to_string() } else { os_message(e) };
+    let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
+    if path.chars().any(char::is_control) {
+        let _ = err
+            .hint
+            .set(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write Windows paths with / or \\, as in "notes/new.txt""#.into());
+    }
+    Err(Flow::Error(Rc::new(err)))
+}
+
+/// What text that isn't UTF-8 probably is (5.10).
+fn not_utf8_kind(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        "it is UTF-16 (what Windows PowerShell's > and Out-File write)"
+    } else if bytes.iter().take(8192).any(|&b| b == 0) {
+        "it looks like binary data"
+    } else {
+        "it may be in an older encoding, such as Windows-1252"
+    }
+}
+
 /// `input(prompt = "")`: one line from stdin without `\n` and one `\r` before it; `null` at end
 /// of input; the prompt is flushed first (5.10).
 fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
@@ -281,13 +321,17 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     }
     // Windows PowerShell 5 starts text it pipes with a byte-order mark: the first line drops it,
     // as a script file's first line does (5.10).
-    thread_local!(static FIRST_LINE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
-    if FIRST_LINE.with(|f| f.replace(false)) && line.starts_with(&[0xEF, 0xBB, 0xBF]) {
+    thread_local!(static LINES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+    let n = LINES.with(|l| {
+        l.set(l.get() + 1);
+        l.get()
+    });
+    if n == 1 && line.starts_with(&[0xEF, 0xBB, 0xBF]) {
         line.drain(..3);
     }
     match String::from_utf8(line) {
         Ok(s) => Ok(Value::Str(s.into())),
-        Err(_) => io_error("input is not valid UTF-8".into()),
+        Err(e) => io_error(format!("input line {n} is not valid UTF-8: {}: send UTF-8 text, or read the file with read_file(path, binary: true)", not_utf8_kind(e.as_bytes()))),
     }
 }
 
@@ -392,21 +436,26 @@ fn json_stringify(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> 
     Ok(Value::Str(json::stringify(&args[0], indent)?.into()))
 }
 
-/// `read_file(path, binary: false)`: relative to the working directory; text is strict UTF-8,
-/// BOM kept, no newline translation (5.10).
+/// `read_file(path, binary: false)`: relative to the working directory; text is strict UTF-8
+/// without one leading BOM (Windows tools write one), no newline translation (5.10).
 fn read_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
     let binary = bool_arg(&args[1], "read_file", "binary")?;
     let bytes = match std::fs::read(&*path) {
         Ok(b) => b,
-        Err(e) => return io_error(format!("cannot read '{path}': {}", os_message(&e))),
+        Err(e) => return file_error("read", &path, &e),
     };
     if binary {
         return Ok(Value::Bytes(bytes.into()));
     }
-    match String::from_utf8(bytes) {
-        Ok(s) => Ok(Value::Str(s.into())),
-        Err(_) => io_error(format!("'{path}' is not valid UTF-8 (use binary: true)")),
+    let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    match std::str::from_utf8(text) {
+        Ok(s) => Ok(Value::str(s)),
+        Err(_) => {
+            let kind = not_utf8_kind(&bytes);
+            let fix = if kind.ends_with("binary data") { "read it with binary: true" } else { "save it as UTF-8, or read it with binary: true" };
+            io_error(format!("'{}' is not valid UTF-8: {kind}: {fix}", shown_path(&path)))
+        }
     }
 }
 
@@ -426,7 +475,7 @@ fn write_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     };
     match r {
         Ok(()) => Ok(Value::Null),
-        Err(e) => io_error(format!("cannot write '{path}': {}", os_message(&e))),
+        Err(e) => file_error("write", &path, &e),
     }
 }
 
@@ -439,7 +488,7 @@ fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `list_dir(path)`: the entry names, sorted by code point (5.10).
 fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "list_dir", "path")?;
-    let failed = |e: std::io::Error| io_error(format!("cannot list '{path}': {}", os_message(&e)));
+    let failed = |e: std::io::Error| file_error("list", &path, &e);
     let entries = match std::fs::read_dir(&*path) {
         Ok(rd) => rd,
         Err(e) => return failed(e),
@@ -464,7 +513,7 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "make_dir", "path")?;
     match std::fs::create_dir_all(&*path) {
         Ok(()) => Ok(Value::Null),
-        Err(e) => io_error(format!("cannot create '{path}': {}", os_message(&e))),
+        Err(e) => file_error("create", &path, &e),
     }
 }
 
@@ -473,7 +522,7 @@ fn remove_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "remove_file", "path")?;
     match std::fs::remove_file(&*path) {
         Ok(()) => Ok(Value::Null),
-        Err(e) => io_error(format!("cannot remove '{path}': {}", os_message(&e))),
+        Err(e) => file_error("remove", &path, &e),
     }
 }
 

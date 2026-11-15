@@ -209,8 +209,12 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 ready.push(id);
             }
             Err(nf) => {
+                // ts is held to js's minimum (7.6).
+                let rule = spec.session_of.as_ref().and_then(|host| reg.specs().iter().find(|s| &s.id == host)).unwrap_or(spec);
                 let (status, version) = match nf.status {
                     Status::Missing => ("missing", "-".to_string()),
+                    // Node 23.0 and 23.1: newer than the minimum, without type stripping (7.6).
+                    Status::Old(v) if rule.min_version.is_some_and(|min| v >= min) => ("unsupported", v.to_string()),
                     Status::Old(v) => ("old", v.to_string()),
                     Status::Broken => ("broken", "-".to_string()),
                 };
@@ -228,14 +232,14 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     _ => None,
                 };
                 let host = spec.session_of.as_ref().and_then(|h| rows.iter().find(|r| *r[0] == **h)).filter(|r| r[1] != "missing").map(|r| (r[2].clone(), r[4].clone()));
+                // The row and the note already say why the too-old one shown can't be used.
+                let shown_old = found.clone().filter(|_| matches!(nf.status, Status::Old(_)));
                 let (command, from) = match (found, host) {
                     (Some(path), _) => (path, "PATH".to_string()),
                     (None, Some(js)) if nf.command.is_none() => js,
                     _ => (nf.command.clone().unwrap_or_else(dash), nf.from.clone().unwrap_or_else(dash)),
                 };
                 rows.push([id.clone(), status.into(), command, version, from]);
-                // ts is held to js's minimum (7.6).
-                let rule = spec.session_of.as_ref().and_then(|host| reg.specs().iter().find(|s| &s.id == host)).unwrap_or(spec);
                 let note = match (nf.status, rule.min_version, &nf.command) {
                     (Status::Missing, _, _) => format!("not found; install: {}", install_hint(&id)),
                     (Status::Old(v), Some(min), None) if v >= min => {
@@ -251,7 +255,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     _ => note,
                 };
                 notes.push(format!("{id}: {note}"));
-                skipped(&nf.skipped, &mut notes);
+                let others: Vec<(std::path::PathBuf, String)> =
+                    nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
+                skipped(&others, &mut notes);
+                // A program that can't load a library: the package that has it (7.8).
+                notes.extend(nf.skipped.iter().filter_map(|(p, why)| crate::engines::resolve::library_fix(p, why)).map(|fix| format!("{id}: fix: {fix}")));
                 not_ready.push(id);
             }
         }

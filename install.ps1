@@ -88,10 +88,12 @@
         }
 
         # 3. Check it.
+        $checked = $false
         if (Test-Path -LiteralPath "$zip.sha256") {
             $want = ((Get-Content -LiteralPath "$zip.sha256" -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
             $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($want -ne $got) { Fail "$shownArchive is damaged (its SHA-256 doesn't match): $again" }
+            $checked = $true
         }
 
         # 4. Unpack (the files are in a folder named like the archive), and check that it runs here
@@ -101,8 +103,10 @@
         $exe = Join-Path $unpacked "v2-$target\v2.exe"
         if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $exe = Join-Path $unpacked 'v2.exe' }
         if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Fail "$shownArchive has no v2.exe in it" }
-        try { $shown = & $exe --version } catch { Fail "the downloaded v2.exe doesn't run here ($($_.Exception.Message)): $fromSource" }
-        if ($LASTEXITCODE -ne 0) { Fail "the downloaded v2.exe doesn't run here: $fromSource" }
+        # Unchecked, a file that doesn't run may just be damaged.
+        $next = if ($checked) { $fromSource } else { "if the file may be damaged, download it again with its .sha256, so it gets checked; else $fromSource" }
+        try { $shown = & $exe --version } catch { Fail "the v2.exe in $shownArchive doesn't run here ($($_.Exception.Message)): $next" }
+        if ($LASTEXITCODE -ne 0) { Fail "the v2.exe in $shownArchive doesn't run here: $next" }
         $shown = (($shown -split ' ')[0..1]) -join ' '
 
         # 5. Put v2.exe in place. A running v2.exe can't be overwritten or deleted, but it can be
@@ -126,6 +130,9 @@
         }
         if ($moved) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
         Write-Host "Installed $shown as $dest"
+        if ($moved -and (Test-Path -LiteralPath $old)) {
+            Write-Host "Note: the old v2.exe is still running, so $(Split-Path -Leaf $old) stays until it ends: the next install removes it, or delete it then"
+        }
 
         # 6. Put the folder on the user PATH (kept unexpanded, as Windows stores it), and on this
         # window's PATH.

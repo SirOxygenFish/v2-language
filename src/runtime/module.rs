@@ -14,6 +14,9 @@ pub struct ModuleDiag {
     pub line: u32,
     pub col: u32,
     pub message: String,
+    /// The line and caret, and the hint, as `v2 check` prints them (2.4, 6.4).
+    pub excerpt: String,
+    pub hint: Option<String>,
 }
 
 /// A file read at startup or on its first import: its program, or its diagnostics.
@@ -28,6 +31,8 @@ fn module_diag(sm: &SourceMap, d: &Diag) -> ModuleDiag {
         line: d.span.line,
         col: d.span.col,
         message: d.message.lines().next().unwrap_or("").to_string(),
+        excerpt: crate::runtime::error::excerpt(sm, d.span),
+        hint: d.hint.clone(),
     }
 }
 
@@ -37,7 +42,7 @@ pub fn parse_file(sm: &mut SourceMap, path: &Path) -> Result<Parsed, LoadError> 
     let file = match sm.load(path) {
         Ok(id) => id,
         Err(LoadError::NotUtf8 { display, line, message }) => {
-            return Ok(Parsed::Failed(vec![ModuleDiag { display, line, col: 1, message: message.into() }]))
+            return Ok(Parsed::Failed(vec![ModuleDiag { display, line, col: 1, message: message.into(), excerpt: String::new(), hint: None }]))
         }
         Err(e) => return Err(e),
     };

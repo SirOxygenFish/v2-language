@@ -562,7 +562,7 @@ bigger come from the languages you embed.
 | `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int (so NaN and infinity are a `ValueError`), more gives a float, fewer is a `ValueError`; an int `x` comes back unchanged |
 | `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
-| `read_file(path, binary: false)`        | file contents as `str` (or `bytes` with `binary: true`)     |
+| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`) |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error)  |
 | `list_dir(path)`                        | sorted list of the names in a folder                        |
@@ -866,13 +866,16 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - Named arguments become Python keyword arguments: `plot(xs, color: "red")`.
 - If a Python function returns a coroutine, V2 waits for it (see [8.4](#84-rules) for the one
   exception).
-- Output is UTF-8 on every platform.
+- Output is UTF-8 on every platform: blocks run in Python's UTF-8 mode, so `open()` also reads
+  and writes UTF-8 unless given an encoding (an Excel CSV file: `encoding="cp1252"`), and Python
+  programs a block starts run in it too.
 - The value of a block is its last expression, like in a Jupyter cell
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
 - On Python 3.10 an error's column (`e.col`, the caret) is the start of its line: 3.10 doesn't
   report columns, 3.11 and later do.
 - `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"` and the
-  message `sys.exit(3) can't end V2's Python engine; raise an error instead`) instead of ending
+  message `sys.exit(3) can't end V2's Python engine; raise an error instead, or end the program
+  with V2's exit(3)`) instead of ending
   your program; V2's own `exit(3)` ends it. In blocks, `__name__` is not `"__main__"`.
 - `multiprocessing` workers that are started rather than forked (the default on Windows and macOS,
   and on Linux from Python 3.14) can't load functions defined in `@py` blocks, and a pool using

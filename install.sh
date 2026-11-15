@@ -42,11 +42,16 @@ yes_value() {
 
 version="${V2_VERSION:-v0.1.0-alpha.2}"
 case "$version" in
+[vV][lL][aA][tT][eE][sS][tT] | [lL][aA][tT][eE][sS][tT]) fail "V2_VERSION=latest isn't a release name: leave V2_VERSION unset to install the release this script names, or give one from https://github.com/$repo/releases" ;;
 v*) ;;
 *) version="v$version" ;;
 esac
 dir=$(full_path "${V2_INSTALL_DIR:-$HOME/.v2/bin}")
 [ ! -e "$dir" ] || [ -d "$dir" ] || fail "V2_INSTALL_DIR names a file, not a folder: $dir"
+case "$dir" in
+*"
+"*) fail "V2_INSTALL_DIR has a line break in it: choose a folder without one" ;;
+esac
 
 # 1. Which binary this computer needs.
 os=$(uname -s)
@@ -61,6 +66,10 @@ name="v2-$target.tar.gz"
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t v2-install)
 trap 'rm -rf "$tmp"' EXIT
+# Ctrl+C and the other stop signals end the script through the EXIT trap, which cleans up.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 download() { # URL FILE
     if command -v curl >/dev/null 2>&1; then
@@ -97,6 +106,7 @@ else
 fi
 
 # 3. Check it.
+checked=no
 if [ -f "$tmp/$name.sha256" ]; then
     want=$(cut -d ' ' -f 1 <"$tmp/$name.sha256")
     if command -v sha256sum >/dev/null 2>&1; then
@@ -110,6 +120,7 @@ if [ -f "$tmp/$name.sha256" ]; then
     if [ -n "$got" ] && [ "$got" != "$want" ]; then
         fail "$shown_archive is damaged (its SHA-256 doesn't match): $again"
     fi
+    [ -z "$got" ] || checked=yes
 fi
 
 # 4. Unpack (the files are in a folder named like the archive), and check that v2 runs here
@@ -137,6 +148,9 @@ if ! "$bin" --version >"$tmp/version" 2>"$tmp/error"; then
     if grep -qi 'exec format\|cannot execute' "$tmp/error"; then
         fail "that v2 is for another kind of computer: this one needs $name"
     fi
+    if [ "$checked" = no ]; then
+        fail "the v2 in $shown_archive doesn't run here (see above): if the file may be damaged, download it again with its .sha256, so it gets checked; else $from_source"
+    fi
     fail "the downloaded v2 doesn't run here (see above): $from_source"
 fi
 installed=$(cut -d ' ' -f 1-2 <"$tmp/version")
@@ -151,15 +165,19 @@ chmod 755 "$dir/v2.new"
 mv -f "$dir/v2.new" "$dir/v2"
 say "Installed $installed as $dir/v2"
 
-# 6. Put the folder on PATH for new terminals: in each startup file the shell reads, the marker
-# and the setting, once per folder.
+# 6. Put the folder on PATH for new terminals, unless it is there already: in each startup file
+# the shell reads, the marker and the setting, once per folder.
 case ":$PATH:" in
 *":$dir:"*) on_path=yes ;;
 *) on_path=no ;;
 esac
+# The folder as it goes between double quotes: `\`, `"`, `$` and the backtick escaped (for
+# fish, without the backtick), so any folder name works.
+quoted_for_sh() { printf '%s' "$1" | sed 's/[\\"$`]/\\&/g'; }
+quoted_for_fish() { printf '%s' "$1" | sed 's/[\\"$]/\\&/g'; }
 case "$dir" in
-"$HOME"/*) shown="\$HOME/${dir#"$HOME"/}" ;;
-*) shown="$dir" ;;
+"$HOME"/*) shown="\$HOME/$(quoted_for_sh "${dir#"$HOME"/}")" ;;
+*) shown=$(quoted_for_sh "$dir") ;;
 esac
 # add_line FILE LINE: 0 when it adds the line, 1 when FILE has that exact line already, 2 when
 # FILE can't be written.
@@ -178,8 +196,11 @@ if yes_value "${V2_NO_MODIFY_PATH:-}"; then
     if [ "$on_path" = no ]; then
         say "Add $dir to your PATH to use v2 (V2_NO_MODIFY_PATH is set, so nothing was changed)."
     fi
+elif [ "$on_path" = yes ]; then
+    say "$dir is already on your PATH, so no startup file was changed"
 else
-    line="export PATH=\"$shown:\$PATH\""
+    # Only when it isn't on PATH yet, so a shell that reads two of the files gets it once.
+    line="case \":\$PATH:\" in *\":$shown:\"*) ;; *) export PATH=\"$shown:\$PATH\" ;; esac"
     # The startup files, as the positional parameters (a home folder's path can have spaces).
     case "$(basename "${SHELL:-sh}")" in
     # Every zsh reads .zshenv: new terminals, `zsh -lc`, ssh commands.
@@ -194,9 +215,10 @@ else
         fi
         ;;
     fish)
-        set -- "$HOME/.config/fish/conf.d/v2.fish"
+        set -- "${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/v2.fish"
         # Global, not universal: deleting the file undoes it.
-        line="contains \"$dir\" \$PATH; or set -gx PATH \"$dir\" \$PATH"
+        fdir=$(quoted_for_fish "$dir")
+        line="contains \"$fdir\" \$PATH; or set -gx PATH \"$fdir\" \$PATH"
         ;;
     *) set -- "$HOME/.profile" ;;
     esac
@@ -219,26 +241,26 @@ else
     fi
     if [ -n "$added" ]; then
         say "Added $dir to PATH in $added"
-    elif [ "$on_path" = no ] && [ -z "$unwritable" ]; then
+    elif [ -z "$unwritable" ]; then
         say "Your startup files already put $dir on PATH"
     fi
-    if [ "$on_path" = no ]; then
-        if [ -n "$added" ] || [ -z "$unwritable" ]; then
-            say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
-        else
-            say "To use v2 in this terminal, run: export PATH=\"$dir:\$PATH\""
-        fi
+    if [ -n "$added" ] || [ -z "$unwritable" ]; then
+        say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
+    else
+        say "To use v2 in this terminal, run: export PATH=\"$dir:\$PATH\""
     fi
 fi
 
-# 7. Another v2 that would come first: on PATH before this folder, or, when this folder isn't
-# on PATH yet and nothing was added, the one a terminal finds now.
+# 7. Another v2: one before this folder on PATH, the one a terminal finds now when nothing was
+# changed, or one this terminal runs that an update to another folder leaves in place.
 other=$(command -v v2 2>/dev/null || true)
 if [ -n "$other" ] && [ "$other" != "$dir/v2" ]; then
     if [ "$on_path" = yes ]; then
         say "Note: another v2 comes first on your PATH: $other (remove it, or put $dir before it)"
     elif yes_value "${V2_NO_MODIFY_PATH:-}"; then
         say "Note: a terminal finds another v2 now: $other"
+    else
+        say "Note: this terminal runs another v2, $other; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=$(dirname "$other")"
     fi
 fi
 say "Next: run 'v2 doctor' to see whether Python and Node.js are ready for @py and @js blocks."
