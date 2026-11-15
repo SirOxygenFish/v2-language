@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: SyntaxError: `// 2` starts a comment in V2, so this line doesn't divide
+// stderr: hint: V2 divides rounding down with div(a, b), as in div(len(xs), 2)
+// Python's floor division after a call, inside a call: the lexer's habit error (INTERNALS 3.2).
+let xs = [1, 2, 3, 4]
+print(len(xs) // 2)

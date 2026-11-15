@@ -839,7 +839,7 @@ impl ChildProc {
         // (Rust escapes only the arguments) and run something else (7.5).
         let ext = std::path::Path::new(program).extension().map(|e| e.to_ascii_lowercase());
         if cfg!(windows) && (ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref())) && program.to_string_lossy().contains('%') {
-            let reason = "a batch file whose path contains '%' can't be started safely".to_string();
+            let reason = "a batch file whose path contains '%' can't be started safely: move it to a folder whose path has no %, or start the program it runs directly".to_string();
             return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
         }
         let mut cmd = Command::new(program);

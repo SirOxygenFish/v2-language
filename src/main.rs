@@ -75,6 +75,16 @@ fn main() {
         Ok(c) => c,
         Err(cli::UsageError(msg)) => {
             stderrln!("v2: {msg}");
+            // `v2 -dash.v2`: a script whose name starts with -, which PowerShell even splits
+            // before its dot (`-dash` `.v2`) (19.1).
+            if msg.starts_with("unknown flag") {
+                let first = &args[0];
+                let split = args.get(1).filter(|n| n.starts_with('.')).map(|n| format!("{first}{n}"));
+                let named = [Some(first.clone()), split, Some(format!("{first}.v2"))].into_iter().flatten().find(|f| std::path::Path::new(f).is_file());
+                if let Some(file) = named {
+                    stderrln!("to run the file {file}, write: v2 ./{file}");
+                }
+            }
             stderrln!("run `v2 --help` for usage");
             exit(EXIT_USAGE);
         }

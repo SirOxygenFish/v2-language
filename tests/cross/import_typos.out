@@ -1,4 +1,4 @@
-'sprad' is not exported by 'tools' — did you mean 'spread'?
+'sprad' is not exported by 'tools' — did you mean 'spread'? (or should its @export say 'sprad'?)
 'meen' is not exported by 'py.statistics' — did you mean 'mean'?
 'joinn' is not exported by 'js.path' — did you mean 'join'?
 'nothing_like_it' is not exported by 'py.statistics'

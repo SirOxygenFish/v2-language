@@ -260,6 +260,41 @@ impl Out {
     }
 }
 
+/// A child's output as text (5.10): UTF-8 as it is. On Windows, output that isn't UTF-8 is what
+/// console programs (`cmd /c dir`) write in the console's code page (850, 437, …), and is decoded
+/// with it; what is left invalid becomes U+FFFD.
+fn child_text(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(windows)]
+    if let Some(s) = console_text(bytes) {
+        return s;
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `bytes` in the console's output code page, or the OEM code page with no console; `None` for
+/// a UTF-8 console, whose programs write UTF-8.
+#[cfg(windows)]
+fn console_text(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+    // SAFETY: neither takes arguments or has preconditions.
+    let cp = match unsafe { GetConsoleOutputCP() } {
+        0 => unsafe { GetOEMCP() },
+        cp => cp,
+    };
+    let len = i32::try_from(bytes.len()).ok().filter(|_| cp != 65001)?;
+    // SAFETY: the input is `len` readable bytes; a null output with size 0 asks for the length.
+    let n = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    let mut wide = vec![0u16; usize::try_from(n).ok().filter(|&n| n > 0)?];
+    // SAFETY: `wide` holds the `n` units the first call asked for.
+    let m = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n) };
+    wide.truncate(usize::try_from(m).ok().filter(|&m| m > 0)?);
+    Some(String::from_utf16_lossy(&wide))
+}
+
 /// `to_v2(h)`: a handle's object as plain data, converted inside its worker; anything else
 /// unchanged (containers are not walked) (5.10, 11.5).
 fn to_v2(it: &mut Interp, mut args: Vec<Value>, at: Span) -> Exec<Value> {
@@ -304,11 +339,14 @@ fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
 
 /// `file_error`, with a hint of the caller's when the path itself needs none.
 fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<String>) -> Exec<T> {
-    // Windows says "Access is denied" for a folder.
-    let folder = matches!(verb, "read" | "remove") && std::path::Path::new(path).is_dir();
-    let why = match (folder, verb) {
-        (true, "remove") => "it is a folder, and remove_file removes files only".to_string(),
-        (true, _) => "it is a folder".to_string(),
+    // A file where a folder goes, or the other way round: Windows says "Access is denied", "The
+    // directory name is invalid" or "Cannot create a file when that file already exists".
+    let p = std::path::Path::new(path);
+    let why = match verb {
+        "remove" if p.is_dir() => "it is a folder, and remove_file removes files only".to_string(),
+        "read" | "write" if p.is_dir() => "it is a folder".to_string(),
+        "list" if p.is_file() => "it is a file, not a folder".to_string(),
+        "create" if p.is_file() => "a file has that name".to_string(),
         _ => os_message(e),
     };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
@@ -636,8 +674,8 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     };
     let mut result = DictMap::new();
     result.insert(Rc::from("code"), Value::Int(code));
-    result.insert(Rc::from("stdout"), Value::str(&String::from_utf8_lossy(&c.stdout)));
-    result.insert(Rc::from("stderr"), Value::str(&String::from_utf8_lossy(&c.stderr)));
+    result.insert(Rc::from("stdout"), Value::str(&child_text(&c.stdout)));
+    result.insert(Rc::from("stderr"), Value::str(&child_text(&c.stderr)));
     Ok(Value::dict(result))
 }
 

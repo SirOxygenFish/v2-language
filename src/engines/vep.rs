@@ -135,7 +135,8 @@ pub enum Frame {
     Ret { id: u64, value: Json, exports: Option<Json>, missing: Option<Json>, names: Option<Json> },
     Err { id: u64, error: Map<String, Json> },
     Call { id: u64, target: Target, args: Vec<Json>, kwargs: Map<String, Json> },
-    Out { stream: Stream, text: String },
+    /// `error`: the text reports an error no V2 call could raise (9.9).
+    Out { stream: Stream, text: String, error: bool },
     Release { fns: Vec<u64> },
 }
 
@@ -292,7 +293,7 @@ pub fn parse_frame(line: &[u8], caps: Caps) -> Result<Frame, String> {
                 "stderr" => Stream::Stderr,
                 _ => return Err("'out' frame with a bad 'stream'".into()),
             };
-            Ok(Frame::Out { stream, text: text(&m, &t, "text")?.to_string() })
+            Ok(Frame::Out { stream, text: text(&m, &t, "text")?.to_string(), error: m.get("error").and_then(Json::as_bool).unwrap_or(false) })
         }
         "release" => {
             let list = member(&m, &t, "fn")?.as_array().ok_or("'release' frame with a bad 'fn'")?;
@@ -475,7 +476,7 @@ mod tests {
         assert!(parse_frame(ok.as_bytes(), c).is_ok());
         assert_eq!(
             parse_frame(br#"{"t":"out","stream":"stderr","text":"x","new":true}"#, c),
-            Ok(Frame::Out { stream: Stream::Stderr, text: "x".into() }),
+            Ok(Frame::Out { stream: Stream::Stderr, text: "x".into(), error: false }),
             "unknown members are ignored"
         );
     }
@@ -496,7 +497,7 @@ mod tests {
         for raw in [format!("\\\"{}", "[".repeat(300)), format!("{}\\\\", "{".repeat(300))] {
             let line = format!("{{\"t\":\"out\",\"stream\":\"stdout\",\"text\":\"{raw}\"}}");
             let text: String = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
-            assert_eq!(parse_frame(line.as_bytes(), c), Ok(Frame::Out { stream: Stream::Stdout, text }), "{raw}");
+            assert_eq!(parse_frame(line.as_bytes(), c), Ok(Frame::Out { stream: Stream::Stdout, text, error: false }), "{raw}");
         }
     }
 

@@ -1,4 +1,6 @@
 // requires: js
+// exit: 1
+// stderr: uncaught exception: Error: cb boom
 // A write's callback runs as Node runs it: in a tick of its own, in order with other ticks, the
 // same callback again counted into the tick still waiting (so a block that logs a lot doesn't
 // hold every line in memory until it ends), with null, and a throw loses no later one (9.9).

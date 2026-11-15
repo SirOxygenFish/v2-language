@@ -117,6 +117,8 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     match code {
         0 if broken.get() => crate::engines::process::EXIT_BROKEN_PIPE,
         0 if flushed.is_some() || late.is_some() => 1,
+        // A worker reported an error no V2 call could raise (a JS timer's, a Python thread's).
+        0 if interp.reported => 1,
         code => code,
     }
 }

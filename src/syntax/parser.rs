@@ -1512,8 +1512,8 @@ impl<'a> Parser<'a> {
             Tok::Bytes(b) => ExprKind::Bytes(b),
             Tok::FStr(parts) => {
                 if let Some(name) = python_placeholder(&parts) {
-                    return Err(Diag::new(format!("{{{name}}} in an f-string is printed as it is"), t.span)
-                        .hint(format!("V2's placeholders are ${{{name}}}")));
+                    return Err(Diag::new(format!("{{{name}}} in an f-string is Python's placeholder, which V2 doesn't use"), t.span)
+                        .hint(format!("write ${{{name}}} for its value, or ${{\"{{{name}}}\"}} for the text {{{name}}}")));
                 }
                 ExprKind::FStr(self.fstring(parts)?)
             }
@@ -1856,7 +1856,7 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let f = function(x) {\n    return x\n}"), "V2 writes an anonymous function as func(x) { ... }");
         // Python's f-string braces, and the import forms.
         let d = diag("let n = 1\nprint(f\"hello {n}\")");
-        assert_eq!((d.message.as_str(), d.hint.as_deref()), ("{n} in an f-string is printed as it is", Some("V2's placeholders are ${n}")));
+        assert_eq!((d.message.as_str(), d.hint.as_deref()), ("{n} in an f-string is Python's placeholder, which V2 doesn't use", Some("write ${n} for its value, or ${\"{n}\"} for the text {n}")));
         assert!(parse_str("print(f\"{{n}} and \\${n} and ${1}\")").is_ok(), "doubled and escaped braces are text");
         let d = diag("@import math from py.math");
         assert_eq!(d.message, "expected `{` before the names to import");

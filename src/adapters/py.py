@@ -214,7 +214,11 @@ if __name__ == "__main__":
         for stream, parts in merged:
             text = well_formed("".join(parts))
             for i in range(0, len(text), OUT_CHUNK):
-                write_frame({"t": "out", "stream": stream, "text": text[i : i + OUT_CHUNK]})
+                # "stderr!": text that reports an error no V2 call could raise (9.9).
+                frame = {"t": "out", "stream": stream.rstrip("!"), "text": text[i : i + OUT_CHUNK]}
+                if stream.endswith("!"):
+                    frame["error"] = True
+                write_frame(frame)
 
     def send(frame):
         """Buffered output, then queued releases as one frame, then `frame` (14.2)."""
@@ -737,7 +741,18 @@ if __name__ == "__main__":
                         t.__notes__ = list(getattr(t, "__notes__", None) or []) + ["raised in V2 at " + trace[0]]
                 todo += [(t.__cause__, getattr(x, "__cause__", None)), (t.__context__, getattr(x, "__context__", None))]
                 todo += list(zip(getattr(t, "exceptions", None) or (), getattr(x, "exceptions", None) or ()))
-        sys.stderr.write(header + "".join(te.format()))
+        report(header + "".join(te.format()))
+
+    def report(text):
+        """An error no V2 call could raise, on V2's stderr and marked, so the run ends with exit 1
+        (6.5, 9.9); a stderr of the program's own gets it as it is."""
+        if forked[0] or not isinstance(sys.stderr, Output):
+            sys.stderr.write(text)
+            return
+        with _out_cond:
+            _out_buf.append(("stderr!", text))
+            _out_size[0] += len(text)
+        flush_out()
 
     def thread_hook(a):
         if a.exc_type is not SystemExit:
@@ -750,7 +765,7 @@ if __name__ == "__main__":
         except Exception:
             what = u.err_msg or "Exception ignored in"
         if u.exc_value is None:
-            sys.stderr.write("%s\n%s\n" % (what or "Exception ignored", getattr(u.exc_type, "__name__", "")))
+            report("%s\n%s\n" % (what or "Exception ignored", getattr(u.exc_type, "__name__", "")))
         else:
             print_unattached((what or "Exception ignored") + "\n", u.exc_value)
 

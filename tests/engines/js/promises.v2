@@ -1,6 +1,8 @@
 // requires: js
+// exit: 1
 // stderr: unhandled rejection: Error: nobody waits for this
-// stderr: Error: timer boom
+// stderr: uncaught exception: Error: timer boom
+// (Errors no V2 call could raise turn the run's exit code 0 into 1: INTERNALS 6.5, 9.9.)
 // A block's value that is a Promise is awaited when V2 waits on JavaScript directly; inside a
 // nested cross-language call it can't be (DOCS 8.4, INTERNALS 9.8, 14.4).
 print(@js { new Promise((resolve) => setTimeout(() => resolve(42), 10)) })

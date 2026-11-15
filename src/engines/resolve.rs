@@ -624,7 +624,9 @@ impl Resolver<'_> {
                     } else {
                         format!("is too old: found {v}, V2 needs {}", spec.needs(min))
                     };
-                    let next = format!("point it at a newer {}, or install one: {}", spec.language, install_hint(&spec.id));
+                    // The program, not the language: a newer Node.js.
+                    let program = if &*spec.id == "js" { "Node.js" } else { &*spec.language };
+                    let next = format!("point it at a newer {program}, or install one: {}", install_hint(&spec.id));
                     message = format!("engine '{}' {what} (set by {}) {found}; {next}", spec.id, set_by(from));
                 }
                 let mut nf = NotFound::broken(message, join(&argv), from);
@@ -641,8 +643,13 @@ impl Resolver<'_> {
         let Some(path) = first_program(name, self.lookup) else {
             // `V2_ENGINE_PY="C:\Python311"`: a folder; `V2_ENGINE_PY="py -3"`: the variable holds
             // one program, never split (18.4).
-            let first = name.split_whitespace().next().unwrap_or_default();
             let quote = |w: &str| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
+            // The shortest run of words that is a program, then its arguments: a path with spaces
+            // (`C:\Program Files\…\python.exe -X utf8`) is one program.
+            let words: Vec<&str> = name.split_whitespace().collect();
+            let split = matches!(from, ConfigSource::Env(_))
+                .then(|| (1..words.len()).find(|&k| first_program(&words[..k].join(" "), self.lookup).is_some()))
+                .flatten();
             let hint = match from {
                 _ if Path::new(name).is_dir() => {
                     let who = match from {
@@ -651,11 +658,15 @@ impl Resolver<'_> {
                     };
                     folder_hint(&who, &spec.id, Path::new(name))
                 }
-                ConfigSource::Env(var) if name.trim().contains(char::is_whitespace) && first_program(first, self.lookup).is_some() => format!(
-                    "; {var} names one program, without arguments: for a command with arguments, write [engines.{}] command = [{}] in v2.toml",
-                    spec.id,
-                    name.split_whitespace().map(quote).collect::<Vec<_>>().join(", ")
-                ),
+                ConfigSource::Env(var) if split.is_some() => {
+                    let k = split.unwrap_or(1);
+                    let array: Vec<String> = std::iter::once(words[..k].join(" ")).chain(words[k..].iter().map(|w| w.to_string())).map(|w| quote(&w)).collect();
+                    format!(
+                        "; {var} names one program, without arguments: for a command with arguments, write [engines.{}] command = [{}] in v2.toml",
+                        spec.id,
+                        array.join(", ")
+                    )
+                }
                 _ => String::new(),
             };
             return Err(NotFound::broken(
@@ -1296,6 +1307,15 @@ mod tests {
         assert!(nf.message.ends_with("; V2_ENGINE_PY names one program, without arguments: for a command with arguments, write [engines.py] command = [\"py\", \"-3\"] in v2.toml"), "{}", nf.message);
         // A folder: the program in it, if there is one, or a virtual environment's [python] venv
         // (7.8), from a variable or from v2.toml.
+        // A program whose path has a space, then arguments.
+        let spaced = d.join("My Python");
+        std::fs::create_dir_all(&spaced).unwrap();
+        exe(&spaced, "python");
+        let program = first_program(&spaced.join("python").to_string_lossy(), &lookup(&[], None)).unwrap();
+        let cfg = with_command("py", &[&format!("{} -X utf8", program.display())], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        let shown = if program.display().to_string().contains('\\') { format!("'{}'", program.display()) } else { format!("\"{}\"", program.display()) };
+        assert!(nf.message.ends_with(&format!("for a command with arguments, write [engines.py] command = [{shown}, \"-X\", \"utf8\"] in v2.toml")), "{}", nf.message);
         let folder = d.join("Python Folder");
         std::fs::create_dir_all(&folder).unwrap();
         let env = ConfigSource::Env("V2_ENGINE_PY".into());

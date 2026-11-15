@@ -105,7 +105,12 @@
         if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Fail "$shownArchive has no v2.exe in it" }
         # Unchecked, a file that doesn't run may just be damaged.
         $next = if ($checked) { $fromSource } else { "if the file may be damaged, download it again with its .sha256, so it gets checked; else $fromSource" }
-        try { $shown = & $exe --version } catch { Fail "the v2.exe in $shownArchive doesn't run here ($($_.Exception.Message)): $next" }
+        # Windows's own reason, without PowerShell's "At …install.ps1:108 char:24" position.
+        try { $shown = & $exe --version } catch {
+            $why = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+            $why = ($why -replace '(?s)\s*At [^\r\n]*:\d+ char:\d+.*$', '').Trim().TrimEnd('.')
+            Fail "the v2.exe in $shownArchive doesn't run here ($why): $next"
+        }
         if ($LASTEXITCODE -ne 0) { Fail "the v2.exe in $shownArchive doesn't run here: $next" }
         $shown = (($shown -split ' ')[0..1]) -join ' '
 
@@ -173,7 +178,7 @@
         }
         if ($first -and ($first -ine $dest)) {
             if ($noPath) {
-                Write-Host "Note: a window finds another v2 now: $first"
+                Write-Host "Note: a window finds another v2 now: $first (put $dir before it in PATH, or remove it)"
             } else {
                 Write-Host "Note: new windows find another v2 first: $first (remove it, or move $dir before it in PATH)"
             }
