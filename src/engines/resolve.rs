@@ -223,6 +223,27 @@ impl Judged {
 /// The skip reason of the Store's fake `python.exe` (7.6): the one skip the cache remembers (7.7).
 const PLACEHOLDER: &str = "Microsoft Store placeholder";
 
+/// What to write instead of a folder where the program goes (7.8): a virtual environment's
+/// `[python] venv`, else the program in the folder, when there is one.
+fn folder_hint(who: &str, id: &str, dir: &Path) -> String {
+    let names: &[&str] = match (id, cfg!(windows)) {
+        ("py", true) => &["python.exe", "Scripts\\python.exe"],
+        ("py", false) => &["python3", "python", "bin/python3", "bin/python"],
+        (_, true) => &["node.exe"],
+        _ => &["node", "bin/node"],
+    };
+    let inside = names.iter().map(|n| dir.join(n)).find(|p| p.is_file());
+    if id == "py" && dir.join("pyvenv.cfg").is_file() {
+        let its = inside.map(|p| format!(", or point {who} at its python, {}", p.display())).unwrap_or_default();
+        let venv = crate::config::toml_string(&dir.display().to_string());
+        return format!("; {who} names a virtual environment: write [python] venv = {venv} in v2.toml{its}");
+    }
+    match inside {
+        Some(p) => format!("; {who} names a folder: point it at the program in it, {}", p.display()),
+        None => format!("; {who} names a folder: point it at the program, not at its folder"),
+    }
+}
+
 /// The skip reason of a `py` launcher left with no Python (7.6): like the placeholder, no Python
 /// is installed, so the engine is missing, not broken (7.8).
 const NO_RUNTIME: &str = "a py launcher with no Python installed";
@@ -595,11 +616,18 @@ impl Resolver<'_> {
                 } else {
                     String::new()
                 };
-                let mut nf = NotFound::broken(
-                    format!("engine '{}' {what} (set by {}) is not usable: {reason}{hint}", spec.id, set_by(from)),
-                    join(&argv),
-                    from,
-                );
+                let mut message = format!("engine '{}' {what} (set by {}) is not usable: {reason}{hint}", spec.id, set_by(from));
+                if let (Judged::TooOld(v, _), Some(min)) = (&other, spec.min_version) {
+                    // Worded as for one found on PATH (7.8), with what to do.
+                    let found = if *v >= min {
+                        format!("is not supported: found {v}, which has no type stripping; V2 needs {}", spec.needs(min))
+                    } else {
+                        format!("is too old: found {v}, V2 needs {}", spec.needs(min))
+                    };
+                    let next = format!("point it at a newer {}, or install one: {}", spec.language, install_hint(&spec.id));
+                    message = format!("engine '{}' {what} (set by {}) {found}; {next}", spec.id, set_by(from));
+                }
+                let mut nf = NotFound::broken(message, join(&argv), from);
                 if let Judged::TooOld(v, _) = other {
                     nf.status = Status::Old(v);
                 }
@@ -616,14 +644,12 @@ impl Resolver<'_> {
             let first = name.split_whitespace().next().unwrap_or_default();
             let quote = |w: &str| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
             let hint = match from {
-                ConfigSource::Env(var) if Path::new(name).is_dir() => {
-                    let program = match (&*spec.id, cfg!(windows)) {
-                        ("py", true) => "python.exe",
-                        ("py", false) => "python3",
-                        (_, true) => "node.exe",
-                        _ => "node",
+                _ if Path::new(name).is_dir() => {
+                    let who = match from {
+                        ConfigSource::Env(var) => var.clone(),
+                        ConfigSource::Project(_) => format!("[engines.{}] command", spec.id),
                     };
-                    format!("; {var} names a folder: point it at the program in it, as in {}", Path::new(name).join(program).display())
+                    folder_hint(&who, &spec.id, Path::new(name))
                 }
                 ConfigSource::Env(var) if name.trim().contains(char::is_whitespace) && first_program(first, self.lookup).is_some() => format!(
                     "; {var} names one program, without arguments: for a command with arguments, write [engines.{}] command = [{}] in v2.toml",
@@ -790,7 +816,8 @@ pub fn library_fix(path: &Path, reason: &str) -> Option<String> {
     let (_, rest) = reason.split_once("error while loading shared libraries: ")?;
     let lib = rest.split(':').next()?.trim();
     Some(if lib.starts_with("libatomic.so") {
-        format!("{} needs {lib}: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic", path.display())
+        let (family, sudo) = crate::engines::spec::this_linux();
+        format!("{} needs {lib}: {}", path.display(), crate::engines::spec::package_line(family, sudo, "libatomic1", "libatomic", Some(())))
     } else {
         format!("{} needs {lib}, which isn't installed: install it with your system's package manager", path.display())
     })
@@ -1255,7 +1282,9 @@ mod tests {
         // A missing shared library names its package (7.8).
         let node = Path::new("/usr/local/bin/node");
         let reason = "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file";
-        assert_eq!(library_fix(node, reason).as_deref(), Some("/usr/local/bin/node needs libatomic.so.1: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic"));
+        let (family, sudo) = crate::engines::spec::this_linux();
+        let line = crate::engines::spec::package_line(family, sudo, "libatomic1", "libatomic", Some(()));
+        assert_eq!(library_fix(node, reason), Some(format!("/usr/local/bin/node needs libatomic.so.1: {line}")));
         assert!(library_fix(node, "version probe failed (exit code 127): x: error while loading shared libraries: libfoo.so.2: nope").unwrap().ends_with("needs libfoo.so.2, which isn't installed: install it with your system's package manager"));
         assert_eq!(library_fix(node, "version probe failed (exit code 1)"), None);
         // V2_ENGINE_PY holds one program (18.4): a command with arguments when its program is
@@ -1265,12 +1294,31 @@ mod tests {
         let cfg = with_command("py", &["py -3"], ConfigSource::Env("V2_ENGINE_PY".into()));
         let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with("; V2_ENGINE_PY names one program, without arguments: for a command with arguments, write [engines.py] command = [\"py\", \"-3\"] in v2.toml"), "{}", nf.message);
+        // A folder: the program in it, if there is one, or a virtual environment's [python] venv
+        // (7.8), from a variable or from v2.toml.
         let folder = d.join("Python Folder");
         std::fs::create_dir_all(&folder).unwrap();
-        let cfg = with_command("py", &[&folder.to_string_lossy()], ConfigSource::Env("V2_ENGINE_PY".into()));
-        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        let env = ConfigSource::Env("V2_ENGINE_PY".into());
+        let says_for = |source: &ConfigSource, dir: &Path| {
+            let cfg = with_command("py", &[&dir.to_string_lossy()], source.clone());
+            resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err().message
+        };
+        let m = says_for(&env, &folder);
+        assert!(m.ends_with("; V2_ENGINE_PY names a folder: point it at the program, not at its folder"), "{m}");
         let inside = folder.join(if cfg!(windows) { "python.exe" } else { "python3" });
-        assert!(nf.message.ends_with(&format!("; V2_ENGINE_PY names a folder: point it at the program in it, as in {}", inside.display())), "{}", nf.message);
+        std::fs::write(&inside, "").unwrap();
+        let m = says_for(&env, &folder);
+        assert!(m.ends_with(&format!("; V2_ENGINE_PY names a folder: point it at the program in it, {}", inside.display())), "{m}");
+        let venv = d.join(".venv");
+        let python = venv.join(if cfg!(windows) { "Scripts\\python.exe" } else { "bin/python3" });
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
+        std::fs::write(&python, "").unwrap();
+        let shown = crate::config::toml_string(&venv.display().to_string());
+        let m = says_for(&env, &venv);
+        assert!(m.ends_with(&format!("; V2_ENGINE_PY names a virtual environment: write [python] venv = {shown} in v2.toml, or point V2_ENGINE_PY at its python, {}", python.display())), "{m}");
+        let m = says_for(&ConfigSource::Project(d.join("v2.toml")), &venv);
+        assert!(m.ends_with(&format!("; [engines.py] command names a virtual environment: write [python] venv = {shown} in v2.toml, or point [engines.py] command at its python, {}", python.display())), "{m}");
         let cfg = with_command("py", &["no such python"], ConfigSource::Env("V2_ENGINE_PY".into()));
         let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with("not found (set by V2_ENGINE_PY)"), "{}", nf.message);
@@ -1281,6 +1329,12 @@ mod tests {
         let nf = resolve_with(&Config::default(), &lookup(&[&launcher], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert_eq!(nf.status, Status::Missing, "{}", nf.message);
         assert!(nf.message.contains("(a py launcher with no Python installed)"), "{}", nf.message);
+        // A configured one that is too old is worded as one found on PATH, with what to do (7.8).
+        let cfg = with_command("py", &["py"], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.9.6")), &mut ProbeCache::off(), "py").unwrap_err();
+        let next = format!("; point it at a newer Python, or install one: {}", install_hint("py"));
+        assert!(nf.message.contains(&format!("(set by V2_ENGINE_PY) is too old: found 3.9.6, V2 needs 3.10+{next}")), "{}", nf.message);
+        assert_eq!(nf.status, Status::Old(Version(3, 9, 6)), "{}", nf.message);
     }
 
     #[test]

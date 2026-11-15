@@ -44,7 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/inst
 
 It puts `v2` in `~/.v2/bin` and adds that folder to your PATH in your shell's startup files
 (it says which). Then open a new terminal. No `curl` (`curl: command not found`)? Install it
-(`sudo apt update && sudo apt install curl` on Ubuntu and Debian), or use `wget` instead:
+(`sudo apt update && sudo apt install curl` on Ubuntu and Debian; as root, as in a container or a
+fresh WSL distro, leave out `sudo`), or use `wget` instead:
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
@@ -75,7 +76,8 @@ To install from files you downloaded: get the archive for your computer from
 checked), and save the script from the address in the one-liner
 ([install.sh](https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh) or
 [install.ps1](https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.ps1)) into
-the same folder. Then, in that folder:
+the same folder (in WSL, a Windows browser saves to `/mnt/c/Users/<you>/Downloads`). Then, in
+that folder:
 
 ```bash
 cd ~/Downloads
@@ -149,8 +151,8 @@ mkdir ~/v2-examples && cd ~/v2-examples
 nano hello.v2
 ```
 
-Paste, then Ctrl+O and Enter to save, Ctrl+X to quit. Any plain-text editor works, as long as it
-saves UTF-8.
+Paste, then Ctrl+O and Enter to save, Ctrl+X to quit (a bare system may have no `nano`:
+`apt install nano`). Any plain-text editor works, as long as it saves UTF-8.
 
 **1. Plain V2** (needs nothing else). Save this as `hello.v2`:
 
@@ -275,7 +277,7 @@ ForeignError ZeroDivisionError division by zero
 | `x = 1`, `var x = 1`, `let x = 1`         | `let x = 1` (and `const` for a constant)        |
 | `True`, `False`, `None`, `null`, `undefined` | `true`, `false`, `null`                      |
 | `and`, `or`, `not`                        | `&&`, `\|\|`, `!`                                |
-| `f"{x}"`, `` `${x}` ``                    | `f"${x}"`                                       |
+| `f"{x}"`, `` `${x}` ``                    | `f"${x}"` (without the `f`, `${x}` is plain text) |
 | `elif`, `else if`                         | `elif`                                          |
 | `i += 1`, `i++`                           | `i += 1`                                        |
 | `while x < 3:`, `while (x < 3) { }`       | `while x < 3 { ... }`                           |
@@ -297,16 +299,21 @@ ForeignError ZeroDivisionError division by zero
 
 V2's own functions include `int`, `float`, `str`, `round`, `abs`, `min`, `max`, `sum`, `range`,
 `type` and `len`; for files and the system `exists`, `list_dir`, `make_dir`, `remove_file`,
-`getenv`, `exec`, `sleep` and `time`; and `json_parse` and `json_stringify`. Strings have `split`,
+`getenv`, `exec`, `sleep(seconds)` and `time()` (seconds, as a float); and `json_parse` and
+`json_stringify`. Strings have `split`,
 `upper`, `lower`, `replace`, `trim`, `starts_with` and `ends_with`; lists `push`, `pop`, `sort`,
 `map` and `join`; dicts `keys`, `values`, `get` and `remove`; and lists and strings slice as
-`xs[1:3]`. `cond ? a : b` picks a value, `f"${x:.2f}"` formats a number, `r"C:\new"` keeps its
+`xs[1:3]`. `cond ? a : b` picks a value, `f"${x:.2f}"` formats a number (`:.Nf` is the only
+format), `r"C:\new"` keeps its
 backslashes, a `"""` at the end of a line starts a string of several lines, and a caught error has
 `e.type` and `e.message`. Another `.v2` file's top-level names not starting with `_` are imported
 as a snapshot taken when that file finished running: read state that changes through its
 functions.
 A block can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and its last
-expression is its value. File paths are relative to the folder you run `v2` from; for a file next
+expression is its value. A block is one line, `@py { 1 + 2 }`, or its code starts on the line after
+the `{` and its `}` stands on a line of its own; inside a larger expression it goes in parentheses,
+`(@py { 1 }) + 2`. A `@js` block whose value is an object literal needs them too, `@js { ({a: 1}) }`,
+or JavaScript reads the braces as code. File paths are relative to the folder you run `v2` from; for a file next
 to the script, `read_file(f"${script_dir()}/data.csv")`. `v2 check FILE` checks a script's V2
 syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
@@ -320,7 +327,9 @@ and a [cookbook](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#
 
 V2 doesn't install packages: it uses the Python and Node.js that `v2 doctor` shows, with the
 packages installed for them. A Python package is imported with `@import py.numpy as np` (or
-`@import { mean } from py.statistics`), and a `helpers.py` next to the script is `py.helpers`.
+`@import { mean } from py.statistics`), and a `helpers.py` next to the `.v2` file that imports it
+is `py.helpers` (name yours unlike Python's own modules, such as `json` or `numbers`: one Python
+serves the whole run, with one module per name, and V2 says so when another came first).
 
 - **npm:** in your project folder, `npm install lodash`, then
   `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
@@ -352,15 +361,18 @@ packages installed for them. A Python package is imported with `@import py.numpy
 
   (Activating it, `source .venv/bin/activate`, before running `v2` works too.)
 
-A package is loaded where it is first used, not at its `@import` line: what it prints when it loads
-comes then, and so does the error for a misspelled package name.
+A package is loaded at the first call of a name imported from it, not at its `@import` line, when
+the file only calls its names (for `@import py.numpy as np`, only uses `np.something`); a name used
+as a value (`let f = mean`, `print(mean)`) loads it at its `@import` line. What it prints when it
+loads, and the error for a misspelled package name, come at that point.
 
 ## Troubleshooting
 
 **`v2` is not recognized, or `command not found`.** Open a new terminal: the PATH change reaches
 only terminals opened after the install. Still not found? Check that the folder is on your PATH
 (Windows: `$env:Path -split ';'`; macOS and Linux: `echo $PATH`), or run V2 by its full path
-(`~/.v2/bin/v2`; in PowerShell, `& "$env:USERPROFILE\.v2\bin\v2.exe"`).
+(`~/.v2/bin/v2`; in PowerShell, `& "$env:USERPROFILE\.v2\bin\v2.exe"`). Changed your shell (to zsh
+or fish) after installing? Run the install command again in it: it sets up the shell it runs in.
 
 **`EngineNotFound: engine 'py' (Python) not found`** (or `'js'`, Node.js). Install it with the
 command the message shows, open a new terminal, and run `v2 doctor`. On Windows, if Python is
@@ -378,8 +390,9 @@ shows which version V2 found, and where.
 **`NameError: name 'x' is not defined` from a block** (Python), or `x is not defined`
 (JavaScript). Blocks don't see V2's variables: pass `x` in, `@py(x) { ... }`.
 
-**`SyntaxError: file is not valid UTF-8`.** Save the file as UTF-8. In Windows PowerShell 5, `>`
-and `Out-File` write UTF-16: use an editor, or `Set-Content -Encoding utf8`.
+**`SyntaxError: file is not valid UTF-8`.** Save the file as UTF-8. Windows PowerShell 5.1's `>`
+and `Out-File` write UTF-16, and its `Set-Content` the old ANSI code page: use an editor, or add
+`-Encoding utf8`.
 
 **Non-ASCII text turns into `├╝` or `?` when piped in Windows PowerShell 5.1.** It decodes and
 encodes what passes through pipes with the console's old code page. Run
@@ -447,6 +460,15 @@ loops belong in a Python or JavaScript block (and, later, in C or Rust blocks). 
 language to another takes about a tenth of a millisecond: pass a whole list to one call rather than
 calling once per item.
 
+**Can blocks use async JavaScript?** Yes: a function that returns a Promise (an `async` function),
+or a block whose value is a Promise, is awaited, and you get its result; a rejection is an error you
+can catch. A block can't use `await` at its top level: end it with a Promise, or export an `async`
+function.
+
+**How do I catch a V2 error in Python or JavaScript?** It arrives as a `V2Error`
+(`except Exception as e`, `catch (e)`): `e.type` is its V2 type (`"ValueError"`), `e.message` its
+text. Uncaught, it goes back to V2 as it was.
+
 **What is `VEP/1` in `v2 --version`?** The version of the protocol V2 speaks with its Python and
 Node.js workers.
 
@@ -467,12 +489,15 @@ Node.js workers.
   number math inside the block. A handle works only in its own language: `to_v2(h)` makes plain
   data that any language takes. Operators don't work on handles (call a method, or do it in the
   block), a handle is always true, and `==` on two handles means the same object.
-- **A V2 function given to Python or JavaScript** can be called while that call runs, on its
-  thread: not later from a timer or an event, and not from another thread.
+- **A V2 function given to Python or JavaScript** can be called whenever V2 is in a call to that
+  language (one kept for later works in later calls), on its main thread: not from another
+  thread, and not from a timer or an event that fires while V2 runs its own code.
 - **JavaScript's event loop runs only while V2 is in a call to JavaScript:** a server, timer or
   socket in a `@js` block waits in between. Output a Python or JavaScript thread prints in
   between shows at the next call, or when the program ends.
-- **Each block has its own variables**, also in JavaScript: share them with `@export`.
+- **Each block has its own variables**, also in JavaScript: share them with `@export`. Each `@js`
+  block is a JavaScript realm of its own, so a list or dict from V2 isn't `instanceof Array` or
+  `Object` there, nor a V2 error `instanceof Error`: test with `Array.isArray(x)` and `e.type`.
 - **Blocks can't read standard input:** V2's `input()` owns it. Read the input in V2 and pass it
   in.
 - **Programs a block starts print to standard error**, not standard output (`subprocess.run`,
@@ -487,7 +512,7 @@ Node.js workers.
 - **`v2 check` checks V2's syntax only:** names, engine tags and the code inside blocks are checked
   when the script runs.
 - **A `#!` first line is an error:** delete it, and run scripts with `v2 file.v2`.
-- **Ctrl+C stops at once:** `finally` blocks don't run.
+- **Ctrl+C and `exit(n)` stop at once:** `finally` blocks don't run, in any language.
 - **No REPL, no package manager of its own, no editor plugins.**
 - **It's an alpha:** syntax and behavior may still change before 0.1.0.
 
@@ -495,7 +520,9 @@ Node.js workers.
 
 1. Delete the folder `.v2` in your home folder (`%USERPROFILE%\.v2` on Windows): it holds V2's
    caches, and V2 itself unless you installed with `V2_INSTALL_DIR`. If you did, also delete just
-   `v2` (`v2.exe`, and a `v2.exe.old` if there is one) from that folder, not the folder.
+   `v2` (`v2.exe`, and a `v2.exe.old` if there is one) from that folder, not the folder. If V2
+   was ever killed, also delete the `v2-…` folders it left in your temp folder (`%TEMP%` on
+   Windows, `/tmp` or `$TMPDIR` elsewhere).
 2. Take it off your PATH. Windows: Settings, search "Edit environment variables for your account",
    select `Path`, delete the `.v2\bin` entry. macOS and Linux: in each startup file `install.sh`
    changed (`~/.bashrc`, `~/.profile` or `~/.bash_profile`, `~/.zshenv`; `grep -ls 'added by

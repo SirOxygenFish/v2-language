@@ -1,6 +1,6 @@
 6 4 true 3 2 true
 ArityError
-ForeignError Error process.exit(3) can't end V2's JavaScript engine; throw an error instead
+ForeignError Error process.exit(3) can't end V2's JavaScript engine; throw an error instead, or end the program with V2's exit(3)
 0 handle b.txt
 ADA null 2
 ["ForeignError", "SyntaxError", "import statements are not allowed in @js blocks — use require(...), await import(...) inside an async function, or @import { x } from js.<package>"]

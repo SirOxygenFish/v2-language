@@ -1,7 +1,7 @@
 // requires: py js
-// One engine serves every .v2 file of a run: two local Python modules with one name collide and
-// the first one imported wins, and a JS package imported by bare name loads once, from the folder
-// of the first file that imports it (DOCS 7).
+// One engine serves every .v2 file of a run: two local Python modules with one name collide, so
+// the second file's import of its own is an ImportError that names both files, and a JS package
+// imported by bare name loads once, from the folder of the first file that imports it (DOCS 7).
 @import { who as py_who } from py.same
 @import { who as js_who } from js.jpkg
 print(py_who(), js_who())

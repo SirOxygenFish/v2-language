@@ -154,9 +154,10 @@ fn engine_overrides(env: impl Iterator<Item = (OsString, OsString)>) -> Result<O
             continue;
         }
         // cmd's `set V2_ENGINE_PY="C:\Program Files\…\python.exe"` keeps the quotes: one pair
-        // around the whole value is taken off (18.4).
+        // around the whole value is taken off; `set V2_ENGINE_PY=C:\…\python.exe && v2 x.v2`
+        // keeps the space before `&&`: spaces around it are too (18.4).
         let v = v.to_string_lossy();
-        found.insert(tag, (from_cwd(&cwd, Path::new(unquoted(&v))), k));
+        found.insert(tag, (from_cwd(&cwd, Path::new(unquoted(v.trim()))), k));
     }
     Ok(found)
 }
@@ -232,7 +233,7 @@ fn command_words(s: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
 
 /// A word as a TOML string the user can paste (18.2, 18.5): in double quotes, in literal quotes
 /// when it has a backslash or a double quote, or escaped when it also has a single quote.
-fn toml_string(w: &str) -> String {
+pub(crate) fn toml_string(w: &str) -> String {
     if !w.contains(['\\', '"']) {
         format!("\"{w}\"")
     } else if !w.contains('\'') {
@@ -442,6 +443,10 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
             other => return Err(f.error(unknown(&format!("section [{other}]"), other, SECTIONS))),
         }
     }
+    // Both choose the Python, and the command would win without a word (18.3).
+    if cfg.python_venv.is_some() && cfg.engines.get("py").is_some_and(|e| e.command.is_some()) {
+        return Err(f.error("[python] venv and [engines.py] command both choose the Python: keep one (venv for a virtual environment, command for any other Python)".into()));
+    }
     Ok(())
 }
 
@@ -465,10 +470,20 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
         let engine = match tag.as_str() {
             "node" | "nodejs" => Some("js"),
             "python3" | "py3" | "pypy" | "pypy3" | "cpython" => Some("py"),
+            "gcc" | "clang" | "cc" | "cl" => Some("c"),
+            "rustc" => Some("rust"),
             _ => None,
         };
         if let Some(engine) = engine {
             return Err(f.error(format!("[engines.{name}] names a program, not an engine: it runs the {engine} engine, so write [engines.{engine}] command = [\"{name}\"]")));
+        }
+        // A misspelled engine (`[engines.pyy]`, `[engines.Python]`) would configure nothing, with
+        // no word (18.2); a later engine's name (`ruby`) isn't a misspelling.
+        if !BUILTIN_TAGS.contains(&tag.as_str()) && crate::engines::registry::later_language(&tag).is_none() {
+            let names = ["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs"];
+            if let Some(near) = crate::runtime::error::did_you_mean(name, names) {
+                return Err(f.error(format!("[engines.{name}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")));
+            }
         }
         if !BUILTIN_TAGS.contains(&tag.as_str()) {
             // A custom engine (17.1, roadmap Phase 3).
@@ -534,10 +549,11 @@ mod tests {
 
     #[test]
     fn finds_the_root_and_reads_values() {
-        let cfg = project("ok", "[python]\nvenv = \".venv\"\n[engines.python]\ncommand = [\"py.exe\"]\ncall_timeout = 5\n[engines.c]\nflags = [\"-O2\"]\n[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n").unwrap();
+        let cfg = project("ok", "[engines.python]\ncommand = [\"py.exe\"]\ncall_timeout = 5\n[engines.c]\nflags = [\"-O2\"]\n[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n").unwrap();
         assert!(cfg.root.join("v2.toml").is_file());
         assert_eq!(cfg.file, Some(cfg.root.join("v2.toml")));
-        assert_eq!(cfg.python_venv.as_ref().unwrap().value, cfg.root.join(".venv"));
+        let venv = project("venv", "[python]\nvenv = \".venv\"\n").unwrap();
+        assert_eq!(venv.python_venv.as_ref().unwrap().value, venv.root.join(".venv"));
         assert_eq!(cfg.engines["py"].command.as_ref().unwrap().value, vec!["py.exe"]);
         assert_eq!(cfg.engines["py"].call_timeout.as_ref().unwrap().value, 5.0);
         assert_eq!(cfg.engines["c"].flags.as_ref().unwrap().value, vec!["-O2"]);
@@ -620,10 +636,20 @@ mod tests {
         let cfg = project("venvpasted", "[python]\nvenv = '\".venv\"'\n").unwrap();
         assert_eq!(cfg.python_venv.unwrap().value, cfg.root.join(".venv"));
         // A program's name where the engine's goes (18.2).
-        for (table, engine) in [("node", "js"), ("nodejs", "js"), ("python3", "py"), ("pypy3", "py")] {
+        for (table, engine) in [("node", "js"), ("nodejs", "js"), ("python3", "py"), ("pypy3", "py"), ("gcc", "c"), ("rustc", "rust")] {
             let e = project(&format!("prog{table}"), &format!("[engines.{table}]\ncommand = [\"x\"]\n")).unwrap_err().0;
             assert!(e.ends_with(&format!("[engines.{table}] names a program, not an engine: it runs the {engine} engine, so write [engines.{engine}] command = [\"{table}\"]")), "{e}");
         }
+        // A misspelled engine configures nothing: an error, not silence (18.2). A later engine's
+        // name (ruby, close to rust) and any other name are kept for custom engines.
+        for (table, near) in [("pyy", "py"), ("Python", "python"), ("PY", "py"), ("jss", "js")] {
+            let e = project(&format!("typo{table}"), &format!("[engines.{table}]\ncommand = [\"x\"]\n")).unwrap_err().0;
+            assert!(e.ends_with(&format!("[engines.{table}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")), "{e}");
+        }
+        assert!(project("later", "[engines.ruby]\ncommand = [\"ruby\"]\n[engines.perl]\ncommand = [\"perl\"]\n").is_ok());
+        // [python] venv and [engines.py] command both choose the Python (18.3).
+        let e = project("venvcmd", "[python]\nvenv = \".venv\"\n[engines.py]\ncommand = [\"python3\"]\n").unwrap_err().0;
+        assert!(e.ends_with("v2.toml: config error: [python] venv and [engines.py] command both choose the Python: keep one (venv for a virtual environment, command for any other Python)"), "{e}");
         let e = project("cmdempty", "[engines.py]\ncommand = \" \"\n").unwrap_err().0;
         assert!(e.ends_with("[engines.py] command: expected an array of strings, got string \" \""), "{e}");
     }

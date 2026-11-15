@@ -1,0 +1,11 @@
+// requires: py
+// A module next to the file that Python already holds under its name (V2's own worker loaded
+// `json`): an ImportError that names both files, not the other module in silence (INTERNALS 13.5).
+try {
+    @import { describe } from py.json
+    print(describe([1]))
+} catch (e) {
+    print(e.type, e.message.starts_with("py.json is "), ", which was loaded first, not your " in e.message, e.message.ends_with("json.py: give your file another name (one Python serves the whole run, with one module per name)"))
+}
+@import { local_name } from py.shadow_ok
+print(local_name())

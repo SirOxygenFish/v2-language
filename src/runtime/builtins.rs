@@ -108,6 +108,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
 static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// What `Out` holds before it writes, when stdout isn't a terminal.
 const OUT_BUFFER: usize = 64 * 1024;
+/// How long `Out` holds output when stdout isn't a terminal: a file or a pipe gets a slow
+/// program's output as it comes, and a reader that went away is noticed (5.10).
+const OUT_HOLD: Duration = Duration::from_millis(100);
 
 fn lock(m: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -166,11 +169,13 @@ fn raw_stdout() -> std::mem::ManuallyDrop<std::fs::File> {
 }
 
 /// The only writer of the host's stdout: buffered, flushed after every write when stdout is a
-/// terminal, and at the end of the run (5.10).
+/// terminal, otherwise by size and age (`OUT_HOLD`), and at the end of the run (5.10).
 pub struct Out {
     w: Box<dyn Write>,
     tty: bool,
     pending: &'static Mutex<Vec<u8>>,
+    /// When `pending` was last written out.
+    flushed: std::time::Instant,
     /// Output that couldn't be written and whose `IOError` never reached the program (a block's
     /// own error won): the end of the run reports it (6.5).
     pub lost: Option<Rc<str>>,
@@ -181,7 +186,7 @@ impl Out {
         let stdout = std::io::stdout();
         let tty = stdout.is_terminal();
         let lock: StdoutLock<'static> = stdout.lock();
-        Out { w: Box::new(lock), tty, pending: &PENDING, lost: None }
+        Out { w: Box::new(lock), tty, pending: &PENDING, flushed: std::time::Instant::now(), lost: None }
     }
 
     /// An `Out` that collects into a shared buffer (tests).
@@ -199,22 +204,36 @@ impl Out {
         }
         let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let pending = Box::leak(Box::new(Mutex::new(Vec::new())));
-        (Out { w: Box::new(Shared(buf.clone())), tty: true, pending, lost: None }, buf)
+        (Out { w: Box::new(Shared(buf.clone())), tty: true, pending, flushed: std::time::Instant::now(), lost: None }, buf)
     }
 
     pub fn write_str(&mut self, s: &str) -> Exec<()> {
         let mut pending = lock(self.pending);
         pending.extend_from_slice(s.as_bytes());
-        if !self.tty && pending.len() < OUT_BUFFER {
+        if !self.tty && pending.len() < OUT_BUFFER && self.flushed.elapsed() < OUT_HOLD {
             return Ok(());
         }
         let r = drain(&mut *self.w, &mut pending);
         drop(pending);
+        self.flushed = std::time::Instant::now();
         self.raise(r)
     }
 
     pub fn flush(&mut self) -> std::io::Result<()> {
-        drain(&mut *self.w, &mut lock(self.pending))
+        let r = drain(&mut *self.w, &mut lock(self.pending));
+        self.flushed = std::time::Instant::now();
+        r
+    }
+
+    /// A flush on the way (before a wait, a child, stderr text or a frame to a worker): a reader
+    /// that went away stops the run, as at a print; another failure waits for the next write or
+    /// the end of the run (6.5).
+    pub fn flush_or_stop(&mut self) {
+        if let Err(e) = self.flush() {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                crate::engines::process::exit_broken_pipe();
+            }
+        }
     }
 
     /// Drop what is waiting: the rest of the output of a request whose write failed (9.9).
@@ -285,7 +304,13 @@ fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
 
 /// `file_error`, with a hint of the caller's when the path itself needs none.
 fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<String>) -> Exec<T> {
-    let why = if verb == "read" && std::path::Path::new(path).is_dir() { "it is a folder".to_string() } else { os_message(e) };
+    // Windows says "Access is denied" for a folder.
+    let folder = matches!(verb, "read" | "remove") && std::path::Path::new(path).is_dir();
+    let why = match (folder, verb) {
+        (true, "remove") => "it is a folder, and remove_file removes files only".to_string(),
+        (true, _) => "it is a folder".to_string(),
+        _ => os_message(e),
+    };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
     if path.chars().any(char::is_control) {
         let _ = err
@@ -333,7 +358,8 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
         l.set(l.get() + 1);
         l.get()
     });
-    if n == 1 && line.starts_with(&[0xEF, 0xBB, 0xBF]) {
+    // Two when `$OutputEncoding` is UTF-8 with its BOM, which PowerShell 5.1 adds once more.
+    while n == 1 && line.starts_with(&[0xEF, 0xBB, 0xBF]) {
         line.drain(..3);
     }
     match String::from_utf8(line) {
@@ -597,7 +623,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         None if name.contains(['/', '\\']) => lookup.cwd.join(&**name).into_os_string(),
         None => return io_error(format!("exec: cannot start '{name}': not found on PATH")),
     };
-    let _ = it.out.flush();
+    it.out.flush_or_stop();
     let c = match process::run_captured(&argv, &[], None, input) {
         Ok(c) => c,
         Err(e) => return io_error(format!("exec: cannot start '{name}': {}", e.reason)),
@@ -629,7 +655,7 @@ fn sleep(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     match Duration::try_from_secs_f64(secs) {
         Ok(d) => {
             // What was printed before a wait is out during it, and survives an interrupt.
-            let _ = it.out.flush();
+            it.out.flush_or_stop();
             std::thread::sleep(d)
         }
         Err(_) => return value_error(format!("sleep() argument 'seconds' is out of range: {shown}")),
@@ -810,7 +836,7 @@ fn print(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
         it.out.write_str(&text)?;
         return Ok(Value::Null);
     }
-    let _ = it.out.flush();
+    it.out.flush_or_stop();
     stop_if_interrupted();
     let mut err = std::io::stderr().lock();
     match err.write_all(text.as_bytes()).and_then(|_| err.flush()) {

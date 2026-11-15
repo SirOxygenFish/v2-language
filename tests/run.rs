@@ -568,7 +568,8 @@ fn a_utf16_file_says_to_save_it_as_utf8() {
     std::fs::write(home.0.join("app.v2"), b"MZ\x90\x00\x03\x00\xff\xff").unwrap();
     let out = v2_command(&home.0).arg("app.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "app.v2:1:1: SyntaxError: file is not valid UTF-8: it looks like a binary file, not a V2 script\n");
+    // At the first bad byte, after `MZ` (INTERNALS 3.1).
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "app.v2:1:3: SyntaxError: file is not valid UTF-8: it looks like a binary file, not a V2 script\n");
 }
 
 #[test]
@@ -609,10 +610,11 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
             .expect("start v2");
         let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
         assert_eq!(out.status.code(), Some(1));
-        let expected_line = if bytes.contains(&b'\n') { 2 } else { 3 };
+        // The bad byte's line and column: `print("` holds 7 characters.
+        let (line, col) = if bytes.contains(&b'\n') { (2, 8) } else { (3, 1) };
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            format!("bad.v2:{expected_line}:1: SyntaxError: file is not valid UTF-8: save it as UTF-8\n")
+            format!("bad.v2:{line}:{col}: SyntaxError: file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8\n")
         );
         assert!(out.stdout.is_empty());
     }
@@ -1007,6 +1009,64 @@ fn sleep_flushes_what_was_printed() {
     assert!(took < Duration::from_secs(10), "{took:?}");
 }
 
+#[test]
+fn a_reader_that_goes_away_stops_a_slow_printer() {
+    // INTERNALS 5.10, 6.5: `v2 x.v2 | head -1` on a script that prints and sleeps stops at the
+    // next flush that fails, not at the end, so the rest of the script never runs.
+    let home = TempHome::new();
+    let src = "for i in range(100) {\n    print(i)\n    sleep(0.05)\n}\nwrite_file(\"finished.txt\", \"x\")\n";
+    std::fs::write(home.0.join("slow.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("slow.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let start = Instant::now();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+    drop(stdout); // the reader goes away, as `head -1` does
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!(line, "0\n");
+    assert_eq!(out.status.code(), Some(141), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(start.elapsed() < Duration::from_secs(3), "it stopped after {:?}", start.elapsed());
+    assert!(!home.0.join("finished.txt").exists(), "the rest of the script ran");
+}
+
+#[test]
+fn a_blocks_output_reaches_a_pipe_as_it_comes() {
+    // INTERNALS 9.9: what a block printed goes out before V2 waits for the worker again, so a
+    // file or a pipe gets a long block's progress while it runs.
+    if !needs("py", "a_blocks_output_reaches_a_pipe_as_it_comes") {
+        return;
+    }
+    let home = TempHome::new();
+    let src = "@py {\n    import time\n    print(\"started\")\n    time.sleep(4)\n    print(\"done\")\n}\n";
+    std::fs::write(home.0.join("progress.v2"), src).unwrap();
+    let mut child = v2_command(&home.0)
+        .arg("progress.v2")
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start v2");
+    let start = Instant::now();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+    let took = start.elapsed();
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!((line.as_str(), rest.as_str()), ("started\n", "done\n"));
+    assert!(took < Duration::from_secs(3), "the first line came after {took:?}; the block sleeps 4 s");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn no_interpreter_thread_is_not_an_internal_error() {
@@ -1107,7 +1167,7 @@ print(with_cause())
     assert!(stderr.contains("Error: not a group\n") && !stderr.contains("member"), "{stderr}");
     assert!(stderr.contains("caused by: Error: x (shown above)\ncaused by: Error: y\n"), "{stderr}");
     assert!(stderr.contains("caused by: Error: its cause\n"), "{stderr}");
-    assert!(stderr.starts_with("V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
+    assert!(stderr.starts_with("uncaught exception: V2Error: ValueError: timer boom\n    at boom (timer.v2:2)\n"), "{stderr}");
     // By line: a frame's column is the body's, not the file's.
     assert!(stderr.contains("timer.v2:7)\n"), "{stderr}");
     assert!(stderr.contains("Error: outer\n") && stderr.contains("caused by: TypeError: inner\n"), "{stderr}");
@@ -1933,12 +1993,12 @@ fn check_keeps_file_order_for_files_that_are_not_utf8() {
     };
     let (code, stdout, stderr) = check("main.v2");
     assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 3 files, 2 errors\n"), "{stderr}");
-    let bad = stderr.find("bad.v2:1:1: SyntaxError: file is not valid UTF-8").expect(&stderr);
+    let bad = stderr.find("bad.v2:1:10: SyntaxError: file is not valid UTF-8").expect(&stderr);
     let good = stderr.find("good.v2:2:5: SyntaxError: 'y' is already declared").expect(&stderr);
     assert!(bad < good, "{stderr}");
     let (code, stdout, stderr) = check("bad.v2");
     assert_eq!((code, stdout.as_str()), (Some(1), "check bad.v2: 1 file, 1 error\n"), "{stderr}");
-    assert_eq!(stderr, "bad.v2:1:1: SyntaxError: file is not valid UTF-8: save it as UTF-8\n");
+    assert_eq!(stderr, "bad.v2:1:10: SyntaxError: file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8\n");
 }
 
 #[test]
@@ -2255,7 +2315,10 @@ fn doctor_names_the_programs_it_could_not_use() {
     assert!(stdout.contains("\n  py: too old: found 3.8.1, V2 needs 3.10+; install: "), "{stdout}");
     // The row and that note say it all: no skipped line repeats it.
     assert!(!stdout.contains(&format!("py: skipped {py}")), "{stdout}");
-    assert!(stdout.contains(&format!("\n  js: fix: {node} needs libatomic.so.1: on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic\n")), "{stdout}");
+    // The package's line fits the system (apt or dnf, sudo unless root): INTERNALS 7.8.
+    let fix = format!("\n  js: fix: {node} needs libatomic.so.1: ");
+    let line = stdout.split(&*fix).nth(1).and_then(|r| r.lines().next()).unwrap_or_else(|| panic!("{stdout}"));
+    assert!(line.contains("apt install libatomic1") || line.contains("dnf install libatomic"), "{stdout}");
     // The note, then the program it skipped and why, which "see why below" points at.
     let below = format!("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)\n  js: skipped {node} (version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1)\n");
     assert!(stdout.contains(&below), "{stdout}");
@@ -2914,10 +2977,11 @@ fn find_dir(root: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[test]
-fn a_python_venv_from_v2_toml_is_used_unless_a_command_is_set() {
+fn a_python_venv_from_v2_toml_is_used_unless_v2_engine_py_is_set() {
     // DOCS 5, 7, 14: `[python] venv`, relative to the v2.toml, gives blocks that venv's Python and
-    // its packages; `[engines.py] command` wins over it.
-    if !needs("py", "a_python_venv_from_v2_toml_is_used_unless_a_command_is_set") {
+    // its packages; `V2_ENGINE_PY` wins over it, and `[engines.py] command` beside it in v2.toml
+    // is a configuration error (INTERNALS 18.3).
+    if !needs("py", "a_python_venv_from_v2_toml_is_used_unless_v2_engine_py_is_set") {
         return;
     }
     let python = block_python();
@@ -2934,9 +2998,13 @@ fn a_python_venv_from_v2_toml_is_used_unless_a_command_is_set() {
     assert_eq!((code, stdout.as_str()), (Some(0), "venv package\n.venv\n"), "{stderr}");
     std::fs::write(home.0.join("v2.toml"), format!("[python]\nvenv = \".venv\"\n\n[engines.py]\ncommand = ['{python}']\n")).unwrap();
     std::fs::write(home.0.join("sub/main.v2"), "print(@py { import os, sys; os.path.basename(sys.prefix) })\n").unwrap();
-    let (code, stdout, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[]);
+    let (code, _, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("config error: [python] venv and [engines.py] command both choose the Python: keep one"), "{stderr}");
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[("V2_ENGINE_PY", std::ffi::OsStr::new(&python))]);
     assert_eq!(code, Some(0), "{stderr}");
-    assert_ne!(stdout, ".venv\n", "the configured command lost to the venv");
+    assert_ne!(stdout, ".venv\n", "V2_ENGINE_PY lost to the venv");
 }
 
 #[test]
