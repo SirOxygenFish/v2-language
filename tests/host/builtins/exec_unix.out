@@ -3,3 +3,4 @@ a b|$HOME
 137
 piped
 "a�b"
+ArityError | exec takes argv and input only: for a variable or another folder, start a shell, as in exec(["sh", "-c", "cd web && NODE_ENV=production npm run build"])

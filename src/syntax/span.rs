@@ -84,7 +84,7 @@ pub enum LoadError {
 /// The message for a file that isn't UTF-8 (2.1). A UTF-16 file (a byte-order mark first) is
 /// named as such: Windows PowerShell 5's `>` and `Out-File` write UTF-16.
 pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bomless_utf16(bytes) {
         "file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
         "file is not valid UTF-8: it looks like a binary file, not a V2 script"
@@ -94,6 +94,17 @@ pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
         // On Linux and macOS such a file comes from an old system or a share.
         "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 or Latin-1: save it as UTF-8, as in iconv -f cp1252 -t utf-8 old.v2 > new.v2"
     }
+}
+
+/// UTF-16 without a byte order mark: in Latin text most pairs are an ASCII letter, digit,
+/// space or line break and a NUL, the same way round (3 in 4 here). Some editors save UTF-16
+/// that way; a binary file's NULs come in runs.
+pub fn bomless_utf16(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(8192) & !1];
+    let pairs = sample.len() / 2;
+    let text = |b: u8| matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7E);
+    let count = |le: bool| sample.chunks(2).filter(|c| if le { text(c[0]) && c[1] == 0 } else { c[0] == 0 && text(c[1]) }).count();
+    pairs >= 2 && (count(true) * 4 >= pairs * 3 || count(false) * 4 >= pairs * 3)
 }
 
 #[derive(Default)]
@@ -118,6 +129,10 @@ impl SourceMap {
         let bytes = std::fs::read(&canonical)
             .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", display_path(&canonical), os_message(&e))))?;
         let display = display_path(&canonical);
+        // Latin text in UTF-16 is valid UTF-8 with a NUL between the letters.
+        if bomless_utf16(&bytes) {
+            return Err(LoadError::NotUtf8 { display, line: 1, col: 1, message: not_utf8_message(&bytes) });
+        }
         let text = match String::from_utf8(bytes) {
             Ok(t) => t,
             Err(e) => {

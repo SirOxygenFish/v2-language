@@ -1,0 +1,4 @@
+V2Error: IOError: disk hiccup 0
+true
+true 3 false
+[2, "V2Error: disk hiccup 1", true]

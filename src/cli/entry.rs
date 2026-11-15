@@ -135,6 +135,16 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, next: Option<&str>) -> S
     if path.extension().is_none() && folder.join(format!("{name}.v2")).is_file() {
         return format!("did you mean '{file}.v2'?");
     }
+    // `v2 doctr`, `v2 chek x.v2`: a command, misspelled.
+    if let Some(command) = did_you_mean(&word, ["check", "doctor", "cache"]).filter(|_| plain) {
+        let rest = match (command, next) {
+            ("check", Some(script)) => format!(" {}", quoted(script)),
+            ("check", None) => " FILE".to_string(),
+            ("cache", _) => " clean".to_string(),
+            _ => String::new(),
+        };
+        return format!("did you mean 'v2 {command}{rest}'?");
+    }
     // Notepad saves `hello` as hello.txt: whether FILE was hello or hello.v2, it becomes hello.v2.
     let stem = name.strip_suffix(".v2").unwrap_or(&name);
     if folder.join(format!("{stem}.txt")).is_file() && (stem != name || path.extension().is_none()) {
@@ -287,6 +297,10 @@ mod tests {
         // Run from a folder that has none of these files (the test binary's cwd is the crate).
         let hint = |f: &str, next: Option<&str>| entry_error(f, next, "v2").map(|m| m.lines().nth(1).unwrap().to_string());
         assert_eq!(hint("run", Some("hello.v2")).unwrap(), "there is no 'run' command: to run hello.v2, type: v2 hello.v2");
+        // A command, misspelled.
+        assert_eq!(hint("doctr", None).unwrap(), "did you mean 'v2 doctor'?");
+        assert_eq!(hint("chek", Some("x.v2")).unwrap(), "did you mean 'v2 check x.v2'?");
+        assert_eq!(hint("cahce", None).unwrap(), "did you mean 'v2 cache clean'?");
         assert_eq!(hint("run", Some("my file.v2")).unwrap(), "there is no 'run' command: to run my file.v2, type: v2 \"my file.v2\"");
         assert_eq!(hint("help", None).unwrap(), "for help, type: v2 --help");
         assert_eq!(hint("version", None).unwrap(), "for the version, type: v2 --version");

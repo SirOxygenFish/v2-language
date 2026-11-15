@@ -426,6 +426,9 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set(h.into());
     } else if verb == "remove" && p.is_dir() {
         let _ = err.hint.set("a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into());
+    } else if cfg!(windows) && matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr") {
+        // Linux's and macOS's names for the standard streams.
+        let _ = err.hint.set("/dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)".into());
     } else if tilde && !p.exists() {
         // A shell expands them, V2 doesn't (5.10); `$env:X\…` fails as a bad name, not as missing.
         let write = if path == "~" { format!("getenv(\"{home}\")") } else { format!("getenv(\"{home}\") + \"{}\"", &path[1..]) };
@@ -573,10 +576,17 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
 /// Whether stdin is a file (`v2 x.v2 < data.txt`), not a terminal or a pipe.
 fn stdin_is_file() -> bool {
     #[cfg(unix)]
-    let owned = std::os::fd::AsFd::as_fd(&std::io::stdin()).try_clone_to_owned().map(std::fs::File::from);
+    {
+        std::os::fd::AsFd::as_fd(&std::io::stdin()).try_clone_to_owned().map(std::fs::File::from).and_then(|f| f.metadata()).is_ok_and(|m| m.is_file())
+    }
+    // A pipe's handle reports a file's metadata on Windows: its type says what it is.
     #[cfg(windows)]
-    let owned = std::os::windows::io::AsHandle::as_handle(&std::io::stdin()).try_clone_to_owned().map(std::fs::File::from);
-    owned.and_then(|f| f.metadata()).is_ok_and(|m| m.is_file())
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_DISK};
+        // SAFETY: the standard input handle stays open for the process.
+        unsafe { GetFileType(std::io::stdin().as_raw_handle()) == FILE_TYPE_DISK }
+    }
 }
 
 /// `len(x)`: chars, bytes, items or entries, or a handle's `op len` (5.10, 11.3).
@@ -803,7 +813,7 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
                 let shown = bad.to_string_lossy();
                 // A name that can't be renamed (an upload, a share): a block lists the folder as bytes.
                 let err = ErrorValue::new("IOError", format!("cannot list '{path}': the name '{shown}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"));
-                let _ = err.hint.set("to list such names as they are, do it in a @py block: @py(d) { [n.decode(\"utf-8\", \"replace\") for n in os.listdir(os.fsencode(d))] }, and pass a name back with os.fsencode".into());
+                let _ = err.hint.set("to list such names as they are, keep them as bytes in a @py block: @py(d) { import os; os.listdir(os.fsencode(d)) }, and open one there with os.path.join(os.fsencode(d), name)".into());
                 return Err(Flow::Error(Rc::new(err)));
             }
         }
@@ -841,6 +851,27 @@ fn script_dir(it: &mut Interp, _args: Vec<Value>, at: Span) -> Exec<Value> {
 /// `exec(argv, input = null)`: a program run without a shell, found like an engine command
 /// (7.5) with the cwd as base; its outputs captured whole and decoded leniently, its tree
 /// killed when it ends. Returns `{code, stdout, stderr}`; a non-zero code is not an error (5.10).
+/// Whether `name` is a program in a node_modules/.bin of the current folder or one above it.
+fn npm_tool(name: &str) -> bool {
+    if name.contains(['/', '\\']) {
+        return false;
+    }
+    let Ok(cwd) = std::env::current_dir() else { return false };
+    cwd.ancestors().map(|d| d.join("node_modules").join(".bin")).any(|bin| bin.join(name).is_file() || (cfg!(windows) && bin.join(format!("{name}.cmd")).is_file()))
+}
+
+/// A named argument a builtin doesn't take, that people try: what to write instead.
+pub(crate) fn named_hint(builtin: &str, name: &str) -> Option<String> {
+    if builtin != "exec" || !matches!(name, "env" | "cwd" | "dir" | "environment") {
+        return None;
+    }
+    Some(if cfg!(windows) {
+        r#"exec takes argv and input only: for a variable or another folder, start a shell, as in exec(["cmd", "/c", "cd /d web && set \"NODE_ENV=production\" && npm run build"])"#.to_string()
+    } else {
+        r#"exec takes argv and input only: for a variable or another folder, start a shell, as in exec(["sh", "-c", "cd web && NODE_ENV=production npm run build"])"#.to_string()
+    })
+}
+
 fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let items = match &args[0] {
         Value::List(l) => l.borrow().clone(),
@@ -907,6 +938,11 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
                 let mut path = String::new();
                 super::value::quoted(&format!("./{file}"), &mut path);
                 let _ = err.hint.set(format!("V2 doesn't look in the current folder for a bare name: write exec([{path}])").into());
+            } else if npm_tool(name) {
+                // A tool an npm package installed for the project (prettier, tsc, eslint).
+                let mut quoted = String::new();
+                super::value::quoted(name, &mut quoted);
+                let _ = err.hint.set(format!("{name} is in node_modules/.bin, where npm puts a package's programs: run it with npx, as in exec([\"npx\", {quoted}, …])").into());
             }
             return Err(Flow::Error(Rc::new(err)));
         }

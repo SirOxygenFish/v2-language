@@ -17,3 +17,4 @@
 17.2-1   needs pandas, which the CI matrix doesn't install
 17.3-1   needs @rust (Phase 2)
 17.4-1   needs the npm package slugify, which the CI matrix doesn't install
+17.6-1   serves HTTP until a client asks for /stop; tests/engines/js/server.v2 runs the same server with its own client

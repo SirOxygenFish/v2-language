@@ -52,3 +52,24 @@ show(func() => {a: 1}.keys)
 }
 @import { frame } from huge
 show(func() => to_v2(frame()))
+// A date or a Decimal handle passed to another language, or to json_stringify: the block that
+// makes plain data of it, since to_v2 can't (11.5).
+let when = @py { __import__("datetime").datetime(2024, 3, 10, 7, 0) }
+let cents = @py { __import__("decimal").Decimal("0.00") }
+let stamp = @js { new Date(0) }
+@js j {
+    function shown(x) { return String(x) }
+    @export { shown }
+}
+@py p {
+    def pshown(x):
+        return str(x)
+    @export { pshown }
+}
+@import { shown } from j
+@import { pshown } from p
+for v in [when, cents, {"ts": when}] {
+    show(func() => shown(v))
+    show(func() => json_stringify(v))
+}
+show(func() => pshown(stamp))

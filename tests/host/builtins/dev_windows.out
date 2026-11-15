@@ -1,0 +1,2 @@
+cannot read '/dev/stdin': there is no folder '/dev'
+/dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)

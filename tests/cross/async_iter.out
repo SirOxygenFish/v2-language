@@ -1,0 +1,6 @@
+ForeignError | AsyncGenerator is not iterable
+an async generator can't be looped over in V2: collect it in JavaScript, as in let items = @js(h) { Array.fromAsync(h) } (V2 waits for the Promise)
+[1, 2]
+ForeignError | 'async_generator' object is not iterable
+an async generator can't be looped over in V2: collect it with an async function that a block exports, as in async def collect(h): return [x async for x in h] (V2 waits for the coroutine it returns)
+[1, 2]

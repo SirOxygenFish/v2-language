@@ -1411,7 +1411,8 @@ same string (`1` and `"1"`) — is a `MarshalError`.
   block — `@py(df) { df["revenue"] * 1.2 }` — call a function (`np.multiply(a, 2)`), or convert
   with `to_v2(h)`.
 - A handle belongs to its engine. Passing a Python handle to a JavaScript function is a
-  `MarshalError` — convert it with `to_v2(h)` first. A callable handle (a function, method,
+  `MarshalError` — convert it with `to_v2(h)` first (for a date, a time or a `Decimal`, which
+  `to_v2` can't convert, the message names the block that can: `@py(h) { h.isoformat() }`). A callable handle (a function, method,
   class or callable object) is the exception: the other language gets a function that calls it.
 - A handle stays valid as long as V2 keeps a reference to it. V2 tells the engine when it can let
   the object go.
@@ -1828,7 +1829,9 @@ venv = ".venv"                    # use this virtual environment
 ```
 
 A call that runs past `call_timeout` raises `EngineTimeout`. For a worker engine that stops the
-whole engine for the rest of the run, so later uses of it raise `EngineCrashed`.
+whole engine for the rest of the run, so later uses of it raise `EngineCrashed`. For a request
+that may hang, use the language's own timeout, which you can retry: `urlopen(url, timeout=5)`,
+`fetch(url, { signal: AbortSignal.timeout(5000) })`.
 
 `V2_ENGINE_PY` wins over `[python] venv`. Setting both `[python] venv` and `[engines.py] command`
 in `v2.toml` is a configuration error: keep one.
@@ -1876,7 +1879,7 @@ that isn't there.
 | `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error; a run in which Python or JavaScript printed an error V2 couldn't raise (from a timer, a thread, a Promise nobody waits for) |
 | `2`       | usage or configuration error                                             |
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
-| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped, what was printed is still written. On Linux and macOS v2 then ends by that signal, as a program without a handler does, so a shell shows 128 + its number (130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP) and stops a loop of `v2` runs |
+| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped at once (what their open files still buffer is lost, and `atexit` doesn't run), what was printed is still written. On Linux and macOS v2 then ends by that signal, as a program without a handler does, so a shell shows 128 + its number (130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP) and stops a loop of `v2` runs |
 | `141`     | the output's reader went away (`v2 x.v2 \| head`): the run stops quietly, like Ctrl+C but with nothing more to show |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 
@@ -2031,6 +2034,41 @@ func progress(done, total) {
 }
 @import { process } from worker
 process(["a", "b", "c"])
+```
+
+### 17.6 An HTTP server in a JavaScript block
+
+JavaScript serves only while V2 waits on it ([8.4](#84-rules)), so `serve` returns a Promise
+that resolves when the server stops; until then its handlers can call V2. Nothing else in the
+script runs meanwhile, so a client in the same script can't reach it: try it with
+`curl "http://127.0.0.1:8181/?name=Ada"`, and stop it with `curl http://127.0.0.1:8181/stop`.
+
+```v2
+func greet(name) {
+    return f"hello, ${name}"
+}
+
+@js web {
+    @import { greet } from v2
+    const http = require("http")
+    function serve(port) {
+        return new Promise((resolve) => {
+            const server = http.createServer((req, res) => {
+                const url = new URL(req.url, "http://127.0.0.1")
+                if (url.pathname === "/stop") {
+                    res.end("stopping\n")
+                    server.close(() => resolve("stopped"))
+                    return
+                }
+                res.end(greet(url.searchParams.get("name") ?? "world") + "\n")
+            })
+            server.listen(port, "127.0.0.1", () => console.log(`listening on http://127.0.0.1:${port}`))
+        })
+    }
+    @export { serve }
+}
+@import { serve } from web
+print(serve(8181))                           // after /stop: stopped
 ```
 
 ---

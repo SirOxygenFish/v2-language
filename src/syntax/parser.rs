@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use super::ast::*;
 use super::directives;
-use super::lexer::{LABEL_HINT, ONLY_FIXED};
+use super::lexer::{LABEL_HINT, ONLY_FIXED, PAD_HINT};
 use super::span::{SourceMap, Span};
 use super::token::{BraceKind, FPartTok, Kw, Op, Tok, Token};
 use super::Diag;
@@ -81,6 +81,8 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
     let hint = match (word(1), word(0), op(0)) {
         (Some("fn" | "def" | "function" | "fun" | "sub"), Some(name), _) => format!("V2 writes functions as func {name}(a, b) {{ ... }}"),
         (Some("var"), Some(_), _) => "V2 declares variables with let: let x = 1".into(),
+        // JavaScript's and Python's `await f()`.
+        (Some("await"), Some(name), _) => format!("V2 has no await: when a call returns a Promise or a coroutine, V2 waits for its result, so write {name}(…)"),
         (_, Some("and" | "or"), _) => "V2 writes and, or and not as &&, || and !".into(),
         (_, Some("is"), _) => "V2 compares with == and !=, as in x == null".into(),
         (Some("lambda"), Some(_), _) => "V2 writes an anonymous function as func(x) => x * 2".into(),
@@ -593,6 +595,15 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let found = self.peek().clone();
                 return Err(self.leading_operator(format!("expected {{, found {found} on the next line")));
+            }
+            // `if (x == 1) print(x)`: a body on the header's line, without braces.
+            Tok::Ident(w) if self.on_previous_tokens_line() && !matches!(&**w, "and" | "or" | "is" | "not" | "then" | "do") && matches!(self.peek_at(1), Tok::Op(Op::LParen | Op::Eq | Op::Dot | Op::PlusEq)) => {
+                let d = Diag::new(format!("expected {{, found {}", self.peek()), self.span());
+                return Err(d.hint(format!("the body goes in braces, even for one statement: {what} … {{ ... }}")));
+            }
+            Tok::Kw(Kw::Return | Kw::Break | Kw::Continue | Kw::Throw | Kw::Let) if self.on_previous_tokens_line() => {
+                let d = Diag::new(format!("expected {{, found {}", self.peek()), self.span());
+                return Err(d.hint(format!("the body goes in braces, even for one statement: {what} … {{ ... }}")));
             }
             other => return Err(Diag::new(format!("expected {{, found {other}"), self.span())),
         };
@@ -1728,7 +1739,7 @@ impl<'a> Parser<'a> {
                     let expr = sub.expr()?;
                     self.peak = self.peak.max(sub.peak);
                     if matches!(sub.peek(), Tok::Op(Op::Colon)) {
-                        return Err(Diag::new(ONLY_FIXED, sub.span()));
+                        return Err(Diag::new(ONLY_FIXED, sub.span()).hint(PAD_HINT));
                     }
                     if !matches!(sub.peek(), Tok::RBrace) || sub.pos + 1 != sub.toks.len() {
                         return Err(Diag::new(format!("expected `}}` to close the ${{…}}, found {}", sub.peek()), sub.span()));
@@ -1988,6 +1999,17 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let a = null\na ??= 5"), "V2 has no ??=: write a = a ?? …");
         assert_eq!(hint("let x = 1\nif x > 2 {\n} elsif x > 0 {\n}"), "V2 writes elif: } elif x > 0 { ... }");
         assert_eq!(hint("x := 1"), "V2 declares a name with let x = …, and assigns to it with x = …");
+        assert_eq!(hint("let y = await foo()"), "V2 has no await: when a call returns a Promise or a coroutine, V2 waits for its result, so write foo(…)");
+        // A body on the header's line, without braces; `and` keeps its own hint.
+        assert_eq!(hint("let x = 1
+if (x == 1) print(x)"), "the body goes in braces, even for one statement: if … { ... }");
+        assert_eq!(hint("for x in [1] print(x)"), "the body goes in braces, even for one statement: for … { ... }");
+        assert_eq!(hint("func f() {
+    while true break
+}"), "the body goes in braces, even for one statement: while … { ... }");
+        assert_eq!(hint("let x = 1
+if x and x {
+}"), "V2 writes and, or and not as &&, || and !");
         assert_eq!(hint("let if = 1"), "if is one of V2's own words: pick another name, as in if_");
         assert_eq!(hint("Let x = 1"), "V2's own words are written in small letters: let");
         assert_eq!(hint("let x = 1\nIf x > 0 {\n}"), "V2's own words are written in small letters: if");

@@ -212,6 +212,15 @@ fn not_json<T>(what: &str, path: &[Step]) -> Exec<T> {
     not_json_hint(what, path, "")
 }
 
+/// A handle, which isn't JSON: `to_v2` first, or the block for a type it can't convert. Out of
+/// line, so `to_json`'s frame stays small for deep values.
+#[cold]
+#[inline(never)]
+fn handle_not_json<T>(h: &crate::engines::handles::HandleRef, path: &[Step]) -> Exec<T> {
+    let how = h.plain_way().map_or_else(|| " (use to_v2(h) first)".to_string(), |w| format!(" ({w})"));
+    not_json_hint("handle", path, &how)
+}
+
 fn not_json_hint<T>(what: &str, path: &[Step], hint: &str) -> Exec<T> {
     let mut at = String::new();
     for p in path {
@@ -277,7 +286,7 @@ fn to_json(v: &Value, path: &mut Vec<Step>, open: &mut Vec<usize>) -> Exec<serde
             serde_json::Value::Object(out)
         }
         Value::Bytes(_) | Value::Func(_) | Value::Error(_) => return not_json(v.type_name(), path),
-        Value::Handle(_) => return not_json_hint("handle", path, " (use to_v2(h) first)"),
+        Value::Handle(h) => return handle_not_json(h, path),
     })
 }
 

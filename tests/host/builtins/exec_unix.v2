@@ -9,3 +9,9 @@ print(exec(["sh", "-c", "kill -9 $$"]).code)
 print(exec(["cat"], input: "piped\n").stdout.trim())
 // Output that isn't UTF-8 is decoded leniently.
 print(json_stringify(exec(["sh", "-c", r"printf 'a\377b'"]).stdout))
+// exec has no env: or cwd: (DOCS 3.11): the hint shows the shell way.
+try {
+    exec(["npm", "run", "build"], env: {NODE_ENV: "production"})
+} catch (e) {
+    print(e.type, "|", e.hint)
+}
