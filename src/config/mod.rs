@@ -156,10 +156,15 @@ fn engine_overrides(env: impl Iterator<Item = (OsString, OsString)>) -> Result<O
         // cmd's `set V2_ENGINE_PY="C:\Program Files\…\python.exe"` keeps the quotes: one pair
         // around the whole value is taken off (18.4).
         let v = v.to_string_lossy();
-        let v = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')).filter(|x| !x.is_empty()).unwrap_or(&v);
-        found.insert(tag, (from_cwd(&cwd, Path::new(v)), k));
+        found.insert(tag, (from_cwd(&cwd, Path::new(unquoted(&v))), k));
     }
     Ok(found)
+}
+
+/// A path without one pair of double quotes around it: cmd's `set X="C:\…"` keeps them, and so
+/// does Explorer's "Copy as path" pasted into a TOML string (18.1, 18.4).
+fn unquoted(s: &str) -> &str {
+    s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).filter(|x| !x.is_empty()).unwrap_or(s)
 }
 
 /// An executable named in `V2_ENGINE_*`: with a separator it is a path against the cwd; a bare
@@ -300,7 +305,7 @@ impl File {
     /// A path: a leading `~/` is the home folder; another relative one resolves against the
     /// file's folder (18.1).
     fn path(&self, what: &str, v: &toml::Value) -> Result<PathBuf, ConfigError> {
-        let text = self.string_of(what, v)?;
+        let text = unquoted(&self.string_of(what, v)?).to_string();
         if let Some(home) = home_relative(&text) {
             return Ok(home);
         }
@@ -345,6 +350,9 @@ impl File {
     /// scripts (`cd src/x && make`) and `{file}` patterns are left alone.
     fn argv(&self, what: &str, mut argv: Vec<String>) -> Result<Vec<String>, ConfigError> {
         for (i, a) in argv.iter_mut().enumerate() {
+            if i == 0 {
+                *a = unquoted(a).to_string();
+            }
             if let Some(home) = home_relative(a).filter(|_| i == 0) {
                 *a = home.to_string_lossy().into_owned();
                 continue;
@@ -451,6 +459,15 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
         };
         if tag == "ts" {
             return Err(f.error(format!("[engines.{name}]: ts runs on the js engine; configure [engines.js]")));
+        }
+        // `[engines.node]`, `[engines.python3]`: a program's name where the engine's goes (18.2).
+        let engine = match tag.as_str() {
+            "node" | "nodejs" => Some("js"),
+            "python3" | "py3" | "pypy" | "pypy3" | "cpython" => Some("py"),
+            _ => None,
+        };
+        if let Some(engine) = engine {
+            return Err(f.error(format!("[engines.{name}] names a program, not an engine: it runs the {engine} engine, so write [engines.{engine}] command = [\"{name}\"]")));
         }
         if !BUILTIN_TAGS.contains(&tag.as_str()) {
             // A custom engine (17.1, roadmap Phase 3).
@@ -595,6 +612,17 @@ mod tests {
         let e = load_from(&d, vars(&[])).unwrap_err().0;
         assert!(e.ends_with("command must be an array: write [\"my tools/py\", \"-X\", \"utf8\"]"), "{e}");
         assert_eq!(toml_string("it's \"x\"\\y"), "\"it's \\\"x\\\"\\\\y\"");
+        // Explorer's "Copy as path" in a TOML string: the quotes are taken off (18.1).
+        let exe = if cfg!(windows) { "C:\\Program Files\\Python311\\python.exe" } else { "/opt/my python/bin/python3" };
+        let cfg = project("cmdpasted", &format!("[engines.py]\ncommand = ['\"{exe}\"', \"-X\"]\n")).unwrap();
+        assert_eq!(cfg.engines["py"].command.as_ref().unwrap().value, [exe, "-X"]);
+        let cfg = project("venvpasted", "[python]\nvenv = '\".venv\"'\n").unwrap();
+        assert_eq!(cfg.python_venv.unwrap().value, cfg.root.join(".venv"));
+        // A program's name where the engine's goes (18.2).
+        for (table, engine) in [("node", "js"), ("nodejs", "js"), ("python3", "py"), ("pypy3", "py")] {
+            let e = project(&format!("prog{table}"), &format!("[engines.{table}]\ncommand = [\"x\"]\n")).unwrap_err().0;
+            assert!(e.ends_with(&format!("[engines.{table}] names a program, not an engine: it runs the {engine} engine, so write [engines.{engine}] command = [\"{table}\"]")), "{e}");
+        }
         let e = project("cmdempty", "[engines.py]\ncommand = \" \"\n").unwrap_err().0;
         assert!(e.ends_with("[engines.py] command: expected an array of strings, got string \" \""), "{e}");
     }

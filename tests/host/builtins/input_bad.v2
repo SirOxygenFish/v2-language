@@ -1,0 +1,12 @@
+// input() names the line that isn't UTF-8 and what it probably is (DOCS 3.11, INTERNALS 5.10).
+try {
+    while true {
+        let line = input()
+        if line == null {
+            break
+        }
+        print(f"[${line}]")
+    }
+} catch (e) {
+    print(e.type, e.message)
+}

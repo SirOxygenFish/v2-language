@@ -25,6 +25,9 @@ pub struct ErrorValue {
     /// What to do about it, printed only when the error ends the program (2.4); never part of
     /// `e.message`, so a program that catches it sees the error as it was raised.
     pub hint: OnceCell<Rc<str>>,
+    /// More lines printed with it then, before the hint: an imported file's problem, with its
+    /// own line and caret (6.4).
+    pub detail: OnceCell<Rc<str>>,
 }
 
 /// An error's `data` and `cause` are freed through the same queue as containers (5.1), so a
@@ -53,6 +56,7 @@ impl ErrorValue {
             trace: OnceCell::new(),
             cause: Value::Null,
             hint: OnceCell::new(),
+            detail: OnceCell::new(),
         }
     }
 }
@@ -139,7 +143,7 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
 /// The source line under `span` with a caret, indented 4. Leading whitespace is removed, tabs
 /// print as one space, other control characters as their visible symbols, and lines over 120
 /// chars are cut to a window around the caret.
-fn excerpt(sm: &SourceMap, span: Span) -> String {
+pub fn excerpt(sm: &SourceMap, span: Span) -> String {
     let line = sm.line_text(span.file, span.line);
     let removed = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
     let chars: Vec<char> = line.chars().skip(removed).map(visible).collect();
@@ -316,6 +320,9 @@ pub fn render_error(sm: &SourceMap, e: &ErrorValue) -> String {
     };
     for line in rest {
         out.push_str(&format!("    {line}\n"));
+    }
+    if let Some(d) = e.detail.get() {
+        out.push_str(d);
     }
     if let Some(h) = e.hint.get() {
         out.push_str(&format!("  hint: {h}\n"));
