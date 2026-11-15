@@ -1,6 +1,6 @@
 handle 2024 2024-02-29 2024-02-29 true true
-TypeError: unsupported operand types for +: 'handle' and 'int' — do it inside a block of its language, as in @py(h) { h + 1 } or @js(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
-TypeError: cannot compare handle and handle with '<' — do it inside a block of its language, as in @py(h) { h + 1 } or @js(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
+TypeError: unsupported operand types for +: 'handle' and 'int' — do it inside a block of its language, as in @py(h) { h + 1 }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
+TypeError: cannot compare handle and handle with '<' — do it inside a block of its language, as in @py(h) { h < x }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
 TypeError TypeError TypeError TypeError
 ForeignError ForeignError ForeignError
 2 1 c <C> 8 {"name": "c"}

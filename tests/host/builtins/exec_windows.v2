@@ -14,3 +14,8 @@ let utf8 = "65001" in exec(["cmd", "/d", "/c", "chcp"]).stdout
 print(len(typed), ("\u{fffd}" in typed) == utf8)
 // UTF-16 output, as cmd /u writes it, is decoded (INTERNALS 5.10).
 print(json_stringify(exec(["cmd", "/d", "/u", "/c", "echo h\u{e9}llo"]).stdout))
+// The one string after /c is cmd's own command line: its quotes reach cmd as written (5.10).
+make_dir(home + "/v2 exec dir")
+write_file(home + "/v2 exec dir/a.txt", "a")
+let listed = exec(["cmd", "/d", "/c", f"cd /d \"${home}\\v2 exec dir\" && dir /b"])
+print(listed.code, listed.stdout.trim())

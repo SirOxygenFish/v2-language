@@ -1,0 +1,22 @@
+[1.5, 2.5]
+[3, -4]
+MarshalError: to_v2(): can't convert Date to V2 data: make plain data of it in a block first, as in @js(h) { h.toISOString() }
+  hint: none
+MarshalError: to_v2(): can't convert dict to V2 data (key of type datetime.date)
+  hint: make its keys strings in the block, as in @py(h) { {str(k): v for k, v in h.items()} }
+TypeError: float() can't convert handle
+  hint: convert it in its language, as in @py(h) { float(h) }
+TypeError: int() can't convert handle
+  hint: convert it in its language, as in @py(h) { int(h) }
+TypeError: the :.2f format needs a number, got handle
+  hint: convert it in its language, as in @py(h) { float(h) }
+TypeError: cannot slice a handle — do it inside a block of its language, as in @js(h) { h.slice(1, 3) }, or call a method on it; to_v2(h) converts one that holds plain data (lists, dicts, numbers, text)
+  hint: none
+TypeError: read_file() argument 'path' must be a str, got handle
+  hint: pass its text, as in read_file(str(h))
+ValueError: block arg 'class' is not a valid Python name: pass it under another name, as in @py(class_: …)
+  hint: none
+ForeignError: 'utf-8' codec can't decode byte 0xe9 in position 3: invalid continuation byte
+  hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: for a file in another encoding, name it, as in open(path, encoding="cp1252")
+KeyError: key 'keys' not found
+  hint: keys is a method of dicts, so call it, as in d.keys()

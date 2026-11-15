@@ -448,6 +448,10 @@ impl<'a> DirParser<'a> {
         loop {
             let t = self.bump();
             let span = t.span;
+            let named = match &t.kind {
+                DK::Name(n) | DK::Kw(n) | DK::Str(n) => n.to_string(),
+                _ => "name".to_string(),
+            };
             match t.kind.clone() {
                 DK::Star => {
                     exports.star.get_or_insert(span);
@@ -476,6 +480,11 @@ impl<'a> DirParser<'a> {
                     return Ok(());
                 }
                 DK::End => return Err(Diag::new("unterminated @export list", open)),
+                // JavaScript's `export { show as pyshow }`.
+                DK::Kw(k) if &*k == "as" => {
+                    return Err(Diag::new("expected `,` or `}` in the @export list, found keyword `as`", self.span())
+                        .hint(format!("@export can't rename: export {named} and rename it where it is imported, as in @import {{ {named} as other }} from …")))
+                }
                 other => return Err(Diag::new(format!("expected `,` or `}}` in the @export list, found {}", describe(&other)), self.span())),
             }
         }
@@ -559,6 +568,7 @@ impl<'a> DirParser<'a> {
         }
         let block = canonical_tag(tag);
         match (family(tag), family(&lang.text)) {
+            ("py", "py") if module == *alias.text => format!("use import {module} inside @py blocks"),
             ("py", "py") => format!("use import {module} as {} inside @py blocks", alias.text),
             ("js", "js") => format!("use const {} = require({module:?}) inside @{block} blocks", alias.text),
             _ => names,
@@ -954,6 +964,7 @@ mod tests {
         for (src, hint) in [
             ("@py {\n  @import py.numpy as np\n}", "use import numpy as np inside @py blocks"),
             ("@python {\n  @import py.os.path as p\n}", "use import os.path as p inside @py blocks"),
+            ("@py {\n  @import py.os as os\n}", "use import os inside @py blocks"),
             ("@js {\n  @import js.\"date-fns\" as dfns\n}", "use const dfns = require(\"date-fns\") inside @js blocks"),
             ("@ts {\n  @import ts.lodash as _\n}", "use const _ = require(\"lodash\") inside @ts blocks"),
             ("@js {\n  @import py.numpy as np\n}", "import names instead: @import { … } from …"),
@@ -975,6 +986,10 @@ mod tests {
         for src in ["@js {\n  const css = `\n@import url(\"theme.css\");\n`\n}", "@py {\n  s = '''\n@import \"theme.css\";\n'''\n}"] {
             assert_eq!(diag(src).hint.as_deref(), Some(hint), "{src}");
         }
+        assert_eq!(
+            diag("@py {\n  def show(): pass\n  @export { show as pyshow }\n}").hint.as_deref(),
+            Some("@export can't rename: export show and rename it where it is imported, as in @import { show as other } from …")
+        );
         // The line escaped is the block's own.
         let (p, _) = run("@js {\n  const css = `\n@@import url(\"theme.css\");\n`\n}").unwrap();
         assert!(p.body.contains("\n@import url(\"theme.css\");\n"), "{:?}", p.body);

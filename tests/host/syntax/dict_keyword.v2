@@ -1,3 +1,12 @@
-// exit: 1
-// stderr: dict_keyword.v2:3:10: SyntaxError: keyword `from` can't be a bare dict key: quote it
-let d = {from: 1}
+// A V2 keyword before `:` is a dict key, as JavaScript allows, or an argument's name, as a Python
+// function's parameter may be called func (DOCS 3.6, 3.7). After a dot it is a name too.
+let d = {from: 1, to: 2, if: 3, "in": 4}
+print(d, d.from, d["if"])
+func f(x) {
+    return x
+}
+try {
+    f(func: 1)
+} catch (e) {
+    print(e.message)
+}

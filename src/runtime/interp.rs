@@ -129,6 +129,17 @@ fn no_member(o: &Value, what: &str, n: &str) -> String {
     }
 }
 
+/// `x.items()`, `x.iteritems()`, `x.iterrows()`, `x.entries()`: a loop over pairs, which Python and
+/// JavaScript unpack (5.8). The method's name and the span of `x`.
+fn pairs_call(e: &Expr) -> Option<(&'static str, Span)> {
+    let ExprKind::Call { callee, args, .. } = &e.kind else { return None };
+    let ExprKind::Member { obj, name, .. } = &callee.kind else { return None };
+    if !args.is_empty() {
+        return None;
+    }
+    ["items", "iteritems", "iterrows", "entries"].into_iter().find(|m| *m == &*name.text).map(|m| (m, obj.span))
+}
+
 /// What V2 writes for a Python or JavaScript method or field name on its own values (5.9):
 /// `xs.append` is `xs.push`, `s.length` is `len(s)`.
 fn habit(o: &Value, n: &str) -> Option<&'static str> {
@@ -146,6 +157,10 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "forEach" | "each" if matches!(o, Value::List(_)) => "V2 loops with for item in x { ... }",
         "sorted" if matches!(o, Value::List(_)) => "did you mean 'sort'?",
         "reversed" if matches!(o, Value::List(_)) => "did you mean 'reverse'?",
+        "remove" | "splice" if matches!(o, Value::List(_)) => "V2 removes the item at an index with xs.pop(i) (xs.index_of(x) finds it), or keeps the others with xs.filter(func(y) => y != x)",
+        "count" if matches!(o, Value::List(_)) => "V2 counts with len(xs.filter(func(y) => y == x))",
+        "clear" if matches!(o, Value::List(_) | Value::Dict(_)) => "V2 starts over with a new one: xs = [] (or d = {})",
+        "ljust" | "rjust" | "center" | "padEnd" | "padStart" if matches!(o, Value::Str(_)) => "V2 pads with \" \" * n, as in s + \" \" * (10 - len(s))",
         "toUpperCase" if matches!(o, Value::Str(_)) => "did you mean 'upper'?",
         "toLowerCase" if matches!(o, Value::Str(_)) => "did you mean 'lower'?",
         "strip" | "trimStart" | "trimEnd" | "lstrip" | "rstrip" if matches!(o, Value::Str(_)) => "did you mean 'trim'?",
@@ -560,7 +575,11 @@ impl Interp {
         if let Some(msg) = self.declared_later(span.file, name, env) {
             return self.fail_at("NameError", msg, span);
         }
-        let names = env::visible_names(env);
+        let mut names = env::visible_names(env);
+        // A builtin can't be assigned to, so `count = 1` isn't a typo of round.
+        if assigning {
+            names.retain(|n| !super::builtins::BUILTINS.iter().any(|b| b.name == &**n));
+        }
         let base = format!("'{name}' is not declared");
         // Python's and JavaScript's names for what V2 spells differently (5.9).
         let habit = match name {
@@ -752,6 +771,22 @@ impl Interp {
                 }
             }
             ForIter::Value(e) => match self.eval(e, env)? {
+                // Python's `for k, v in d.items()` unpacks each pair; V2's two variables would be
+                // its index and the pair (5.8).
+                Value::Handle(_) if second.is_some() && pairs_call(e).is_some() => {
+                    let (method, obj) = pairs_call(e).unwrap_or(("items", e.span));
+                    let text = &self.sm.file(obj.file).text[obj.lo as usize..obj.hi as usize];
+                    let x = if text.len() <= 40 && !text.contains('\n') { text } else { "x" };
+                    let vars = format!("{}, {}", first.text, second.map_or("", |s| &*s.text));
+                    let err = ErrorValue::new("TypeError", format!("V2 doesn't unpack pairs: for {vars} in {x}.{method}() would give each pair's index and the pair"));
+                    let hint = if method == "iterrows" {
+                        format!("loop over its rows with for row in {x}.itertuples() and read their fields, as in row.Index")
+                    } else {
+                        format!("write for {vars} in {x}: two variables loop over a mapping's keys and values, and over a Python object's items()")
+                    };
+                    let _ = err.hint.set(hint.into());
+                    return Err(self.raise(Flow::Error(Rc::new(err)), e.span));
+                }
                 Value::List(l) => {
                     let items = l.borrow().clone();
                     for (i, x) in items.into_iter().enumerate() {
@@ -798,7 +833,7 @@ impl Interp {
     /// `[key, value]` pairs, so one variable is the key and two are key and value, as for a
     /// dict; anything else gives items, or index and item, as for a list.
     fn for_handle(&mut self, h: &HandleRef, first: &Name, second: Option<&Name>, body: &Body, env: &Env, at: Span) -> Exec<()> {
-        let (it, mapping) = self.handle_iter(h, at)?;
+        let (it, mapping) = self.handle_iter(h, second.is_some(), at)?;
         let mut index = 0;
         loop {
             let (items, done) = self.handle_next(&it, at)?;
@@ -1122,6 +1157,10 @@ impl Interp {
                             let x = match v {
                                 Value::Int(i) => i as f64,
                                 Value::Float(x) => x,
+                                Value::Handle(h) => {
+                                    let msg = format!("the :.{n}f format needs a number, got handle");
+                                    return super::builtins::number_error(&msg, &h.tag, false).map_err(|f| self.raise(f, expr.span));
+                                }
                                 other => {
                                     let msg = format!("the :.{n}f format needs a number, got {}", other.type_name());
                                     return self.fail_at("TypeError", msg, expr.span);
@@ -1443,7 +1482,7 @@ impl Interp {
                 let (x, y) = (self.chars.byte_of(s, a), self.chars.byte_of(s, b));
                 Ok(Value::str(&s[x..y]))
             }
-            Value::Handle(_) => type_error(format!("cannot slice a handle{}", ops::HANDLE_HINT)),
+            h @ Value::Handle(_) => type_error(format!("cannot slice a handle{}", ops::handle_hint(h, "h[1:3]", "h.slice(1, 3)"))),
             other => type_error(format!("cannot slice {}", other.type_name())),
         }
     }

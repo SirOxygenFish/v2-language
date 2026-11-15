@@ -1,4 +1,4 @@
 4 var b.txt listed
-arrow | 'arrow' is not exported by 'tools' (did the block @export it?)
-notAFunction | 'notAFunction' is not exported by 'tools' (did the block @export it?)
-_private | '_private' is not exported by 'tools' (did the block @export it?)
+arrow | 'arrow' is not exported by 'tools' (its @export { * } exports only functions, and no name that starts with _: list a const, let or class by name, as in @export { arrow })
+notAFunction | 'notAFunction' is not exported by 'tools' (its @export { * } exports only functions, and no name that starts with _: list a const, let or class by name, as in @export { notAFunction })
+_private | '_private' is not exported by 'tools' (its @export { * } exports only functions, and no name that starts with _: list a const, let or class by name, as in @export { _private })

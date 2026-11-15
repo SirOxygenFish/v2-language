@@ -142,7 +142,10 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, next: Option<&str>) -> S
         return format!("there is a '{name}.v2.txt': your editor added '.txt', so rename it to '{name}.v2'");
     }
     let scripts = v2_files(folder);
-    if let Some(close) = did_you_mean(&name, scripts.iter().map(String::as_str)) {
+    // By the names without `.v2`, which every one shares: `nope.v2` isn't a typo of `tour.v2`.
+    let stem = |s: &str| s.strip_suffix(".v2").unwrap_or(s).to_string();
+    let stems: Vec<String> = scripts.iter().map(|s| stem(s)).collect();
+    if let Some(close) = did_you_mean(&stem(&name), stems.iter().map(String::as_str)).map(|c| format!("{c}.v2")) {
         let suggestion = match file.rfind(['/', '\\']) {
             Some(i) => format!("{}{close}", &file[..=i]),
             None => close.to_string(),
@@ -252,6 +255,9 @@ mod tests {
         assert_eq!(hint("notes.v2", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         assert_eq!(hint("helo.v2", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("zzzzzz.v2", None), "the .v2 files there: b.v2, hello.v2");
+        // Names are compared without .v2: nope.v2 is no typo of tour.v2.
+        std::fs::write(d.join("tour.v2"), "print(1)\n").unwrap();
+        assert_eq!(hint("nope.v2", None), "the .v2 files there: b.v2, hello.v2, tour.v2");
         // A folder on the way that isn't there, with the one it probably meant.
         std::fs::create_dir_all(d.join("examples")).unwrap();
         let m = entry_error(&at("exmaples/x.v2"), None, "v2").unwrap();

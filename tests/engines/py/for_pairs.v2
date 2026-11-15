@@ -1,0 +1,52 @@
+// requires: py
+// Two loop variables over a handle: a mapping, or an object with items() as a pandas Series has,
+// give keys and values; one variable gives what Python's for gives. x.items() itself would give
+// each pair's index and the pair: an error (DOCS 9.2, INTERNALS 11.4).
+@py data {
+    class Totals:
+        """Like a pandas Series: iterating gives the values, items() the labels and values."""
+        def __init__(self):
+            self.d = {"North": 40, "South": 20}
+        def __iter__(self):
+            return iter(self.d.values())
+        def items(self):
+            return iter(self.d.items())
+        def iterrows(self):
+            return iter([(0, "row")])
+    def totals():
+        return Totals()
+    def pairs():
+        yield (1, 2)
+        yield (3, 4)
+    @export { totals, pairs }
+}
+@import { totals, pairs } from data
+let t = totals()
+for k, v in t {
+    print(k, v)
+}
+for v in t {
+    print(v)
+}
+// A generator of pairs has no items(): its index and each pair.
+for i, p in pairs() {
+    print(i, p)
+}
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        print("hint: " + e.hint)
+    }
+}
+show(func() {
+    for region, total in t.items() {
+        print(region, total)
+    }
+})
+show(func() {
+    for i, row in t.iterrows() {
+        print(i, row)
+    }
+})
