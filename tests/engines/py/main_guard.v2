@@ -1,0 +1,13 @@
+// requires: py
+// exit: 1
+// stderr: main_guard.v2:11:1: ForeignError: SyntaxError: a block isn't the main module, so its `if __name__ == "__main__":` is never true: run that code directly (call main()), or remove the if
+// A script pasted into a block: its main guard would quietly run nothing, so it is an error at
+// its line, before any of the block runs (DOCS 4, INTERNALS 14.3).
+print("before")
+@py {
+def main():
+    print("main ran")
+
+if __name__ == "__main__":
+    main()
+}

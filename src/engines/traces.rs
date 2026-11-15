@@ -78,6 +78,11 @@ impl Interp {
                     (format!("{shown}:{line}, in {lang}"), None)
                 }
             };
+            // V8 writes an anonymous function's frame as it writes the block's own top level,
+            // so the same unnamed place twice in a row is printed once.
+            if func.is_none() && out.frames.last().is_some_and(|l| **l == *loc) {
+                continue;
+            }
             out.frames.push(match func {
                 Some(name) => format!("{name} ({loc})").into(),
                 None => loc.into(),

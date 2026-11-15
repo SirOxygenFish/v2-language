@@ -1,0 +1,17 @@
+// requires: py
+// pickle saves a class by its module, and a block's module is named for its place in one run:
+// in the same run its objects pickle and load, and a name of another run's block says why it
+// can't load (INTERNALS 14.3).
+@py {
+import pickle
+
+class Point:
+    def __init__(self, x):
+        self.x = x
+
+print(pickle.loads(pickle.dumps(Point(3))).x)
+try:
+    pickle.loads(b"c__v2_9_99\nPoint\n.")
+except ModuleNotFoundError as e:
+    print(e)
+}

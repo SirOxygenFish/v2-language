@@ -252,12 +252,15 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     (Status::Old(v), Some(min), None) => format!("too old: found {v}, V2 needs {}; install: {}", rule.needs(min), install_hint(&id)),
                     _ => nf.message.lines().next().unwrap_or_default().to_string(),
                 };
-                // The note, then the programs skipped, which its "(see why below)" points at; ts's
-                // reasons are js's, listed above it.
-                let note = match (&spec.session_of, nf.skipped.is_empty()) {
-                    (Some(host), true) => note.replace(" (see why below)", &format!(" (see {host} above)")),
-                    _ => note,
-                };
+                // The note, then the programs skipped, which its "(see why below)" points at. ts's
+                // reasons are js's: when js was found but can't be used, its notes above say what
+                // to do (a missing js has the install line for both).
+                let host_found = spec.session_of.as_ref().and_then(|h| rows.iter().find(|r| *r[0] == **h)).is_some_and(|r| r[1] != "ok" && r[1] != "missing");
+                if let (Some(host), true) = (&spec.session_of, host_found) {
+                    notes.push(format!("{id}: @{id} blocks run on the {host} engine: see {host} above"));
+                    not_ready.push(id);
+                    continue;
+                }
                 notes.push(format!("{id}: {note}"));
                 let others: Vec<(std::path::PathBuf, String)> =
                     nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
@@ -273,14 +276,17 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         notes.push(format!("temp: {problem}"));
         not_ready.push("blocks".into());
     }
+    // COMMAND goes last, so a long path (a venv deep in a project) runs on past the row instead of
+    // pushing the other columns apart.
+    const ORDER: [usize; 5] = [0, 1, 3, 4, 2];
     let widths: Vec<usize> = (0..5).map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0) + 2).collect();
     for row in &rows {
         let mut line = String::new();
-        for (c, cell) in row.iter().enumerate() {
-            if c + 1 < row.len() {
-                line.push_str(&format!("{cell:<width$}", width = widths[c]));
+        for (i, &c) in ORDER.iter().enumerate() {
+            if i + 1 < ORDER.len() {
+                line.push_str(&format!("{:<width$}", row[c], width = widths[c]));
             } else {
-                line.push_str(cell);
+                line.push_str(&row[c]);
             }
         }
         stdoutln!("{}", line.trim_end());

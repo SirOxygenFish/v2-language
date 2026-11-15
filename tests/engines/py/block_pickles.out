@@ -1,0 +1,2 @@
+3
+No module named '__v2_9_99': that is how V2 names a @py block's code, for its place in one run, so nothing else can import it (pickle saves where each class it saved came from): define what you pickle in a .py file next to your .v2 file, and import that in the block

@@ -1,0 +1,23 @@
+// requires: py
+// stderr: No module named '__v2_
+// stderr: it is a @py block's code, which a new Python process can't import (multiprocessing's spawn and forkserver start one): put the functions and classes you send to other processes in a .py file next to your .v2 file, and import that in the block
+// A process that multiprocessing spawns is a new Python: it can't import a block's function,
+// and says why; one from a .py file next to the script works (INTERNALS 14.3).
+@py {
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from spawn_helpers import double
+
+def square(x):
+    return x * x
+
+spawn = mp.get_context("spawn")
+with ProcessPoolExecutor(1, mp_context=spawn) as ex:
+    print(list(ex.map(double, [1, 2])))
+try:
+    with ProcessPoolExecutor(1, mp_context=spawn) as ex:
+        print(list(ex.map(square, [1, 2])))
+except BrokenProcessPool:
+    print("BrokenProcessPool")
+}

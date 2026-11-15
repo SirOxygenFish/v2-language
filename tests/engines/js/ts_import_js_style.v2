@@ -1,0 +1,7 @@
+// requires: js ts
+// exit: 1
+// stderr: hint: Node runs .ts files as they are written, so imports between them name the .ts file: write ts_math.ts for ts_math.js in ts_tsc_style.ts
+// tsc writes an import of a .ts file as './x.js'; Node runs .ts files as they are written, so
+// the import names x.ts (DOCS 7, INTERNALS 13.5).
+@import { three } from ts."./fixtures/ts_tsc_style.ts"
+print(three)

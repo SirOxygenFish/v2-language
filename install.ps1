@@ -45,12 +45,17 @@
         $null
     }
 
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("v2-install-" + [Guid]::NewGuid().ToString('N'))
+    # A short name, so the v2.exe in it can start even in a deep temp folder (step 4).
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("v2-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     try {
         $dir = if ($env:V2_INSTALL_DIR) { FullPath $env:V2_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.v2\bin' }
         # As PATH spells a folder: without a trailing separator (C:\ keeps its own).
         if ($dir.Length -gt 3) { $dir = $dir.TrimEnd('\', '/') }
         if (Test-Path -LiteralPath $dir -PathType Leaf) { Fail "V2_INSTALL_DIR names a file, not a folder: $dir" }
+        # Windows starts no program whose path has 260 characters or more.
+        if ((Join-Path $dir 'v2.exe').Length -ge 260) {
+            Fail "$dir is $($dir.Length) characters long, too long a folder for v2.exe: Windows starts no program whose path has 260 characters or more; set V2_INSTALL_DIR to a shorter folder"
+        }
 
         # 1. Which binary: x64 (Windows on Arm runs it too, emulated).
         if (-not [Environment]::Is64BitOperatingSystem) { Fail "V2 needs 64-bit Windows: $fromSource" }
@@ -61,6 +66,7 @@
 
         # 2. Get the archive and its checksum.
         if ($env:V2_ARCHIVE) {
+            if ($env:V2_VERSION) { Write-Host "Note: V2_VERSION is ignored: V2_ARCHIVE names the archive to install" }
             $archive = FullPath $env:V2_ARCHIVE
             $shownArchive = Split-Path -Leaf $archive
             $again = "download $shownArchive and its .sha256 again"
@@ -96,17 +102,34 @@
             $checked = $true
         }
 
-        # 4. Unpack (the files are in a folder named like the archive), and check that it runs here
+        # 4. Unpack v2.exe (in the archive, in a folder named like it), and check that it runs here
         # before it replaces anything.
-        $unpacked = Join-Path $tmp 'unpacked'
-        try { Expand-Archive -LiteralPath $zip -DestinationPath $unpacked } catch { Fail "could not unpack $shownArchive (it isn't a zip file, or is damaged): $again" }
-        $exe = Join-Path $unpacked "v2-$target\v2.exe"
-        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $exe = Join-Path $unpacked 'v2.exe' }
-        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Fail "$shownArchive has no v2.exe in it" }
+        $exe = Join-Path $tmp 'v2.exe'
+        $found = $false
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $file = [IO.Compression.ZipFile]::OpenRead($zip)
+            try {
+                $entry = $file.Entries | Where-Object { ($_.FullName -replace '\\', '/') -in @("v2-$target/v2.exe", 'v2.exe') } | Select-Object -First 1
+                if ($entry) { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $exe); $found = $true }
+            } finally {
+                $file.Dispose()
+            }
+        } catch { Fail "could not unpack $shownArchive (it isn't a zip file, or is damaged): $again" }
+        if (-not $found) { Fail "$shownArchive has no v2.exe in it" }
+        # In a temp folder too deep for that, its short (8.3) name.
+        $run = $exe
+        if ($run.Length -ge 260) {
+            try { $run = (New-Object -ComObject Scripting.FileSystemObject).GetFile($exe).ShortPath } catch {}
+        }
+        if ($run.Length -ge 260) {
+            $base = [IO.Path]::GetTempPath().TrimEnd('\')
+            Fail "the temp folder $base is $($base.Length) characters long, too long for Windows to start the new v2.exe from it: set `$env:TEMP to a shorter folder (such as C:\Temp), then run this again"
+        }
         # Unchecked, a file that doesn't run may just be damaged.
         $next = if ($checked) { $fromSource } else { "if the file may be damaged, download it again with its .sha256, so it gets checked; else $fromSource" }
         # Windows's own reason, without PowerShell's "At …install.ps1:108 char:24" position.
-        try { $shown = & $exe --version } catch {
+        try { $shown = & $run --version } catch {
             $why = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
             $why = ($why -replace '(?s)\s*At [^\r\n]*:\d+ char:\d+.*$', '').Trim().TrimEnd('.')
             Fail "the v2.exe in $shownArchive doesn't run here ($why): $next"

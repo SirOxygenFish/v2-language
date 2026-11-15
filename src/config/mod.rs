@@ -243,6 +243,44 @@ pub(crate) fn toml_string(w: &str) -> String {
     }
 }
 
+/// The first variable in `text` that a shell would have expanded and V2 takes as written
+/// (18.1, 5.10): `%ProgramFiles%`, `${HOME}`, `$env:USERPROFILE`, or `$HOME` in capitals.
+pub(crate) fn unexpanded(text: &str) -> Option<&str> {
+    let b = text.as_bytes();
+    let starts = |i: usize| b.get(i).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_');
+    let end = |mut i: usize, also: &[u8]| {
+        while b.get(i).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || also.contains(c)) {
+            i += 1;
+        }
+        i
+    };
+    for i in 0..b.len() {
+        match b[i] {
+            b'%' if starts(i + 1) => {
+                let e = end(i + 1, b"()");
+                if b.get(e) == Some(&b'%') {
+                    return Some(&text[i..=e]);
+                }
+            }
+            b'$' if text[i + 1..].starts_with("env:") && starts(i + 5) => return Some(&text[i..end(i + 5, b"")]),
+            b'$' if b.get(i + 1) == Some(&b'{') && starts(i + 2) => {
+                let e = end(i + 2, b"");
+                if b.get(e) == Some(&b'}') {
+                    return Some(&text[i..=e]);
+                }
+            }
+            b'$' if starts(i + 1) => {
+                let e = end(i + 1, b"");
+                if text[i + 1..e].bytes().all(|c| !c.is_ascii_lowercase()) {
+                    return Some(&text[i..e]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// How a TOML value is named in messages: `string "30s"`, `integer 5`, `array`.
 fn describe(v: &toml::Value) -> String {
     match v {
@@ -545,6 +583,20 @@ mod tests {
 
     fn project(name: &str, toml_text: &str) -> Result<Config, ConfigError> {
         project_env(name, toml_text, &[])
+    }
+
+    #[test]
+    fn variables_a_shell_would_expand_are_found() {
+        // 18.1, 5.10: what V2 takes as written, for the hints that say so.
+        assert_eq!(unexpanded(r"C:\proj\%ProgramFiles%\Python311\python.exe"), Some("%ProgramFiles%"));
+        assert_eq!(unexpanded(r"%ProgramFiles(x86)%\x"), Some("%ProgramFiles(x86)%"));
+        assert_eq!(unexpanded("$HOME/.venv"), Some("$HOME"));
+        assert_eq!(unexpanded("${HOME}/.venv"), Some("${HOME}"));
+        assert_eq!(unexpanded(r"$env:USERPROFILE\x"), Some("$env:USERPROFILE"));
+        // Not variables: a share, a folder that starts with $, a lone %.
+        for plain in [r"\\server\C$\x", r"C:\$Recycle.Bin", "50% off", "100%", "a%%b", "~/x"] {
+            assert_eq!(unexpanded(plain), None, "{plain}");
+        }
     }
 
     #[test]
