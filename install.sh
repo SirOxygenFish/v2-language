@@ -65,7 +65,8 @@ esac
 name="v2-$target.tar.gz"
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t v2-install)
-trap 'rm -rf "$tmp"' EXIT
+staged=""
+trap 'rm -rf "$tmp"; [ -z "$staged" ] || rm -f "$staged"' EXIT
 # Ctrl+C and the other stop signals end the script through the EXIT trap, which cleans up.
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -125,7 +126,8 @@ if [ -f "$tmp/$name.sha256" ]; then
 fi
 
 # 4. Unpack (the files are in a folder named like the archive), and check that v2 runs here
-# before it replaces anything.
+# before it replaces anything: the copy in the install folder, as a temp folder may not run
+# programs (a server's /tmp mounted noexec), and the install folder has to.
 mkdir "$tmp/unpacked"
 tar -xzf "$tmp/$name" -C "$tmp/unpacked" || fail "could not unpack $shown_archive: $again"
 if [ -f "$tmp/unpacked/v2-$target/v2" ]; then
@@ -139,9 +141,24 @@ else
     done
     fail "$shown_archive has no v2 in it"
 fi
-chmod 755 "$bin"
-if ! "$bin" --version >"$tmp/version" 2>"$tmp/error"; then
+made=""
+[ -d "$dir" ] || made=$dir
+mkdir -p "$dir" || fail "could not create $dir"
+dir=$(CDPATH='' cd -- "$dir" && pwd) || fail "could not open $dir"
+[ ! -d "$dir/v2" ] || fail "$dir/v2 is a folder, so v2 can't go there: move it away, then run this again"
+staged="$dir/v2.new"
+cp "$bin" "$staged" || fail "could not write to $dir: choose a folder you can write to with V2_INSTALL_DIR"
+chmod 755 "$staged"
+ran=0
+"$staged" --version >"$tmp/version" 2>"$tmp/error" || ran=$?
+if [ "$ran" -ne 0 ]; then
+    rm -f "$staged"
+    staged=""
+    [ -z "$made" ] || rmdir "$made" 2>/dev/null || true
     cat "$tmp/error" >&2
+    if grep -qi 'permission denied' "$tmp/error"; then
+        fail "$dir doesn't let programs run (its file system is mounted noexec): install into a folder that does, with V2_INSTALL_DIR"
+    fi
     need=$(grep -o 'GLIBC_[0-9.]*' "$tmp/error" | head -n 1 | cut -d _ -f 2)
     if [ -n "$need" ]; then
         fail "this Linux is too old for the prebuilt V2, which needs glibc $need or newer: $from_source"
@@ -158,12 +175,8 @@ installed=$(cut -d ' ' -f 1-2 <"$tmp/version")
 
 # 5. Put v2 in place (a rename, so a running v2 is not touched), in the folder as PATH spells it:
 # absolute, without `.`, `..` or a trailing `/`.
-mkdir -p "$dir" || fail "could not create $dir"
-dir=$(CDPATH='' cd -- "$dir" && pwd) || fail "could not open $dir"
-[ ! -d "$dir/v2" ] || fail "$dir/v2 is a folder, so v2 can't go there: move it away, then run this again"
-cp "$bin" "$dir/v2.new"
-chmod 755 "$dir/v2.new"
-mv -f "$dir/v2.new" "$dir/v2"
+mv -f "$staged" "$dir/v2"
+staged=""
 say "Installed $installed as $dir/v2"
 
 # 6. Put the folder on PATH for new terminals: in each startup file the shell reads, the marker and
@@ -243,7 +256,11 @@ else
         fi
     done
     if [ -n "$unwritable" ]; then
-        printf 'install.sh: could not write %s, so new terminals may not find v2: add this line to it yourself:\n    %s\n' "$unwritable" "$line" >&2
+        case "$unwritable" in
+        *" and "*) them=them ;;
+        *) them=it ;;
+        esac
+        printf 'install.sh: could not write %s, so new terminals may not find v2: add this line to %s yourself:\n    %s\n' "$unwritable" "$them" "$line" >&2
         status=1
     fi
     if [ -n "$added" ]; then
@@ -268,8 +285,10 @@ if [ -n "$other" ] && [ "$other" != "$dir/v2" ]; then
         say "Note: another v2 comes first on your PATH: $other (remove it, or put $dir before it)"
     elif yes_value "${V2_NO_MODIFY_PATH:-}"; then
         say "Note: a terminal finds another v2 now: $other (put $dir before it in PATH, or remove it)"
-    else
+    elif [ -z "${unwritable:-}" ]; then
         say "Note: this terminal runs another v2, $other; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=$(dirname "$other")"
+    else
+        say "Note: a terminal finds another v2 now: $other (put $dir before it in PATH, or remove it)"
     fi
 fi
 say "Next: run 'v2 doctor' to see whether Python and Node.js are ready for @py and @js blocks."

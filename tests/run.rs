@@ -2541,6 +2541,107 @@ fn a_local_es_module_under_commonjs_shows_v2s_hint_without_nodes_warning() {
     assert!(!stderr.contains("Failed to load the ES module"), "{stderr}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_virtual_memory_limit_gets_a_smaller_interpreter_stack() {
+    // main.rs: under ulimit -v 260000 (254 MiB) the 256 MiB stack can't be reserved, so the
+    // interpreter starts on a smaller one, and the script runs.
+    use std::os::unix::process::CommandExt;
+    let home = TempHome::new();
+    std::fs::write(home.0.join("m.v2"), "func f(n) {\n    return n == 0 ? 0 : 1 + f(n - 1)\n}\nprint(f(1000))\n").unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("m.v2").current_dir(&home.0).stdin(Stdio::null());
+    // SAFETY: setrlimit is async-signal-safe and touches only the child.
+    unsafe {
+        cmd.pre_exec(|| {
+            let limit = libc::rlimit { rlim_cur: 260_000 * 1024, rlim_max: 260_000 * 1024 };
+            if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_past_the_file_size_limit_is_an_ioerror() {
+    // INTERNALS 8.3: V2 ignores SIGXFSZ, so a write past ulimit -f fails with EFBIG, an IOError
+    // the script can catch, instead of killing v2.
+    use std::os::unix::process::CommandExt;
+    let home = TempHome::new();
+    let src = "try {\n    write_file(\"big.out\", \"x\" * 1048576)\n} catch (e) {\n    print(e.type, \"|\", e.hint)\n}\n";
+    std::fs::write(home.0.join("f.v2"), src).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("f.v2").current_dir(&home.0).stdin(Stdio::null());
+    // SAFETY: setrlimit is async-signal-safe and touches only the child.
+    unsafe {
+        cmd.pre_exec(|| {
+            let limit = libc::rlimit { rlim_cur: 100 * 1024, rlim_max: 100 * 1024 };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "IOError | the file size limit (ulimit -f) stops it: raise the limit, or write less\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_python_that_never_answers_is_noted_in_the_run() {
+    // INTERNALS 7.6: a hit on PATH whose --version probe times out costs the run its 10 s, so the
+    // run says so on stderr, and goes on with the next one.
+    use std::os::unix::fs::PermissionsExt;
+    let home = TempHome::new();
+    let slow = home.0.join("slow");
+    std::fs::create_dir_all(&slow).unwrap();
+    std::fs::write(slow.join("python3"), "#!/bin/sh\nsleep 60\n").unwrap();
+    std::fs::set_permissions(slow.join("python3"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(home.0.join("p.v2"), "print(@py { 1 + 1 })\n").unwrap();
+    let path = format!("{}:{}", slow.display(), std::env::var("PATH").unwrap_or_default());
+    let (code, stdout, stderr) = run_in_home(&home.0, &["p.v2"], &[("PATH", std::ffi::OsStr::new(&path))]);
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default().split([',', ' ']).any(|t| t == "py");
+    if stderr.contains("EngineNotFound") && !required {
+        return;
+    }
+    assert_eq!((code, stdout.as_str()), (Some(0), "2\n"), "{stderr}");
+    let note = format!("note: {} didn't answer --version in 10 s, so V2 used ", slow.join("python3").display());
+    assert!(stderr.starts_with(&note) && stderr.ends_with(" (v2 doctor lists what it skips)\n"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_deleted_current_folder_is_said() {
+    // INTERNALS 19.1: a terminal still in a folder that was deleted.
+    let home = TempHome::new();
+    let script = format!("mkdir gone && cd gone && rmdir ../gone && exec \"{}\" hello.v2", BIN);
+    let out = Command::new("sh").arg("-c").arg(script).current_dir(&home.0).env("HOME", &home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "v2: cannot find 'hello.v2': the current folder no longer exists (it was deleted or moved)\ncd to another folder, or give the script's full path\n"
+    );
+}
+
+#[test]
+fn pythoninspect_doesnt_hold_the_python_worker() {
+    // INTERNALS 14.3: PYTHONINSPECT (python -i) would print the worker's SystemExit at the end and
+    // wait for input; atexit still runs.
+    let src = "print(@py { 1 + 1 })\n@py {\n    import atexit\n    atexit.register(lambda: print(\"atexit ran\"))\n}\n";
+    let (code, stdout, stderr, _home) = run_with_files_env(&[("p.v2", src)], &["p.v2"], &[("PYTHONINSPECT", "1")]);
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default().split([',', ' ']).any(|t| t == "py");
+    if stderr.contains("EngineNotFound") && !required {
+        return;
+    }
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "2\natexit ran\n", ""));
+}
+
 #[test]
 fn doctor_notes_engine_tables_of_later_versions() {
     // INTERNALS 19.2: a v2.toml written for R or @sh says, before any block is written, that

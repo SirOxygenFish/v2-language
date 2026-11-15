@@ -47,8 +47,16 @@ use std::process;
 
 use cli::Command;
 
-/// The interpreter thread's stack (INTERNALS 1.3, ch. 5).
-const INTERP_STACK_BYTES: usize = 256 * 1024 * 1024;
+/// The interpreter thread's stack (INTERNALS 1.3, ch. 5), and the smaller ones tried when the
+/// system won't reserve it (a virtual memory limit, `ulimit -v`): recursion then stops sooner.
+const INTERP_STACKS: [usize; 3] = [256 << 20, 64 << 20, 16 << 20];
+
+/// The stack the interpreter thread got, for its recursion guard.
+static INTERP_STACK_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(256 << 20);
+
+pub fn interp_stack_bytes() -> usize {
+    INTERP_STACK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Exit code for usage and configuration errors (INTERNALS 18.5, 19.1).
 const EXIT_USAGE: i32 = 2;
@@ -110,15 +118,33 @@ fn main() {
     }
 
     let watchdog = engines::process::Watchdog::start();
-    let interpreter = std::thread::Builder::new()
-        .name("v2-interp".into())
-        .stack_size(INTERP_STACK_BYTES)
-        .spawn(move || run(command));
+    let mut command = Some(command);
+    let mut interpreter = None;
+    let mut refused = None;
+    for size in INTERP_STACKS {
+        INTERP_STACK_BYTES.store(size, std::sync::atomic::Ordering::Relaxed);
+        // The closure gets the command only when the thread starts.
+        let (tx, rx) = std::sync::mpsc::channel::<Command>();
+        match std::thread::Builder::new().name("v2-interp".into()).stack_size(size).spawn(move || match rx.recv() {
+            Ok(c) => run(c),
+            Err(_) => 0,
+        }) {
+            Ok(handle) => {
+                let _ = tx.send(command.take().expect("sent once"));
+                interpreter = Some(handle);
+                break;
+            }
+            Err(e) => refused = Some(e),
+        }
+    }
     let code = match interpreter {
-        Ok(handle) => handle.join().unwrap_or(EXIT_PANIC),
+        Some(handle) => handle.join().unwrap_or(EXIT_PANIC),
         // The system's limit, not a bug in V2.
-        Err(e) => {
-            stderrln!("v2: cannot start the interpreter thread: {e}");
+        None => {
+            let why = refused.map(|e| e.to_string()).unwrap_or_default();
+            // The same error for a memory limit and a process limit: both are named.
+            stderrln!("v2: cannot start the interpreter thread: {why}");
+            stderrln!("a limit set for this shell may be too low: on memory (ulimit -v; V2 needs about 300 MB) or on processes and threads (ulimit -u)");
             1
         }
     };

@@ -1,0 +1,20 @@
+// requires: py js
+// A constant imported into a @js block from a block that hasn't run yet is a function there:
+// used as a value it says so, instead of printing V2's own code (INTERNALS 13.7).
+@py conf {
+    VERSION = "1"
+    def greet():
+        return "hi"
+    @export { VERSION, greet }
+}
+@js j {
+    @import { VERSION, greet } from conf
+    function show() {
+        try { return VERSION + "!" } catch (e) { return e.type + " | " + e.message }
+    }
+    function call() { return greet() }
+    @export { show, call }
+}
+@import { show, call } from j
+print(show())
+print(call())

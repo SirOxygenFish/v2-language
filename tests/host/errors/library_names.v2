@@ -1,0 +1,13 @@
+// What a beginner reaches for from Python's library, and V2's own time(), with what to write;
+// a short name two edits from another gets no did-you-mean (INTERNALS 5.9).
+func show(f) {
+    try { f() } catch (e) { print(e.message) }
+}
+show(func() => randint(1, 6))
+show(func() => random(1, 10))
+show(func() => math.sqrt(4))
+show(func() => sqrt(4))
+show(func() => datetime.now())
+show(func() => time.time())
+show(func() => nope)
+show(func() => pritn(1))

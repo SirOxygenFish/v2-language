@@ -208,6 +208,28 @@ expect "$code" 1 "exit code"
 says "the v2 in broken.tar.gz doesn't run here (see above): " || { echo "    no message"; ok=no; }
 result "an archive whose v2 doesn't run"
 
+# A temp folder that can't run programs (a server's /tmp mounted noexec) doesn't matter: the
+# check runs the copy in the install folder. An install folder that can't is named. Root only,
+# on Linux: it mounts a tmpfs.
+if [ "$(id -u)" = 0 ] && [ "$(uname -s)" = Linux ] && mkdir -p "$tmp/noexec" && mount -t tmpfs -o noexec tmpfs "$tmp/noexec" 2>/dev/null; then
+    fresh
+    install /bin/bash TMPDIR="$tmp/noexec"
+    ok=yes
+    expect "$code" 0 "exit code"
+    expect "$("$h/.v2/bin/v2" --version | cut -d ' ' -f 1)" v2 "the installed v2 runs"
+    result "a temp folder mounted noexec"
+    fresh
+    install /bin/bash V2_INSTALL_DIR="$tmp/noexec/bin"
+    ok=yes
+    expect "$code" 1 "exit code"
+    says "$tmp/noexec/bin doesn't let programs run (its file system is mounted noexec): install into a folder that does, with V2_INSTALL_DIR" || { echo "    no message"; ok=no; }
+    expect "$(ls -A "$tmp/noexec")" "" "files left in the folder"
+    result "an install folder mounted noexec"
+    umount "$tmp/noexec"
+else
+    echo "SKIP noexec mounts (they need root on Linux)"
+fi
+
 # A startup file that can't be written is named, with the line to add; the others are written.
 fresh
 mkdir "$h/$login"

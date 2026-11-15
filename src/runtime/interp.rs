@@ -95,6 +95,14 @@ fn stack_here() -> usize {
 /// `func has no method 'cwd'`, and for an imported name the way to its members (DOCS 6.1).
 fn no_member(o: &Value, what: &str, n: &str) -> String {
     let msg = format!("{} has no {what} '{n}'", o.type_name());
+    // `time.time()`, `time.sleep(1)`: V2's own functions, not a module.
+    if let Value::Func(f) = o {
+        if let Callable::Builtin(def) = &**f {
+            if def.name == "time" && matches!(n, "time" | "sleep" | "perf_counter" | "monotonic") {
+                return format!("{msg} — time() is V2's own function: call it, as in time() for the seconds, and sleep(1) to wait");
+            }
+        }
+    }
     // `s.upper` without the call: a method, read as a field (5.11).
     if what == "field" && super::methods::table(o).is_some_and(|t| t.iter().any(|m| m.name == n)) {
         return format!("{msg}: {n} is a method, so call it, as in x.{n}()");
@@ -143,7 +151,16 @@ fn null_from(name: &str, value: &str) -> Option<String> {
     if let Some(m) = ["sort", "reverse", "push", "insert"].iter().find(|m| value.contains(&format!(".{m}("))) {
         return Some(format!("'{name}' is null: it was set from {value}, and {m}() changes the list itself and gives null: use the list"));
     }
+    if value.starts_with('@') {
+        return Some(format!("'{name}' is null: it was set from a block, whose value is its last line: that line isn't an expression"));
+    }
+    if value.contains(".get(") {
+        return Some(format!("'{name}' is null: it was set with .get(), which gives null for a key or index that isn't there: pass a default, as in d.get(k, 0)"));
+    }
     let callee: String = value.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if callee == "getenv" {
+        return Some(format!("'{name}' is null: it was set from getenv(…), and that variable isn't set: pass a default, as in getenv(\"HOME\", \"/root\")"));
+    }
     (!callee.is_empty() && value[callee.len()..].starts_with('('))
         .then(|| format!("'{name}' is null: it was set from {callee}(…), which gave null (a function without return does)"))
 }
@@ -180,6 +197,13 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "count" if matches!(o, Value::List(_)) => "V2 counts with len(xs.filter(func(y) => y == x))",
         "clear" if matches!(o, Value::List(_) | Value::Dict(_)) => "V2 starts over with a new one: xs = [] (or d = {})",
         "ljust" | "rjust" | "center" | "padEnd" | "padStart" if matches!(o, Value::Str(_)) => "V2 pads with \" \" * n, as in s + \" \" * (10 - len(s))",
+        "isdigit" | "isnumeric" | "isdecimal" if matches!(o, Value::Str(_)) => "V2 checks for a number by converting it: try { int(s) } catch (e) { ... }",
+        "count" if matches!(o, Value::Str(_)) => "V2 counts a piece of text with len(s.split(piece)) - 1",
+        "capitalize" | "title" | "isalpha" | "isalnum" | "isupper" | "islower" | "isspace" | "swapcase" | "zfill" | "casefold" if matches!(o, Value::Str(_)) => {
+            "V2's strings don't have it: do it in a block, as in @py(s) { s.title() }"
+        }
+        "chars" | "toCharArray" if matches!(o, Value::Str(_)) => "V2 loops over a string's characters with for ch in s",
+        "charAt" if matches!(o, Value::Str(_)) => "V2 reads a character with s[i]",
         "toUpperCase" if matches!(o, Value::Str(_)) => "did you mean 'upper'?",
         "toLowerCase" if matches!(o, Value::Str(_)) => "did you mean 'lower'?",
         "strip" | "trimStart" | "trimEnd" | "lstrip" | "rstrip" if matches!(o, Value::Str(_)) => "did you mean 'trim'?",
@@ -595,6 +619,10 @@ impl Interp {
         if let Some(msg) = self.declared_later(span.file, name, env) {
             return self.fail_at("NameError", msg, span);
         }
+        // Declared inside a loop, an if or a function, and used outside it.
+        if let Some(msg) = self.declared_inside(span.file, name, span) {
+            return self.fail_at("NameError", msg, span);
+        }
         let mut names = env::visible_names(env);
         // A builtin can't be assigned to, so `count = 1` isn't a typo of round.
         if assigning {
@@ -626,20 +654,36 @@ impl Interp {
             "String" => Some("V2 converts with str(x)".to_string()),
             "floor" | "ceil" | "trunc" => Some("V2 has int(x) (toward zero), round(x) and div(a, b); Python's math and JavaScript's Math work in a block".to_string()),
             "isinstance" => Some("V2 checks a type with type(x) == \"int\"".to_string()),
+            // What a beginner's game or math exercise reaches for, from Python's library.
+            "random" | "randint" | "randrange" | "choice" | "shuffle" | "uniform" => {
+                Some("V2 gets random numbers from Python: @import { randint, choice } from py.random".to_string())
+            }
+            "math" => Some("V2 has min, max, abs, round, sum and div(a, b) built in; for more, @import py.math as math".to_string()),
+            "sqrt" | "pi" | "pow" | "log" | "sin" | "cos" | "tan" | "exp" | "factorial" | "gcd" => {
+                Some(format!("Python's math has it: @import {{ {name} }} from py.math"))
+            }
+            "datetime" | "date" | "Date" | "now" | "today" => {
+                Some("V2's time() gives the seconds since 1970; dates come from Python: @import py.datetime as dt, then dt.datetime.now()".to_string())
+            }
             _ => None,
         };
         if let Some(h) = habit {
             return self.fail_at("NameError", format!("{base} — {h}"), span);
         }
-        // Declared inside a loop, an if or a function, and used outside it.
-        if let Some(msg) = self.declared_inside(span.file, name, span) {
-            return self.fail_at("NameError", msg, span);
-        }
         // A block's export used without its @import, or a block's label used as a name.
         if let Some(h) = self.import_hint(span.file, name).filter(|_| !assigning) {
             return self.fail_at("NameError", format!("{base} — {h}"), span);
         }
-        let msg = match (super::error::did_you_mean(name, names.iter().map(|n| &**n)), assigning) {
+        // The file's own names declared further on come before the builtins: `totl` is the
+        // `total` of line 9, not `bool`.
+        let later: Vec<(Rc<str>, u32, &'static str)> = self.top_names(span.file).into_iter().filter(|(n, ..)| !names.contains(n)).collect();
+        let (builtins, own): (Vec<Rc<str>>, Vec<Rc<str>>) = names.iter().cloned().partition(|n| super::builtins::BUILTINS.iter().any(|b| b.name == &**n));
+        let candidates: Vec<&str> = own.iter().map(|n| &**n).chain(later.iter().map(|(n, ..)| &**n)).chain(builtins.iter().map(|n| &**n)).collect();
+        let near = super::error::did_you_mean(name, candidates.iter().copied());
+        if let Some((n, line, how)) = near.and_then(|s| later.iter().find(|(n, ..)| &**n == s)) {
+            return self.fail_at("NameError", format!("{base} — did you mean '{n}'? (its {how} is on line {line}, further on)"), span);
+        }
+        let msg = match (near, assigning) {
             (Some(s), false) => format!("{base} — did you mean '{s}'?"),
             (Some(s), true) => format!("{base} — did you mean '{s}'? (or declare it with let)"),
             (None, false) => base,
@@ -1038,12 +1082,19 @@ impl Interp {
         }
         match &e.kind {
             ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n, _) if &**n == "getenv" => "getenv(…) gave null: that environment variable isn't set: pass a default, as in getenv(\"HOME\", \"/root\")".into(),
+                // A builtin that gives null (print, write_file, sleep): its value isn't data.
+                ExprKind::Name(n, _) if super::builtins::BUILTINS.iter().any(|b| b.name == &**n) => format!("{n}() gives null: it does its work and has no value to use"),
                 ExprKind::Name(n, _) => format!("{n}(…) gave null: a function without return gives null, so end it with return …"),
                 ExprKind::Member { name, .. } if matches!(&*name.text, "sort" | "reverse" | "push" | "insert") => {
                     format!("{}() changes the list itself and gives null: use the list", name.text)
                 }
+                ExprKind::Member { name, .. } if &*name.text == "get" => {
+                    "get() gave null: the key or index isn't there: pass a default, as in d.get(k, 0)".into()
+                }
                 _ => format!("the call gave null: {generic}"),
             },
+            ExprKind::Block(_) => "the block gave null: a block's value is its last line, and that line isn't an expression".into(),
             ExprKind::Name(n, _) => {
                 // Its `let` on an earlier line of this file, as written.
                 let found = (1..=e.span.line).rev().find_map(|line| {
@@ -1154,6 +1205,12 @@ impl Interp {
                 if let (Err(Flow::Error(e)), ExprKind::Call { callee, .. }) = (&r, &obj.kind) {
                     if &*e.kind == "IndexError" && matches!(&callee.kind, ExprKind::Name(n, _) if &**n == "args") {
                         let _ = e.hint.set("the script was given fewer arguments: use args().get(0, \"default\") for one that may be missing, or check len(args()) first".into());
+                    }
+                }
+                // `words[1]` when the player typed one word.
+                if let (Err(Flow::Error(e)), Value::List(_)) = (&r, &o) {
+                    if &*e.kind == "IndexError" {
+                        let _ = e.hint.set("xs.get(i, default) gives a default past the end; or check len(xs) first".into());
                     }
                 }
                 Ok(Some(self.at(r, *bracket)?))
@@ -1542,7 +1599,14 @@ impl Interp {
                     let found = d.borrow().get(key).cloned();
                     match found {
                         Some(v) => Ok(v),
-                        None => key_error(key, d),
+                        None => key_error(key, d).inspect_err(|f| {
+                            // `counts[w] += 1` for a word not counted yet (5.5).
+                            if let Flow::Error(e) = f {
+                                if !e.message.contains("did you mean") {
+                                    let _ = e.hint.set("when a key may be missing, read it with d.get(k, default), as in counts[w] = counts.get(w, 0) + 1, or test it first with k in d".into());
+                                }
+                            }
+                        }),
                     }
                 }
                 other => type_error(format!("dict keys must be str, got {}", other.type_name())),
@@ -1576,7 +1640,13 @@ impl Interp {
                 }
                 other => type_error(format!("dict keys must be str, got {}", other.type_name())),
             },
-            Value::Str(_) | Value::Bytes(_) => type_error(format!("{} is immutable", o.type_name())),
+            // `word[1] = "a"` in a hangman game.
+            Value::Str(_) => {
+                let err = ErrorValue::new("TypeError", "str is immutable");
+                let _ = err.hint.set("build a new string instead, as in s = s[0:i] + \"a\" + s[i + 1:]".into());
+                Err(Flow::Error(Rc::new(err)))
+            }
+            Value::Bytes(_) => type_error(format!("{} is immutable", o.type_name())),
             Value::Error(_) => type_error("error values are read-only"),
             Value::Null => type_error("cannot index null"),
             other => type_error(format!("cannot index {}", other.type_name())),

@@ -708,6 +708,13 @@ function routeStub(route, name) {
   // A function an inner @import brings in through V2: another engine's, or V2's (13.7).
   const s = { [name]: function (...args) { return hostCall({ route }, args, name); } }[name];
   routeStubs.set(s, route);
+  // Used as a value (`VERSION + "!"`, `${VERSION}`), it would print this code: a block imports
+  // functions only, and a constant whose block hasn't run yet isn't known to be one (13.7).
+  const asValue = () => {
+    throw new V2Error('ImportError', `'${name}' is imported as a function, and used here as a value: a block imports only functions; for a constant, pass it in as a block arg`);
+  };
+  Object.defineProperty(s, Symbol.toPrimitive, { value: asValue });
+  Object.defineProperty(s, 'toString', { value: asValue });
   return s;
 }
 
@@ -1207,7 +1214,9 @@ function compileOrExplain(src, m) {
           e.message = 'an object at the start of a statement needs parentheses, as in ({a: 1}): JavaScript reads { there as a block of code';
         }
         // A decorator: Node's JavaScript has none yet, and TypeScript's are more than types.
-        if (String(e.message) === 'Invalid or unexpected token' && /^\s*@[A-Za-z_$]/.test(text)) {
+        // At a line's start or where the caret is (`class B { @d m() {} }`).
+        const caret = loc[3] === undefined ? -1 : loc[3].length;
+        if (String(e.message) === 'Invalid or unexpected token' && (/^\s*@[A-Za-z_$]/.test(text) || text[caret] === '@')) {
           e.message = m.lang === 'ts'
             ? "decorators aren't supported in @ts blocks: Node runs TypeScript by removing its types, and a decorator is code"
             : "decorators aren't part of the JavaScript Node runs yet";

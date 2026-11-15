@@ -2,6 +2,6 @@ ImportError | 'os; print(1)' is not a valid Python module name
 ImportError | 'my-mod' is not a valid Python module name
 ImportError | 'os.if' is not a valid Python module name
 ImportError | No module named 'v2_no_such_module'
-ImportError | 'nope' is not exported by 'py.os' — did you mean 'name'?
+ImportError | 'nope' is not exported by 'py.os'
 func handle handle b.txt
 [1]

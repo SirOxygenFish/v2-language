@@ -440,6 +440,9 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let mut folder = String::new();
         super::value::quoted(&d.to_string_lossy(), &mut folder);
         let _ = err.hint.set(format!("make the folder first, with make_dir({folder})").into());
+    } else if e.raw_os_error() == Some(27) && cfg!(unix) {
+        // EFBIG: the file size limit (V2 ignores SIGXFSZ, so the write fails instead).
+        let _ = err.hint.set("the file size limit (ulimit -f) stops it: raise the limit, or write less".into());
     }
     Err(Flow::Error(Rc::new(err)))
 }
@@ -536,16 +539,31 @@ fn not_utf8_kind(bytes: &[u8], start: bool) -> &'static str {
     }
 }
 
+/// How many times in a row `input()` may give null before a loop that never checks is stopped.
+const INPUT_NULLS: u32 = 1000;
+
+/// The nulls `input()` gave since it last read a line.
+static NULLS_IN_A_ROW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// `input(prompt = "")`: one line from stdin without `\n` and one `\r` before it; `null` at end
-/// of input; the prompt is flushed first (5.10).
+/// of input; the prompt is flushed first (5.10). A menu loop that never checks for null would
+/// spin forever once the input ends: the 1000th null in a row is an IOError instead.
 fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
+    use std::sync::atomic::Ordering;
     let prompt = it.str_of(&args[0], at)?;
     it.out.write_str(&prompt)?;
     it.out.flush_or_raise()?;
     let mut line = Vec::new();
     match std::io::stdin().lock().read_until(b'\n', &mut line) {
-        Ok(0) => return Ok(Value::Null),
-        Ok(_) => {}
+        Ok(0) => {
+            if NULLS_IN_A_ROW.fetch_add(1, Ordering::Relaxed) + 1 >= INPUT_NULLS {
+                let err = ErrorValue::new("IOError", format!("the input has ended, and input() has given null {INPUT_NULLS} times in a row"));
+                let _ = err.hint.set("check for null and stop, as in let line = input(); if line == null { break }".into());
+                return Err(Flow::Error(Rc::new(err)));
+            }
+            return Ok(Value::Null);
+        }
+        Ok(_) => NULLS_IN_A_ROW.store(0, Ordering::Relaxed),
         Err(e) => return io_error(format!("cannot read from stdin: {}", os_message(&e))),
     }
     if line.last() == Some(&b'\n') {
@@ -813,7 +831,19 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let bytes: &[u8] = match &args[1] {
         Value::Str(s) => s.as_bytes(),
         Value::Bytes(b) => b,
-        other => return type_error(format!("write_file() argument 'data' must be a str or bytes, got {}", other.type_name())),
+        other => {
+            let err = ErrorValue::new("TypeError", format!("write_file() argument 'data' must be a str or bytes, got {}", other.type_name()));
+            let hint = match other {
+                Value::List(_) => Some(r#"write one item per line with xs.join("\n") (read it back with read_file(f).lines()), or the whole list with json_stringify(xs)"#),
+                Value::Dict(_) => Some("write it as JSON with json_stringify(d) (read it back with json_parse(read_file(f)))"),
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) => Some("write it as text with str(x)"),
+                _ => None,
+            };
+            if let Some(h) = hint {
+                let _ = err.hint.set(h.into());
+            }
+            return Err(Flow::Error(Rc::new(err)));
+        }
     };
     let append = bool_arg(&args[2], "write_file", "append")?;
     // `write_file("/dev/stdout", data)`: V2's own stdout or stderr, written through V2's own
