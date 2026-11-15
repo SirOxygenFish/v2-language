@@ -1062,7 +1062,7 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 
 | Situation                              | Message                                                     |
 | -------------------------------------- | ----------------------------------------------------------- |
-| name not exported                      | `'x' is not exported by 'stats' (did the block @export it?)` |
+| name not exported                      | `'sprad' is not exported by 'stats' — did you mean 'spread'?`, or, with no close name, `… (did the block @export it?)` |
 | no block has that label                | `no block in this file is labeled 'stat' — did you mean 'stats'?`, or, with no close label, `…: a Python module is imported with py.stat, an npm package with js.stat` |
 | the block has no `@export`             | `block 'stats' exports nothing: add @export { mean } inside it` |
 | block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
@@ -1130,7 +1130,9 @@ as ES modules work too, except the rare one whose `package.json` `exports` offer
 `import` entry. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
 
 One Python engine serves every `.v2` file in a run, so two local modules with the same name in
-different folders collide — the first one imported wins. Likewise a JavaScript package imported by
+different folders collide: importing the second is an `ImportError` that names both files, and so
+is a local module named like one Python has already loaded (`json`, `numbers`). Give yours another
+name. Likewise a JavaScript package imported by
 bare name is loaded once per run, from the folder of the first `.v2` file that imports it.
 
 A module that doesn't exist is an `ImportError` carrying the foreign message
@@ -1768,7 +1770,8 @@ venv = ".venv"                    # use this virtual environment
 A call that runs past `call_timeout` raises `EngineTimeout`. For a worker engine that stops the
 whole engine for the rest of the run, so later uses of it raise `EngineCrashed`.
 
-If `[engines.py] command` (or `V2_ENGINE_PY`) is set, it is used and `[python] venv` is ignored.
+`V2_ENGINE_PY` wins over `[python] venv`. Setting both `[python] venv` and `[engines.py] command`
+in `v2.toml` is a configuration error: keep one.
 
 `@ts` blocks run on the js engine, so they are configured in `[engines.js]`: an `[engines.ts]`
 table, or `V2_ENGINE_TS`, is a configuration error. So is an unknown section or key, or a key that

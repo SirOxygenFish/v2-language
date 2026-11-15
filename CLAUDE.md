@@ -33,8 +33,10 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 4 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 5 next
-  on a new distro and sandbox (round 4's prompts: scratchpad/newcomer/prompt-*-r4.md).
+  Rounds 1 to 5 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 6 next
+  on a new distro and sandbox (round 5's prompts: scratchpad/newcomer/prompt-*-r5.md).
+  CI's minimum Node (22.13) for local checks: WSL Ubuntu's ~/node2213/node-v22.13.0-linux-x64/bin
+  first on PATH (copied from round 5's distro, which checked it against nodejs.org's SHASUMS).
   Newcomer agents work as root only: no user accounts, not even in a throwaway distro (the
   owner's rule; the auto-mode classifier also blocks it). Loop until a round finds nothing new.
   Installer test changes run on Windows, WSL and the Mac before they are pushed. Installer tests: tests/install/paths.{sh,ps1} (paths.ps1 never

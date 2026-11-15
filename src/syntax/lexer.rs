@@ -1100,6 +1100,14 @@ impl<'a> Lexer<'a> {
         // line (DOCS 4 Errors), with a note at the `}`.
         let what_short = what.split(" '").next().unwrap_or(what);
         if text.contains('\n') {
+            // A multi-line block's code starts on the line after its `{` (3.7), so its first line
+            // dedents like the others. Checked first: it is the first mistake on the way down.
+            let first = text.split('\n').next().unwrap_or("");
+            let lead = first.len() - first.trim_start_matches([' ', '\t']).len();
+            if !is_extern && !first.trim_matches([' ', '\t', '\r']).is_empty() {
+                return Err(Diag::new("a multi-line block starts on the line after its {", self.span_at(body_start + lead, 1))
+                    .hint("move this code to the next line, or write the whole block on one line"));
+            }
             let line_start = self.src[..close].rfind('\n').map(|i| i + 1).unwrap_or(0);
             if !self.src[line_start..close].trim_matches([' ', '\t']).is_empty() {
                 let d = Diag::new(format!("{what_short} closes at a }} that does not start its line"), self.span_of_mark(at, 1))
@@ -1109,14 +1117,6 @@ impl<'a> Lexer<'a> {
                 } else {
                     d.hint(FENCE_HINT)
                 });
-            }
-            // A multi-line block's code starts on the line after its `{` (3.7), so its first line
-            // dedents like the others.
-            let first = text.split('\n').next().unwrap_or("");
-            let lead = first.len() - first.trim_start_matches([' ', '\t']).len();
-            if !is_extern && !first.trim_matches([' ', '\t', '\r']).is_empty() {
-                return Err(Diag::new("a multi-line block starts on the line after its {", self.span_at(body_start + lead, 1))
-                    .hint("move this code to the next line, or write the whole block on one line"));
             }
         }
         self.advance_to(close);
@@ -1562,6 +1562,8 @@ let n = names
         let d = diag("@py \"odd name\" { }");
         assert_eq!((d.span.col, d.span.hi - d.span.lo), (5, 10), "the whole string");
         assert_eq!(err("@py {\n x }"), "@py block closes at a } that does not start its line");
+        // Code after the `{` too: that is the first mistake, so it is the one reported (3.7).
+        assert_eq!(err("print(@py { import json\n    json.dumps([1]) })"), "a multi-line block starts on the line after its {");
         assert_eq!(err("@py { 1 } + 2"), "unexpected text after the } that closes the @py block");
         assert_eq!(err("@py ```python\n```"), "nothing may follow the opening ``` fence on its line");
         assert_eq!(err("@py stats ```\nx\n"), "@py block 'stats' is never closed");

@@ -1,0 +1,28 @@
+// requires: py js
+// A misspelled imported name gets the closest name the block or the module has; with none close,
+// the message is as before (INTERNALS 13.3, 13.5).
+@py tools {
+    def spread(xs):
+        return max(xs) - min(xs)
+    @export { spread }
+}
+try {
+    @import { sprad } from tools
+} catch (e) {
+    print(e.message)
+}
+try {
+    @import { meen } from py.statistics
+} catch (e) {
+    print(e.message)
+}
+try {
+    @import { joinn } from js.path
+} catch (e) {
+    print(e.message)
+}
+try {
+    @import { nothing_like_it } from py.statistics
+} catch (e) {
+    print(e.message)
+}

@@ -105,6 +105,8 @@ pub struct Reply {
     pub value: Value,
     pub exports: Vec<(Rc<str>, Option<Value>)>,
     pub missing: Vec<Rc<str>>,
+    /// A module's public names, when it lacks a name asked for: for the did-you-mean (9.4).
+    pub names: Vec<Rc<str>>,
 }
 
 /// Most `cause` levels an `err` is read to (9.6).
@@ -367,7 +369,7 @@ impl Interp {
             };
             let (noise, frame) = vep::split_noise(&line);
             if !noise.is_empty() {
-                let _ = self.out.flush();
+                self.out.flush_or_stop();
                 stderrln!("{}", String::from_utf8_lossy(noise));
             }
             if frame.is_empty() {
@@ -487,7 +489,7 @@ impl Interp {
     /// which may be its last holder, waits for a later frame (11.2). A write error is the worker
     /// going away (9.1).
     fn send(&mut self, s: SessionId, frame: &Json) -> Result<(), WriteErr> {
-        let _ = self.out.flush();
+        self.out.flush_or_stop();
         let session = &mut self.sessions[s];
         let Some(w) = session.writer.as_mut() else { return Err(WriteErr::Io(std::io::ErrorKind::BrokenPipe.into())) };
         if session.caps.handles {
@@ -577,6 +579,12 @@ impl Interp {
     fn await_reply(&mut self, s: SessionId, id: u64, at: Span) -> Exec<Reply> {
         let mut unwritten = None; // this request's output that couldn't be written (9.9)
         loop {
+            // Every frame sent so far is handled: what the worker printed goes out before V2
+            // waits, so a file or a pipe gets it as it comes (9.9). A failure here may be an
+            // earlier request's output, so it waits for the next write, as at other flushes.
+            if !self.sessions[s].reader.as_ref().is_some_and(|r| r.has_buffered()) {
+                self.out.flush_or_stop();
+            }
             let read = match self.sessions[s].reader.as_mut() {
                 Some(r) => r.read_line(),
                 None => Ok(None),
@@ -608,10 +616,12 @@ impl Interp {
                     let flow = self.protocol_violation(s, &what, &line);
                     return Err(self.raise(flow, at));
                 }
-                Frame::Ret { value, exports, missing, .. } => {
+                Frame::Ret { value, exports, missing, names, .. } => {
                     let reply = self.wire(s).decode(&value).and_then(|value| {
                         let (exports, missing) = self.export_lists(s, exports.as_ref(), missing.as_ref())?;
-                        Ok(Reply { value, exports, missing })
+                        // Only for a message: anything but a list of strings counts as none.
+                        let names = names.as_ref().and_then(Json::as_array).map(|l| l.iter().filter_map(Json::as_str).map(Rc::from).collect()).unwrap_or_default();
+                        Ok(Reply { value, exports, missing, names })
                     });
                     return match (reply, unwritten) {
                         (Ok(_), Some(flow)) => {
@@ -659,7 +669,7 @@ impl Interp {
         match stream {
             Stream::Stdout => self.out.write_str(text),
             Stream::Stderr => {
-                let _ = self.out.flush();
+                self.out.flush_or_stop();
                 stderr!("{text}");
                 Ok(())
             }

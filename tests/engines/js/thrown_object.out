@@ -1,0 +1,2 @@
+ForeignError Object { code: 42, why: 'object' }
+ForeignError plain

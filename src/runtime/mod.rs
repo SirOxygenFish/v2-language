@@ -42,8 +42,8 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
             stderrln!("v2: {msg}");
             return 2;
         }
-        Err(LoadError::NotUtf8 { display, line, message }) => {
-            stderrln!("{display}:{line}:1: SyntaxError: {message}");
+        Err(LoadError::NotUtf8 { display, line, col, message }) => {
+            stderrln!("{display}:{line}:{col}: SyntaxError: {message}");
             return 1;
         }
     };

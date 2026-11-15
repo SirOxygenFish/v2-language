@@ -14,7 +14,7 @@ type Resolution = Result<Rc<ResolvedEngine>, Rc<NotFound>>;
 /// The language of a tag that DOCS 5 lists but this build doesn't register yet: compiled blocks
 /// (roadmap Phase 2) and the built-in run engines (Phase 3). Each row goes when its engine joins
 /// the registry (7.3).
-fn later_language(tag: &str) -> Option<&'static str> {
+pub(crate) fn later_language(tag: &str) -> Option<&'static str> {
     Some(match tag {
         "c" => "C",
         "cpp" | "cxx" => "C++",

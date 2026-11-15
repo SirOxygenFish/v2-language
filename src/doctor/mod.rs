@@ -48,10 +48,10 @@ impl Checker {
     }
 
     /// A file that is not UTF-8 never gets a `FileId`; its one error sorts at its place.
-    fn not_utf8(&mut self, display: &str, line: u32, message: &str) {
+    fn not_utf8(&mut self, display: &str, line: u32, col: u32, message: &str) {
         self.files += 1;
         self.errors += 1;
-        let text = format!("{display}:{line}:1: SyntaxError: {message}\n");
+        let text = format!("{display}:{line}:{col}: SyntaxError: {message}\n");
         self.problems.push(Problem { met: self.files, lo: 0, text });
     }
 
@@ -141,9 +141,9 @@ impl Checker {
                     self.done.insert(canonical);
                     self.import_error(format!("cannot import '{spec}': {msg}"), at);
                 }
-                Err(LoadError::NotUtf8 { display, line, message }) => {
+                Err(LoadError::NotUtf8 { display, line, col, message }) => {
                     self.done.insert(canonical);
-                    self.not_utf8(&display, line, message);
+                    self.not_utf8(&display, line, col, message);
                 }
             }
         }
@@ -170,8 +170,8 @@ pub fn check(file: &str) -> i32 {
             stderrln!("v2: {msg}");
             return 2;
         }
-        Err(LoadError::NotUtf8 { display, line, message }) => {
-            c.not_utf8(&display, line, message);
+        Err(LoadError::NotUtf8 { display, line, col, message }) => {
+            c.not_utf8(&display, line, col, message);
             display
         }
     };

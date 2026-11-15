@@ -424,7 +424,8 @@ if __name__ == "__main__":
         mod = getattr(t, "__module__", None)
         mod = mod if isinstance(mod, str) else ""
         qual = getattr(t, "__qualname__", t.__name__)
-        return qual if mod == "builtins" or not mod else mod + "." + qual
+        # A class a block defines is named as written, not with the block's module (11.6).
+        return qual if mod == "builtins" or not mod or mod.startswith("__v2_") else mod + "." + qual
 
     def handle_tag(obj):
         hid = _by_obj.get(id(obj))
@@ -877,6 +878,21 @@ if __name__ == "__main__":
             while p in sys.path:
                 sys.path.remove(p)
         sys.path[0:0] = lead
+        return lead
+
+    def shadowed(name, lead):
+        """A module the .v2 file's folders hold, while another of that name was loaded first (one
+        V2 loaded itself, or another folder's): what Python would have used, unnoticed (13.5)."""
+        top = name.split(".")[0]
+        loaded = getattr(sys.modules.get(top), "__file__", None)
+        if not isinstance(loaded, str):
+            return None
+        for p in lead:
+            for mine in (os.path.join(p, top + ".py"), os.path.join(p, top, "__init__.py")):
+                if os.path.isfile(mine):
+                    same = os.path.normcase(os.path.abspath(mine)) == os.path.normcase(os.path.abspath(loaded))
+                    return None if same else (top, loaded, mine)
+        return None
 
     def check_name(k, what="block arg"):
         if not k.isidentifier() or keyword.iskeyword(k) or (k.startswith("__") and k.endswith("__")):
@@ -1095,7 +1111,7 @@ if __name__ == "__main__":
 
     def do_module(m):
         """A module unit (13.5): imported once per unit, then the names asked for."""
-        add_file_dir(m["from"])
+        lead = add_file_dir(m["from"])
         unit = m["unit"]
         if unit not in units:
             name = m["name"]
@@ -1108,6 +1124,10 @@ if __name__ == "__main__":
                     raise Fail("ImportError", str(e))
                 raise
             units[unit] = (mod, None)
+        clash = shadowed(m["name"], lead)
+        if clash:
+            raise Fail("ImportError", "py.%s is %s, which was loaded first, not your %s: give your file another name "
+                       "(one Python serves the whole run, with one module per name)" % clash)
         mod = units[unit][0]
         names = m.get("names")
         if names is None:
@@ -1124,7 +1144,14 @@ if __name__ == "__main__":
                 exports.append({"name": n, "kind": "func"})
             else:
                 exports.append({"name": n, "kind": "value", "value": encode_value(v, n)})
-        return {"value": None, "exports": exports, "missing": missing}
+        if not missing:
+            return {"value": None, "exports": exports, "missing": missing}
+        # What it has, for V2's did-you-mean (9.4, 13.5).
+        try:
+            have = sorted(n for n in dir(mod) if isinstance(n, str) and not n.startswith("_") and n == well_formed(n))
+        except Exception:  # a module whose __dir__ raises
+            have = []
+        return {"value": None, "exports": exports, "missing": missing, "names": have[:5000]}
 
     def do_call(m):
         target = m.get("target") or {}

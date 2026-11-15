@@ -31,6 +31,12 @@ impl<R: Read> FrameReader<R> {
         FrameReader { r: BufReader::with_capacity(64 * 1024, r) }
     }
 
+    /// Whether bytes the worker sent are read but not handled yet: the next frame may need no
+    /// wait (9.9).
+    pub fn has_buffered(&self) -> bool {
+        !self.r.buffer().is_empty()
+    }
+
     /// The next line, or `None` at end of input (a partial last line counts as the end: the
     /// worker died mid-frame). A line past 64 MiB is refused as soon as it gets there.
     pub fn read_line(&mut self) -> Result<Option<Vec<u8>>, ReadErr> {
@@ -126,7 +132,7 @@ pub struct Hello {
 /// A frame from a worker (9.2).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
-    Ret { id: u64, value: Json, exports: Option<Json>, missing: Option<Json> },
+    Ret { id: u64, value: Json, exports: Option<Json>, missing: Option<Json>, names: Option<Json> },
     Err { id: u64, error: Map<String, Json> },
     Call { id: u64, target: Target, args: Vec<Json>, kwargs: Map<String, Json> },
     Out { stream: Stream, text: String },
@@ -257,6 +263,7 @@ pub fn parse_frame(line: &[u8], caps: Caps) -> Result<Frame, String> {
             value: member(&m, &t, "value")?.clone(),
             exports: m.get("exports").cloned(),
             missing: m.get("missing").cloned(),
+            names: m.get("names").cloned(),
         }),
         "err" => {
             let error = member(&m, &t, "error")?.as_object().ok_or("'err' frame with a bad 'error'")?;
