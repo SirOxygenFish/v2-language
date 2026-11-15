@@ -902,6 +902,17 @@ impl Interp {
         self.foreign_error_at(s, e, 0, Some(at))
     }
 
+    /// Whether the line at `span` starts with ( [ or ` and the code line above it ends as an
+    /// expression can, so JavaScript, without a ; there, read the two as one (DOCS 4).
+    fn joined_line(&self, span: Span) -> bool {
+        let line = self.sm.line_text(span.file, span.line).trim_start();
+        if !line.starts_with(['(', '[', '`']) {
+            return false;
+        }
+        let above = (1..span.line).rev().map(|n| self.sm.line_text(span.file, n).trim_end()).find(|l| !l.trim().is_empty());
+        above.and_then(|l| l.chars().last()).is_some_and(|c| c.is_alphanumeric() || "_$)]'\"`".contains(c))
+    }
+
     /// `at`: the V2 call site, whose frames follow the foreign ones; `None` for a cause.
     fn foreign_error_at(&mut self, s: SessionId, e: &Map<String, Json>, depth: usize, at: Option<Span>) -> Result<Rc<ErrorValue>, String> {
         if let Some(tag) = e.get("v2").filter(|t| !t.is_null()) {
@@ -961,6 +972,10 @@ impl Interp {
         let frames = self.foreign_frames(s, e);
         err.lang = Some(self.tag(s));
         if let Some((span, lang)) = frames.at {
+            // `const a = [1, 2]` then `[3, 4].forEach(…)`: JavaScript joined the two lines.
+            if &*err.kind == "ForeignError" && matches!(&*lang, "js" | "ts") && err.hint.get().is_none() && self.joined_line(span) {
+                let _ = err.hint.set("JavaScript reads this line as part of the one above, as in a(…) or a[…]: end the line above with ;".into());
+            }
             let _ = err.span.set(span);
             err.lang = Some(lang);
         }

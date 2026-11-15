@@ -8,7 +8,7 @@ true
 ["ArityError", "greet() got an unexpected argument 'colour'"]
 ['Error', "V2 function 'twice' called from another thread"]
 8
-[["Error", "V2 function 'twice' called outside an active V2 call"]]
+[["Error", "V2 function 'twice' called outside an active V2 call: Python called it while V2 wasn't waiting on Python (a thread, a timer or a finalizer after its call returned); call V2 from the code V2 called, and return to V2 when done"]]
 ["Linus", "Ada", "Grace"]
 1/3
 2/3

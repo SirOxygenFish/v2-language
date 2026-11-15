@@ -1,0 +1,24 @@
+// requires: js
+// Names a newcomer mixes up, each with a hint that says what to write (DOCS 7, INTERNALS 13.5).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", e.hint)
+    }
+}
+// js.util is Node's own module even with a util.js next to the script.
+show(func() {
+    @import { shared } from js.util
+})
+// A local file is named with its extension (Node adds .js only).
+show(func() {
+    @import { N } from js."./tla"
+})
+// A block imports only functions: a package's constant comes in the language's own way.
+show(func() {
+    @js {
+        @import { VERSION } from js."v2-test-pkg"
+    }
+})

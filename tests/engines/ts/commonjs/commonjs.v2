@@ -1,0 +1,9 @@
+// requires: ts
+// exit: 1
+// stderr: SyntaxError: Unexpected token 'export'
+// stderr: says "type": "commonjs" (npm init writes that), so Node loads this file as CommonJS
+// stderr: set "type": "module" there, or rename the file to .mts
+// A local module in a folder whose package.json says "type": "commonjs" (npm init's default):
+// the error names that file and both ways out (DOCS 7, INTERNALS 13.5).
+@import { add } from ts."./math.ts"
+print(add(1, 2))

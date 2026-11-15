@@ -1,3 +1,6 @@
 SyntaxError JavaScript reads this line as part of the one above, as in a(…) or a[…]: end the line above with ;
 [1, 2]
 2
+TypeError Cannot read properties of undefined (reading 'forEach')
+JavaScript reads this line as part of the one above, as in a(…) or a[…]: end the line above with ;
+null

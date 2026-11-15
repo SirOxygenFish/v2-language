@@ -22,3 +22,17 @@ KeyError: key 'keys' not found
   hint: keys is a method of dicts, so call it, as in d.keys()
 MarshalError: value too large to send to V2 (20000000 items, more than 64 MiB)
   hint: write it to a file and pass the file's path, or send it in parts
+MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — a datetime.datetime isn't data: make plain data of it in a block, as in @py(h) { h.isoformat() } (at args[0])
+  hint: none
+TypeError: cannot convert handle to JSON (a datetime.datetime isn't data: make plain data of it in a block, as in @py(h) { h.isoformat() })
+  hint: none
+MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — a decimal.Decimal isn't data: make plain data of it in a block, as in @py(h) { str(h) } (at args[0])
+  hint: none
+TypeError: cannot convert handle to JSON (a decimal.Decimal isn't data: make plain data of it in a block, as in @py(h) { str(h) })
+  hint: none
+MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — a datetime.datetime isn't data: make plain data of it in a block, as in @py(h) { h.isoformat() } (at args[0]["ts"])
+  hint: none
+TypeError: cannot convert handle to JSON at ["ts"] (a datetime.datetime isn't data: make plain data of it in a block, as in @py(h) { h.isoformat() })
+  hint: none
+MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — a Date isn't data: make plain data of it in a block, as in @js(h) { h.toISOString() } (at args[0])
+  hint: none

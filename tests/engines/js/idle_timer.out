@@ -1,3 +1,3 @@
 scheduled
-["V2Error", "Error", "V2 function 'note' called outside an active V2 call"] 0
+["V2Error", "Error", "V2 function 'note' called outside an active V2 call: JavaScript called it while V2 wasn't waiting on JavaScript (a server, timer or event after its call returned); keep V2 in a call while it serves, as in an exported async function that resolves when the server should stop"] 0
 noted 1

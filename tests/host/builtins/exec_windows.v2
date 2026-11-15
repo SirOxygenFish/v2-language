@@ -19,3 +19,9 @@ make_dir(home + "/v2 exec dir")
 write_file(home + "/v2 exec dir/a.txt", "a")
 let listed = exec(["cmd", "/d", "/c", f"cd /d \"${home}\\v2 exec dir\" && dir /b"])
 print(listed.code, listed.stdout.trim())
+// exec has no env: or cwd: (DOCS 3.11): the hint shows the shell way.
+try {
+    exec(["npm", "run", "build"], cwd: "web")
+} catch (e) {
+    print(e.type, "|", e.hint)
+}

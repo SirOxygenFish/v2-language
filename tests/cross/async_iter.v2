@@ -1,0 +1,34 @@
+// requires: py js
+// An async generator has no plain iterator: for says how its language collects it, and the
+// collected list comes back (DOCS 8.4, INTERNALS 11.4).
+let ag = @js {
+    async function* g() { yield 1; yield 2 }
+    g()
+}
+try {
+    for x in ag { print(x) }
+} catch (e) {
+    print(e.type, "|", e.message)
+    print(e.hint)
+}
+let items = @js(ag) { Array.fromAsync(ag) }
+print(items)
+let pg = @py {
+    async def g():
+        yield 1
+        yield 2
+    g()
+}
+try {
+    for x in pg { print(x) }
+} catch (e) {
+    print(e.type, "|", e.message)
+    print(e.hint)
+}
+@py c {
+    async def collect(h):
+        return [x async for x in h]
+    @export { collect }
+}
+@import { collect } from c
+print(collect(pg))

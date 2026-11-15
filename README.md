@@ -46,7 +46,8 @@ It puts `v2` in `~/.v2/bin` and adds that folder to your PATH in your shell's st
 (it says which). Then open a new terminal. No `curl` (`curl: command not found`)? Install it
 (`sudo apt update && sudo apt install curl` on Ubuntu and Debian), or use `wget`, if you have it,
 instead. (As root, as in a container or a fresh WSL distro, leave out `sudo` in every command in
-this README: such a system has none.)
+this README: such a system has none. It has no package lists yet either: run `apt update` once
+before its first `apt install`.)
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.sh | sh
@@ -308,7 +309,8 @@ More of V2, in short:
   `print(a, b, sep: ", ")`.
 - **Files and programs:** `read_file(path)`, or `read_file(path, binary: true)` for bytes;
   `write_file(path, data)`, with `append: true` to add to the end; `exists`, `list_dir`,
-  `make_dir`, `remove_file`, `getenv`. `exec(["git", "status"], input: text)` runs a program
+  `make_dir`, `remove_file`, `getenv` (V2's own environment: a variable a block sets, with
+  dotenv's `config()` or `os.environ`, stays in that language). `exec(["git", "status"], input: text)` runs a program
   without a shell and returns `{code, stdout, stderr}`, its output as text and all of it in memory.
   A program that can't start is an `IOError`. To walk folders, or tell a file from a folder, use
   Python's `os.walk` in a block. File paths are relative to the folder you run `v2` from; for a
@@ -347,7 +349,8 @@ More of V2, in short:
   `.code`. `exec` starts one program, not a shell, so for a pipe, a glob, `cd dir && make` or
   `VAR=x cmd`, start a shell: `exec(["sh", "-c", "cd build && make"])`, on Windows
   `exec(["cmd", "/c", "cd /d build && make"])` (the one string after `/c` reaches cmd.exe as
-  written, so quote a path as cmd does: `"cd /d \"my build\" && make"`). It returns when the program ends, with all its
+  written, so quote a path as cmd does: `"cd /d \"my build\" && make"`, and a variable as
+  `"set \"NODE_ENV=production\" && npm run build"`, or it keeps the space before `&&`). It returns when the program ends, with all its
   output; to see the output as it comes, run the program from a `@py` block with `subprocess.run`
   (what it prints goes to standard error). In a `@py` block, `shutil.rmtree(path)` removes a
   folder, `os.replace(a, b)` renames or moves a file, and `shutil.copy2(a, b)` copies one. On
@@ -372,7 +375,8 @@ and a [cookbook](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#
 V2 doesn't install packages: it uses the Python and Node.js that `v2 doctor` shows, with the
 packages installed for them. A Python package is imported with `@import py.numpy as np` (or
 `@import { mean } from py.statistics`), and a `helpers.py` next to the `.v2` file that imports it,
-or in its project folder (where its `v2.toml` is), is `py.helpers` (name yours unlike Python's own
+or in its project folder (where its `v2.toml` is), is `py.helpers`, and a `stages/clean.py` there
+is `py.stages.clean` (name yours unlike Python's own
 modules, such as `json` or `numbers`: one Python serves the whole run, with one module per name,
 and V2 says so when another came first).
 
@@ -383,7 +387,9 @@ and V2 says so when another came first).
   `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
   `@import { f } from js."./helpers.js"` (a TypeScript one, `ts."./helpers.ts"`; `js.helpers`,
-  without `./`, means an npm package named helpers). A function
+  without `./`, means an npm package named helpers). If that file uses `import` or `export`
+  and the folder has a `package.json`, it needs `"type": "module"` there (`npm init` writes
+  `"commonjs"`), or the extension `.mjs` (`.mts`). A function
   imported by name brings none of its own properties: for `dayjs.extend` or lodash's `_.chunk`,
   import the module itself, `@import js.dayjs as dayjs`. For an ES module imported whole, what
   its default export holds is under `.default`: `chalk.default.red("x")`.
@@ -444,8 +450,8 @@ Linux distributions often ship older versions than 22.13 (`apt install nodejs` g
 24.04): get Node.js 22 or newer from [nodejs.org](https://nodejs.org/en/download). One way there:
 its Linux `.tar.xz`, unpacked into `/opt` (`sudo apt install xz-utils`, then
 `sudo tar -xf node-v22.*-linux-x64.tar.xz -C /opt`), and its `bin` folder put on PATH in your
-shell's startup file (bash: `echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' >>
-~/.profile`, with the version you unpacked; zsh: `~/.zshenv`; fish:
+shell's startup files (bash: `echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' |
+tee -a ~/.bashrc ~/.profile`, with the version you unpacked; zsh: `~/.zshenv`; fish:
 `fish_add_path /opt/node-v22.21.0-linux-x64/bin`), then a new terminal. Or, whatever the shell,
 name it in a `v2.toml` next to your script (a section's name on a line of its own, its keys below):
 
@@ -555,7 +561,11 @@ print it once, or return it.
 **Can blocks use async JavaScript?** Yes: a function that returns a Promise (an `async` function),
 or a block whose value is a Promise, is awaited, and you get its result; a rejection is an error you
 can catch. A block can't use `await` at its top level: end it with a Promise, or export an `async`
-function.
+function. One exception: while JavaScript is itself waiting on V2, as when it calls a V2
+function from a route handler or a callback, that V2 function can't wait on async JavaScript;
+write such handlers in JavaScript, and call V2 for the parts that don't wait. An HTTP server in a
+block serves only while V2 waits on it:
+[the cookbook has one](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#176-an-http-server-in-a-javascript-block).
 
 **How do I catch a V2 error in Python or JavaScript?** It arrives as a `V2Error`
 (`except Exception as e`, `catch (e)`): `e.type` is its V2 type (`"ValueError"`), `e.message` its
@@ -585,7 +595,9 @@ Node.js workers.
   fails there: write `x + 1n`), a whole number comes back as an integer (`2.0` as `2`), and dict
   keys that look like numbers come back first, as JavaScript orders them. A handle works only in its own language: `to_v2(h)` makes plain
   data that any language takes. Operators don't work on handles (call a method, or do it in the
-  block), a handle is always true, and `==` on two handles means the same object.
+  block), a handle is always true, and `==` on two handles means the same object; a handle is
+  never equal to a number or a string, so a `Decimal` from a database is never `== 0`: compare
+  in its block, `@py(amount) { amount == 0 }`.
 - **A V2 function given to Python or JavaScript** can be called whenever V2 is in a call to that
   language (one kept for later works in later calls), on its main thread: not from another
   thread, and not from a timer or an event that fires while V2 runs its own code.
@@ -614,7 +626,10 @@ Node.js workers.
 - **`v2 check` checks V2's syntax only:** names, engine tags and the code inside blocks are checked
   when the script runs.
 - **A `#!` first line is an error:** delete it, and run scripts with `v2 file.v2`.
-- **Ctrl+C and `exit(n)` stop at once:** `finally` blocks don't run, in any language.
+- **Ctrl+C and `exit(n)` stop at once:** `finally` blocks don't run, in any language. After
+  `exit(n)` Python and Node.js still end cleanly (open files are flushed, `atexit` runs). Ctrl+C,
+  or a kill such as `docker stop`, stops them on the spot: what an open file still buffers is
+  lost and `atexit` doesn't run, so close files as you go (`with open(...)` in each call).
 - **An error V2 can't raise in your program** (from a JavaScript timer, a Promise nobody waits
   for, a Python thread) is printed, and the run then ends with exit code 1, not 0.
 - **No REPL, no package manager of its own, no editor plugins.**

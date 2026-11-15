@@ -79,6 +79,15 @@ impl Encoder<'_, '_> {
         }
     }
 
+    /// Another session's handle, which can't be sent (11.5). Out of line: `value` recurses once
+    /// per nesting level, so its own frame stays small.
+    #[cold]
+    #[inline(never)]
+    fn foreign_handle<T>(&self, h: &HandleRef) -> Exec<T> {
+        let how = h.plain_way().unwrap_or_else(|| "convert it with to_v2(h) first".to_string());
+        self.fail(format!("this handle belongs to engine '{}' and can't be passed to '{}' — {how}", h.tag, self.wire.tag))
+    }
+
     fn enter(&mut self, addr: usize, kind: &str) -> Exec<()> {
         if self.open.contains(&addr) {
             return self.fail(format!("cannot send {kind} that contains itself"));
@@ -145,10 +154,7 @@ impl Encoder<'_, '_> {
                     return self.callable(v, &h.text());
                 }
                 if h.session != self.wire.session {
-                    return self.fail(format!(
-                        "this handle belongs to engine '{}' and can't be passed to '{}' — convert it with to_v2(h) first",
-                        h.tag, self.wire.tag
-                    ));
+                    return self.foreign_handle(h);
                 }
                 json!({"$v2": "h", "id": h.id})
             }
@@ -567,7 +573,11 @@ mod tests {
         let args = Value::list(vec![Value::dict(m)]);
         assert_eq!(fx.wire(ALL).encode(&h, "args[0]").unwrap().to_string(), r#"{"$v2":"h","id":9}"#);
         let e = fx.wire(ALL).encode(&args, "args").err().map(err_text).unwrap();
-        assert_eq!(e, "MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — convert it with to_v2(h) first (at args[0][\"when\"])");
+        // A Date, which to_v2 can't convert: the block that can (11.5).
+        assert_eq!(e, "MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — a Date isn't data: make plain data of it in a block, as in @js(h) { h.toISOString() } (at args[0][\"when\"])");
+        let obj = Value::Handle(Rc::new(HandleRef::new(1, "js".into(), 5, "Object".into(), fx.releases.clone())));
+        let e = fx.wire(ALL).encode(&obj, "args[0]").err().map(err_text).unwrap();
+        assert_eq!(e, "MarshalError: this handle belongs to engine 'js' and can't be passed to 'py' — convert it with to_v2(h) first (at args[0])");
         // Decoding: one HandleRef per tag; without the handles cap a tag is fatal.
         let tag: Json = serde_json::from_str(r#"{"$v2":"h","id":4,"type":"datetime.date"}"#).unwrap();
         let v = fx.wire(ALL).decode(&tag).unwrap();

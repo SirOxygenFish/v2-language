@@ -579,6 +579,14 @@ fn a_utf16_file_says_to_save_it_as_utf8() {
         String::from_utf8_lossy(&out.stderr),
         "u16.v2:1:1: SyntaxError: file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8\n"
     );
+    // Without the byte-order mark, and big-endian: the same (some editors save it so).
+    for le in [true, false] {
+        let bytes: Vec<u8> = "print(1)
+".encode_utf16().flat_map(|u| if le { u.to_le_bytes() } else { u.to_be_bytes() }).collect();
+        std::fs::write(home.0.join("u16.v2"), bytes).unwrap();
+        let out = v2_command(&home.0).arg("u16.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stderr).starts_with("u16.v2:1:1: SyntaxError: file is not valid UTF-8: it is UTF-16"), "{le}: {}", String::from_utf8_lossy(&out.stderr));
+    }
     // A program or an image given to V2 is named a binary file (a NUL byte in its start).
     std::fs::write(home.0.join("app.v2"), b"MZ\x90\x00\x03\x00\xff\xff").unwrap();
     let out = v2_command(&home.0).arg("app.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
@@ -594,6 +602,16 @@ fn a_url_in_a_string_gets_no_comment_hint() {
 ")], &["u.v2"]);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("is never closed") && !stderr.contains("starts a comment"), "{stderr}");
+}
+
+#[test]
+fn an_npm_tool_not_on_path_says_to_run_it_with_npx() {
+    // prettier installed for the project lives in node_modules/.bin, which PATH doesn't name.
+    let tool = if cfg!(windows) { "node_modules/.bin/v2-test-tool.cmd" } else { "node_modules/.bin/v2-test-tool" };
+    let (code, _, stderr, _home) = run_with_files(&[(tool, ""), ("t.v2", "exec([\"v2-test-tool\", \".\"])
+")], &["t.v2"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("hint: v2-test-tool is in node_modules/.bin, where npm puts a package's programs: run it with npx, as in exec([\"npx\", \"v2-test-tool\", …])"), "{stderr}");
 }
 
 #[test]
@@ -1196,6 +1214,11 @@ fn input_from_a_file_that_isnt_utf8_says_to_convert_the_file() {
     assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(1), "ok\n"), "{stderr}");
     assert!(stderr.contains("IOError: input line 2 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text"), "{stderr}");
     assert!(stderr.contains("\n  hint: the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with its encoding"), "{stderr}");
+    // The same bytes through a pipe (a shell sent them): not the file's hint.
+    let child = v2_command(&home.0).arg("r.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("start v2");
+    let out = wait_with_timeout(child, b"ok\n\xff\xfe bad\n".to_vec(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("IOError: input line 2 is not valid UTF-8") && !stderr.contains("the file sent as input"), "{stderr}");
 }
 
 #[cfg(unix)]
@@ -2746,6 +2769,16 @@ fn list_dir_names_the_name_that_isnt_utf8() {
     let (code, _, stderr) = run_in_home(&home.0, &["l.v2"], &[]);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("IOError: cannot list 'names': the name 'bad\u{FFFD}.txt' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"), "{stderr}");
+    // The hint's code runs as written, and the bytes name it gives opens the file.
+    let hint = "keep them as bytes in a @py block: @py(d) { import os; os.listdir(os.fsencode(d)) }, and open one there with os.path.join(os.fsencode(d), name)";
+    assert!(stderr.contains(hint), "{stderr}");
+    let src = "if engine_available(\"py\") {\n    let d = \"names\"\n    let name = (@py(d) { import os; os.listdir(os.fsencode(d)) })[0]\n    print(@py(d, name) { import os; open(os.path.join(os.fsencode(d), name), \"rb\").read() })\n} else {\n    print(\"no py\")\n}\n";
+    std::fs::write(home.0.join("h.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["h.v2"], &[]);
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default().split([',', ' ']).any(|t| t == "py");
+    if stdout != "no py\n" || required {
+        assert_eq!((code, stdout.as_str()), (Some(0), "b\"x\"\n"), "{stderr}");
+    }
 }
 
 #[test]

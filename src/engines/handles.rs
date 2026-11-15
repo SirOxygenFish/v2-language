@@ -31,6 +31,22 @@ pub struct HandleRef {
 }
 
 impl HandleRef {
+    /// For a value that `to_v2` can't make data of (a date, a Decimal), the block that can, as
+    /// in `@py(h) { h.isoformat() }` (11.5).
+    pub fn plain_way(&self) -> Option<String> {
+        let t = &*self.type_name;
+        let last = t.rsplit('.').next().unwrap_or(t);
+        let how = match &*self.tag {
+            "py" if matches!(last, "datetime" | "date" | "time" | "Timestamp") => "h.isoformat()",
+            "py" if matches!(last, "Decimal" | "UUID" | "Fraction") || t.starts_with("pathlib.") => "str(h)",
+            "py" if last == "timedelta" => "h.total_seconds()",
+            "js" | "ts" if t == "Date" => "h.toISOString()",
+            _ => return None,
+        };
+        let tag = if &*self.tag == "py" { "py" } else { "js" };
+        Some(format!("a {t} isn't data: make plain data of it in a block, as in @{tag}(h) {{ {how} }}"))
+    }
+
     pub fn new(session: usize, tag: Rc<str>, id: u64, type_name: Rc<str>, releases: ReleaseQueue) -> HandleRef {
         HandleRef { session, tag, id, type_name, callable: false, releases }
     }
@@ -255,7 +271,12 @@ impl Interp {
     pub fn handle_iter(&mut self, h: &HandleRef, pairs: bool, at: Span) -> Exec<(Rc<HandleRef>, bool)> {
         let what = format!("iterating {}", h.text());
         let fields = if pairs { Map::from_iter([("pairs".to_string(), json!(true))]) } else { Map::new() };
-        let reply = self.handle_op(h, "iter", fields, &what, at)?;
+        let reply = self.handle_op(h, "iter", fields, &what, at).inspect_err(|f| {
+            // An async generator has no plain iterator: its language collects it (11.4).
+            if let (crate::runtime::error::Flow::Error(e), Some(hint)) = (f, async_iter_hint(h)) {
+                let _ = e.hint.set(hint.into());
+            }
+        })?;
         let parts = match &reply {
             Value::Dict(d) => {
                 let d = d.borrow();
@@ -284,6 +305,15 @@ impl Interp {
             (Some(Value::List(items)), Some(Value::Bool(done))) => Ok((items.borrow().clone(), done)),
             _ => fail("ProtocolError", format!("engine '{}' answered next without items", it.tag)).map_err(|f| self.raise(f, at)),
         }
+    }
+}
+
+/// What to write for `for x in h` over an async generator, which `for` can't step through.
+fn async_iter_hint(h: &HandleRef) -> Option<&'static str> {
+    match &*h.type_name {
+        "AsyncGenerator" => Some("an async generator can't be looped over in V2: collect it in JavaScript, as in let items = @js(h) { Array.fromAsync(h) } (V2 waits for the Promise)"),
+        "async_generator" => Some("an async generator can't be looped over in V2: collect it with an async function that a block exports, as in async def collect(h): return [x async for x in h] (V2 waits for the coroutine it returns)"),
+        _ => None,
     }
 }
 

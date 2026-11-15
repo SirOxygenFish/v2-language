@@ -33,9 +33,9 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 11 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 12 next
-  on a new distro and sandbox (round 11's prompts: scratchpad/newcomer/prompt-*-r11.md, made by
-  scratchpad/setup_round11.py; round 11's distro v2new24k; agents may read the archive's DOCS.md; the Windows one forbids
+  Rounds 1 to 12 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 13 next
+  on a new distro and sandbox (round 12's prompts: scratchpad/newcomer/prompt-*-r12.md, made by
+  scratchpad/setup_round12.py; round 12's distro v2new24l; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
   line endings).
@@ -182,7 +182,7 @@ it is loaded automatically into every session and every subagent.
   globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
   HANDLERS). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
   JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`.
-- `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`), `CallableTable` (Values: functions
+- `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`, `plain_way`: the block for a date or Decimal), `CallableTable` (Values: functions
   and other sessions' callable handles, keyed by Rc address), and the host's handle ops on
   `Interp`: `handle_getattr/setattr/getitem/setitem/len/str/value/call/iter/next`; `foreign_call`
   (handles and Proxies; `check_alive` first, then the kwargs cap).

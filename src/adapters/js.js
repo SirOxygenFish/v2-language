@@ -570,7 +570,7 @@ function printUnattached(prefix, e) {
   const shown = new Set(); // an error in its own causes or group, or in two, is shown once
   const describe = (e, head, indent) => {
     const fromV2 = e instanceof V2Error;
-    const title = `${indent}${head}${errorName(e)}: ${fromV2 ? `${e.type}: ` : ''}${errorMessage(e)}`;
+    const title = `${indent}${head}${errorName(e)}: ${fromV2 && e.type !== 'Error' ? `${e.type}: ` : ''}${errorMessage(e)}`;
     if (e !== null && typeof e === 'object') {
       if (shown.has(e)) return void lines.push(`${title} (shown above)`);
       shown.add(e);
@@ -600,8 +600,17 @@ function printUnattached(prefix, e) {
   } catch {
     lines.push(`${prefix}<an error that can't be printed>`); // a revoked Proxy, a throwing trap
   }
-  writeOut('stderr!', lines.join('\n') + '\n');
+  const text = lines.join('\n') + '\n';
+  if (text === lastUnattached.text) {
+    lastUnattached.count += 1;
+    if (lastUnattached.count === 1) writeOut('stderr!', '(the same error again; further repeats are not shown)\n');
+    return;
+  }
+  lastUnattached.text = text;
+  lastUnattached.count = 0;
+  writeOut('stderr!', text);
 }
+const lastUnattached = { text: null, count: 0 };
 process.on('uncaughtException', (e) => printUnattached('uncaught exception: ', e));
 process.on('unhandledRejection', (e) => printUnattached('unhandled rejection: ', e));
 // Node prints an ExperimentalWarning the first time types are stripped (12.5).
@@ -627,6 +636,9 @@ function typeName(obj) {
   try {
     const c = obj && obj.constructor;
     if (c && typeof c.name === 'string' && c.name) return c.name;
+    // No named constructor, as for an async generator: its tag, `AsyncGenerator`.
+    const tag = Object.prototype.toString.call(obj).slice(8, -1);
+    if (tag && tag !== 'Object') return tag;
   } catch {}
   return 'Object';
 }
@@ -879,6 +891,7 @@ function decodeTag(j) {
       const e = new V2Error(j.type, j.message, decode(j.data ?? null), j.lang ?? null, j.foreign_type ?? null);
       Object.defineProperty(e, '_cause', { value: j.cause && typeof j.cause === 'object' ? decode(j.cause) : null, enumerable: false });
       e._v2 = j;
+      cleanStack(e, j);
       return e;
     }
     case 'dict': {
@@ -967,6 +980,25 @@ function frames(e) {
     });
   }
   return out;
+}
+
+function cleanStack(e, j) {
+  // A V2Error's stack as a log shows it (14.2): its V2 type, where V2 raised it, then the frames
+  // of this request's code that called V2, without the adapter's own.
+  const lines = [`V2Error: ${j.type && j.type !== 'Error' ? `${j.type}: ` : ''}${j.message}`];
+  if (Array.isArray(j.trace) && typeof j.trace[0] === 'string') lines.push(`    at ${j.trace[0]}`);
+  for (const line of String(e.stack).split('\n').slice(1)) {
+    const named = NAMED_FRAME.exec(line);
+    const m = named || BARE_FRAME.exec(line);
+    if (!m) continue;
+    const [func, file] = named ? m.slice(1, 3) : [undefined, m[1]];
+    if (file === ADAPTER && func && DISPATCH.has(func.replace(/^async /, ''))) break;
+    if (file.startsWith('node:') || file === ADAPTER || file.startsWith('evalmachine.')) continue;
+    lines.push(line);
+  }
+  try {
+    Object.defineProperty(e, 'stack', { value: lines.join('\n'), writable: true, configurable: true, enumerable: false });
+  } catch {}
 }
 
 function errorName(e) {
@@ -1070,7 +1102,7 @@ let nextOutId = 0;
 
 function hostCall(target, args, name) {
   const top = stack[stack.length - 1];
-  if (!top || top.kind !== 'request') throw new V2Error('Error', `V2 function '${name}' called outside an active V2 call`);
+  if (!top || top.kind !== 'request') throw new V2Error('Error', `V2 function '${name}' called outside an active V2 call: JavaScript called it while V2 wasn't waiting on JavaScript (a server, timer or event after its call returned); keep V2 in a call while it serves, as in an exported async function that resolves when the server should stop`);
   let frame;
   try {
     frame = { t: 'call', id: 0, target, args: args.map((a, i) => encodeValue(a, `args[${i}]`)), kwargs: {} };

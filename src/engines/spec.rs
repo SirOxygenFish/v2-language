@@ -258,13 +258,16 @@ pub fn this_linux() -> (Family, &'static str) {
 }
 
 /// The command that installs a package: one manager's when the family is known, else both, as
-/// `apt … / dnf …`, or as `on Debian and Ubuntu, …; on Fedora, …` when `named` (7.8).
+/// `apt … / dnf …`, or as `on Debian and Ubuntu, …; on Fedora, …` when `named` (7.8). For root
+/// (a container, a fresh WSL distro, which have no package lists yet) apt's starts with
+/// `apt update && `.
 pub fn package_line(family: Family, sudo: &str, apt: &str, dnf: &str, named: Option<()>) -> String {
+    let apt = if sudo.is_empty() { format!("apt update && apt install {apt}") } else { format!("{sudo}apt install {apt}") };
     match (family, named) {
-        (Family::Apt, _) => format!("{sudo}apt install {apt}"),
+        (Family::Apt, _) => apt,
         (Family::Dnf, _) => format!("{sudo}dnf install {dnf}"),
-        (Family::Unknown, None) => format!("{sudo}apt install {apt} / {sudo}dnf install {dnf}"),
-        (Family::Unknown, Some(())) => format!("on Debian and Ubuntu, {sudo}apt install {apt}; on Fedora, {sudo}dnf install {dnf}"),
+        (Family::Unknown, None) => format!("{apt} / {sudo}dnf install {dnf}"),
+        (Family::Unknown, Some(())) => format!("on Debian and Ubuntu, {apt}; on Fedora, {sudo}dnf install {dnf}"),
     }
 }
 
@@ -362,7 +365,9 @@ mod tests {
         assert_eq!(family_of("ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n"), Family::Dnf);
         assert_eq!(family_of("ID=alpine\n"), Family::Unknown);
         assert_eq!(family_of(""), Family::Unknown);
-        assert_eq!(package_line(Family::Apt, "", "python3", "python3", None), "apt install python3");
+        assert_eq!(package_line(Family::Apt, "", "python3", "python3", None), "apt update && apt install python3");
+        assert_eq!(package_line(Family::Apt, "sudo ", "python3", "python3", None), "sudo apt install python3");
+        assert_eq!(package_line(Family::Unknown, "", "python3", "python3", None), "apt update && apt install python3 / dnf install python3");
         assert_eq!(package_line(Family::Dnf, "sudo ", "python3", "python3", None), "sudo dnf install python3");
         assert_eq!(package_line(Family::Unknown, "sudo ", "python3", "python3", None), "sudo apt install python3 / sudo dnf install python3");
         assert_eq!(

@@ -903,7 +903,7 @@ if __name__ == "__main__":
         if forked[0]:
             raise V2Error("Error", "V2 function '%s' called from a forked process" % name)
         if not stack or stack[-1][0] != "request":
-            raise V2Error("Error", "V2 function '%s' called outside an active V2 call" % name)
+            raise V2Error("Error", "V2 function '%s' called outside an active V2 call: Python called it while V2 wasn't waiting on Python (a thread, a timer or a finalizer after its call returned); call V2 from the code V2 called, and return to V2 when done" % name)
         if threading.get_ident() != DISPATCH:
             raise V2Error("Error", "V2 function '%s' called from another thread" % name)
         if _send_owner[0] == DISPATCH:  # a finalizer that runs while a frame is being sent
@@ -924,6 +924,13 @@ if __name__ == "__main__":
         stack.append(("waiting", cid))
         try:
             return serve(cid)
+        except V2Error as e:
+            # Its traceback starts at the call, not in the adapter's serve loop, and V2's frame
+            # where it was raised is a note in it (Python 3.11+; 14.2).
+            where = (e._v2 or {}).get("trace") or []
+            if where and isinstance(where[0], str) and hasattr(e, "add_note") and not getattr(e, "__notes__", None):
+                e.add_note("raised in V2 as %s, at %s" % (e.type, where[0]))
+            raise e.with_traceback(None)
         finally:
             stack.pop()
 

@@ -1,0 +1,9 @@
+// platform: windows
+// /dev/stdin and the others are Linux's and macOS's names: on Windows the hint says what to use
+// instead (DOCS 3.11).
+try {
+    read_file("/dev/stdin")
+} catch (e) {
+    print(e.message)
+    print(e.hint)
+}
