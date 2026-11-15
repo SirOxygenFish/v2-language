@@ -54,6 +54,30 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         _ => None,
     };
     let ends_line = matches!(tok(0), Some(Tok::Newline | Tok::Semi | Tok::Eof | Tok::RBrace));
+    // `Let x = 1`, `} Else {`: a keyword written with a capital, at a statement's start.
+    let starts = |back: usize| i.checked_sub(back + 1).is_none_or(|j| matches!(toks[j].tok, Tok::Newline | Tok::Semi | Tok::RBrace | Tok::LBrace(_)));
+    let capital = |w: Option<&str>| {
+        const KEYWORDS: [&str; 15] = ["let", "const", "func", "return", "if", "elif", "else", "while", "for", "break", "continue", "try", "catch", "finally", "throw"];
+        w.filter(|w| w.chars().next().is_some_and(char::is_uppercase)).map(str::to_lowercase).filter(|l| KEYWORDS.contains(&l.as_str()))
+    };
+    if let Some(kw) = capital(word(1)).filter(|_| starts(1)).or_else(|| capital(word(0)).filter(|_| starts(0))) {
+        return Some(format!("V2's own words are written in small letters: {kw}"));
+    }
+    // Python's tuples, comprehensions and unpacking.
+    let opener = (0..i).rev().find(|&j| matches!(toks[j].tok, Tok::Op(Op::LParen | Op::LBracket) | Tok::Newline)).map(|j| &toks[j].tok);
+    let after_let = (0..i).rev().take_while(|&j| !matches!(toks[j].tok, Tok::Newline | Tok::Semi)).last().is_some_and(|j| matches!(toks[j].tok, Tok::Kw(Kw::Let | Kw::Const)));
+    let after_return = (0..i).rev().take_while(|&j| !matches!(toks[j].tok, Tok::Newline | Tok::Semi | Tok::LBrace(_))).last().is_some_and(|j| matches!(toks[j].tok, Tok::Kw(Kw::Return)));
+    match tok(0) {
+        Some(Tok::Op(Op::Comma)) if matches!(opener, Some(Tok::Op(Op::LParen))) && !matches!(tok(1), Some(Tok::Op(Op::LParen))) => {
+            return Some("V2 has no tuples: write a list, as in [1, 2]".into())
+        }
+        Some(Tok::Op(Op::Comma)) if after_let => return Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()),
+        Some(Tok::Op(Op::Comma)) if after_return => return Some("V2 returns one value: return a list, as in return [a, b]".into()),
+        Some(Tok::Kw(Kw::For)) if matches!(opener, Some(Tok::Op(Op::LBracket))) => {
+            return Some("V2 has no comprehensions: write xs.map(func(x) => x * 2), or xs.filter(func(x) => x > 0)".into())
+        }
+        _ => {}
+    }
     let hint = match (word(1), word(0), op(0)) {
         (Some("fn" | "def" | "function" | "fun" | "sub"), Some(name), _) => format!("V2 writes functions as func {name}(a, b) {{ ... }}"),
         (Some("var"), Some(_), _) => "V2 declares variables with let: let x = 1".into(),
@@ -413,7 +437,13 @@ impl<'a> Parser<'a> {
 
     fn expect_name(&mut self, what: &str) -> Result<Name, Diag> {
         let t = self.bump();
-        name_of(&t).ok_or_else(|| Diag::new(format!("expected {what}, found {}", t.tok), t.span))
+        name_of(&t).ok_or_else(|| {
+            let d = Diag::new(format!("expected {what}, found {}", t.tok), t.span);
+            match &t.tok {
+                Tok::Kw(k) => d.hint(format!("{} is one of V2's own words: pick another name, as in {}_", k.as_str(), k.as_str())),
+                _ => d,
+            }
+        })
     }
 
     fn skip_separators(&mut self) {
@@ -1668,6 +1698,10 @@ impl<'a> Parser<'a> {
                 }
                 _ => return Err(Diag::new("dict keys are names, strings or [expr]", t.span)),
             };
+            if statement && entries.is_empty() && !self.at_op(Op::Colon) {
+                return Err(Diag::new("V2 has no bare { } blocks: a { that starts a statement is a dict", self.span())
+                    .hint("write the statements without the braces, or in a function"));
+            }
             self.expect_op(Op::Colon)?;
             entries.push((key, self.expr()?));
             if self.at_op(Op::Comma) {
@@ -1954,6 +1988,15 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let a = null\na ??= 5"), "V2 has no ??=: write a = a ?? …");
         assert_eq!(hint("let x = 1\nif x > 2 {\n} elsif x > 0 {\n}"), "V2 writes elif: } elif x > 0 { ... }");
         assert_eq!(hint("x := 1"), "V2 declares a name with let x = …, and assigns to it with x = …");
+        assert_eq!(hint("let if = 1"), "if is one of V2's own words: pick another name, as in if_");
+        assert_eq!(hint("Let x = 1"), "V2's own words are written in small letters: let");
+        assert_eq!(hint("let x = 1\nIf x > 0 {\n}"), "V2's own words are written in small letters: if");
+        assert_eq!(hint("if true {\n} Else {\n}"), "V2's own words are written in small letters: else");
+        assert_eq!(hint("let p = (1, 2)"), "V2 has no tuples: write a list, as in [1, 2]");
+        assert_eq!(hint("let xs = [1]\nlet ys = [x * 2 for x in xs]"), "V2 has no comprehensions: write xs.map(func(x) => x * 2), or xs.filter(func(x) => x > 0)");
+        assert_eq!(hint("let a, b = 1, 2"), "V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])");
+        assert_eq!(hint("func f() {\n    return 1, 2\n}"), "V2 returns one value: return a list, as in return [a, b]");
+        assert_eq!(hint("{\n    print(\"x\")\n}"), "write the statements without the braces, or in a function");
         // One that starts a statement after `=>` is a block body (a keyword before `:` is a key).
         assert_eq!(hint("let f = func(x) => { return x }"), "`=>` takes one expression, so `{` starts a dict; for statements write func(…) { … }");
         assert_eq!(hint("let x = 1\nif x = 2 {\n    print(x)\n}"), "V2 compares with ==, as in if x == 2 { ... }");

@@ -500,7 +500,13 @@ impl<'a> Lexer<'a> {
             }
         }
         let c = self.peek().unwrap_or(' ');
-        let (shown, hint) = shown_char(c);
+        let (shown, mut hint) = shown_char(c);
+        // A Markdown example copied with its fence lines (```v2 and ```).
+        let start = self.src[..self.pos].rfind('\n').map_or(0, |i| i + 1);
+        let line = self.src[start..].lines().next().unwrap_or_default().trim();
+        if c == '`' && line.starts_with("```") && line[3..].chars().all(|c| c.is_ascii_alphanumeric()) {
+            hint = Some("```v2 and ``` mark an example in a Markdown file: copy only the lines between them");
+        }
         let d = Diag::new(format!("unexpected character {shown}"), self.span_here(1));
         Err(match hint {
             Some(h) => d.hint(h),
@@ -687,6 +693,26 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    /// Why a one-line string that opens at `open` reached the end of its line (3.2): a curly
+    /// quote where it should end, an apostrophe that ended a '…' string early, a path ending in
+    /// `\` before its quote, or text that goes on over lines.
+    fn unterminated_hint(&self, open: usize, quote: char) -> String {
+        let start = self.src[..open].rfind('\n').map_or(0, |i| i + 1);
+        let line = &self.src[start..];
+        let line = &line[..line.find('\n').unwrap_or(line.len())];
+        let rest = &self.src[open + quote.len_utf8()..start + line.len()];
+        if let Some(c) = rest.chars().find(|c| matches!(c, '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}')) {
+            return format!("the line has a curly quote {c} where the string should end: V2's strings end with a straight {quote} (editors and chat apps curl them)");
+        }
+        if quote == '\'' && line.matches('\'').count() >= 3 {
+            return "an apostrophe inside '…' ends the string: put the text in \"…\", as in \"it's me\"".into();
+        }
+        if rest.trim_end().ends_with(&format!("\\{quote}")) {
+            return format!("\\{quote} is a quote inside the string, so it goes on: end a Windows path with / or \\\\, as in \"C:/temp/\"");
+        }
+        format!("end the string with {quote} on this line; for text over several lines, write \\n for a line break, or use a \"\"\" string: \"\"\" at the end of the line, the text on the lines after it, and \"\"\" alone on the last line")
+    }
+
     /// `"…"` / `'…'`: no line breaks inside.
     fn one_line_body(&mut self, kind: StrKind, quote: char) -> Result<Vec<RawPart>, Diag> {
         let q = self.mark(); // the opening quote: where "unterminated string" points
@@ -696,8 +722,8 @@ impl<'a> Lexer<'a> {
         loop {
             match self.peek() {
                 None | Some('\n') => {
-                    return Err(Diag::new("unterminated string", Span { hi: q.pos as u32 + 1, ..self.span_from(q) })
-                        .hint("write \\n for a line break, or use a \"\"\" string: \"\"\" at the end of the line, the text on the lines after it, and \"\"\" alone on the last line"));
+                    let d = Diag::new("unterminated string", Span { hi: q.pos as u32 + 1, ..self.span_from(q) });
+                    return Err(d.hint(self.unterminated_hint(q.pos, quote)));
                 }
                 Some(c) if c == quote => {
                     self.bump();
@@ -1127,8 +1153,12 @@ impl<'a> Lexer<'a> {
             if !self.src[line_start..close].trim_matches([' ', '\t']).is_empty() {
                 let d = Diag::new(format!("{what_short} closes at a }} that does not start its line"), self.span_of_mark(at, 1))
                     .note("the } that closes it", self.span_at(close, 1));
+                // `    print(x)}`: the block's last line, with its } at the end.
+                let ends_line = self.src[close + 1..].split('\n').next().is_some_and(|rest| rest.trim().is_empty());
                 return Err(if is_extern {
                     d.hint("put the } that closes an extern block on its own line")
+                } else if ends_line {
+                    d.hint("put the } that ends the block on a line of its own")
                 } else {
                     d.hint(FENCE_HINT)
                 });
@@ -1368,6 +1398,8 @@ pub fn shown_char(c: char) -> (String, Option<&'static str>) {
         }
         '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), Some("use a plain minus sign: -")),
         '`' => ("'`'".to_string(), Some("V2 writes a template string as f\"text ${x}\"")),
+        // `copy con file` and old editors end a file with Ctrl+Z.
+        '\u{001A}' => (format!("{code} (Ctrl+Z, an old end-of-file mark)"), Some("delete it: V2 files end where their text ends")),
         c if c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') => (code, None),
         c => (format!("'{c}'"), None),
     }
@@ -1726,6 +1758,33 @@ let n = names
         let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), "print(2 ^ 3)");
         assert_eq!(lex(&sm, id).unwrap_err().hint.as_deref(), Some("V2 writes a power as 2 ** 3"));
         assert_eq!(kinds("a && b || c"), "a && b || c EOF");
+    }
+
+    #[test]
+    fn copied_markdown_and_ctrl_z_say_what_they_are() {
+        let diag = |src: &str| {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            lex(&sm, id).unwrap_err()
+        };
+        assert_eq!(diag("```v2\nprint(1)\n```\n").hint.as_deref(), Some("```v2 and ``` mark an example in a Markdown file: copy only the lines between them"));
+        assert_eq!(diag("print(`x`)").hint.as_deref(), Some("V2 writes a template string as f\"text ${x}\""));
+        let z = diag("print(1)\n\u{1A}");
+        assert_eq!((z.message.as_str(), z.hint.as_deref()), ("unexpected character U+001A (Ctrl+Z, an old end-of-file mark)", Some("delete it: V2 files end where their text ends")));
+    }
+
+    #[test]
+    fn an_unterminated_string_says_why() {
+        // 3.2: the cause on the line itself, before the advice for text over several lines.
+        let hint = |src: &str| {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            lex(&sm, id).unwrap_err().hint.unwrap_or_default()
+        };
+        assert!(hint("print(\"hello\u{201D})").starts_with("the line has a curly quote \u{201D} where the string should end"));
+        assert!(hint("print('it's me')").starts_with("an apostrophe inside '…' ends the string"));
+        assert!(hint("let p = \"C:\\temp\\\"").starts_with("\\\" is a quote inside the string, so it goes on"));
+        assert!(hint("print(\"hello)").starts_with("end the string with \" on this line; for text over several lines"));
     }
 
     #[test]

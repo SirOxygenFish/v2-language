@@ -166,11 +166,17 @@ chmod 755 "$dir/v2.new"
 mv -f "$dir/v2.new" "$dir/v2"
 say "Installed $installed as $dir/v2"
 
-# 6. Put the folder on PATH for new terminals, unless it is there already: in each startup file
-# the shell reads, the marker and the setting, once per folder.
+# 6. Put the folder on PATH for new terminals: in each startup file the shell reads, the marker and
+# the setting, once per folder. A folder of the home folder that this terminal has on PATH may have
+# it from an `export` or from lines since deleted (an uninstall), so it gets them too; the setting
+# checks PATH itself. Another folder on PATH (/usr/local/bin) is the system's: nothing changes.
 case ":$PATH:" in
 *":$dir:"*) on_path=yes ;;
 *) on_path=no ;;
+esac
+case "$dir" in
+"$HOME"/*) mine=yes ;;
+*) mine=no ;;
 esac
 # The folder as it goes between double quotes: `\`, `"`, `$` and the backtick escaped (for
 # fish, without the backtick), so any folder name works.
@@ -197,10 +203,10 @@ if yes_value "${V2_NO_MODIFY_PATH:-}"; then
     if [ "$on_path" = no ]; then
         say "Add $dir to your PATH to use v2 (V2_NO_MODIFY_PATH is set, so nothing was changed)."
     fi
-elif [ "$on_path" = yes ]; then
+elif [ "$on_path" = yes ] && [ "$mine" = no ]; then
     say "$dir is already on your PATH, so no startup file was changed"
 else
-    # Only when it isn't on PATH yet, so a shell that reads two of the files gets it once.
+    # The setting checks PATH, so a shell that reads two of the files gets the folder once.
     line="case \":\$PATH:\" in *\":$shown:\"*) ;; *) export PATH=\"$shown:\$PATH\" ;; esac"
     # The startup files, as the positional parameters (a home folder's path can have spaces).
     case "$(basename "${SHELL:-sh}")" in
@@ -245,7 +251,9 @@ else
     elif [ -z "$unwritable" ]; then
         say "Your startup files already put $dir on PATH"
     fi
-    if [ -n "$added" ] || [ -z "$unwritable" ]; then
+    if [ "$on_path" = yes ]; then
+        [ -z "$added" ] || say "New terminals will find v2 too (this one has $dir on PATH already)"
+    elif [ -n "$added" ] || [ -z "$unwritable" ]; then
         say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
     else
         say "To use v2 in this terminal, run: export PATH=\"$dir:\$PATH\""

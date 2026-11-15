@@ -40,3 +40,15 @@ write_file(home + "/v2_cp1252.txt", b"caf\xe9!")
 show(func() => @py(p: home + "/v2_cp1252.txt") { open(p).read() })
 // A dict's method read as a key.
 show(func() => {a: 1}.keys)
+// An object whose items alone pass 64 MiB (a big DataFrame) is refused before it converts.
+@py huge {
+    class Frame:
+        size = 20000000
+        def to_dict(self):
+            raise RuntimeError("converted anyway")
+    def frame():
+        return Frame()
+    @export { frame }
+}
+@import { frame } from huge
+show(func() => to_v2(frame()))

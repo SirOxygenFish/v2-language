@@ -1,0 +1,8 @@
+// requires: py
+// A file of the folder named like a module of Python's own, which it hides (INTERNALS 13.5).
+try {
+    @import { mean } from py.statistics
+    print(mean([1, 2, 3]))
+} catch (e) {
+    print(e.type, e.message.split(" is your ")[0], "|", e.message.split(".py, ")[1])
+}

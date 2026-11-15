@@ -358,6 +358,18 @@ fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator
     }
 }
 
+/// Whether a block's top level defines `name` as a function or a class (`def`, `class`; in
+/// JavaScript also `function` and `const`/`let`/`var`), read from its lines as written.
+fn defines(b: &EngineBlock, name: &str) -> bool {
+    let py = canonical_tag(&b.tag.text) == "py";
+    let forms: &[&str] = if py { &["def ", "async def ", "class "] } else { &["function ", "async function ", "class ", "const ", "let ", "var "] };
+    b.body.lines().any(|line| {
+        forms.iter().any(|f| {
+            line.strip_prefix(f).and_then(|rest| rest.trim_start_matches('*').trim_start().strip_prefix(name)).is_some_and(|after| after.starts_with(['(', ':', ' ', '=', '{', '<']) || after.is_empty())
+        })
+    })
+}
+
 /// The tag of a block with `@export { * }`.
 fn star_tag(b: &EngineBlock) -> Option<&str> {
     b.directives.exports.as_ref().filter(|x| x.star.is_some()).map(|_| canonical_tag(&b.tag.text))
@@ -416,9 +428,27 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
         let rest = name[package.len()..].trim_start_matches('/');
         return Some(format!("'{package}' is installed, but has no '{rest}': check the path after '{package}/'"));
     }
+    // `js.helpers` for the script's own helpers.js: a file is imported by its path, and
+    // `npm install helpers` would fetch whatever package has that name.
+    const EXTS: [&str; 6] = ["js", "mjs", "cjs", "ts", "mts", "cts"];
+    let with_ext = Path::new(&name).extension().and_then(|e| e.to_str()).is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    let own = if with_ext { vec![dir.join(&name)] } else { EXTS.iter().map(|e| dir.join(format!("{name}.{e}"))).collect() };
+    let lang = |file: &str| if Path::new(file).extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts")) { "ts" } else { "js" };
+    if let Some(file) = own.iter().find(|p| p.is_file()).and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()) {
+        return Some(format!("your own {file} is imported by its path from the .v2 file's folder: @import {{ … }} from {}.\"./{file}\" (js.{name}, without ./, names an npm package)", lang(&file)));
+    }
+    if with_ext {
+        return Some(format!("a file of your own is imported by its path from the .v2 file's folder, as in {}.\"./{name}\": check its name (js.{name}, without ./, names an npm package)", lang(&name)));
+    }
     let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| format!("did you mean js.{n}? "));
-    Some(format!("{}if '{package}' isn't misspelled, install it in your project folder: npm install {package}", near.unwrap_or_default()))
+    // Node looks in node_modules from the importing .v2 file's folder up, which for a shared
+    // module isn't the project's folder.
+    Some(format!(
+        "{}if '{package}' isn't misspelled, install it with npm install {package} in {} or a folder above it, where Node looks for this file",
+        near.unwrap_or_default(),
+        dir.display()
+    ))
 }
 
 /// A TypeScript file's own import that Node couldn't follow (13.5): Node runs a .ts file as it
@@ -557,10 +587,20 @@ impl Interp {
             };
             return Some(format!("{} exports it: add @import {{ {name} }} from {from}", self.block_name(b)));
         }
-        bodies
-            .iter()
-            .any(|b| b.label.as_ref().is_some_and(|l| &*l.text == name))
-            .then(|| format!("it is a block's label: bring the block's names in with @import {{ … }} from {name}"))
+        if bodies.iter().any(|b| b.label.as_ref().is_some_and(|l| &*l.text == name)) {
+            return Some(format!("it is a block's label: bring the block's names in with @import {{ … }} from {name}"));
+        }
+        // `@py { def double(x): ... }`, then `double(4)`: defined at a block's top level, so V2
+        // can have it once the block exports it.
+        let b = bodies.iter().find(|b| defines(b, name))?;
+        let from = match &b.label {
+            Some(l) => l.text.to_string(),
+            None => format!("@{}", canonical_tag(&b.tag.text)),
+        };
+        Some(match b.directives.exports.as_ref().filter(|x| x.star.is_some() && !name.starts_with('_')) {
+            Some(_) => format!("{} exports it: add @import {{ {name} }} from {from}", self.block_name(b)),
+            None => format!("{} defines it without exporting it: add @export {{ {name} }} inside it, then @import {{ {name} }} from {from}", self.block_name(b)),
+        })
     }
 
     /// 13.3: what follows already fails for `name` whatever loads now: its provider is neither
@@ -1121,9 +1161,16 @@ mod tests {
         let js = temp("npm");
         std::fs::create_dir_all(js.join("node_modules").join("lodash")).unwrap();
         assert_eq!(hint("Cannot find module 'lodash/chunck'", &js), "'lodash' is installed, but has no 'chunck': check the path after 'lodash/'");
-        assert_eq!(hint("Cannot find module 'lodsh'", &js), "did you mean js.lodash? if 'lodsh' isn't misspelled, install it in your project folder: npm install lodsh");
-        assert_eq!(hint("Cannot find module '@scope/pkg/sub'", &d), "if '@scope/pkg' isn't misspelled, install it in your project folder: npm install @scope/pkg");
+        let place = |dir: &Path| format!("{} or a folder above it, where Node looks for this file", dir.display());
+        assert_eq!(hint("Cannot find module 'lodsh'", &js), format!("did you mean js.lodash? if 'lodsh' isn't misspelled, install it with npm install lodsh in {}", place(&js)));
+        assert_eq!(hint("Cannot find module '@scope/pkg/sub'", &d), format!("if '@scope/pkg' isn't misspelled, install it with npm install @scope/pkg in {}", place(&d)));
         assert_eq!(hint("Cannot find module './nope.js'", &d), "a local file is found from the .v2 file's folder: check the path");
+        // The script's own file, named like a package: never npm install it.
+        std::fs::write(js.join("helpers.js"), "").unwrap();
+        let own = "your own helpers.js is imported by its path from the .v2 file's folder: @import { … } from js.\"./helpers.js\" (js.helpers, without ./, names an npm package)";
+        assert_eq!(hint("Cannot find module 'helpers'", &js), own);
+        assert_eq!(hint("Cannot find module 'helpers.js'", &js), own.replace("js.helpers,", "js.helpers.js,"));
+        assert_eq!(hint("Cannot find module 'util.ts'", &js), "a file of your own is imported by its path from the .v2 file's folder, as in ts.\"./util.ts\": check its name (js.util.ts, without ./, names an npm package)");
         assert_eq!(missing_package_hint("something else", &d, false), None);
         // A package that offers only `import` (an ES module's `exports`).
         let m = format!("No \"exports\" main defined in {}", d.join("node_modules").join("@scope").join("esm-only").join("package.json").display());

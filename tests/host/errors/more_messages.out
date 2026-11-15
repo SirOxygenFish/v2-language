@@ -8,3 +8,8 @@ area() got an unexpected argument 'h'
 'step' is used before it is declared: its declaration comes later
 'rnge' is not declared — declare it with let
 str has no field 'upper': upper is a method, so call it, as in x.upper()
+the script was given fewer arguments: use args().get(0, "default") for one that may be missing, or check len(args()) first
+V2's / always gives a float: write div(a, b) for a whole number, as in xs[div(len(xs), 2)]
+input() gives null when the input has ended: check it first, as in let line = input(); if line == null { break }
+unsupported operand types for +: 'str' and 'int' — to join text, use f"...${x}" or str(x); to count with text such as input() gives, convert it: int(x) or float(x)
+cannot compare str and int with '<' — to compare text such as input() gives with a number, convert it: int(x) or float(x)

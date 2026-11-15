@@ -33,9 +33,9 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 10 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 11 next
-  on a new distro and sandbox (round 10's prompts: scratchpad/newcomer/prompt-*-r10.md, made by
-  scratchpad/setup_round10.py; round 10's distro v2new24j; agents may read the archive's DOCS.md; the Windows one forbids
+  Rounds 1 to 11 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 12 next
+  on a new distro and sandbox (round 11's prompts: scratchpad/newcomer/prompt-*-r11.md, made by
+  scratchpad/setup_round11.py; round 11's distro v2new24k; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
   line endings).

@@ -33,6 +33,10 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 /// Set by the interrupt handler; nothing else happens in the handler (6.5).
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Unix: the first interrupt signal that came, which v2 ends by once it has cleaned up (6.5).
+#[cfg(unix)]
+static SIGNALED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 /// Unix: Ctrl+Z (SIGTSTP) came; the watchdog stops the children, then v2 itself (6.5).
 #[cfg(unix)]
 static SUSPEND: AtomicBool = AtomicBool::new(false);
@@ -100,7 +104,33 @@ fn die(w: &Watch) -> ! {
     if let Some(dir) = &w.run_dir {
         remove_run_dir(dir);
     }
+    #[cfg(unix)]
+    die_by_signal();
     hard_exit(EXIT_INTERRUPTED)
+}
+
+/// Unix: end by the signal that came, as a program without a handler does, so the shell sees a
+/// process killed by SIGINT (shown as 130, SIGTERM 143, SIGHUP 129) and stops a loop of v2 runs
+/// on one Ctrl+C, which it doesn't for a plain exit 130 (6.5). SIGQUIT leaves no core file.
+#[cfg(unix)]
+fn die_by_signal() {
+    let sig = SIGNALED.load(Ordering::SeqCst);
+    if sig == 0 {
+        return;
+    }
+    // SAFETY: plain libc calls on this process; `raise` with the default action ends it.
+    unsafe {
+        if sig == libc::SIGQUIT {
+            let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            libc::setrlimit(libc::RLIMIT_CORE, &none);
+        }
+        libc::signal(sig, libc::SIG_DFL);
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(sig);
+    }
 }
 
 /// Kill every process in the session `sid` leads (8.3). Linux, through /proc.
@@ -1236,7 +1266,8 @@ pub fn run_captured(
 /// ignored (6.5).
 #[cfg(unix)]
 fn install_interrupt_handler() {
-    extern "C" fn on_signal(_: libc::c_int) {
+    extern "C" fn on_signal(sig: libc::c_int) {
+        let _ = SIGNALED.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst);
         INTERRUPTED.store(true, Ordering::SeqCst);
     }
     // SAFETY: the handler only stores to an atomic; `sigaction` gets zeroed, filled structs.

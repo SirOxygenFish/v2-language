@@ -146,8 +146,8 @@ it, and the last lines say what that means for your scripts:
 
 ```text
 notes:
-  js: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal
-  ts: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal
+  js: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal; installed where PATH doesn't look: [engines.js] command in v2.toml, or V2_ENGINE_JS
+  ts: not found; install: winget install -e --id OpenJS.NodeJS.LTS (or https://nodejs.org), then open a new terminal; installed where PATH doesn't look: [engines.js] command in v2.toml, or V2_ENGINE_JS
 config file: none
 v2 0.1.0 (VEP/1), windows x86_64
 ready: py
@@ -600,7 +600,10 @@ Relative paths in the file functions and in `exec` are relative to the folder yo
 `script_dir()`: `read_file(f"${script_dir()}/data.csv")` (forward slashes work on Windows too).
 `import` paths and `extern` library paths are relative to the `.v2` file instead. A block that
 changes its working directory (`os.chdir`, `process.chdir`) changes it for its own language only:
-V2's file functions and `exec` keep V2's. On Linux and macOS, `write_file("/dev/stdout", data)`
+V2's file functions and `exec` keep V2's. Paths go through symbolic links: `script_dir()` is the
+real folder of the script, where the search for `v2.toml` starts too. `write_file` replaces a file's
+contents in place, not all at once: for a file another program reads, write a new file and rename
+it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
 wrote, and `read_file("/dev/stdin")` reads all of standard input. The file
 functions raise `IOError` when they fail (`exists` just returns `false`). Paths are taken as
@@ -1873,7 +1876,7 @@ that isn't there.
 | `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error; a run in which Python or JavaScript printed an error V2 couldn't raise (from a timer, a thread, a Promise nobody waits for) |
 | `2`       | usage or configuration error                                             |
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
-| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped, what was printed is still written |
+| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped, what was printed is still written. On Linux and macOS v2 then ends by that signal, as a program without a handler does, so a shell shows 128 + its number (130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP) and stops a loop of `v2` runs |
 | `141`     | the output's reader went away (`v2 x.v2 \| head`): the run stops quietly, like Ctrl+C but with nothing more to show |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 

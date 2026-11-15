@@ -1,0 +1,4 @@
+'double' is not declared — @py block at defined_not_exported.v2:3 defines it without exporting it: add @export { double } inside it, then @import { double } from @py
+'triple' is not declared — block 'tools' defines it without exporting it: add @export { triple } inside it, then @import { triple } from tools
+'quad' is not declared — block 'tools' defines it without exporting it: add @export { quad } inside it, then @import { quad } from tools
+'doubles' is not declared
