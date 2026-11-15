@@ -115,9 +115,11 @@ const MAX_CAUSES: usize = 8;
 /// the user has is inherited untouched).
 pub fn worker_command(e: &ResolvedEngine, adapter: &Path) -> (Vec<OsString>, Vec<(OsString, OsString)>) {
     let mut argv = e.argv.clone();
-    // A Node that strips types only when asked: the .ts files an @import names load too (7.2).
+    // A Node that strips types only when asked: the .ts files an @import names load too. Asked,
+    // it warns at startup, before the adapter can drop that warning (7.2).
     if &*e.spec.id == "js" && e.version.is_some_and(super::spec::node_needs_strip_flag) {
         argv.push("--experimental-strip-types".into());
+        argv.push("--disable-warning=ExperimentalWarning".into());
     }
     for a in &e.spec.fixed_args {
         argv.push(if &**a == "{adapter}" { adapter.as_os_str().to_os_string() } else { OsString::from(&**a) });
