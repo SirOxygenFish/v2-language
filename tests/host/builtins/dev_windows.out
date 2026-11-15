@@ -1,2 +1,4 @@
 cannot read '/dev/stdin': there is no folder '/dev'
 /dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)
+cannot write 'notes 12:30.txt': a Windows file name can't have ':' in it
+use another character, as in 12-30 for a time false

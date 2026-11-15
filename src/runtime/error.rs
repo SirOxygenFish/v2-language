@@ -120,7 +120,8 @@ fn osa(a: &[char], b: &[char]) -> usize {
     d[n][m]
 }
 
-/// The closest candidate, compared lower-cased, if within `max(1, min(3, (len + 2) / 3))`.
+/// The closest candidate, compared lower-cased, if within `max(1, min(3, (len + 2) / 3))`; of
+/// candidates as close, the first that starts with the name, else the first.
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let target: Vec<char> = name.to_lowercase().chars().collect();
     let limit = 1usize.max(3usize.min(target.len().div_ceil(3)));
@@ -132,7 +133,9 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
         let cand: Vec<char> = c.to_lowercase().chars().collect();
         let d = osa(&target, &cand);
         // A suggestion keeps some of the name: `y` isn't a typo of `f`.
-        if d <= limit && d < target.len().max(cand.len()) && best.is_none_or(|(bd, _)| d < bd) {
+        let prefix = cand.starts_with(&target);
+        let better = |(bd, b): (usize, &str)| d < bd || (d == bd && prefix && !b.to_lowercase().starts_with(&*name.to_lowercase()));
+        if d <= limit && d < target.len().max(cand.len()) && best.is_none_or(better) {
             best = Some((d, c));
         }
     }
@@ -428,6 +431,9 @@ mod tests {
         assert_eq!(did_you_mean("y", ["f", "x"]), None);
         assert_eq!(did_you_mean("x", ["xs"]), Some("xs"));
         assert_eq!(did_you_mean("ab", ["ba"]), Some("ba"));
+        // A tie goes to the one that starts with the name, whatever the order.
+        assert_eq!(did_you_mean("stat", ["star", "stats", "stats2"]), Some("stats"));
+        assert_eq!(did_you_mean("stat", ["start", "star"]), Some("start"));
     }
 
     fn sm_with(text: &str) -> (SourceMap, FileId) {

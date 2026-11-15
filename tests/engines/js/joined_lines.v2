@@ -9,6 +9,8 @@ try {
     }
 } catch (e) {
     print(e.foreign_type, e.message)
+    // The message says it already: no hint repeats it.
+    print(e.hint)
 }
 let w = @js {
     let a = 1;

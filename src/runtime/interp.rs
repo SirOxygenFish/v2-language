@@ -134,6 +134,20 @@ fn reads_input(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Name(n, _) if &**n == "input"))
 }
 
+/// What the text after `let NAME =` says about where a null came from (5.3), or `None`.
+fn null_from(name: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.starts_with("input(") {
+        return Some(format!("'{name}' is null: it was set from input(), which gives null when the input has ended"));
+    }
+    if let Some(m) = ["sort", "reverse", "push", "insert"].iter().find(|m| value.contains(&format!(".{m}("))) {
+        return Some(format!("'{name}' is null: it was set from {value}, and {m}() changes the list itself and gives null: use the list"));
+    }
+    let callee: String = value.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    (!callee.is_empty() && value[callee.len()..].starts_with('('))
+        .then(|| format!("'{name}' is null: it was set from {callee}(…), which gave null (a function without return does)"))
+}
+
 /// `x.items()`, `x.iteritems()`, `x.iterrows()`, `x.entries()`: a loop over pairs, which Python and
 /// JavaScript unpack (5.8). The method's name and the span of `x`.
 fn pairs_call(e: &Expr) -> Option<(&'static str, Span)> {
@@ -174,6 +188,7 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "splitlines" if matches!(o, Value::Str(_)) => "did you mean 'lines'?",
         "format" if matches!(o, Value::Str(_)) => "V2 formats with f-strings: f\"${x}\"",
         "join" if matches!(o, Value::Str(_)) => "V2 joins a list with xs.join(sep)",
+        "slice" | "substring" | "substr" | "subList" if seq => "V2 slices with x[a:b], as in xs[0:3]",
         "items" | "entries" if matches!(o, Value::Dict(_)) => "V2 loops over a dict with for key, value in d { ... }",
         "has" | "has_key" | "hasOwnProperty" | "containsKey" if matches!(o, Value::Dict(_)) => "V2 writes key in d",
         "pop" | "delete" if matches!(o, Value::Dict(_)) => "did you mean 'remove'?",
@@ -616,6 +631,10 @@ impl Interp {
         if let Some(h) = habit {
             return self.fail_at("NameError", format!("{base} — {h}"), span);
         }
+        // Declared inside a loop, an if or a function, and used outside it.
+        if let Some(msg) = self.declared_inside(span.file, name, span) {
+            return self.fail_at("NameError", msg, span);
+        }
         // A block's export used without its @import, or a block's label used as a name.
         if let Some(h) = self.import_hint(span.file, name).filter(|_| !assigning) {
             return self.fail_at("NameError", format!("{base} — {h}"), span);
@@ -775,60 +794,84 @@ impl Interp {
                     i += 1;
                 }
             }
-            ForIter::Value(e) => match self.eval(e, env)? {
-                // Python's `for k, v in d.items()` unpacks each pair; V2's two variables would be
-                // its index and the pair (5.8).
-                Value::Handle(_) if second.is_some() && pairs_call(e).is_some() => {
-                    let (method, obj) = pairs_call(e).unwrap_or(("items", e.span));
-                    let text = &self.sm.file(obj.file).text[obj.lo as usize..obj.hi as usize];
-                    let x = if text.len() <= 40 && !text.contains('\n') { text } else { "x" };
-                    let vars = format!("{}, {}", first.text, second.map_or("", |s| &*s.text));
-                    let err = ErrorValue::new("TypeError", format!("V2 doesn't unpack pairs: for {vars} in {x}.{method}() would give each pair's index and the pair"));
-                    let hint = if method == "iterrows" {
-                        format!("loop over its rows with for row in {x}.itertuples() and read their fields, as in row.Index")
-                    } else {
-                        format!("write for {vars} in {x}: two variables loop over a mapping's keys and values, and over a Python object's items()")
-                    };
-                    let _ = err.hint.set(hint.into());
-                    return Err(self.raise(Flow::Error(Rc::new(err)), e.span));
-                }
-                Value::List(l) => {
-                    let items = l.borrow().clone();
-                    for (i, x) in items.into_iter().enumerate() {
-                        if !self.iteration(body, env, &pair(Value::Int(i as i64), x))? {
+            // `for i in range(n)`: counts as `0..n` does, without making the list (5.8).
+            ForIter::Value(e) => match self.builtin_range(e, env)? {
+                Some(args) => {
+                    let (start, step, count) = self.at(super::builtins::range_bounds(&args), e.span)?;
+                    let mut x = start as i128;
+                    for i in 0..count {
+                        if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::Int(x as i64)))? {
                             break;
                         }
+                        x += step as i128;
                     }
                 }
-                Value::Dict(d) => {
-                    let entries: Vec<(Rc<str>, Value)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    for (k, v) in entries {
-                        let vars = match second {
-                            Some(s) => vec![(first, Value::Str(k.into())), (s, v)],
-                            None => vec![(first, Value::Str(k.into()))],
+                None => match self.eval(e, env)? {
+                    // Python's `for k, v in d.items()` unpacks each pair; V2's two variables would be
+                    // its index and the pair (5.8).
+                    Value::Handle(_) if second.is_some() && pairs_call(e).is_some() => {
+                        let (method, obj) = pairs_call(e).unwrap_or(("items", e.span));
+                        let text = &self.sm.file(obj.file).text[obj.lo as usize..obj.hi as usize];
+                        let x = if text.len() <= 40 && !text.contains('\n') { text } else { "x" };
+                        let vars = format!("{}, {}", first.text, second.map_or("", |s| &*s.text));
+                        let err = ErrorValue::new("TypeError", format!("V2 doesn't unpack pairs: for {vars} in {x}.{method}() would give each pair's index and the pair"));
+                        let hint = if method == "iterrows" {
+                            format!("loop over its rows with for row in {x}.itertuples() and read their fields, as in row.Index")
+                        } else {
+                            format!("write for {vars} in {x}: two variables loop over a mapping's keys and values, and over a Python object's items()")
                         };
-                        if !self.iteration(body, env, &vars)? {
-                            break;
+                        let _ = err.hint.set(hint.into());
+                        return Err(self.raise(Flow::Error(Rc::new(err)), e.span));
+                    }
+                    Value::List(l) => {
+                        let items = l.borrow().clone();
+                        for (i, x) in items.into_iter().enumerate() {
+                            if !self.iteration(body, env, &pair(Value::Int(i as i64), x))? {
+                                break;
+                            }
                         }
                     }
-                }
-                Value::Str(s) => {
-                    for (i, ch) in s.chars().enumerate() {
-                        let mut buf = [0u8; 4];
-                        if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::str(ch.encode_utf8(&mut buf))))? {
-                            break;
+                    Value::Dict(d) => {
+                        let entries: Vec<(Rc<str>, Value)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        for (k, v) in entries {
+                            let vars = match second {
+                                Some(s) => vec![(first, Value::Str(k.into())), (s, v)],
+                                None => vec![(first, Value::Str(k.into()))],
+                            };
+                            if !self.iteration(body, env, &vars)? {
+                                break;
+                            }
                         }
                     }
-                }
-                Value::Bytes(b) => {
-                    for (i, byte) in b.iter().enumerate() {
-                        if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::Int(*byte as i64)))? {
-                            break;
+                    Value::Str(s) => {
+                        for (i, ch) in s.chars().enumerate() {
+                            let mut buf = [0u8; 4];
+                            if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::str(ch.encode_utf8(&mut buf))))? {
+                                break;
+                            }
                         }
                     }
-                }
-                Value::Handle(h) => self.for_handle(&h, first, second, body, env, e.span)?,
-                other => return self.fail_at("TypeError", format!("cannot iterate over {}", other.type_name()), e.span),
+                    Value::Bytes(b) => {
+                        for (i, byte) in b.iter().enumerate() {
+                            if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::Int(*byte as i64)))? {
+                                break;
+                            }
+                        }
+                    }
+                    Value::Handle(h) => self.for_handle(&h, first, second, body, env, e.span)?,
+                    other => {
+                        let err = ErrorValue::new("TypeError", format!("cannot iterate over {}", other.type_name()));
+                        let hint = match &other {
+                            Value::Int(n) => Some(format!("to count, write for i in 0..{n} (0 up to {})", n - 1)),
+                            Value::Null => Some(self.null_hint(e)),
+                            _ => None,
+                        };
+                        if let Some(h) = hint {
+                            let _ = err.hint.set(h.into());
+                        }
+                        return Err(self.raise(Flow::Error(Rc::new(err)), e.span));
+                    }
+                },
             },
         }
         Ok(())
@@ -956,7 +999,62 @@ impl Interp {
                 return Ok(v);
             }
         }
-        self.at(ops::binop(op, &x, &y), span)
+        let r = ops::binop(op, &x, &y);
+        // `doppelt(4) + 1` with a doppelt that has no return: where the null came from.
+        if let (Err(Flow::Error(err)), true) = (&r, matches!(x, Value::Null) || matches!(y, Value::Null)) {
+            let _ = err.hint.set(self.null_hint(if matches!(x, Value::Null) { a } else { b }).into());
+        }
+        self.at(r, span)
+    }
+
+    /// For `range(a, b)` with plain positional arguments, where `range` is the builtin: the
+    /// arguments, evaluated. `None` for anything else, evaluating nothing.
+    fn builtin_range(&mut self, e: &Expr, env: &Env) -> Exec<Option<Vec<Value>>> {
+        let ExprKind::Call { callee, args, .. } = &e.kind else { return Ok(None) };
+        let ExprKind::Name(n, _) = &callee.kind else { return Ok(None) };
+        if &**n != "range" || !args.iter().all(|a| matches!(a, Arg::Pos(_))) {
+            return Ok(None);
+        }
+        let f = self.eval(callee, env)?;
+        if !matches!(&f, Value::Func(c) if matches!(&**c, Callable::Builtin(def) if def.name == "range")) {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(args.len());
+        for a in args {
+            if let Arg::Pos(x) = a {
+                out.push(self.eval(x, env)?);
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// Where the null that `e` gave came from, as far as its code says (5.3): a call, input(),
+    /// a list method, or the `let` of a name.
+    #[cold]
+    fn null_hint(&self, e: &Expr) -> String {
+        let generic = "a function without return gives null, and so does input() when the input has ended";
+        if reads_input(e) {
+            return "input() gives null when the input has ended: check it first, as in let line = input(); if line == null { break }".into();
+        }
+        match &e.kind {
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n, _) => format!("{n}(…) gave null: a function without return gives null, so end it with return …"),
+                ExprKind::Member { name, .. } if matches!(&*name.text, "sort" | "reverse" | "push" | "insert") => {
+                    format!("{}() changes the list itself and gives null: use the list", name.text)
+                }
+                _ => format!("the call gave null: {generic}"),
+            },
+            ExprKind::Name(n, _) => {
+                // Its `let` on an earlier line of this file, as written.
+                let found = (1..=e.span.line).rev().find_map(|line| {
+                    let text = self.sm.line_text(e.span.file, line).trim_start();
+                    let rest = text.strip_prefix("let ")?.trim_start().strip_prefix(&**n)?.trim_start();
+                    rest.strip_prefix('=').filter(|r| !r.starts_with('=')).map(str::to_string)
+                });
+                found.and_then(|v| null_from(n, &v)).unwrap_or_else(|| format!("'{n}' is null here: {generic}"))
+            }
+            _ => format!("one side is null: {generic}"),
+        }
     }
 
     #[inline(never)]
@@ -1049,6 +1147,9 @@ impl Interp {
                 let Some(o) = self.chain(obj, env)? else { return Ok(None) };
                 let k = self.eval(index, env)?;
                 let r = self.index(&o, &k, *bracket);
+                if let (Err(Flow::Error(e)), Value::Null) = (&r, &o) {
+                    let _ = e.hint.set(self.null_hint(obj).into());
+                }
                 // `args()[0]` with no argument given: the script can say it needs one.
                 if let (Err(Flow::Error(e)), ExprKind::Call { callee, .. }) = (&r, &obj.kind) {
                     if &*e.kind == "IndexError" && matches!(&callee.kind, ExprKind::Name(n, _) if &**n == "args") {
@@ -1307,10 +1408,17 @@ impl Interp {
             return self.fail_at("TypeError", msg, name.span);
         };
         let Some(def) = table.iter().find(|m| *m.name == *name.text) else {
-            let msg = format!("{} has no method '{}'", o.type_name(), name.text);
             let msg = match habit(o, &name.text) {
-                Some(h) => format!("{msg} — {h}"),
-                None => with_suggestion(msg, &name.text, table.iter().map(|m| m.name)),
+                Some(h) => format!("{} has no method '{}' — {h}", o.type_name(), name.text),
+                // An imported .v2 file is a dict of its names: those are the likely ones.
+                None => match o {
+                    Value::Dict(d) => {
+                        let keys: Vec<Rc<str>> = d.borrow().keys().cloned().collect();
+                        let msg = format!("dict has no key or method '{}'", name.text);
+                        with_suggestion(msg, &name.text, keys.iter().map(|k| &**k).chain(table.iter().map(|m| m.name)))
+                    }
+                    _ => with_suggestion(format!("{} has no method '{}'", o.type_name(), name.text), &name.text, table.iter().map(|m| m.name)),
+                },
             };
             return self.fail_at("TypeError", msg, name.span);
         };

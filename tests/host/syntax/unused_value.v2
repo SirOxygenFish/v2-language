@@ -4,7 +4,7 @@
 // stderr: unused_value.v2:11:5: SyntaxError: this expression's value is not used
 // stderr: hint: did you mean '='?
 // stderr: unused_value.v2:12:5: SyntaxError: this expression's value is not used
-// stderr: hint: assign it with let, or remove it
+// stderr: hint: to change total, write total += … (or total = total + …)
 let total = 1
 - 2
 if total > 0 {

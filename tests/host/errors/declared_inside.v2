@@ -1,0 +1,25 @@
+// A name declared in a loop, an if or a function, used after it: the NameError says where it is
+// declared and what to do, instead of a did-you-mean (DOCS 3.3, INTERNALS 5.9).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.message)
+    }
+}
+for i in 0..3 {
+    let summe = 0
+    summe += i
+}
+show(func() => print(summe))
+func zeige() {
+    let ergebnis = 5
+}
+show(func() => print(ergebnis))
+if true {
+    let x = 1
+}
+show(func() => print(x))
+// A name declared nowhere keeps its did-you-mean.
+let total = 1
+show(func() => print(totl))

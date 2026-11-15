@@ -828,7 +828,34 @@ if __name__ == "__main__":
         data = own_data(e)
         if data:
             out["data"] = data
+        hint = shadow_hint(e)
+        if hint:
+            out["hint"] = hint
         return out
+
+    def shadow_hint(e):
+        """A file of the user's named like a standard module, which some other module needed (9.6):
+        `cannot import name 'Random' from 'random' (C:\\x\\random.py)`, or an AttributeError of
+        that module."""
+        try:
+            if isinstance(e, ImportError):
+                name, path = e.name, e.path
+            elif isinstance(e, AttributeError) and isinstance(getattr(e, "obj", None), types.ModuleType):
+                name, path = e.obj.__name__, getattr(e.obj, "__file__", None)
+            else:
+                return None
+            if not isinstance(name, str) or name not in getattr(sys, "stdlib_module_names", ()) or not isinstance(path, str):
+                return None
+            where = os.path.normcase(os.path.abspath(path))
+            import sysconfig  # only on this error path
+
+            paths = sysconfig.get_paths()
+            own = [paths.get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")]
+            if any(isinstance(p, str) and where.startswith(os.path.normcase(os.path.abspath(p)) + os.sep) for p in own):
+                return None
+            return "your %s hides Python's own %s module, which other code needs: give your file another name" % (path, name)
+        except Exception:
+            return None
 
     def own_data(e):
         """An exception's own simple fields, as e.data in V2 (9.6): sys.exit(n)'s n as exit_code,

@@ -4,3 +4,4 @@ a b|$HOME
 piped
 "a�b"
 ArityError | exec takes argv and input only: for a variable or another folder, start a shell, as in exec(["sh", "-c", "cd web && NODE_ENV=production npm run build"])
+exec() argument 'argv' must be a list, got str | 'export' is a command of the shell, not a program: write exec(["sh", "-c", "export X=1"])

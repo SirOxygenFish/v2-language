@@ -35,6 +35,17 @@ pub struct FileScope {
     waiting: HashSet<UnitId>,
     /// The `@import` statements that may, by span start (13.4).
     eligible: HashSet<u32>,
+    /// Names declared inside a nested body, by name: where, that body's span and what it is
+    /// (`for loop`, `function show`), for a use outside it (5.9).
+    inner: HashMap<Rc<str>, Vec<Inner>>,
+}
+
+/// A declaration in a nested body.
+struct Inner {
+    at: Span,
+    how: &'static str,
+    body: Span,
+    what: Rc<str>,
 }
 
 impl FileScope {
@@ -43,6 +54,7 @@ impl FileScope {
         let mut walk = Walk::default();
         stmts(program, &mut walk);
         let mut bodies = std::mem::take(&mut walk.bodies);
+        let inner = std::mem::take(&mut walk.inner);
         bodies.sort_by_key(|b| b.unit_id.offset);
         let blocks = bodies.iter().filter(|b| b.directives.exports.is_some()).cloned().collect();
         let mut top = HashMap::new();
@@ -68,7 +80,7 @@ impl FileScope {
             };
             top.extend(crate::syntax::check::declarations(s).into_iter().map(|(n, at)| (n, (at, how))));
         }
-        FileScope { frame, blocks, bodies, top, waiting, eligible }
+        FileScope { frame, blocks, bodies, top, waiting, eligible, inner }
     }
 
     pub(crate) fn block_may_wait(&self, id: UnitId) -> bool {
@@ -91,6 +103,7 @@ struct Walk {
     not_called: HashSet<Rc<str>>,
     /// Names used as anything but the receiver of a plain member read or method call.
     not_member: HashSet<Rc<str>>,
+    inner: HashMap<Rc<str>, Vec<Inner>>,
 }
 
 impl Walk {
@@ -118,6 +131,23 @@ fn stmts(list: &[Stmt], out: &mut Walk) {
     list.iter().for_each(|s| stmt(s, out));
 }
 
+/// A nested body's statements, with the names it declares.
+fn nested(body: &Body, what: &str, out: &mut Walk) {
+    let what: Rc<str> = what.into();
+    for s in &body.stmts {
+        let how = match &s.kind {
+            StmtKind::Let(..) => "let",
+            StmtKind::Const(..) => "const",
+            StmtKind::Func(_) => "func",
+            _ => continue,
+        };
+        for (name, at) in crate::syntax::check::declarations(s) {
+            out.inner.entry(name).or_default().push(Inner { at, how, body: body.span, what: what.clone() });
+        }
+    }
+    stmts(&body.stmts, out);
+}
+
 fn stmt(s: &Stmt, out: &mut Walk) {
     match &s.kind {
         StmtKind::Let(_, Some(e)) | StmtKind::Const(_, e) | StmtKind::Expr(e) | StmtKind::Throw(e) | StmtKind::Return(Some(e)) => expr(e, out),
@@ -142,15 +172,15 @@ fn stmt(s: &Stmt, out: &mut Walk) {
         StmtKind::If { arms, else_ } => {
             for (cond, body) in arms {
                 expr(cond, out);
-                stmts(&body.stmts, out);
+                nested(body, "if", out);
             }
             if let Some(b) = else_ {
-                stmts(&b.stmts, out);
+                nested(b, "if", out);
             }
         }
         StmtKind::While { cond, body } => {
             expr(cond, out);
-            stmts(&body.stmts, out);
+            nested(body, "while loop", out);
         }
         StmtKind::For { iter, body, .. } => {
             match iter {
@@ -160,15 +190,15 @@ fn stmt(s: &Stmt, out: &mut Walk) {
                     expr(b, out);
                 }
             }
-            stmts(&body.stmts, out);
+            nested(body, "for loop", out);
         }
         StmtKind::Try { body, catch, finally } => {
-            stmts(&body.stmts, out);
+            nested(body, "try", out);
             if let Some((_, b)) = catch {
-                stmts(&b.stmts, out);
+                nested(b, "try", out);
             }
             if let Some(b) = finally {
-                stmts(&b.stmts, out);
+                nested(b, "try", out);
             }
         }
         StmtKind::Func(f) => func(f, out),
@@ -183,7 +213,10 @@ fn func(f: &FuncDecl, out: &mut Walk) {
         }
     }
     match &f.body {
-        FuncBody::Block(b) => stmts(&b.stmts, out),
+        FuncBody::Block(b) => match &f.name {
+            Some(n) => nested(b, &format!("function {}", n.text), out),
+            None => nested(b, "function", out),
+        },
         FuncBody::Expr(e) => expr(e, out),
     }
 }
@@ -433,6 +466,14 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
         if let Some(dotted) = module_below(dir, &name) {
             return Some(format!("there is a {} in a folder below: import it as py.{dotted}", dotted.replace('.', "/") + ".py"));
         }
+        // One in a folder above, which isn't on Python's path without a v2.toml there.
+        if let Some(above) = dir.ancestors().skip(1).take(3).map(|d| d.join(format!("{name}.py"))).find(|p| p.is_file()) {
+            let folder = above.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            return Some(format!(
+                "there is a {} in a folder above: a v2.toml in {folder} (it may be empty) makes that the project folder, where py.{name} is found",
+                above.display()
+            ));
+        }
         let install = format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps");
         // A virtual environment made in the project (the file's folder or up to three above it),
         // but not named in a v2.toml.
@@ -540,7 +581,7 @@ fn commonjs_hint(message: &str, spec: &str, dir: &Path) -> Option<String> {
     }
     let ts = file.extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts"));
     Some(format!(
-        "{} says \"type\": \"commonjs\" (npm init writes that), so Node loads this file as CommonJS, without import and export: set \"type\": \"module\" there, or rename the file to .{}",
+        "{} says \"type\": \"commonjs\" (npm init writes that since npm 11), so Node loads this file as CommonJS, without import and export: set \"type\": \"module\" there, or rename the file to .{}",
         pkg.display(),
         if ts { "mts" } else { "mjs" }
     ))
@@ -670,6 +711,21 @@ impl Interp {
             cur = f.parent.as_ref();
         }
         None
+    }
+
+    /// `print(summe)` after the loop whose body declared `summe` (5.9): where it is declared, and
+    /// what to do. The nearest such declaration before the use, else the first after it.
+    pub(crate) fn declared_inside(&self, file: FileId, name: &str, at: Span) -> Option<String> {
+        let found = self.files.get(&file)?.inner.get(name)?;
+        let outside = |d: &&Inner| !(d.body.lo <= at.lo && at.lo < d.body.hi);
+        let d = found.iter().filter(outside).rfind(|d| d.at.lo < at.lo).or_else(|| found.iter().find(outside))?;
+        let what = &*d.what;
+        let fix = if what.starts_with("function") {
+            "return it from the function, or declare it with let outside it".to_string()
+        } else {
+            format!("declare it with let before the {what}, and change it inside with {name} = …")
+        };
+        Some(format!("'{name}' is not declared here: its {} on line {} is inside the {what}, so it exists only there — {fix}", d.how, d.at.line))
     }
 
     pub(crate) fn import_hint(&self, file: FileId, name: &str) -> Option<String> {
@@ -1274,6 +1330,13 @@ mod tests {
         std::fs::write(proj.join("stages").join("deep").join("clean.py"), "").unwrap();
         assert_eq!(hint("No module named 'clean'", &proj), "there is a stages/deep/clean.py in a folder below: import it as py.stages.deep.clean");
         assert_eq!(hint("No module named 'clean'", &proj.join("stages")), "there is a deep/clean.py in a folder below: import it as py.deep.clean");
+        // One in a folder above the .v2 file's.
+        std::fs::write(proj.join("rooth.py"), "").unwrap();
+        let sub = proj.join("stages").join("deep");
+        assert_eq!(
+            hint("No module named 'rooth'", &sub),
+            format!("there is a {} in a folder above: a v2.toml in {} (it may be empty) makes that the project folder, where py.rooth is found", proj.join("rooth.py").display(), proj.display())
+        );
         // npm: a subpath of an installed package, a near name, a scoped package.
         let js = temp("npm");
         std::fs::create_dir_all(js.join("node_modules").join("lodash")).unwrap();

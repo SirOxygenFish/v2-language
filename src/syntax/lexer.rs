@@ -585,6 +585,15 @@ impl<'a> Lexer<'a> {
             while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
                 self.bump();
             }
+            // `1.000.000`: points between thousands, as German and others write them.
+            if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
+                while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '.') {
+                    self.bump();
+                }
+                let span = self.span_from(m);
+                return Err(Diag::new("a number has one decimal point at most", span)
+                    .hint("for thousands, write 1000000 or 1_000_000: a point starts the decimals"));
+            }
         }
         if matches!(self.peek(), Some('e' | 'E')) {
             let sign = usize::from(matches!(self.peek_at(1), Some('+' | '-')));
@@ -1401,6 +1410,8 @@ pub fn shown_char(c: char) -> (String, Option<&'static str>) {
             (format!("'{c}' (a curly quote)"), Some("use a straight quote: \" or '"))
         }
         '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), Some("use a plain minus sign: -")),
+        '\u{00D7}' | '\u{22C5}' | '\u{00B7}' => (format!("'{c}' (a multiplication sign)"), Some("multiply with *: 5 * 3")),
+        '\u{00F7}' | '\u{2236}' => (format!("'{c}' (a division sign)"), Some("divide with /: 6 / 3")),
         '`' => ("'`'".to_string(), Some("V2 writes a template string as f\"text ${x}\"")),
         // `copy con file` and old editors end a file with Ctrl+Z.
         '\u{001A}' => (format!("{code} (Ctrl+Z, an old end-of-file mark)"), Some("delete it: V2 files end where their text ends")),

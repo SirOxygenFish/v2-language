@@ -189,8 +189,16 @@ pub fn process(sm: &SourceMap, raw: &RawBody, tag: &str) -> Result<Processed, Di
         let prefix = lines[first].text[..m].to_string();
         for &k in &code[1..] {
             if lines[k].text[..m] != prefix {
+                // The shown lines don't show their indentation: say what each starts with.
+                let lead = |t: &str| indent_words(&t[..lead_of(t)]);
+                let hint = format!(
+                    "this line starts with {}, the block's first code line with {}: indent every line the same way",
+                    lead(&lines[k].text),
+                    lead(&lines[first].text)
+                );
                 return Err(Diag::new("block indentation mixes tabs and spaces", sm.span(file, lines[k].offset as u32, lines[k].offset as u32 + 1))
-                    .note("the first code line of the block", sm.span(file, lines[first].offset as u32, lines[first].offset as u32 + 1)));
+                    .note("the first code line of the block", sm.span(file, lines[first].offset as u32, lines[first].offset as u32 + 1))
+                    .hint(hint));
             }
         }
         let mut kept = Vec::new();
@@ -748,6 +756,17 @@ fn compiled_directives(d: &Directives, tag: &str) -> Result<(), Diag> {
         }
     }
     Ok(())
+}
+
+/// Indentation in words: `1 tab`, `4 spaces`, `1 tab and 2 spaces`.
+fn indent_words(lead: &str) -> String {
+    let count = |c: char, one: &str, many: &str| match lead.chars().filter(|&x| x == c).count() {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        n => Some(format!("{n} {many}")),
+    };
+    let parts: Vec<String> = [count('\t', "tab", "tabs"), count(' ', "space", "spaces")].into_iter().flatten().collect();
+    if parts.is_empty() { "no indentation".to_string() } else { parts.join(" and ") }
 }
 
 /// An ASCII identifier that is not a keyword of `lang` (C11, C++17, Rust 2021 strict and

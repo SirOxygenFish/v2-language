@@ -1,0 +1,30 @@
+// exit: 1
+// stderr: beginner_lines.v2:14:5: SyntaxError: this expression's value is not used
+// stderr: hint: to give it back from the function, write return in front of it
+// stderr: beginner_lines.v2:16:1: SyntaxError: this expression's value is not used
+// stderr: hint: to call it, write double(); to show it, print(double)
+// stderr: beginner_lines.v2:19:9: SyntaxError: this let makes a new 'i' for one turn of the loop, so the 'i' outside it never changes
+// stderr: note: declared here (beginner_lines.v2:17:5)
+// stderr: hint: to change that one, leave out let: i = …
+// stderr: beginner_lines.v2:22:1: SyntaxError: this expression's value is not used
+// stderr: hint: keep it with let x = …, print it, or remove the line
+// What a beginner meant, by the line's shape (INTERNALS 4.5): a function's last line, a function
+// not called, a loop's let that hides the variable the loop tests.
+func double(x) {
+    x * 2
+}
+double
+let i = 0
+while i < 5 {
+    let i = i + 1
+}
+// A let inside an if, or one that doesn't read the outer name, is fine.
+5 * 3
+if i > 0 {
+    let i = i + 1
+    print(i)
+}
+for n in [1] {
+    let i = 2
+    print(i)
+}

@@ -25,3 +25,9 @@ try {
 } catch (e) {
     print(e.type, "|", e.hint)
 }
+// A command line given as one string whose program is cmd's own: the shell form at once.
+try {
+    exec("dir")
+} catch (e) {
+    print(e.message, "|", e.hint)
+}

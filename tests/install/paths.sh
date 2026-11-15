@@ -195,6 +195,19 @@ expect "$(ls -A "$h")" "v2.tar.gz
 v2.tar.gz.sha256" "files written"
 result "a damaged archive"
 
+# An archive whose v2 doesn't run, checked against its .sha256: the message names that archive.
+fresh
+mkdir -p "$h/pack"
+printf '#!/bin/sh\necho "cannot start" >&2\nexit 1\n' >"$h/pack/v2"
+(cd "$h/pack" && tar -czf ../broken.tar.gz v2)
+if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$h/broken.tar.gz"); else sum=$(shasum -a 256 "$h/broken.tar.gz"); fi
+printf '%s  broken.tar.gz\n' "${sum%% *}" >"$h/broken.tar.gz.sha256"
+install /bin/bash V2_ARCHIVE="$h/broken.tar.gz"
+ok=yes
+expect "$code" 1 "exit code"
+says "the v2 in broken.tar.gz doesn't run here (see above): " || { echo "    no message"; ok=no; }
+result "an archive whose v2 doesn't run"
+
 # A startup file that can't be written is named, with the line to add; the others are written.
 fresh
 mkdir "$h/$login"

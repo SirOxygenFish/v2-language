@@ -132,7 +132,9 @@ v2 doctor
 ```
 
 `v2 doctor` shows whether Python and Node.js were found, with the command that installs whatever
-is missing. Its last lines sum it up, for example `ready: py, js, ts`.
+is missing. Its last lines sum it up, for example `ready: py, js, ts`. The install scripts put only
+`v2` on your computer; to read the whole language's guide offline, DOCS.md is in the release
+archive, next to `v2`.
 
 ## Quickstart
 
@@ -283,7 +285,7 @@ ForeignError ZeroDivisionError division by zero
 | `elif`, `else if`                         | `elif`                                          |
 | `i += 1`, `i++`                           | `i += 1`                                        |
 | `while x < 3:`, `while (x < 3) { }`       | `while x < 3 { ... }`                           |
-| `for i in range(3)`                       | `for i in 0..3` (0, 1, 2; `range()` builds the whole list first) |
+| `for i in range(3)`                       | `for i in 0..3` (0, 1, 2), or `for i in range(3)` |
 | `xs.append(x)`, `xs.push(x)`              | `xs.push(x)`                                    |
 | `len(xs)`, `xs.length`                    | `len(xs)`                                       |
 | `", ".join(xs)`, `xs.join(", ")`          | `xs.join(", ")`                                 |
@@ -304,7 +306,7 @@ More of V2, in short:
 
 - **Functions:** `int`, `float`, `str`, `round` (ties to even, as in Python: `round(2.5)` is
   `2`), `abs`, `min`, `max`, `sum`, `type`, `len`,
-  `range` (it makes a whole list: for a long loop write `for i in 0..n`), `json_parse` and
+  `range` (a list, except as what a `for` loop goes over), `json_parse` and
   `json_stringify(x, indent: 2)`, `sleep(seconds)`, `time()` (seconds, as a float),
   `print(a, b, sep: ", ")`.
 - **Files and programs:** `read_file(path)`, or `read_file(path, binary: true)` for bytes;
@@ -330,6 +332,12 @@ More of V2, in short:
   block, or with `" " * n`); in `"…"`, `\n`, `\t`, `\\`, `\"` and `\u{e9}` are escapes, and
   `r"C:\new"` keeps its backslashes; a `"""` at the end of a line starts a string of several lines;
   a caught error has `e.type` and `e.message`.
+- **What V2 doesn't have built in** comes from the languages: random numbers with
+  `@import { randint, choice } from py.random`; a program with a time limit with
+  `@py(cmd) { __import__("subprocess").run(cmd, capture_output=True, text=True, timeout=5).stdout }`
+  (exec has none: a program that never ends holds the script). To check a folder of scripts, loop
+  in the shell: `for f in *.v2; do v2 check "$f"; done`, in PowerShell
+  `Get-ChildItem *.v2 | ForEach-Object { v2 check $_.Name }`.
 - **Other `.v2` files:** their top-level names not starting with `_` are imported as a snapshot
   taken when that file finished running: read state that changes through its functions.
 - **Blocks** can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and a block's
@@ -388,8 +396,8 @@ and V2 says so when another came first).
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
   `@import { f } from js."./helpers.js"` (a TypeScript one, `ts."./helpers.ts"`; `js.helpers`,
   without `./`, means an npm package named helpers). If that file uses `import` or `export`
-  and the folder has a `package.json`, it needs `"type": "module"` there (`npm init` writes
-  `"commonjs"`), or the extension `.mjs` (`.mts`). A function
+  and the folder has a `package.json` that says `"type": "commonjs"` (what `npm init` writes since
+  npm 11), it needs `"type": "module"` there, or the extension `.mjs` (`.mts`). A function
   imported by name brings none of its own properties: for `dayjs.extend` or lodash's `_.chunk`,
   import the module itself, `@import js.dayjs as dayjs`. For an ES module imported whole, what
   its default export holds is under `.default`: `chalk.default.red("x")`.
@@ -430,6 +438,10 @@ as a value (`let f = mean`, `print(mean)`) loads its package at its `@import` li
 package prints when it loads, and the error for a misspelled package name, come at that point.
 
 ## Troubleshooting
+
+**An `if` that compares what `input()` gave with a number is never true.** `input()` gives text,
+and values of different types are never equal: `"7" == 7` is `false`. Compare `int(answer) == 7`,
+or `answer == "7"`.
 
 **`v2` is not recognized, or `command not found`.** Open a new terminal: the PATH change reaches
 only terminals opened after the install. Still not found? Check that the folder is on your PATH
