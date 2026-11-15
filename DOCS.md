@@ -1823,7 +1823,7 @@ else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
 ```toml
 [engines.py]
 # command = ["C:/Python312/python.exe"]   # skips auto-detection
-startup_timeout = 30              # seconds to wait for the engine to start (default 30)
+startup_timeout = 30              # seconds to wait for the engine to start (default 30; 0 = no limit)
 call_timeout    = 0               # seconds per call; 0 = no limit (default). Applies to worker
                                   # engines, run engines and compiled programs — not to in-process
                                   # compiled functions or extern calls, which can't be interrupted

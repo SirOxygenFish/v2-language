@@ -120,11 +120,12 @@ fn osa(a: &[char], b: &[char]) -> usize {
     d[n][m]
 }
 
-/// The closest candidate, compared lower-cased, if within `max(1, min(3, (len + 2) / 3))`; of
+/// The closest candidate, compared lower-cased, if within 1 for a name of up to 5 chars, else
+/// `min(3, (len + 2) / 3)`; of
 /// candidates as close, the first that starts with the name, else the first.
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let target: Vec<char> = name.to_lowercase().chars().collect();
-    let limit = 1usize.max(3usize.min(target.len().div_ceil(3)));
+    let limit = if target.len() <= 5 { 1 } else { 3usize.min(target.len().div_ceil(3)) };
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {
         if c == name {

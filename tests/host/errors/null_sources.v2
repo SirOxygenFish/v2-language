@@ -1,0 +1,16 @@
+// requires: py
+// Where a null came from, by what gave it: getenv, .get(), a block, a builtin that has no value
+// (INTERNALS 5.3).
+func try_it(f) {
+    try { f() } catch (e) { print(e.message); print("  hint:", e.hint) }
+}
+try_it(func() => getenv("NO_SUCH_V2_VAR_X") + "/notes.txt")
+let cfg = {port: 80}
+try_it(func() => cfg.get("host") + ":80")
+try_it(func() => args().get(0) + ".txt")
+try_it(func() => (@py { x = 1 }) + 1)
+let r = @py { x = 1 }
+try_it(func() => r + 1)
+let home = getenv("NO_SUCH_V2_VAR_X")
+try_it(func() => home + "/x")
+try_it(func() => print("a") + 1)

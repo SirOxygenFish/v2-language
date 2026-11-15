@@ -1,0 +1,17 @@
+// A key or index that isn't there, with the next step (DOCS 3.6, INTERNALS 5.5).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", e.hint)
+    }
+}
+let counts = {}
+show(func() { counts["der"] += 1 })
+show(func() => counts["name"])
+let words = ["gehe"]
+show(func() => words[1])
+// A key one letter off keeps its did-you-mean, without the hint.
+let person = {name: "Ada"}
+show(func() => person["nmae"])

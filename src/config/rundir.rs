@@ -158,8 +158,11 @@ fn create() -> Result<PathBuf, String> {
     let base = fitting(base.clone()).map_err(|problem| format!("cannot create a private temp folder in {}; {problem}", shown(&base)))?;
     let fail = |e: Option<&Error>| {
         let why = e.map_or_else(String::new, |e| format!(": {}", crate::syntax::span::os_message(e)));
+        // A folder made but not private: its file system has no owner and mode to set.
+        let shared = e.is_some_and(|e| e.to_string().contains(NOT_PRIVATE));
         let next = match (temp_problem(), temp_variable()) {
             (Some(problem), _) => format!("; {problem}"),
+            (None, Some(var)) if shared => format!("; set {var} to a folder on the computer's own file system, such as /tmp"),
             (None, Some(var)) => format!("; {var} must name a folder you can write to"),
             (None, None) => String::new(),
         };
@@ -280,6 +283,10 @@ fn owned_by_me(_: &std::fs::Metadata) -> bool {
     true
 }
 
+/// Why a folder that was made isn't private: what a Windows drive in WSL, a FAT drive or some
+/// network shares do, which show every folder as everyone's.
+const NOT_PRIVATE: &str = "its file system can't keep a folder private (a Windows drive in WSL, a FAT or network drive)";
+
 /// POSIX: `mkdir` with mode 0700, `chmod` 0700 (the umask may have cleared owner bits), then
 /// `lstat` must show a real directory of the effective user with exactly that mode (20.3). A
 /// folder that fails is removed again.
@@ -293,7 +300,7 @@ fn make_private(dir: &Path) -> std::io::Result<()> {
         // SAFETY: a plain query.
         let euid = unsafe { libc::geteuid() };
         if !m.is_dir() || m.uid() != euid || m.permissions().mode() & 0o777 != 0o700 {
-            return Err(Error::other("the folder is not private"));
+            return Err(Error::other(NOT_PRIVATE));
         }
         Ok(())
     };

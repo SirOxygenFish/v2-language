@@ -48,7 +48,14 @@ fn folder_message(file: &str, path: &Path, command: &str) -> String {
             let what = if command == "v2" { "run" } else { "check" };
             format!("'{file}' is a folder, not a script\n{what} one of its .v2 files, for example: {command} {}", quoted(&format!("{file}{sep}{name}")))
         }
-        None => format!("'{file}' is a folder, not a script, and it has no .v2 files"),
+        None => {
+            // Notepad's `hallo.v2.txt`, as `v2 hallo.v2` inside that folder says too.
+            let saved_txt = std::fs::read_dir(path).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).find(|n| n.ends_with(".v2.txt"));
+            match saved_txt {
+                Some(t) => format!("'{file}' is a folder, not a script, and it has no .v2 files\nthere is a '{t}': your editor added '.txt', so rename it to '{}'", t.trim_end_matches(".txt")),
+                None => format!("'{file}' is a folder, not a script, and it has no .v2 files"),
+            }
+        }
     }
 }
 
@@ -59,6 +66,10 @@ fn missing_message(file: &str, path: &Path, next: Option<&str>) -> String {
     };
     // The file's own name in its folder: `sub/x.v2` is `x.v2` in `…/sub`, not `sub/x.v2` there.
     let name = path.file_name().map_or_else(|| file.to_string(), |n| n.to_string_lossy().into_owned());
+    // A terminal still in a folder that was deleted: nothing relative can be found there.
+    if !path.is_absolute() && std::env::current_dir().is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return format!("cannot find '{file}': the current folder no longer exists (it was deleted or moved)\ncd to another folder, or give the script's full path");
+    }
     let first = if path.is_absolute() {
         format!("cannot find '{file}'")
     } else {
@@ -132,6 +143,10 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, next: Option<&str>) -> S
         }
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // `v2 mein spiel.v2`: the shell split a name with a space in two.
+    if let Some(rest) = next.filter(|n| folder.join(format!("{name} {n}")).is_file()) {
+        return format!("the file's name has a space, so the shell split it: put it in quotes, as in v2 \"{file} {rest}\"");
+    }
     if path.extension().is_none() && folder.join(format!("{name}.v2")).is_file() {
         return format!("did you mean '{file}.v2'?");
     }
@@ -165,6 +180,9 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, next: Option<&str>) -> S
             Some(i) => format!("{}{close}", &file[..=i]),
             None => close.to_string(),
         };
+        if suggestion.contains(' ') {
+            return format!("did you mean \"{suggestion}\"? a name with a space goes in quotes: v2 \"{suggestion}\"");
+        }
         return format!("did you mean '{suggestion}'?");
     }
     match scripts.len() {
@@ -270,6 +288,11 @@ mod tests {
         assert_eq!(hint("notes.v2", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         assert_eq!(hint("helo.v2", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("zzzzzz.v2", None), "the .v2 files there: b.v2, hello.v2");
+        // A name with a space, split by the shell or typed with _.
+        std::fs::write(d.join("mein spiel.v2"), "print(1)\n").unwrap();
+        assert_eq!(hint("mein", Some("spiel.v2")), format!("the file's name has a space, so the shell split it: put it in quotes, as in v2 \"{dir}mein spiel.v2\""));
+        assert_eq!(hint("mein_spiel.v2", None), format!("did you mean \"{dir}mein spiel.v2\"? a name with a space goes in quotes: v2 \"{dir}mein spiel.v2\""));
+        std::fs::remove_file(d.join("mein spiel.v2")).unwrap();
         // Notepad's hello.txt, run as hello.v2 or as hello.
         std::fs::write(d.join("greet.txt"), "print(1)\n").unwrap();
         assert_eq!(hint("greet.v2", None), "there is a 'greet.txt': your editor saved it as a .txt file, so rename it to 'greet.v2'");
@@ -312,6 +335,11 @@ mod tests {
         let d = temp("folder");
         let shown = d.to_string_lossy().into_owned();
         assert!(entry_error(&shown, None, "v2").unwrap().ends_with("is a folder, not a script, and it has no .v2 files"));
+        // Only Notepad's hallo.v2.txt there: what to rename.
+        std::fs::write(d.join("hallo.v2.txt"), "").unwrap();
+        assert!(entry_error(&shown, None, "v2").unwrap().ends_with("it has no .v2 files
+there is a 'hallo.v2.txt': your editor added '.txt', so rename it to 'hallo.v2'"));
+        std::fs::remove_file(d.join("hallo.v2.txt")).unwrap();
         std::fs::write(d.join("util.v2"), "").unwrap();
         std::fs::write(d.join("main.v2"), "").unwrap();
         let m = entry_error(&shown, None, "v2").unwrap();

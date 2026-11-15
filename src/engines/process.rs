@@ -687,7 +687,9 @@ fn signal_name(_: i32) -> Option<String> {
 }
 
 /// V2 needs its children's exit statuses, so an inherited `SIGCHLD = SIG_IGN` (which makes the
-/// kernel reap them at once) is put back to the default (8.3, 8.6).
+/// kernel reap them at once) is put back to the default (8.3, 8.6). And a write past the file
+/// size limit (`ulimit -f`) fails with EFBIG, an IOError, instead of killing V2 with SIGXFSZ, as
+/// Python does; children get the default back (`platform_spawn`).
 #[cfg(unix)]
 fn default_sigchld() {
     // SAFETY: a zeroed, filled struct for `sigaction`.
@@ -696,6 +698,8 @@ fn default_sigchld() {
         action.sa_sigaction = libc::SIG_DFL;
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
+        action.sa_sigaction = libc::SIG_IGN;
+        libc::sigaction(libc::SIGXFSZ, &action, std::ptr::null_mut());
     }
 }
 
@@ -1043,6 +1047,8 @@ fn platform_spawn(cmd: &mut Command, keep: &[i32]) -> std::io::Result<(std::proc
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
+            // V2 ignores SIGXFSZ; the programs it starts behave as they would anywhere.
+            libc::signal(libc::SIGXFSZ, libc::SIG_DFL);
             for &fd in &keep {
                 if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
                     return Err(std::io::Error::last_os_error());

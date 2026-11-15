@@ -2,3 +2,4 @@
 'ergebnis' is not declared here: its let on line 16 is inside the function zeige, so it exists only there — return it from the function, or declare it with let outside it
 'x' is not declared here: its let on line 20 is inside the if, so it exists only there — declare it with let before the if, and change it inside with x = …
 'totl' is not declared — did you mean 'total'?
+'scor' is not declared — did you mean 'score'? (its let is on line 28, further on)

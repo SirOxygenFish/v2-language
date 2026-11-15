@@ -1,0 +1,8 @@
+'randint' is not declared — V2 gets random numbers from Python: @import { randint, choice } from py.random
+'random' is not declared — V2 gets random numbers from Python: @import { randint, choice } from py.random
+'math' is not declared — V2 has min, max, abs, round, sum and div(a, b) built in; for more, @import py.math as math
+'sqrt' is not declared — Python's math has it: @import { sqrt } from py.math
+'datetime' is not declared — V2's time() gives the seconds since 1970; dates come from Python: @import py.datetime as dt, then dt.datetime.now()
+func has no method 'time' — time() is V2's own function: call it, as in time() for the seconds, and sleep(1) to wait
+'nope' is not declared
+'pritn' is not declared — did you mean 'print'?

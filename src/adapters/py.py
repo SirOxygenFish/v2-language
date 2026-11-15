@@ -1544,7 +1544,8 @@ if __name__ == "__main__":
 
     def bye():
         closing[0] = True
-        if not stack:
+        # PYTHONINSPECT (python -i) would print the SystemExit and wait for input instead.
+        if not stack and not sys.flags.inspect:
             sys.exit(0)  # normal finalization and atexit handlers run (9.10)
         # Inside a stub: no unwinding through user code.
         try:

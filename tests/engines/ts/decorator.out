@@ -1,1 +1,2 @@
 SyntaxError decorators aren't supported in @ts blocks: Node runs TypeScript by removing its types, and a decorator is code
+SyntaxError decorators aren't supported in @ts blocks: Node runs TypeScript by removing its types, and a decorator is code

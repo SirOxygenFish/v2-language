@@ -839,7 +839,19 @@ impl Resolver<'_> {
                 argv.extend(candidate[1..].iter().map(|a| OsString::from(&**a)));
                 match self.probe(spec, &argv, &hit, Some(PROBE_LIMIT)) {
                     Judged::Usable(v) => {
-                        return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped })
+                        // A program that didn't answer in time cost this run its wait, and will
+                        // cost the next: said once, as doctor isn't what the user ran (7.6).
+                        if self.cache.mode == CacheMode::ReadWrite {
+                            for (slow, _) in skipped.iter().filter(|(_, why)| why.starts_with("version probe timed out")) {
+                                stderrln!(
+                                    "note: {} didn't answer --version in {} s, so V2 used {} (v2 doctor lists what it skips)",
+                                    slow.display(),
+                                    PROBE_LIMIT.as_secs(),
+                                    hit.display()
+                                );
+                            }
+                        }
+                        return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped });
                     }
                     Judged::TooOld(v, reason) => {
                         newest_old = newest_old.max(Some(v));

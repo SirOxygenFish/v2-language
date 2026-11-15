@@ -442,7 +442,10 @@ fn star_tag(b: &EngineBlock) -> Option<&str> {
 
 /// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
 /// or what to install, from the folder of the importing .v2 file, `dir`.
-fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<String> {
+/// `python`: the Python V2 was told to use (a venv, a command, V2_ENGINE_PY), for the exact
+/// install command; `None` for one found on PATH.
+fn missing_package_hint(message: &str, dir: &Path, python: Option<&Path>) -> Option<String> {
+    let venv_set = python.is_some();
     // A package whose `exports` offer only `import`, which `require` can't load: a block can.
     if let Some(rest) = message.split("No \"exports\" main defined in ").nth(1) {
         let parts: Vec<String> = Path::new(rest.trim()).iter().map(|c| c.to_string_lossy().into_owned()).collect();
@@ -474,7 +477,20 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
                 above.display()
             ));
         }
-        let install = format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps");
+        let install = match python {
+            Some(p) => {
+                let shown = p.display().to_string();
+                let run = if !shown.contains(' ') {
+                    shown
+                } else if cfg!(windows) {
+                    format!("& \"{shown}\"")
+                } else {
+                    format!("\"{shown}\"")
+                };
+                format!("if '{name}' isn't misspelled, install it for the Python V2 uses: {run} -m pip install {name}")
+            }
+            None => format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps"),
+        };
         // A virtual environment made in the project (the file's folder or up to three above it),
         // but not named in a v2.toml.
         let venv = (!venv_set)
@@ -726,6 +742,12 @@ impl Interp {
             format!("declare it with let before the {what}, and change it inside with {name} = …")
         };
         Some(format!("'{name}' is not declared here: its {} on line {} is inside the {what}, so it exists only there — {fix}", d.how, d.at.line))
+    }
+
+    /// The file's top-level names with their line and how they are declared, for a
+    /// did-you-mean that includes the ones further on (5.9).
+    pub(crate) fn top_names(&self, file: FileId) -> Vec<(Rc<str>, u32, &'static str)> {
+        self.files.get(&file).map_or_else(Vec::new, |f| f.top.iter().map(|(n, (at, how))| (n.clone(), at.line, *how)).collect())
     }
 
     pub(crate) fn import_hint(&self, file: FileId, name: &str) -> Option<String> {
@@ -1088,11 +1110,12 @@ impl Interp {
         let frame = json!({"t": "module", "unit": unit, "name": joined, "from": from, "names": names});
         let what = format!("@import from '{}'", self.selector_text(sel));
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let venv_set = self.registry.config().python_venv.is_some() || self.registry.config().engines.get("py").is_some_and(|e| e.command.is_some());
+        let engine = &self.sessions[s].engine;
+        let python = (engine.origin != crate::engines::resolve::Origin::Path).then(|| PathBuf::from(&engine.argv[0]));
         let reply = self.request(s, frame, &what, at).inspect_err(|f| {
             if let Flow::Error(e) = f {
                 let hint = match &*e.kind {
-                    "ImportError" => missing_package_hint(&e.message, &dir, venv_set),
+                    "ImportError" => missing_package_hint(&e.message, &dir, python.as_deref()),
                     "ForeignError" => ts_import_hint(&e.message).or_else(|| commonjs_hint(&e.message, &joined, &dir)),
                     _ => None,
                 };
@@ -1312,7 +1335,7 @@ mod tests {
     fn missing_package_hints_name_the_missing_part() {
         // 13.5: from the engine's own message, what to check or what to install.
         let d = temp("plain");
-        let hint = |m: &str, dir: &Path| missing_package_hint(m, dir, false).unwrap();
+        let hint = |m: &str, dir: &Path| missing_package_hint(m, dir, None).unwrap();
         assert_eq!(hint("No module named 'os.pathh'; 'os' is not a package", &d), "'os' is a module, not a package, so it has no 'pathh': check the name after 'os.'");
         assert_eq!(hint("No module named 'xml.etreee'", &d), "'xml' is there, but has no 'etreee': check the name after 'xml.'");
         let pip = "if 'numpy' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps";
@@ -1324,7 +1347,12 @@ mod tests {
         std::fs::create_dir_all(proj.join("sub")).unwrap();
         let expected = format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; or {pip}", proj.join(".venv").display());
         assert_eq!(hint("No module named 'numpy'", &proj.join("sub")), expected);
-        assert_eq!(missing_package_hint("No module named 'numpy'", &proj, true).as_deref(), Some(pip), "a venv in v2.toml");
+        // A Python V2 was told to use (a venv in v2.toml): its own install command.
+        let venv_python = proj.join(".venv").join("bin").join("python");
+        assert_eq!(
+            missing_package_hint("No module named 'numpy'", &proj, Some(&venv_python)),
+            Some(format!("if 'numpy' isn't misspelled, install it for the Python V2 uses: {} -m pip install numpy", venv_python.display()))
+        );
         // A helper of the project's own in a folder below.
         std::fs::create_dir_all(proj.join("stages").join("deep")).unwrap();
         std::fs::write(proj.join("stages").join("deep").join("clean.py"), "").unwrap();
@@ -1361,7 +1389,7 @@ mod tests {
         assert_eq!(shadowed_hint("js.util", &js).as_deref(), Some("js.util is a package (Node's own or one from npm), not your util.js: a file of yours is imported by its path, as in js.\"./util.js\""));
         assert_eq!(shadowed_hint("js.path", &js), None, "no path.js there");
         assert_eq!(shadowed_hint("py.util", &js), None);
-        assert_eq!(missing_package_hint("something else", &d, false), None);
+        assert_eq!(missing_package_hint("something else", &d, None), None);
         // A package that offers only `import` (an ES module's `exports`).
         let m = format!("No \"exports\" main defined in {}", d.join("node_modules").join("@scope").join("esm-only").join("package.json").display());
         assert_eq!(

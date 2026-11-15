@@ -6,6 +6,7 @@ IOError: '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encodin
   hint: save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding="cp1252").read() }
 IOError cannot read '~/missing_v2_file.txt
 TypeError: write_file() argument 'data' must be a str or bytes, got int
+  hint: write it as text with str(x)
 TypeError: read_file() argument 'binary' must be a bool, got str
 2 6f6b 5
 IOError: '~/v2_files_test.txt' is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write)

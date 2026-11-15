@@ -291,6 +291,8 @@ impl<'a> Lexer<'a> {
             let comment = line.find("//").is_some_and(|p| line[..p].matches('"').count().is_multiple_of(2) && line[..p].matches('\'').count().is_multiple_of(2));
             return Err(if comment {
                 d.hint("`//` starts a comment; integer division is div(a, b)")
+            } else if let Some((n, word)) = self.missing_close(span).filter(|_| open.opener() == "{") {
+                d.hint(format!("a }} is probably missing before the {word} on line {n}: write }} {word}"))
             } else {
                 d
             });
@@ -311,6 +313,24 @@ impl<'a> Lexer<'a> {
         };
         self.toks.push(Token { tok: Tok::Eof, span });
         Ok(None)
+    }
+
+    /// For a `{` never closed: a later line that starts with `else`, `elif`, `catch` or `finally`,
+    /// no further in than the `{`'s own line, and without the `}` that would close the block
+    /// before it (`print("x")` then `else {`): its number and word.
+    fn missing_close(&self, open: Span) -> Option<(u32, &'static str)> {
+        let indent = |l: &str| l.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        let start = self.src[..open.lo as usize].rfind('\n').map_or(0, |i| i + 1);
+        let own = indent(&self.src[start..]);
+        let after = self.src[open.lo as usize..].split('\n').enumerate().skip(1);
+        for (k, line) in after {
+            let t = line.trim_start();
+            let word = ["else", "elif", "catch", "finally"].into_iter().find(|w| t.strip_prefix(w).is_some_and(|r| r.starts_with([' ', '{', '(']) || r.is_empty()));
+            if let Some(w) = word.filter(|_| indent(line) <= own) {
+                return Some((open.line + k as u32, w));
+            }
+        }
+        None
     }
 
     /// Right after a `:` at the top level of an interpolation, with only what a format holds
@@ -996,6 +1016,13 @@ const FENCE_HINT: &str = "if the block's code has braces V2 can't match, use the
 impl<'a> Lexer<'a> {
     /// `@import`, `@export`, a selector tag, or a block head (3.6).
     fn at_sign(&mut self, m: Mark) -> Result<(), Diag> {
+        // `js.@scope/name`: a scoped npm package, which goes in quotes as a whole.
+        let n = self.toks.len();
+        if n >= 2 && matches!(self.toks[n - 1].tok, Tok::Op(Op::Dot)) && matches!(&self.toks[n - 2].tok, Tok::Ident(w) if matches!(&**w, "js" | "ts")) {
+            let name: String = self.rest().chars().take_while(|c| !c.is_whitespace() && !matches!(c, ')' | '{' | ';')).collect();
+            let Tok::Ident(lang) = &self.toks[n - 2].tok else { unreachable!("matched above") };
+            return Err(Diag::new(format!("a package name that starts with @ goes in quotes: {lang}.\"{name}\""), self.span_here(name.len().max(1))));
+        }
         for (word, tok) in [("@import", Tok::DirImport), ("@export", Tok::DirExport)] {
             let r = self.rest();
             if r.starts_with(word) && !r[word.len()..].chars().next().is_some_and(is_ident_continue) {
@@ -1634,6 +1661,7 @@ let n = names
         assert_eq!(kinds("@import py.numpy as np"), "@import py . numpy AS np EOF");
         // `@exporter` is not the `@export` directive: it is a block head (with no body here).
         assert_eq!(err("@exporter"), "expected { or a ``` fence after @exporter");
+        assert_eq!(err("@import { x } from js.@scope/pkg"), "a package name that starts with @ goes in quotes: js.\"@scope/pkg\"");
     }
 
     #[test]

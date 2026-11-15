@@ -10,3 +10,13 @@ try {
 } catch (e) {
     print(e.foreign_type, e.message)
 }
+// One in the middle of a line, on a method: the same.
+try {
+    let y = @ts {
+        function d(t: any, k: any) {}
+        class B { @d m() {} }
+        1
+    }
+} catch (e) {
+    print(e.foreign_type, e.message)
+}
