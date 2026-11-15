@@ -206,6 +206,21 @@ pub fn install_hint(id: &str) -> String {
     }
 }
 
+/// The variables an engine's program reads as it starts, set here: a stale `PYTHONHOME` or a
+/// preload in `NODE_OPTIONS` stops it before V2 sees a version (8.4, 19.2). Values at most 80
+/// characters.
+pub fn startup_variables(id: &str) -> Vec<(&'static str, String)> {
+    let names: &[&'static str] = match id {
+        "py" => &["PYTHONHOME", "PYTHONPATH"],
+        "js" => &["NODE_OPTIONS"],
+        _ => &[],
+    };
+    names
+        .iter()
+        .filter_map(|n| std::env::var_os(n).filter(|v| !v.is_empty()).map(|v| (*n, v.to_string_lossy().chars().take(80).collect())))
+        .collect()
+}
+
 /// Which package manager a Linux uses, from `/etc/os-release`'s `ID` and `ID_LIKE` (7.8).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Family {

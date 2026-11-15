@@ -251,7 +251,8 @@ function drainOut(final = false) {
     for (let i = 0; i < text.length; ) {
       let j = Math.min(i + OUT_CHUNK, text.length);
       if (j < text.length && (text.charCodeAt(j - 1) & 0xfc00) === 0xd800) j--; // keep a pair whole
-      if (j > i) writeFrame({ t: 'out', stream: s, text: text.slice(i, j) });
+      // 'stderr!': text that reports an error no V2 call could raise (9.9).
+      if (j > i) writeFrame(s === 'stderr!' ? { t: 'out', stream: 'stderr', text: text.slice(i, j), error: true } : { t: 'out', stream: s, text: text.slice(i, j) });
       i = j;
     }
   }
@@ -596,7 +597,7 @@ function printUnattached(prefix, e) {
   } catch {
     lines.push(`${prefix}<an error that can't be printed>`); // a revoked Proxy, a throwing trap
   }
-  writeOut('stderr', lines.join('\n') + '\n');
+  writeOut('stderr!', lines.join('\n') + '\n');
 }
 process.on('uncaughtException', (e) => printUnattached('uncaught exception: ', e));
 process.on('unhandledRejection', (e) => printUnattached('unhandled rejection: ', e));

@@ -73,12 +73,27 @@ pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         return Err(format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"));
     }
     let target = resolve(sm, importer, spec);
-    canonical(&target).ok_or_else(|| {
+    let found = canonical(&target).ok_or_else(|| {
         // `import "./util" as util` for util.v2.
         let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
         let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
         format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target))
-    })
+    })?;
+    // `import` loads V2 files: another language's file, or data, is used another way.
+    let ext = found.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+    let Some(ext) = ext.filter(|e| e != "v2") else { return Ok(found) };
+    let rel = spec.strip_prefix("./").or_else(|| spec.strip_prefix(".\\")).unwrap_or(spec);
+    let next = match ext.as_str() {
+        "py" if !rel.contains("..") && Path::new(rel).is_relative() => {
+            let module = rel.trim_end_matches(".py").replace(['/', '\\'], ".");
+            format!("a Python file is imported with @import {{ name }} from py.{module}")
+        }
+        "py" => "a Python file next to a .v2 file is imported with @import { name } from py.NAME".to_string(),
+        "js" | "mjs" | "cjs" => format!("a JavaScript file is imported with @import {{ name }} from js.\"{spec}\""),
+        "ts" | "mts" | "cts" => format!("a TypeScript file is imported with @import {{ name }} from ts.\"{spec}\""),
+        _ => format!("read a data file with read_file(f\"${{script_dir()}}/{}\")", rel.replace('\\', "/")),
+    };
+    Err(format!("cannot import '{spec}': import loads .v2 files; {next}"))
 }
 
 /// `fs::canonicalize` without the `\\?\` prefix, or `None` when the file is missing.

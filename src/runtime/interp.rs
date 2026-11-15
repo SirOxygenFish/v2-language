@@ -56,6 +56,8 @@ pub struct Interp {
     pub registry: Registry,
     /// The worker sessions, by `SessionId` (8.1).
     pub sessions: Vec<Session>,
+    /// A worker reported an error no V2 call could raise: the run ends with 1, not 0 (6.5, 9.9).
+    pub reported: bool,
     /// Cross-language crossings in progress (9.7).
     pub xdepth: u32,
     /// Definition units by block (12.1).
@@ -131,6 +133,8 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
     Some(match n {
         "length" | "size" | "len" | "__len__" if sized => "V2 writes len(x)",
         "includes" | "contains" | "__contains__" if seq => "V2 writes item in x",
+        // A list's `find(f)` takes a function in JavaScript.
+        "find" | "findIndex" | "some" | "every" if matches!(o, Value::List(_)) => "V2 writes xs.filter(f) (its first item: xs.filter(f)[0]), or xs.index_of(x) for a value",
         "indexOf" | "index" | "find" if seq => "did you mean 'index_of'?",
         "toString" | "__str__" | "to_string" => "V2 writes str(x)",
         "append" | "add" if matches!(o, Value::List(_)) => "did you mean 'push'?",
@@ -149,6 +153,7 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "items" | "entries" if matches!(o, Value::Dict(_)) => "V2 loops over a dict with for key, value in d { ... }",
         "has" | "has_key" | "hasOwnProperty" | "containsKey" if matches!(o, Value::Dict(_)) => "V2 writes key in d",
         "pop" | "delete" if matches!(o, Value::Dict(_)) => "did you mean 'remove'?",
+        "set" | "put" | "update" | "setdefault" if matches!(o, Value::Dict(_)) => "V2 sets a key with d[key] = value",
         _ => return None,
     })
 }
@@ -183,6 +188,7 @@ impl Interp {
             sm,
             registry,
             sessions: Vec::new(),
+            reported: false,
             xdepth: 0,
             units: HashMap::new(),
             line: Line::default(),
@@ -558,6 +564,17 @@ impl Interp {
             "json" | "JSON" => Some("V2 reads JSON with json_parse(text) and writes it with json_stringify(value)".to_string()),
             "os" => Some("V2 has getenv(name), list_dir(path), exists(path) and exec([...]) built in; a Python module is imported with @import py.os as os".to_string()),
             "env" | "environ" | "ENV" => Some("V2 reads an environment variable with getenv(name)".to_string()),
+            // Python's and JavaScript's functions where V2 has a method or a literal.
+            "map" => Some("V2 maps a list with xs.map(f)".to_string()),
+            "filter" => Some("V2 filters a list with xs.filter(f)".to_string()),
+            "enumerate" => Some("V2 loops with an index with for i, x in xs { ... }".to_string()),
+            "zip" => Some("V2 has no zip: loop with for i in 0..len(xs) and read xs[i] and ys[i]".to_string()),
+            "list" | "Array" => Some("V2 writes a list as [1, 2], and copies one with xs.copy()".to_string()),
+            "dict" | "Object" => Some("V2 writes a dict as {a: 1}, and copies one with d.copy()".to_string()),
+            "parseInt" | "parseFloat" | "Number" => Some("V2 converts with int(s) and float(s)".to_string()),
+            "String" => Some("V2 converts with str(x)".to_string()),
+            "floor" | "ceil" | "trunc" => Some("V2 has int(x) (toward zero), round(x) and div(a, b); Python's math and JavaScript's Math work in a block".to_string()),
+            "isinstance" => Some("V2 checks a type with type(x) == \"int\"".to_string()),
             _ => None,
         };
         if let Some(h) = habit {
@@ -1233,7 +1250,7 @@ impl Interp {
                 let found = d.borrow().get(n).cloned();
                 match found {
                     Some(v) => Ok(v),
-                    None => key_error(n, d),
+                    None => super::methods::member_key_error(n, d),
                 }
             }
             Value::Error(e) => self.error_field(e, n),

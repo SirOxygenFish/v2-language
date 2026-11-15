@@ -23,3 +23,13 @@ NameError 'Math' is not declared — V2 has min, max, abs, round, sum and div(a,
 NameError 'JSON' is not declared — V2 reads JSON with json_parse(text) and writes it with json_stringify(value)
 NameError 'os' is not declared — V2 has getenv(name), list_dir(path), exists(path) and exec([...]) built in; a Python module is imported with @import py.os as os
 NameError 'env' is not declared — V2 reads an environment variable with getenv(name)
+NameError 'map' is not declared — V2 maps a list with xs.map(f)
+NameError 'filter' is not declared — V2 filters a list with xs.filter(f)
+NameError 'enumerate' is not declared — V2 loops with an index with for i, x in xs { ... }
+NameError 'zip' is not declared — V2 has no zip: loop with for i in 0..len(xs) and read xs[i] and ys[i]
+NameError 'list' is not declared — V2 writes a list as [1, 2], and copies one with xs.copy()
+NameError 'dict' is not declared — V2 writes a dict as {a: 1}, and copies one with d.copy()
+NameError 'parseInt' is not declared — V2 converts with int(s) and float(s)
+NameError 'floor' is not declared — V2 has int(x) (toward zero), round(x) and div(a, b); Python's math and JavaScript's Math work in a block
+TypeError list has no method 'find' — V2 writes xs.filter(f) (its first item: xs.filter(f)[0]), or xs.index_of(x) for a value
+TypeError dict has no method 'set' — V2 sets a key with d[key] = value
