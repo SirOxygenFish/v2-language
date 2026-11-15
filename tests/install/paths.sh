@@ -276,16 +276,28 @@ if command -v fish >/dev/null 2>&1; then
 fi
 result "a folder named with \", \$ and \`"
 
-# A folder already on PATH: no startup file changes. A shell that reads two files gets it once.
+# A system folder already on PATH: no startup file changes.
+fresh
+sysdir="$tmp/system bin $n"
+install /bin/bash PATH="$sysdir:$sys" V2_INSTALL_DIR="$sysdir"
+ok=yes
+says "$sysdir is already on your PATH, so no startup file was changed" || { echo "    no message"; ok=no; }
+expect "$(ls -A "$h")" "" "files written"
+result "a system folder already on PATH"
+
+# The home folder's ~/.v2/bin on this terminal's PATH (an export, or lines an uninstall deleted):
+# the startup files still get the setting, and a shell that reads two files has it once.
 fresh
 install /bin/bash PATH="$h/.v2/bin:$sys"
 ok=yes
-says "$h/.v2/bin is already on your PATH, so no startup file was changed" || { echo "    no message"; ok=no; }
-expect "$(ls -A "$h")" .v2 "files written"
+says "Added $h/.v2/bin to PATH in ~/.bashrc and ~/." || { echo "    no 'Added' line"; ok=no; }
+says "New terminals will find v2 too" || { echo "    no 'new terminals' line"; ok=no; }
+found=$(env -i HOME="$h" PATH="$sys" bash -lc 'command -v v2' 2>&1 || true)
+expect "$found" "$h/.v2/bin/v2" "bash -lc finds"
 install /bin/bash
 twice=$(env -i HOME="$h" PATH="$sys" bash -lc '. "$HOME/.bashrc"; printf "%s" "$PATH"' | tr ':' '\n' | grep -cxF "$h/.v2/bin")
 expect "$twice" 1 "times on PATH after .profile and .bashrc"
-result "a folder already on PATH, and only once"
+result "the home folder's v2 on PATH already, and only once"
 
 # fish's startup folder follows XDG_CONFIG_HOME.
 fresh

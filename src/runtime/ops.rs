@@ -127,7 +127,10 @@ pub fn order(a: &Value, b: &Value, op: &str) -> Exec<Option<Ordering>> {
         (Value::Float(f), Value::Int(i)) => cmp_int_float(*i, *f).map(Ordering::reverse),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
         _ => {
-            let hint = operand_hint(a, b, &format!("h {op} x"));
+            let mut hint = operand_hint(a, b, &format!("h {op} x"));
+            if text_and_number(a, b) {
+                hint = " — to compare text such as input() gives with a number, convert it: int(x) or float(x)".into();
+            }
             return type_error(format!("cannot compare {} and {} with '{op}'{hint}", a.type_name(), b.type_name()));
         }
     })
@@ -161,7 +164,9 @@ fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
     if is_handle(a) || is_handle(b) {
         msg.push_str(&operand_hint(a, b, &format!("h {op} 1")));
     } else if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
-        msg.push_str(" — use f\"...${x}\" or str(x)");
+        msg.push_str(" — to join text, use f\"...${x}\" or str(x); to count with text such as input() gives, convert it: int(x) or float(x)");
+    } else if text_and_number(a, b) {
+        msg.push_str(" — to count with text such as input() gives, convert it: int(x) or float(x)");
     }
     type_error(msg)
 }
@@ -183,6 +188,12 @@ fn operand_hint(a: &Value, b: &Value, example: &str) -> String {
     } else {
         handle_hint(if is_handle(a) { a } else { b }, example, example)
     }
+}
+
+/// A str with an int or a float, either way round: text read as a number (5.3).
+fn text_and_number(a: &Value, b: &Value) -> bool {
+    let num = |v: &Value| matches!(v, Value::Int(_) | Value::Float(_));
+    (matches!(a, Value::Str(_)) && num(b)) || (num(a) && matches!(b, Value::Str(_)))
 }
 
 pub fn is_handle(v: &Value) -> bool {
@@ -425,8 +436,9 @@ mod tests {
         assert_eq!(err(BinOp::Add, Int(i64::MAX), Int(1)), "ValueError: integer overflow in '+'");
         assert_eq!(err(BinOp::Div, Int(1), Float(0.0)), "ValueError: division by zero");
         assert_eq!(err(BinOp::Rem, Int(1), Int(0)), "ValueError: division by zero");
-        assert_eq!(err(BinOp::Add, Value::str("a"), Int(1)), "TypeError: unsupported operand types for +: 'str' and 'int' — use f\"...${x}\" or str(x)");
-        assert_eq!(err(BinOp::Sub, Value::str("a"), Int(1)), "TypeError: unsupported operand types for -: 'str' and 'int'");
+        let count = "to count with text such as input() gives, convert it: int(x) or float(x)";
+        assert_eq!(err(BinOp::Add, Value::str("a"), Int(1)), format!("TypeError: unsupported operand types for +: 'str' and 'int' — to join text, use f\"...${{x}}\" or str(x); {count}"));
+        assert_eq!(err(BinOp::Sub, Value::str("a"), Int(1)), format!("TypeError: unsupported operand types for -: 'str' and 'int' — {count}"));
         assert_eq!(ok(BinOp::Mul, Value::str("ab"), Int(3)), "\"ababab\"");
         assert_eq!(ok(BinOp::Mul, Int(-1), Value::str("ab")), "\"\"");
         assert_eq!(err(BinOp::Mul, Value::str("ab"), Int(i64::MAX)), "ValueError: repetition result too large");

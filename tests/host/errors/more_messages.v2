@@ -33,3 +33,11 @@ func assign() {
 try { assign() } catch (e) { print(e.message) }
 // A method read as a field.
 try { print("abc".upper) } catch (e) { print(e.message) }
+// A beginner's runtime mistakes: no argument given, a float index, input() at its end.
+try { print(args()[0]) } catch (e) { print(e.hint) }
+let nums = [1, 2, 3]
+try { print(nums[len(nums) / 2]) } catch (e) { print(e.hint) }
+try { print(input().trim()) } catch (e) { print(e.hint) }
+// Text from input() used as a number.
+try { print("5" + 1) } catch (e) { print(e.message) }
+try { print("5" < 3) } catch (e) { print(e.message) }

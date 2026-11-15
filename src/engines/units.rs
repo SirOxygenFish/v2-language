@@ -99,7 +99,57 @@ fn hint_v2_variable(b: &EngineBlock, env: &Env, e: &ErrorValue) {
         return;
     }
     let tag = &b.tag.text;
+    // V2's own functions (`print` in a @js block): the block's language has its own way.
+    if crate::runtime::builtins::BUILTINS.iter().any(|f| f.name == name) {
+        let py = crate::syntax::scan::canonical_tag(tag) == "py";
+        let own = if py { python_way(name) } else { javascript_way(name) };
+        let lang = if py { "Python" } else { "JavaScript" };
+        let text = match own {
+            Some(way) => format!("{name} is V2's function, which blocks don't see: in {lang}, write {way}"),
+            None => format!("{name} is V2's function, which blocks don't see: use {lang}'s own, or pass it in, @{tag}({name}) {{ ... }}"),
+        };
+        let _ = e.hint.set(text.into());
+        return;
+    }
     let _ = e.hint.set(format!("'{name}' is a V2 variable, and blocks don't see V2 variables: pass it in, @{tag}({name}) {{ ... }}").into());
+}
+
+/// What Python writes for V2's builtin `name`, for the ones Python lacks.
+fn python_way(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "read_file" => "open(path).read()",
+        "write_file" => "open(path, \"w\").write(text)",
+        "exists" => "os.path.exists(path)",
+        "list_dir" => "os.listdir(path)",
+        "make_dir" => "os.makedirs(path, exist_ok=True)",
+        "remove_file" => "os.remove(path)",
+        "getenv" => "os.environ.get(name)",
+        "sleep" => "time.sleep(seconds)",
+        "json_parse" => "json.loads(text)",
+        "json_stringify" => "json.dumps(value)",
+        "div" => "a // b",
+        _ => return None,
+    })
+}
+
+/// What JavaScript writes for V2's builtin `name`.
+fn javascript_way(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "print" => "console.log(x)",
+        "len" => "x.length",
+        "str" => "String(x)",
+        "int" => "Math.trunc(Number(x))",
+        "float" => "Number(x)",
+        "abs" | "min" | "max" | "round" => "Math.abs, Math.min, Math.max or Math.round",
+        "read_file" => "require(\"fs\").readFileSync(path, \"utf8\")",
+        "write_file" => "require(\"fs\").writeFileSync(path, text)",
+        "exists" => "require(\"fs\").existsSync(path)",
+        "getenv" => "process.env[name]",
+        "json_parse" => "JSON.parse(text)",
+        "json_stringify" => "JSON.stringify(value)",
+        "type" => "typeof x",
+        _ => return None,
+    })
 }
 
 fn error(kind: &str, message: String) -> Flow {
@@ -126,7 +176,12 @@ impl Interp {
         if definition {
             match self.units.get(&b.unit_id) {
                 Some(UnitState::Loaded(_) | UnitState::Waiting) => return Ok(Value::Null),
-                Some(UnitState::Failed(e)) => return Err(Flow::Error(e.clone())),
+                // Reached again: DOCS 4.3's ImportError, with the original error as its cause.
+                Some(UnitState::Failed(e)) => {
+                    let mut err = ErrorValue::new("ImportError", format!("{} failed to load: {}", self.block_name(b), e.message));
+                    err.cause = Value::Error(e.clone());
+                    return Err(self.raise(Flow::Error(Rc::new(err)), b.tag.span));
+                }
                 Some(UnitState::Loading) => {
                     let msg = format!("{} is still loading (reached again during its own load)", self.block_name(b));
                     return Err(self.raise(error("ImportError", msg), b.tag.span));

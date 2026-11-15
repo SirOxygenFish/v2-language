@@ -282,7 +282,7 @@ ForeignError ZeroDivisionError division by zero
 | `elif`, `else if`                         | `elif`                                          |
 | `i += 1`, `i++`                           | `i += 1`                                        |
 | `while x < 3:`, `while (x < 3) { }`       | `while x < 3 { ... }`                           |
-| `for i in range(3)`                       | `for i in 0..3` (0, 1, 2)                       |
+| `for i in range(3)`                       | `for i in 0..3` (0, 1, 2; `range()` builds the whole list first) |
 | `xs.append(x)`, `xs.push(x)`              | `xs.push(x)`                                    |
 | `len(xs)`, `xs.length`                    | `len(xs)`                                       |
 | `", ".join(xs)`, `xs.join(", ")`          | `xs.join(", ")`                                 |
@@ -297,7 +297,7 @@ ForeignError ZeroDivisionError division by zero
 | `open(f).read()`, `fs.readFileSync(f, "utf8")` | `read_file(f)`, and `write_file(f, text)`  |
 | `sys.exit(1)`, `process.exit(1)`          | `exit(1)`                                       |
 | `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`); `args().get(0, "out.txt")` for one that may be missing |
-| `input()`                                 | `input()` (`null` at the end of input)          |
+| `input()`                                 | `input()` (`null` at the end of input); a number: `int(input("Age: "))` |
 
 More of V2, in short:
 
@@ -331,7 +331,8 @@ More of V2, in short:
 - **Other `.v2` files:** their top-level names not starting with `_` are imported as a snapshot
   taken when that file finished running: read state that changes through its functions.
 - **Blocks** can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and a block's
-  last expression is its value. A block is one line, `@py { 1 + 2 }`, or its code starts on the
+  last expression is its value (one that ends in a `with`, `for`, `if` or `try` statement has
+  the value `null`: put the value on a last line of its own). A block is one line, `@py { 1 + 2 }`, or its code starts on the
   line after the `{` and its `}` stands on a line of its own; inside a larger expression it goes in
   parentheses, `(@py { 1 }) + 2`. A `@js` block whose value is an object literal needs them too,
   `@js { ({a: 1}) }`, or JavaScript reads the braces as code; and in a `@js` block of several
@@ -352,7 +353,11 @@ More of V2, in short:
   folder, `os.replace(a, b)` renames or moves a file, and `shutil.copy2(a, b)` copies one. On
   Linux and macOS, `read_file("/dev/stdin")` reads all of standard input at once (anywhere:
   `input()` in a loop until it gives `null`), and `write_file("/dev/stdout", data)` writes text
-  or bytes after what `print` wrote.
+  or bytes after what `print` wrote. A program `exec` starts has no terminal, so it can't ask
+  for a password (`sudo -n`, ssh keys and git's credential helpers don't need one) or show a
+  full-screen program such as `vi`. What it starts stops when it ends: to leave a job running,
+  `exec(["setsid", "-f", "sh", "-c", "job > job.log 2>&1 < /dev/null"])` (Linux). Pass values to
+  `sh -c` as arguments, not inside the command: `exec(["sh", "-c", "cd \"$1\" && make", "sh", dir])`.
 
 `v2 check FILE` checks a script's V2 syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
@@ -377,7 +382,8 @@ and V2 says so when another came first).
   `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
   `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
-  `@import { f } from js."./helpers.js"` (a TypeScript one, `ts."./helpers.ts"`). A function
+  `@import { f } from js."./helpers.js"` (a TypeScript one, `ts."./helpers.ts"`; `js.helpers`,
+  without `./`, means an npm package named helpers). A function
   imported by name brings none of its own properties: for `dayjs.extend` or lodash's `_.chunk`,
   import the module itself, `@import js.dayjs as dayjs`. For an ES module imported whole, what
   its default export holds is under `.default`: `chalk.default.red("x")`.
@@ -441,9 +447,15 @@ its Linux `.tar.xz`, unpacked into `/opt` (`sudo apt install xz-utils`, then
 shell's startup file (bash: `echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' >>
 ~/.profile`, with the version you unpacked; zsh: `~/.zshenv`; fish:
 `fish_add_path /opt/node-v22.21.0-linux-x64/bin`), then a new terminal. Or, whatever the shell,
-name it in a `v2.toml`: `[engines.js] command = ["/opt/node-v22.21.0-linux-x64/bin/node"]`. nvm,
-which the site also offers, sets up interactive shells only. `v2 doctor` shows which version V2
-found, and where.
+name it in a `v2.toml` next to your script (a section's name on a line of its own, its keys below):
+
+```toml
+[engines.js]
+command = ["/opt/node-v22.21.0-linux-x64/bin/node"]
+```
+
+nvm, which the site also offers, sets up interactive shells only. `v2 doctor` shows which version
+V2 found, and where.
 
 **`ImportError: No module named 'numpy'`** (or `Cannot find module 'lodash'`). Install the package:
 [Python and npm packages](#python-and-npm-packages).
@@ -479,8 +491,8 @@ WSL distro) you may be root without `sudo`: leave it out; unpacking Node.js's `.
 
 **`v2` works in a terminal but not in cron or `ssh host v2 ...`.** Those may not read your shell's
 startup files: use the full path, `~/.v2/bin/v2`. A Python or Node.js that your startup files put
-on PATH isn't found there either: name it in a `v2.toml`, `[engines.js] command =
-["/opt/node/bin/node"]`, or with `V2_ENGINE_JS`.
+on PATH isn't found there either: name it in a `v2.toml` as in the entry on Node.js above
+(`command = ["/opt/node/bin/node"]` on the line under `[engines.js]`), or with `V2_ENGINE_JS`.
 
 **macOS says `v2` "can't be opened".** Only files downloaded with a browser are blocked:
 `xattr -d com.apple.quarantine ~/.v2/bin/v2`.
@@ -491,7 +503,8 @@ For `npm` ("npm.ps1 cannot be loaded"), type `npm.cmd` instead. A virtual enviro
 `Activate.ps1`: the `v2.toml` above finds it.
 
 **A script hangs.** Press Ctrl+C: V2 stops it, and its Python and Node.js workers, with exit
-code 130.
+code 130 (on Linux and macOS, v2 ends by the signal, as other programs do, so a shell loop of
+`v2` runs stops too; `kill` shows 143).
 
 ## FAQ
 
@@ -501,9 +514,18 @@ says what's ready.
 **Which Python and Node.js does V2 use?** The first suitable `python3`, `python` (on Windows also
 `py -3`) and `node` on your PATH, unless a `v2.toml` says otherwise; `v2 doctor`, run in the
 script's folder, shows them. To pick one, put a `v2.toml` in your
-project folder ([docs, chapter 14](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#14-project-file-v2toml)):
-`[python]` `venv = ".venv"` for a virtual environment, or `[engines.py]`
-`command = ["C:/Python313/python.exe"]` (on macOS, for example, `["/opt/homebrew/bin/python3"]`).
+project folder ([docs, chapter 14](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#14-project-file-v2toml)),
+each section's name on a line of its own, its keys on the lines below it:
+
+```toml
+[python]
+venv = ".venv"                              # a virtual environment, or else:
+
+[engines.py]
+command = ["C:/Python313/python.exe"]       # on macOS, for example, ["/opt/homebrew/bin/python3"]
+```
+
+(one of the two: a venv and a command for Python together are an error).
 The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
 program's path does the same while it is set: in PowerShell, for that window,
 `$env:V2_ENGINE_PY = "C:\Program Files\Python313\python.exe"` (and `Remove-Item Env:V2_ENGINE_PY`

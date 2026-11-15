@@ -1,6 +1,6 @@
 // requires: py
-// A definition block that fails to load stays failed: reaching it again throws the same error
-// without running its code again (DOCS 4.3, INTERNALS 12.1).
+// A definition block that fails to load stays failed: reaching it again throws
+// ImportError: block '…' failed to load, without running its code again (DOCS 4.3, INTERNALS 12.1).
 let errs = []
 for i in 0..2 {
     try {
@@ -13,7 +13,7 @@ for i in 0..2 {
         errs.push(e)
     }
 }
-print(errs[0] == errs[1], errs[0].type, errs[0].foreign_type, errs[0].message)
+print(errs[0].type, errs[0].foreign_type, errs[0].message, "|", errs[1].type, errs[1].message, errs[1].cause == errs[0])
 // R46: an @import from it says why (INTERNALS 13.3 step 5).
 try {
     @import { f } from bad

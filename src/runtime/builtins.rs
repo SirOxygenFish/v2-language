@@ -801,7 +801,10 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             Ok(name) => names.push(name),
             Err(bad) => {
                 let shown = bad.to_string_lossy();
-                return io_error(format!("cannot list '{path}': the name '{shown}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"));
+                // A name that can't be renamed (an upload, a share): a block lists the folder as bytes.
+                let err = ErrorValue::new("IOError", format!("cannot list '{path}': the name '{shown}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"));
+                let _ = err.hint.set("to list such names as they are, do it in a @py block: @py(d) { [n.decode(\"utf-8\", \"replace\") for n in os.listdir(os.fsencode(d))] }, and pass a name back with os.fsencode".into());
+                return Err(Flow::Error(Rc::new(err)));
             }
         }
     }

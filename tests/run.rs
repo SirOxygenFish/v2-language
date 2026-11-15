@@ -522,7 +522,7 @@ fn cross_language_mistakes_say_what_to_do() {
             "@import { thing } from py.no_such_module_xyz\nprint(thing())\n",
             "  hint: if 'no_such_module_xyz' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps\n",
         ),
-        ("nonpm.v2", "@import { chunk } from js.no_such_package_xyz\nprint(chunk([1], 1))\n", "  hint: if 'no_such_package_xyz' isn't misspelled, install it in your project folder: npm install no_such_package_xyz\n"),
+        ("nonpm.v2", "@import { chunk } from js.no_such_package_xyz\nprint(chunk([1], 1))\n", "  hint: if 'no_such_package_xyz' isn't misspelled, install it with npm install no_such_package_xyz in "),
         ("noexport.v2", "@py tools {\n    def a():\n        return 1\n}\n@import { a } from tools\nprint(a())\n", "ImportError: block 'tools' exports nothing: add @export { a } inside it\n"),
         (
             "static.v2",
@@ -629,7 +629,7 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
         let (line, col) = if bytes.contains(&b'\n') { (2, 8) } else { (3, 1) };
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            format!("bad.v2:{line}:{col}: SyntaxError: file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8\n")
+            format!("bad.v2:{line}:{col}: SyntaxError: {OLDER}\n")
         );
         assert!(out.stdout.is_empty());
     }
@@ -1160,6 +1160,20 @@ fn a_blocks_output_reaches_a_pipe_as_it_comes() {
     assert_eq!((line.as_str(), rest.as_str()), ("started\n", "done\n"));
     assert!(took < Duration::from_secs(3), "the first line came after {took:?}; the block sleeps 4 s");
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn a_tilde_in_v2_toml_with_no_home_folder_is_an_error() {
+    // 18.1: `env -i`, a service without HOME: not a folder named ~ next to v2.toml.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \"~/venv-home\"\n").unwrap();
+    std::fs::write(home.0.join("x.v2"), "print(1)\n").unwrap();
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let child = v2_command(&home.0).arg("x.v2").env_remove(var).current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(&format!("config error: [python] venv: '~/venv-home' starts with ~, but {var} isn't set, so there is no home folder for it: write the full path")), "{stderr}");
 }
 
 #[test]
@@ -1695,6 +1709,34 @@ fn interruptible(cmd: &mut Command) {
 }
 
 /// Interrupt `child` the way a terminal does: SIGINT, or Ctrl+Break to its process group.
+/// A .v2 file in an older encoding: what V2 says, which on Linux and macOS names iconv (2.1).
+const OLDER: &str = if cfg!(windows) {
+    "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8"
+} else {
+    "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 or Latin-1: save it as UTF-8, as in iconv -f cp1252 -t utf-8 old.v2 > new.v2"
+};
+
+/// The signal `interrupt` sends (Windows: Ctrl+Break, which has none).
+#[cfg(unix)]
+const SIGINT: i32 = libc::SIGINT;
+#[cfg(windows)]
+const SIGINT: i32 = 2;
+
+/// An interrupted run (6.5): ended by the signal that came, so a shell stops a loop of v2 runs on
+/// one Ctrl+C (shown as 128 + its number); on Windows, exit 130.
+fn assert_interrupted(status: &std::process::ExitStatus, sig: i32, what: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!((status.signal(), status.code()), (Some(sig), None), "{what}");
+    }
+    #[cfg(windows)]
+    {
+        let _ = sig;
+        assert_eq!(status.code(), Some(130), "{what}");
+    }
+}
+
 fn interrupt(child: &Child) {
     #[cfg(unix)]
     // SAFETY: sending a signal to our own child.
@@ -1998,7 +2040,7 @@ fn an_interrupt_during_a_py_block_exits_130_and_cleans_up() {
             interrupt(&child);
         }
         let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended after the interrupt");
-        assert_eq!(out.status.code(), Some(130), "signal {signal}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_interrupted(&out.status, signal, &String::from_utf8_lossy(&out.stderr));
         assert!(start.elapsed() < Duration::from_secs(2), "signal {signal}: {:?}", start.elapsed());
         assert!(out.stdout.is_empty() && out.stderr.is_empty(), "signal {signal}: no output after an interrupt");
         let gone = Instant::now() + Duration::from_secs(2);
@@ -2046,7 +2088,7 @@ fn an_interrupt_still_writes_what_was_printed() {
         std::thread::sleep(Duration::from_millis(500));
         interrupt(&child);
         let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended after the interrupt");
-        assert_eq!(out.status.code(), Some(130));
+        assert_interrupted(&out.status, SIGINT, "");
         assert_eq!(String::from_utf8_lossy(&out.stdout), want);
     }
 }
@@ -2068,7 +2110,7 @@ fn an_interrupt_exits_130_without_running_finally() {
     std::thread::sleep(Duration::from_millis(500));
     interrupt(&child);
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended after the interrupt");
-    assert_eq!(out.status.code(), Some(130));
+    assert_interrupted(&out.status, SIGINT, "");
     assert!(out.stdout.is_empty(), "catch and finally must not run");
     assert!(out.stderr.is_empty(), "no diagnostic after an interrupt");
 }
@@ -2112,7 +2154,7 @@ fn an_interrupt_as_the_run_ends_still_exits_130() {
             drop(stdin); // end of input: input() returns null and the run ends at once
             let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended");
             let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            assert_eq!(out.status.code(), Some(130), "{name}: stdout {stdout:?} stderr {stderr:?}");
+            assert_interrupted(&out.status, SIGINT, &format!("{name}: stdout {stdout:?} stderr {stderr:?}"));
             assert!(stdout.is_empty() && stderr.is_empty(), "{name}: stdout {stdout:?} stderr {stderr:?}");
         }
     }
@@ -2226,7 +2268,7 @@ fn check_keeps_file_order_for_files_that_are_not_utf8() {
     assert!(bad < good, "{stderr}");
     let (code, stdout, stderr) = check("bad.v2");
     assert_eq!((code, stdout.as_str()), (Some(1), "check bad.v2: 1 file, 1 error\n"), "{stderr}");
-    assert_eq!(stderr, "bad.v2:1:10: SyntaxError: file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8\n");
+    assert_eq!(stderr, format!("bad.v2:1:10: SyntaxError: {OLDER}\n"));
 }
 
 #[test]
@@ -2271,7 +2313,7 @@ fn block_head_and_close_errors() {
         ),
         (
             "@py {\n    x = 1 }\n",
-            &["b.v2:1:1: SyntaxError: @py block closes at a } that does not start its line", "note: the } that closes it (b.v2:2:11)", fence],
+            &["b.v2:1:1: SyntaxError: @py block closes at a } that does not start its line", "note: the } that closes it (b.v2:2:11)", "hint: put the } that ends the block on a line of its own"],
         ),
         (
             "let y = @py { 1 } + 2\n",
@@ -2334,9 +2376,10 @@ fn a_host_panic_exits_101() {
 
 #[cfg(unix)]
 #[test]
-fn every_interrupt_signal_exits_130_and_ignored_ones_stay_ignored() {
-    // INTERNALS 6.5: SIGINT, SIGTERM, SIGHUP and SIGQUIT all end the run with 130, with no catch,
-    // finally or diagnostic; a signal ignored at startup (nohup) stays ignored.
+fn every_interrupt_signal_ends_the_run_by_it_and_ignored_ones_stay_ignored() {
+    // INTERNALS 6.5: SIGINT, SIGTERM, SIGHUP and SIGQUIT each end the run by that signal (a shell
+    // shows 128 + its number), with no catch, finally or diagnostic; a signal ignored at startup
+    // (nohup) stays ignored.
     use std::os::unix::process::CommandExt;
     let home = TempHome::new();
     let src = "try {\n    while true { }\n} catch (e) {\n    print(\"catch ran\")\n} finally {\n    print(\"finally ran\")\n}\n";
@@ -2364,7 +2407,7 @@ fn every_interrupt_signal_exits_130_and_ignored_ones_stay_ignored() {
             libc::kill(child.id() as libc::pid_t, sig);
         }
         let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended");
-        assert_eq!(out.status.code(), Some(130), "signal {sig}");
+        assert_interrupted(&out.status, sig, &format!("signal {sig}"));
         assert!(out.stdout.is_empty() && out.stderr.is_empty(), "signal {sig}: {out:?}");
     }
     let mut child = start(true);
@@ -2378,7 +2421,7 @@ fn every_interrupt_signal_exits_130_and_ignored_ones_stay_ignored() {
         libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
     }
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(10)).expect("v2 ended");
-    assert_eq!(out.status.code(), Some(130));
+    assert_interrupted(&out.status, libc::SIGTERM, "");
 }
 
 #[test]

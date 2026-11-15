@@ -1,0 +1,3 @@
+stats top level runs
+first: ForeignError boom at load
+second: ImportError block 'stats' failed to load: boom at load | cause: ValueError

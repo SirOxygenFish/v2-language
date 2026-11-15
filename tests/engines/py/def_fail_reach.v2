@@ -1,0 +1,14 @@
+// requires: py
+// A definition block that failed, reached again: ImportError with the first error as its cause
+// (DOCS 4.3).
+func load() {
+    @py stats {
+        print("stats top level runs")
+        raise ValueError("boom at load")
+        def f():
+            return 1
+        @export { f }
+    }
+}
+try { load() } catch (e) { print("first:", e.type, e.message) }
+try { load() } catch (e) { print("second:", e.type, e.message, "| cause:", e.cause.foreign_type) }

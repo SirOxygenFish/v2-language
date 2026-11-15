@@ -254,7 +254,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                         let key = spec.session_of.as_deref().unwrap_or(&id);
                         format!("not found: PATH isn't set, so nothing was searched; set it, or name the program in v2.toml, [engines.{key}] command")
                     }
-                    (Status::Missing, _, _) => format!("not found; install: {}", install_hint(&id)),
+                    // Installed where PATH doesn't look (cron's PATH, /opt): name it instead.
+                    (Status::Missing, _, _) => {
+                        let key = spec.session_of.as_deref().unwrap_or(&id);
+                        format!("not found; install: {}; installed where PATH doesn't look: [engines.{key}] command in v2.toml, or V2_ENGINE_{}", install_hint(&id), key.to_uppercase())
+                    }
                     (Status::Old(v), Some(min), None) if v >= min => {
                         format!("not supported: found {v}, which has no type stripping; V2 needs {}; install: {}", rule.needs(min), install_hint(&id))
                     }
