@@ -1174,16 +1174,18 @@ fn a_blocks_output_reaches_a_pipe_as_it_comes() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start v2");
-    let start = Instant::now();
     let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
-    let took = start.elapsed();
+    // Timed from the first line, not from the start: a cold CI runner may take seconds to start
+    // Python (CI's Windows took 6 s once), but held output would come with the last line.
+    let first = Instant::now();
     let mut rest = String::new();
     stdout.read_to_string(&mut rest).unwrap();
+    let gap = first.elapsed();
     let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
     assert_eq!((line.as_str(), rest.as_str()), ("started\n", "done\n"));
-    assert!(took < Duration::from_secs(3), "the first line came after {took:?}; the block sleeps 4 s");
+    assert!(gap > Duration::from_secs(2), "the first line came only {gap:?} before the end; the block sleeps 4 s between them");
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
