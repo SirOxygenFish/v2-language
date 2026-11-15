@@ -181,6 +181,16 @@ pub fn node_supported(node: Version) -> bool {
     }
 }
 
+/// Whether a Node version loads `.ts`, `.mts` and `.cts` files (`@import … from ts."./x.ts"`) only
+/// with `--experimental-strip-types`: before 22.18 on the 22 line, 23.6 on the 23 line (7.2).
+pub fn node_needs_strip_flag(node: Version) -> bool {
+    match node.0 {
+        22 => node < Version(22, 18, 0),
+        23 => node < Version(23, 6, 0),
+        _ => false,
+    }
+}
+
 /// The install line of an `EngineNotFound` message, for this OS (7.8).
 pub fn install_hint(id: &str) -> &'static str {
     match (id, std::env::consts::OS) {
