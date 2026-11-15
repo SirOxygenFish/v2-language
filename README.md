@@ -297,25 +297,39 @@ ForeignError ZeroDivisionError division by zero
 | `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`) |
 | `input()`                                 | `input()` (`null` at the end of input)          |
 
-V2's own functions include `int`, `float`, `str`, `round`, `abs`, `min`, `max`, `sum`, `range`,
-`type` and `len`; for files and the system `exists`, `list_dir`, `make_dir`, `remove_file`,
-`getenv`, `exec`, `sleep(seconds)` and `time()` (seconds, as a float); and `json_parse` and
-`json_stringify`. Strings have `split`,
-`upper`, `lower`, `replace`, `trim`, `starts_with` and `ends_with`; lists `push`, `pop`, `sort`,
-`map` and `join`; dicts `keys`, `values`, `get` and `remove`; and lists and strings slice as
-`xs[1:3]`. `cond ? a : b` picks a value, `f"${x:.2f}"` formats a number (`:.Nf` is the only
-format), `r"C:\new"` keeps its
-backslashes, a `"""` at the end of a line starts a string of several lines, and a caught error has
-`e.type` and `e.message`. Another `.v2` file's top-level names not starting with `_` are imported
-as a snapshot taken when that file finished running: read state that changes through its
-functions.
-A block can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and its last
-expression is its value. A block is one line, `@py { 1 + 2 }`, or its code starts on the line after
-the `{` and its `}` stands on a line of its own; inside a larger expression it goes in parentheses,
-`(@py { 1 }) + 2`. A `@js` block whose value is an object literal needs them too, `@js { ({a: 1}) }`,
-or JavaScript reads the braces as code. File paths are relative to the folder you run `v2` from; for a file next
-to the script, `read_file(f"${script_dir()}/data.csv")`. `v2 check FILE` checks a script's V2
-syntax without running it. The
+More of V2, in short:
+
+- **Functions:** `int`, `float`, `str`, `round`, `abs`, `min`, `max`, `sum`, `type`, `len`,
+  `range` (it makes a whole list: for a long loop write `for i in 0..n`), `json_parse` and
+  `json_stringify(x, indent: 2)`, `sleep(seconds)`, `time()` (seconds, as a float),
+  `print(a, b, sep: ", ")`.
+- **Files and programs:** `read_file(path)`, or `read_file(path, binary: true)` for bytes;
+  `write_file(path, data)`, with `append: true` to add to the end; `exists`, `list_dir`,
+  `make_dir`, `remove_file`, `getenv`. `exec(["git", "status"], input: text)` runs a program
+  without a shell and returns `{code, stdout, stderr}`, its output as text and all of it in memory.
+  To walk folders, or tell a file from a folder, use Python's `os.walk` in a block. File paths are
+  relative to the folder you run `v2` from; for a file next to the script,
+  `read_file(f"${script_dir()}/data.csv")`.
+- **Strings** have `split`, `lines` (Windows line endings too), `upper`, `lower`, `replace`, `trim`,
+  `starts_with`, `ends_with` and `index_of`; **lists** `push`, `pop`, `insert`,
+  `sort(key: f, reverse: true)`, `reverse`, `map`, `filter`, `join`, `index_of` and `copy`;
+  **dicts**, whose keys are strings, `keys`, `values`, `get`, `remove` and `copy`. Lists and
+  strings slice as `xs[1:3]`, and `x in xs`, `key in d` and `"lo" in "hello"` test membership.
+- **Syntax:** `cond ? a : b` picks a value, `a ?? b` is `b` when `a` is `null`, `x?.y` is `null`
+  when `x` is, `**` is a power; `f"${x:.2f}"` formats a number (`:.Nf` is the only format: pad in a
+  block, or with `" " * n`); `r"C:\new"` keeps its backslashes; a `"""` at the end of a line starts
+  a string of several lines; a caught error has `e.type` and `e.message`.
+- **Other `.v2` files:** their top-level names not starting with `_` are imported as a snapshot
+  taken when that file finished running: read state that changes through its functions.
+- **Blocks** can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and a block's
+  last expression is its value. A block is one line, `@py { 1 + 2 }`, or its code starts on the
+  line after the `{` and its `}` stands on a line of its own; inside a larger expression it goes in
+  parentheses, `(@py { 1 }) + 2`. A `@js` block whose value is an object literal needs them too,
+  `@js { ({a: 1}) }`, or JavaScript reads the braces as code. For code whose braces V2 can't match,
+  a block can use a fence instead: three backticks after the header, and three backticks alone on
+  the line that closes it.
+
+`v2 check FILE` checks a script's V2 syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
 [the host language](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#3-the-host-language),
 [blocks](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#4-embedded-blocks),
@@ -331,7 +345,8 @@ packages installed for them. A Python package is imported with `@import py.numpy
 is `py.helpers` (name yours unlike Python's own modules, such as `json` or `numbers`: one Python
 serves the whole run, with one module per name, and V2 says so when another came first).
 
-- **npm:** in your project folder, `npm install lodash`, then
+- **npm:** in your project folder, `npm install lodash` (in a Windows PowerShell that blocks
+  `npm`, `npm.cmd install lodash`), then
   `@import { chunk } from js.lodash`. Names with other characters are quoted (`js."date-fns"`,
   `js."@scope/pkg"`), a default export is `@import { "default" as dayjs } from js.dayjs`, Node's
   own modules are `js.fs`, `js.path` and so on, and a file of your own next to the script is
@@ -361,10 +376,11 @@ serves the whole run, with one module per name, and V2 says so when another came
 
   (Activating it, `source .venv/bin/activate`, before running `v2` works too.)
 
-A package is loaded at the first call of a name imported from it, not at its `@import` line, when
-the file only calls its names (for `@import py.numpy as np`, only uses `np.something`); a name used
-as a value (`let f = mean`, `print(mean)`) loads it at its `@import` line. What it prints when it
-loads, and the error for a misspelled package name, come at that point.
+Python and Node.js start when the script first needs them, and then every package a file imports
+from that language loads, in order: at the first call of an imported name (for
+`@import py.numpy as np`, the first use of `np.something`), not at the `@import` lines. A name used
+as a value (`let f = mean`, `print(mean)`) loads its package at its `@import` line instead. What a
+package prints when it loads, and the error for a misspelled package name, come at that point.
 
 ## Troubleshooting
 
@@ -415,7 +431,9 @@ WSL distro) you may be root without `sudo`: leave it out; unpacking Node.js's `.
 `apt install xz-utils`.
 
 **`v2` works in a terminal but not in cron or `ssh host v2 ...`.** Those may not read your shell's
-startup files: use the full path, `~/.v2/bin/v2`.
+startup files: use the full path, `~/.v2/bin/v2`. A Python or Node.js that your startup files put
+on PATH isn't found there either: name it in a `v2.toml`, `[engines.js] command =
+["/opt/node/bin/node"]`, or with `V2_ENGINE_JS`.
 
 **macOS says `v2` "can't be opened".** Only files downloaded with a browser are blocked:
 `xattr -d com.apple.quarantine ~/.v2/bin/v2`.
@@ -440,7 +458,8 @@ project folder ([docs, chapter 14](https://github.com/SirOxygenFish/v2-language/
 `[python]` `venv = ".venv"` for a virtual environment, or `[engines.py]`
 `command = ["C:/Python313/python.exe"]` (on macOS, for example, `["/opt/homebrew/bin/python3"]`).
 The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
-program's path, without quotes, does the same for one run.
+program's path, without quotes, does the same while it is set (in PowerShell, for that window:
+`Remove-Item Env:V2_ENGINE_PY` ends it).
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,
 so `add("2", 3)` runs. Run `tsc` yourself for checking. Only TypeScript whose types can simply be
@@ -484,7 +503,8 @@ Node.js workers.
 - **The downloads aren't code-signed**, so a browser may warn about them. The install commands
   don't get those warnings.
 - **Values cross between languages as copies** (numbers, strings, lists, dicts) or as handles to
-  the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep.
+  the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep
+  (deeper parts of a value from Python or JavaScript arrive as handles).
   V2's integers are 64-bit: a bigger Python or JavaScript integer arrives as a handle, so do big
   number math inside the block. A handle works only in its own language: `to_v2(h)` makes plain
   data that any language takes. Operators don't work on handles (call a method, or do it in the
@@ -513,6 +533,8 @@ Node.js workers.
   when the script runs.
 - **A `#!` first line is an error:** delete it, and run scripts with `v2 file.v2`.
 - **Ctrl+C and `exit(n)` stop at once:** `finally` blocks don't run, in any language.
+- **An error V2 can't raise in your program** (from a JavaScript timer, a Promise nobody waits
+  for, a Python thread) is printed, and the run then ends with exit code 1, not 0.
 - **No REPL, no package manager of its own, no editor plugins.**
 - **It's an alpha:** syntax and behavior may still change before 0.1.0.
 
@@ -527,7 +549,8 @@ Node.js workers.
    select `Path`, delete the `.v2\bin` entry. macOS and Linux: in each startup file `install.sh`
    changed (`~/.bashrc`, `~/.profile` or `~/.bash_profile`, `~/.zshenv`; `grep -ls 'added by
    install.sh' ~/.bashrc ~/.profile ~/.bash_profile ~/.zshenv` lists them), delete the line
-   `# V2 (added by install.sh)` and the line under it; with fish, delete
+   `# V2 (added by install.sh)` and the line under it (and `~/.zshenv`, if that leaves it empty);
+   with fish, delete
    `~/.config/fish/conf.d/v2.fish` (under `$XDG_CONFIG_HOME` instead, if you set it).
 
 ## Reporting bugs

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use super::builtins::{bool_arg, str_arg};
 use super::call::ParamSpec;
-use super::error::{fail, type_error, value_error, Exec};
+use super::error::{fail, type_error, value_error, Exec, Flow};
 use super::interp::Interp;
 use super::ops::{eq, sort_key_cmp};
 use super::value::{Dict, List, Str, Value};
@@ -222,6 +222,16 @@ pub fn key_error<T>(key: &str, d: &Dict) -> Exec<T> {
     let keys: Vec<Rc<str>> = d.borrow().keys().cloned().collect();
     let msg = super::error::with_suggestion(format!("key '{key}' not found"), key, keys.iter().map(|k| &**k));
     fail("KeyError", msg)
+}
+
+/// `util._helper`, a member read: `key_error`, and for a name that starts with `_`, that an
+/// imported .v2 file keeps such names to itself (6.4).
+pub fn member_key_error<T>(key: &str, d: &Dict) -> Exec<T> {
+    let Err(Flow::Error(e)) = key_error::<T>(key, d) else { unreachable!("key_error fails") };
+    if !key.starts_with('_') {
+        return Err(Flow::Error(e));
+    }
+    fail("KeyError", format!("{} (an imported .v2 file keeps names that start with _ to itself)", e.message))
 }
 
 /// `split(sep = null)`: without `sep`, on runs of whitespace with no empty parts (5.11).

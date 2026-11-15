@@ -856,9 +856,8 @@ impl<'a> Lexer<'a> {
     fn escape(&mut self, kind: StrKind, lit: &mut String) -> Result<(), Diag> {
         let at = self.span_here(2);
         self.bump(); // backslash
-        let bad = |what: &str| {
-            Diag::new(format!("unknown escape {what}"), at).hint("write \\\\ for a backslash, or use a raw string r\"…\"")
-        };
+        const BACKSLASH: &str = "write \\\\ for a backslash, or use a raw string r\"…\"";
+        let bad = |what: &str| Diag::new(format!("unknown escape {what}"), at).hint(BACKSLASH);
         match self.peek() {
             Some(c @ ('n' | 't' | 'r' | '\\' | '"' | '\'' | '0' | '$')) => {
                 self.bump();
@@ -869,7 +868,8 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 let h: String = self.rest().chars().take(2).collect();
                 if h.len() != 2 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return Err(Diag::new("\\x takes exactly 2 hex digits", at));
+                    // `"C:\xampp\htdocs"`: a Windows path, more likely than an escape.
+                    return Err(Diag::new("\\x takes exactly 2 hex digits", at).hint(BACKSLASH));
                 }
                 self.bump_n(2);
                 lit.push_str("\\x");
@@ -881,7 +881,8 @@ impl<'a> Lexer<'a> {
                 }
                 self.bump();
                 if self.peek() != Some('{') {
-                    return Err(Diag::new("\\u must be followed by {hex digits}, as in \\u{1F600}", at));
+                    // `"data\updates.csv"`: a Windows path, more likely than an escape.
+                    return Err(Diag::new("\\u must be followed by {hex digits}, as in \\u{1F600}", at).hint(BACKSLASH));
                 }
                 self.bump();
                 let h: String = self.rest().chars().take_while(|c| *c != '}').take(7).collect();
@@ -1242,27 +1243,72 @@ impl<'a> Lexer<'a> {
     }
 
     /// Python's floor division, `n // 2`: in V2 the rest of the line is a comment, so it would
-    /// silently mean `n` (3.2). A comment that is only a number, right after a name or a number
-    /// with at most one space on each side, is that habit; a result written after code
-    /// (`print(x)    // 3`) is not.
+    /// silently mean `n` (3.2). A comment that starts with a number and holds no words (`2`,
+    /// `2)`, `2, 3)`, `2 - 1`), right after an operand (a name, a number, a call, an index, a
+    /// member, parentheses) with at most one space on each side, is that habit; a result written
+    /// after code (`print(x)    // 3`) or a remark (`// 3 retries`) is not.
     fn floor_division(&self, m: Mark) -> Option<Diag> {
         let prev = self.toks.last().filter(|t| t.span.line == m.line)?;
-        let left = match &prev.tok {
-            Tok::Ident(n) => n.to_string(),
-            Tok::Int(i) => i.to_string(),
-            _ => return None,
-        };
-        let gap = &self.src[prev.span.hi as usize..m.pos];
-        let after = self.rest()[2..].split('\n').next().unwrap_or("");
-        let number = after.strip_prefix(' ').unwrap_or(after).trim_end();
-        let is_number = number.starts_with(|c: char| c.is_ascii_digit()) && number.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '.');
-        if !matches!(gap, "" | " ") || !is_number {
+        let start = self.operand_start()?;
+        // An operand that starts its statement (`print(x) // 2`) has its value unused: the `//`
+        // after it is a remark, not a division (in Python too it would compute nothing).
+        if start == 0 || matches!(self.toks[start - 1].tok, Tok::Newline | Tok::Semi | Tok::LBrace(_) | Tok::RBrace) {
             return None;
         }
+        let gap = &self.src[prev.span.hi as usize..m.pos];
+        let after = self.rest()[2..].split('\n').next().unwrap_or("");
+        let text = after.strip_prefix(' ').unwrap_or(after).trim_end();
+        let number_len = text.find(|c: char| !(c.is_ascii_digit() || c == '_' || c == '.')).unwrap_or(text.len());
+        let number = &text[..number_len];
+        let code_after = text[number_len..].chars().all(|c| c.is_ascii_digit() || " _.)],;+-*".contains(c));
+        if !matches!(gap, "" | " ") || !number.starts_with(|c: char| c.is_ascii_digit()) || !code_after {
+            return None;
+        }
+        let left = &self.src[self.toks[start].span.lo as usize..prev.span.hi as usize];
         Some(
             Diag::new(format!("`// {number}` starts a comment in V2, so this line doesn't divide"), self.span_of_mark(m, 2))
                 .hint(format!("V2 divides rounding down with div(a, b), as in div({left}, {number})")),
         )
+    }
+
+    /// The first token of the operand that ends with the last token: a name or a number, with
+    /// the calls, indexes and members chained to it (`len(xs)`, `xs[0]`, `d.n`), or a
+    /// parenthesized expression; `None` when the last token ends no operand.
+    fn operand_start(&self) -> Option<usize> {
+        let toks = &self.toks;
+        let mut i = toks.len().checked_sub(1)?;
+        loop {
+            match toks[i].tok {
+                Tok::Op(Op::RParen | Op::RBracket) => {
+                    let mut depth = 0i32;
+                    loop {
+                        match toks[i].tok {
+                            Tok::Op(Op::RParen | Op::RBracket) => depth += 1,
+                            Tok::Op(Op::LParen | Op::LBracket) => depth -= 1,
+                            _ => {}
+                        }
+                        if depth == 0 {
+                            break;
+                        }
+                        i = i.checked_sub(1)?;
+                    }
+                    // `len(xs)`, `xs[0]`, `f()(x)`: what is called or indexed is part of it.
+                    if i > 0 && matches!(toks[i - 1].tok, Tok::Ident(_) | Tok::Op(Op::RParen | Op::RBracket)) {
+                        i -= 1;
+                        continue;
+                    }
+                }
+                Tok::Ident(_) => {
+                    if i >= 2 && matches!(toks[i - 1].tok, Tok::Op(Op::Dot | Op::QDot)) {
+                        i -= 2;
+                        continue;
+                    }
+                }
+                Tok::Int(_) | Tok::Float(_) => {}
+                _ => return None,
+            }
+            return Some(i);
+        }
     }
 
     fn skip_blanks(&mut self) {
@@ -1696,7 +1742,25 @@ let n = names
         // Python's `n // 2` (3.2), and the comments that are not that habit.
         assert_eq!(err("let half = n // 2"), "`// 2` starts a comment in V2, so this line doesn't divide");
         assert_eq!(err("let x = 7//2\n"), "`// 2` starts a comment in V2, so this line doesn't divide");
-        for src in ["print(x)    // 3", "let n = count    // 3", "let n = 3 // 3 retries", "let d = n // half", "let a = n\n// 2"] {
+        // The other operands of Python's habit: calls, parentheses, indexes, members, floats, and
+        // a number with closers or arithmetic after it.
+        for (src, left) in [
+            ("let h = len(xs) // 2", "len(xs)"),
+            ("let h = (a + b) // 2", "(a + b)"),
+            ("let h = xs[0] // 2", "xs[0]"),
+            ("let h = d.n // 2", "d.n"),
+            ("let h = 7.5 // 2", "7.5"),
+            ("print(n // 2)", "n"),
+            ("f(len(xs) // 2, 3)", "len(xs)"),
+            ("let h = n // 2 - 1", "n"),
+        ] {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            let d = lex(&sm, id).unwrap_err();
+            assert_eq!(d.message, "`// 2` starts a comment in V2, so this line doesn't divide", "{src}");
+            assert_eq!(d.hint.as_deref(), Some(&*format!("V2 divides rounding down with div(a, b), as in div({left}, 2)")), "{src}");
+        }
+        for src in ["print(x)    // 3", "let n = count    // 3", "let n = 3 // 3 retries", "let d = n // half", "let a = n\n// 2", "let p = x // 100%", "foo() // 2 things", "print(\"a\") // 2", "n // 2", "if x { f(y) // 2\n}"] {
             assert!(lex_str(src).is_ok(), "{src}");
         }
         assert_eq!(err("rf\"x\""), "unknown string prefix `rf`");

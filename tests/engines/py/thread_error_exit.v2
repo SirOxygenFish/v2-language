@@ -1,0 +1,17 @@
+// requires: py
+// exit: 1
+// stderr: Exception in thread worker:
+// stderr: ValueError: in a thread
+// An exception in a Python thread has no V2 call to raise it in: it is printed, and a run that
+// would have ended with 0 ends with 1 (INTERNALS 6.5, 9.9).
+@py {
+    import threading
+
+    def boom():
+        raise ValueError("in a thread")
+
+    t = threading.Thread(target=boom, name="worker")
+    t.start()
+    t.join()
+}
+print("after")

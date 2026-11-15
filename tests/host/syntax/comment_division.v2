@@ -1,3 +1,6 @@
 // exit: 1
 // stderr: hint: `//` starts a comment; integer division is div(a, b)
-print(1 // 2)
+// A `//` that comments out a closing parenthesis, with no number after it: the parser's hint
+// (the lexer's own catches `print(1 // 2)`: comment_division_number.v2).
+let half = 2
+print(7 // half)

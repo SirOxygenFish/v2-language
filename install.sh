@@ -258,7 +258,7 @@ if [ -n "$other" ] && [ "$other" != "$dir/v2" ]; then
     if [ "$on_path" = yes ]; then
         say "Note: another v2 comes first on your PATH: $other (remove it, or put $dir before it)"
     elif yes_value "${V2_NO_MODIFY_PATH:-}"; then
-        say "Note: a terminal finds another v2 now: $other"
+        say "Note: a terminal finds another v2 now: $other (put $dir before it in PATH, or remove it)"
     else
         say "Note: this terminal runs another v2, $other; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=$(dirname "$other")"
     fi

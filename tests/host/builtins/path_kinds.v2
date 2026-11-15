@@ -1,0 +1,19 @@
+// A folder where a file goes, or a file where a folder goes, is said so on every system, not in
+// the OS's words (INTERNALS 5.10).
+let home = getenv("HOME") ?? getenv("USERPROFILE")
+let dir = home + "/v2_kinds_dir"
+let file = home + "/v2_kinds_file.txt"
+make_dir(dir)
+write_file(file, "x")
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message.replace(home, "~"))
+    }
+}
+show(func() => write_file(dir, "x"))
+show(func() => read_file(dir))
+show(func() => remove_file(dir))
+show(func() => list_dir(file))
+show(func() => make_dir(file))

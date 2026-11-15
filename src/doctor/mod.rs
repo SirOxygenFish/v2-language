@@ -206,6 +206,10 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
                 rows.push([id.clone(), "ok".into(), e.shown(), version, e.origin.label()]);
                 skipped(&e.skipped, &mut notes);
+                // Read as it starts, after the version probe: one that is wrong stops every block.
+                for (name, value) in crate::engines::spec::startup_variables(&id) {
+                    notes.push(format!("{id}: {name} is set ({value}), which {} reads as it starts", if id == "py" { "Python" } else { "Node.js" }));
+                }
                 ready.push(id);
             }
             Err(nf) => {

@@ -507,7 +507,7 @@ fn cross_language_mistakes_say_what_to_do() {
             "@import { thing } from py.no_such_module_xyz\nprint(thing())\n",
             "  hint: if 'no_such_module_xyz' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps\n",
         ),
-        ("nonpm.v2", "@import { chunk } from js.no_such_package_xyz\nprint(chunk([1], 1))\n", "  hint: install it in your project folder: npm install no_such_package_xyz\n"),
+        ("nonpm.v2", "@import { chunk } from js.no_such_package_xyz\nprint(chunk([1], 1))\n", "  hint: if 'no_such_package_xyz' isn't misspelled, install it in your project folder: npm install no_such_package_xyz\n"),
         ("noexport.v2", "@py tools {\n    def a():\n        return 1\n}\n@import { a } from tools\nprint(a())\n", "ImportError: block 'tools' exports nothing: add @export { a } inside it\n"),
         (
             "static.v2",
@@ -916,7 +916,7 @@ fn exec_refuses_paths_cmd_would_rewrite() {
         stdout,
         format!(
             "IOError: exec: cannot start '{drive}prog': a drive-relative path: write it relative to the working directory, or absolute\n\
-             IOError: exec: cannot start '.\\p%OS%q\\x.cmd': a batch file whose path contains '%' can't be started safely\n"
+             IOError: exec: cannot start '.\\p%OS%q\\x.cmd': a batch file whose path contains '%' can't be started safely: move it to a folder whose path has no %, or start the program it runs directly\n"
         )
     );
 }
@@ -1007,6 +1007,58 @@ fn sleep_flushes_what_was_printed() {
     child.wait().unwrap();
     assert!(got.is_ok() && line == "first\n", "{line:?}");
     assert!(took < Duration::from_secs(10), "{took:?}");
+}
+
+#[test]
+fn a_script_named_like_a_flag_is_shown_how_to_run() {
+    // INTERNALS 19.1: `v2 -dash.v2`, also as PowerShell passes it (`-dash` `.v2`).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("-dash.v2"), "print(1)\n").unwrap();
+    for args in [&["-dash.v2"][..], &["-dash", ".v2"]] {
+        let (code, _, stderr) = run_in_home(&home.0, args, &[]);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stderr.contains("\nto run the file -dash.v2, write: v2 ./-dash.v2\nrun `v2 --help` for usage\n"), "{args:?}: {stderr}");
+    }
+    let (code, stdout, stderr) = run_in_home(&home.0, &["./-dash.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "1\n"), "{stderr}");
+}
+
+#[test]
+fn a_python_that_cant_start_names_pythonhome() {
+    // INTERNALS 8.4, 19.2: --version runs, but Python can't start with a PYTHONHOME that isn't
+    // there; the crash and doctor's notes name the variable.
+    if !needs("py", "a_python_that_cant_start_names_pythonhome") {
+        return;
+    }
+    let home = TempHome::new();
+    // Short, so no 80-character cut; relative, so there is no such folder from the cwd.
+    let nowhere = std::ffi::OsStr::new("no-python-home");
+    std::fs::write(home.0.join("start.v2"), "@py { 1 }\n").unwrap();
+    let env = [("PYTHONHOME", nowhere)];
+    let (code, _, stderr) = run_in_home(&home.0, &["start.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    let named = "; PYTHONHOME is set (no-python-home), which it reads as it starts";
+    assert!(stderr.contains("EngineCrashed: engine 'py' exited during startup") && stderr.contains(named), "{stderr}");
+    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &env);
+    assert!(stdout.contains("\n  py: PYTHONHOME is set (no-python-home), which Python reads as it starts\n"), "{stdout}");
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_output_in_the_console_code_page_is_decoded() {
+    // INTERNALS 5.10: on Windows, a child's output that isn't UTF-8 is in the console's code page,
+    // the OEM one when there is no console (as here: v2 starts detached), not U+FFFD.
+    use std::os::windows::process::CommandExt;
+    if !needs("py", "exec_output_in_the_console_code_page_is_decoded") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    let src = "let r = exec([args()[0], \"-c\", \"import sys; sys.stdout.buffer.write(bytes([0x9a]))\"])\nprint(len(r.stdout), r.stdout != \"\\u{fffd}\")\n";
+    std::fs::write(home.0.join("oem.v2"), src).unwrap();
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let out = v2_command(&home.0).args(["oem.v2", &python]).current_dir(&home.0).stdin(Stdio::null()).creation_flags(DETACHED_PROCESS).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1 true\n", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]
@@ -1159,7 +1211,8 @@ try {
 print(with_cause())
 ";
     let (code, stdout, stderr, _home) = run_with_files(&[("timer.v2", src)], &["timer.v2"]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "caught Error\n1\n"));
+    // The errors it printed turn exit code 0 into 1 (INTERNALS 6.5, 9.9).
+    assert_eq!((code, stdout.as_str()), (Some(1), "caught Error\n1\n"));
     // A block's own AggregateError (another realm) shows its members, and itself only once.
     assert!(stderr.contains("\n  RangeError: first\n") && stderr.contains("\n  SyntaxError: second\n"), "{stderr}");
     assert!(stderr.contains("\n  AggregateError: group (shown above)\n") && stderr.len() < 4000, "{stderr}");
@@ -1207,7 +1260,8 @@ func bad() {
 print(go())
 ";
     let (code, stdout, stderr, _home) = run_with_files(&[("thread.v2", src)], &["thread.v2"]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "2\n"));
+    // The thread's errors, reported, turn exit code 0 into 1 (INTERNALS 6.5, 9.9).
+    assert_eq!((code, stdout.as_str()), (Some(1), "2\n"));
     assert!(stderr.contains("line 14, in <lambda>"), "{stderr}");
     assert!(stderr.contains("V2Error: V2 function 'boom' called from another thread"), "{stderr}");
     assert!(stderr.contains("V2Error: ValueError: from v2"), "{stderr}");

@@ -3,7 +3,7 @@
 //! entries of a block's `load` (13.7).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use serde_json::{json, Value as Json};
@@ -337,32 +337,62 @@ fn not_exported(name: &str, text: &str, names: &[Rc<str>]) -> String {
 type ModuleAnswer = (Value, Vec<Export>, Vec<Rc<str>>, Vec<Rc<str>>);
 
 /// 13.3 step 6: `name` isn't among what the block exports, with the closest of those names.
-fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator<Item = &'a str>) -> String {
+/// `listed`: `exported` is the blocks' `@export` lists as written, where the typo may be.
+fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator<Item = &'a str>, listed: bool) -> String {
     match did_you_mean(name, exported) {
+        Some(near) if listed => format!("'{name}' is not exported by '{text}' — did you mean '{near}'? (or should its @export say '{name}'?)"),
         Some(near) => format!("'{name}' is not exported by '{text}' — did you mean '{near}'?"),
         None => format!("'{name}' is not exported by '{text}' (did the block @export it?)"),
     }
 }
 
-fn hint_missing_package(f: &Flow) {
-    let Flow::Error(e) = f else { return };
-    if &*e.kind != "ImportError" {
-        return;
-    }
-    let quoted = |after: &str| e.message.split(after).nth(1).and_then(|r| r.split('\'').next()).map(str::to_string);
-    let hint = if let Some(name) = quoted("No module named '") {
-        let top = name.split('.').next().unwrap_or(&name).to_string();
-        format!("if '{top}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps")
-    } else if let Some(name) = quoted("Cannot find module '") {
-        if name.starts_with(['.', '/']) || name.contains(':') {
-            "a local file is found from the .v2 file's folder: check the path".to_string()
-        } else {
-            format!("install it in your project folder: npm install {name}")
+/// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
+/// or what to install, from the folder of the importing .v2 file, `dir`.
+fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<String> {
+    let quoted = |after: &str| message.split(after).nth(1).and_then(|r| r.split('\'').next()).map(str::to_string);
+    if let Some(name) = quoted("No module named '") {
+        // Python names the first part it couldn't find: a dotted one means the rest was there.
+        if let Some((parent, part)) = name.rsplit_once('.') {
+            return Some(if message.contains("is not a package") {
+                format!("'{parent}' is a module, not a package, so it has no '{part}': check the name after '{parent}.'")
+            } else {
+                format!("'{parent}' is there, but has no '{part}': check the name after '{parent}.'")
+            });
         }
-    } else {
-        return;
+        let install = format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps");
+        // A virtual environment made in the project (the file's folder or up to three above it),
+        // but not named in a v2.toml.
+        let venv = (!venv_set)
+            .then(|| dir.ancestors().take(4).flat_map(|d| [d.join(".venv"), d.join("venv")]).find(|v| v.join("pyvenv.cfg").is_file()))
+            .flatten();
+        return Some(match venv {
+            Some(v) => format!(
+                "there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \"{}\"; or {install}",
+                v.display(),
+                v.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+            ),
+            None => install,
+        });
+    }
+    let name = quoted("Cannot find module '")?;
+    if name.starts_with(['.', '/']) || name.contains(':') {
+        return Some("a local file is found from the .v2 file's folder: check the path".to_string());
+    }
+    // The package is the first part of the specifier (`@scope/name` for a scoped one).
+    let mut parts = name.splitn(3, '/');
+    let package = match (parts.next(), parts.next()) {
+        (Some(scope), Some(rest)) if scope.starts_with('@') => format!("{scope}/{rest}"),
+        (Some(first), _) => first.to_string(),
+        _ => name.clone(),
     };
-    let _ = e.hint.set(hint.into());
+    let modules: Vec<PathBuf> = dir.ancestors().map(|d| d.join("node_modules")).filter(|m| m.is_dir()).collect();
+    if package != name && modules.iter().any(|m| m.join(&package).is_dir()) {
+        let rest = name[package.len()..].trim_start_matches('/');
+        return Some(format!("'{package}' is installed, but has no '{rest}': check the path after '{package}/'"));
+    }
+    let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| format!("did you mean js.{n}? "));
+    Some(format!("{}if '{package}' isn't misspelled, install it in your project folder: npm install {package}", near.unwrap_or_default()))
 }
 
 /// The imported names as an `@export { … }` list would write them.
@@ -546,7 +576,7 @@ impl Interp {
                 .iter()
                 .find(|b| b.directives.exports.as_ref().is_some_and(|e| e.star.is_some()) && self.loaded_for(b, seen).is_none())
                 .cloned()
-                .ok_or_else(|| import_error(not_exported_by_block(name, &text, cands.iter().flat_map(|b| b.directives.exports.iter().flat_map(|x| x.items.iter().map(|i| &*i.text)))))),
+                .ok_or_else(|| import_error(not_exported_by_block(name, &text, cands.iter().flat_map(|b| b.directives.exports.iter().flat_map(|x| x.items.iter().map(|i| &*i.text))), true))),
             many => Err(self.ambiguous(name, &text, many)),
         }
     }
@@ -596,7 +626,7 @@ impl Interp {
         match self.loaded_for(&b, seen) {
             Some(exports) => match find(exports, name) {
                 Some(e) => Ok(e.value.clone()),
-                None => Err(import_error(not_exported_by_block(name, &self.selector_text(sel), exports.iter().map(|e| &*e.name)))),
+                None => Err(import_error(not_exported_by_block(name, &self.selector_text(sel), exports.iter().map(|e| &*e.name), false))),
             },
             None => Err(self.state_error(&b, None)),
         }
@@ -756,7 +786,15 @@ impl Interp {
                 cs.next().is_some_and(|c| c == '_' || c.is_alphabetic()) && cs.all(|c| c == '_' || c.is_alphanumeric())
             };
             if !name.split('.').all(|seg| ident(seg) && !PY_KEYWORDS.contains(&seg)) {
-                return Err(import_error(format!("'{name}' is not a valid Python module name")));
+                // `py."./helper.py"`, as js takes a file: Python's names are module names.
+                let file = name.ends_with(".py") || name.contains(['/', '\\']);
+                let module = name.trim_start_matches("./").trim_start_matches(".\\").trim_end_matches(".py").replace(['/', '\\'], ".");
+                let hint = if file && !module.contains("..") && module.split('.').all(|s| !s.is_empty()) {
+                    format!(": a Python file next to the .v2 file is imported as a module, py.{module}")
+                } else {
+                    String::new()
+                };
+                return Err(import_error(format!("'{name}' is not a valid Python module name{hint}")));
             }
         } else if name.is_empty() {
             return Err(import_error("'' is not a valid module name".into()));
@@ -785,7 +823,15 @@ impl Interp {
         let from = self.sm.file(file).path.to_string_lossy().into_owned();
         let frame = json!({"t": "module", "unit": unit, "name": joined, "from": from, "names": names});
         let what = format!("@import from '{}'", self.selector_text(sel));
-        let reply = self.request(s, frame, &what, at).inspect_err(hint_missing_package)?;
+        let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let venv_set = self.registry.config().python_venv.is_some() || self.registry.config().engines.get("py").is_some_and(|e| e.command.is_some());
+        let reply = self.request(s, frame, &what, at).inspect_err(|f| {
+            if let Flow::Error(e) = f {
+                if let Some(hint) = (&*e.kind == "ImportError").then(|| missing_package_hint(&e.message, &dir, venv_set)).flatten() {
+                    let _ = e.hint.set(hint.into());
+                }
+            }
+        })?;
         let unit: Rc<str> = unit.into();
         let exports = reply.exports.into_iter().map(|(name, v)| export(s, &unit, name, v)).collect();
         Ok((reply.value, exports, reply.missing, reply.names))
@@ -937,7 +983,7 @@ impl Interp {
         match self.loaded(&hit).map(|ex| find(ex, name).cloned()) {
             Some(Some(e)) if e.func => Ok(e.value),
             Some(Some(_)) => Err(constant_error(name)),
-            Some(None) => Err(import_error(not_exported_by_block(name, &self.selector_text(&imp.selector), self.loaded(&hit).into_iter().flat_map(|l| l.iter()).map(|e| &*e.name)))),
+            Some(None) => Err(import_error(not_exported_by_block(name, &self.selector_text(&imp.selector), self.loaded(&hit).into_iter().flat_map(|l| l.iter()).map(|e| &*e.name), false))),
             None => Err(self.state_error(&hit, Some(name))),
         }
     }
@@ -948,5 +994,45 @@ pub fn export(s: SessionId, unit: &Rc<str>, name: Rc<str>, value: Option<Value>)
     match value {
         None => Export { value: Value::func(Callable::Proxy { session: s, unit: unit.clone(), name: name.clone() }), func: true, name },
         Some(v) => Export { name, value: v, func: false },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh folder under the system temp dir.
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("v2imp-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn missing_package_hints_name_the_missing_part() {
+        // 13.5: from the engine's own message, what to check or what to install.
+        let d = temp("plain");
+        let hint = |m: &str, dir: &Path| missing_package_hint(m, dir, false).unwrap();
+        assert_eq!(hint("No module named 'os.pathh'; 'os' is not a package", &d), "'os' is a module, not a package, so it has no 'pathh': check the name after 'os.'");
+        assert_eq!(hint("No module named 'xml.etreee'", &d), "'xml' is there, but has no 'etreee': check the name after 'xml.'");
+        let pip = "if 'numpy' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps";
+        assert_eq!(hint("No module named 'numpy'", &d), pip);
+        // A virtual environment V2 isn't told about, in the file's folder or above it.
+        let proj = temp("venv");
+        std::fs::create_dir_all(proj.join(".venv")).unwrap();
+        std::fs::write(proj.join(".venv").join("pyvenv.cfg"), "home = x\n").unwrap();
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        let expected = format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; or {pip}", proj.join(".venv").display());
+        assert_eq!(hint("No module named 'numpy'", &proj.join("sub")), expected);
+        assert_eq!(missing_package_hint("No module named 'numpy'", &proj, true).as_deref(), Some(pip), "a venv in v2.toml");
+        // npm: a subpath of an installed package, a near name, a scoped package.
+        let js = temp("npm");
+        std::fs::create_dir_all(js.join("node_modules").join("lodash")).unwrap();
+        assert_eq!(hint("Cannot find module 'lodash/chunck'", &js), "'lodash' is installed, but has no 'chunck': check the path after 'lodash/'");
+        assert_eq!(hint("Cannot find module 'lodsh'", &js), "did you mean js.lodash? if 'lodsh' isn't misspelled, install it in your project folder: npm install lodsh");
+        assert_eq!(hint("Cannot find module '@scope/pkg/sub'", &d), "if '@scope/pkg' isn't misspelled, install it in your project folder: npm install @scope/pkg");
+        assert_eq!(hint("Cannot find module './nope.js'", &d), "a local file is found from the .v2 file's folder: check the path");
+        assert_eq!(missing_package_hint("something else", &d, false), None);
     }
 }

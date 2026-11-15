@@ -343,7 +343,10 @@ impl Interp {
                 self.sessions[s].state = State::Dead(DeadReason::SpawnFailed(e.clone()));
                 return Flow::Error(e);
             }
-            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any"));
+            // A variable the program reads as it starts may be why (8.4).
+            let id = self.sessions[s].engine.spec.id.clone();
+            let vars: String = super::spec::startup_variables(&id).iter().map(|(n, v)| format!("; {n} is set ({v}), which it reads as it starts")).collect();
+            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any{vars}"));
         }
         let pid = pid.map_or_else(String::new, |p| format!(" (pid {p})"));
         error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above, if any", pending.name))
@@ -653,7 +656,8 @@ impl Interp {
                 Frame::Call { id: c, target, args, kwargs } => {
                     self.serve_call(s, c, target, &args, &kwargs, &line, at)?;
                 }
-                Frame::Out { stream, text } => {
+                Frame::Out { stream, text, error } => {
+                    self.reported |= error;
                     if let Err(flow) = self.forward(stream, &text) {
                         unwritten.get_or_insert(flow);
                     }
@@ -953,7 +957,8 @@ impl Interp {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
             match rx.recv_timeout(left) {
                 Ok(Some(line)) => {
-                    if let Ok(Frame::Out { stream, text }) = vep::parse_frame(&line, Caps::default()) {
+                    if let Ok(Frame::Out { stream, text, error }) = vep::parse_frame(&line, Caps::default()) {
+                        self.reported |= error;
                         if let Err(Flow::Error(lost)) = self.forward(stream, &text) {
                             self.out.lost.get_or_insert(lost.message.clone());
                         }

@@ -327,8 +327,9 @@ Escapes: `\n` `\t` `\r` `\\` `\"` `\'` `\0` `\$` `\xNN` `\u{1F600}`. Any other e
 error (so a typo like `"\d"` is caught instead of silently kept).
 
 In an f-string, `{name}` without the `$` is Python's spelling, and a `SyntaxError`
-(`{name} in an f-string is printed as it is`, hint `V2's placeholders are ${name}`), so it can't
-print its braces by mistake. Doubled braces (`{{name}}`) and an escaped `\${name}` are text.
+(`{name} in an f-string is Python's placeholder, which V2 doesn't use`, hint
+`write ${name} for its value, or ${"{name}"} for the text {name}`), so it can't print its braces by
+mistake. Doubled braces (`{{name}}`) and an escaped `\${name}` are text.
 
 Strings are indexed by character: `"héllo"[1]` is `"é"`, `"hello"[-1]` is `"o"`,
 `"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`.
@@ -535,7 +536,8 @@ import "./util.v2" as util
 print(util.slug("Hello World"))    // hello-world
 ```
 
-- Paths are relative to the importing file and end in `.v2`.
+- Paths are relative to the importing file and end in `.v2`. Another kind of file (`data.csv`,
+  `helper.py`) is an `ImportError` that says how to use it instead.
 - A module runs once, the first time it is imported; later imports reuse it.
 - `util` is a dict of the module's exported names, taken when the module finishes running.
   Reassigning a module variable later does not change what importers see — export a function
@@ -599,7 +601,9 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 `argv` is a non-empty list of strings; a program name without a path separator is searched on
 `PATH` like engine commands. A `str` or `bytes` `input` becomes the program's standard input
 (with `null` it is empty). The result is a dict `{code, stdout, stderr}`, both outputs captured
-whole and decoded as UTF-8 (invalid bytes become U+FFFD). A non-zero `code` is not an error; on
+whole and decoded as UTF-8 (invalid bytes become U+FFFD; on Windows, output that isn't UTF-8 is
+read in the console's code page first, as `cmd` and other console programs write it). A non-zero
+`code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>`. It runs in V2's working
 directory and environment with no timeout. `exec` returns when the program exits, and what the
@@ -1813,7 +1817,7 @@ that isn't there.
 | Exit code | Meaning                                                                  |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | success                                                                  |
-| `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error            |
+| `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error; a run in which Python or JavaScript printed an error V2 couldn't raise (from a timer, a thread, a Promise nobody waits for) |
 | `2`       | usage or configuration error                                             |
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
 | `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped, what was printed is still written |

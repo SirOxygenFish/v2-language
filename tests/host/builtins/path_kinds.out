@@ -1,0 +1,5 @@
+IOError: cannot write '~/v2_kinds_dir': it is a folder
+IOError: cannot read '~/v2_kinds_dir': it is a folder
+IOError: cannot remove '~/v2_kinds_dir': it is a folder, and remove_file removes files only
+IOError: cannot list '~/v2_kinds_file.txt': it is a file, not a folder
+IOError: cannot create '~/v2_kinds_file.txt': a file has that name
