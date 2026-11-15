@@ -1,0 +1,20 @@
+ValueError | invalid int: '13.5'
+  hint: int() reads whole numbers, as in 13: for 13.5, use float(x), or int(float(x)) to drop what is after the point
+ValueError | invalid int: '13.5 kg'
+  hint: int() reads whole numbers, as in 13: for 13.5, use float(x), or int(float(x)) to drop what is after the point
+ValueError | invalid int: '13 Jahre'
+  hint: int() reads the number alone, without other text: '13' would work
+ValueError | invalid int: 'dreizehn'
+  hint: the text has no digits: a number is written with digits, as in 13
+ValueError | invalid int: ''
+  hint: the text is empty: an empty line from input() is ""
+ValueError | invalid int: '0x1F'
+  hint: int() reads decimal digits: for hex text, convert it in a block, as in @py(x) { int(x, 16) }
+ValueError | invalid float: '3,7'
+  hint: write the decimal point as a point, as in 3.7: x.replace(",", ".") changes it
+ValueError | invalid float: '2,5 kg'
+  hint: write the decimal point as a point, as in 3.7: x.replace(",", ".") changes it
+ValueError | invalid float: 'abc'
+  hint: the text has no digits: a number is written with digits, as in 13
+TypeError | int() can't convert null
+  hint: input() gives null when the input has ended, and a function without return gives null: check for null first

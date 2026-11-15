@@ -963,6 +963,10 @@ impl Interp {
             if let Some(hint) = err.foreign_type.as_deref().and_then(|t| foreign_hint(t, message, &self.tag(s))) {
                 let _ = err.hint.set(hint.into());
             }
+            // The adapter's own hint (a file of the user's that hides a standard module, 9.6).
+            if let Some(hint) = e.get("hint").and_then(Json::as_str) {
+                let _ = err.hint.set(hint.into());
+            }
             // A foreign exception's own simple fields (Node's `code: "ENOENT"`, the n of
             // `sys.exit(n)` as `exit_code`) are its data (9.6).
             if let Some(data) = e.get("data").filter(|d| d.as_object().is_some_and(|o| !o.is_empty())) {
@@ -973,7 +977,7 @@ impl Interp {
         err.lang = Some(self.tag(s));
         if let Some((span, lang)) = frames.at {
             // `const a = [1, 2]` then `[3, 4].forEach(…)`: JavaScript joined the two lines.
-            if &*err.kind == "ForeignError" && matches!(&*lang, "js" | "ts") && err.hint.get().is_none() && self.joined_line(span) {
+            if &*err.kind == "ForeignError" && matches!(&*lang, "js" | "ts") && err.hint.get().is_none() && !message.contains("as part of the one above") && self.joined_line(span) {
                 let _ = err.hint.set("JavaScript reads this line as part of the one above, as in a(…) or a[…]: end the line above with ;".into());
             }
             let _ = err.span.set(span);

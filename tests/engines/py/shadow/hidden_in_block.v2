@@ -1,0 +1,16 @@
+// requires: py
+// A file of the folder that hides a standard module, met by a block's own import or attribute:
+// the hint names the file (INTERNALS 9.6).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.foreign_type, "|", e.hint.split(" hides ")[1])
+    }
+}
+show(func() => @py { __import__("statistics").mean([1, 2]) })
+show(func() {
+    @py {
+        from statistics import median
+    }
+})

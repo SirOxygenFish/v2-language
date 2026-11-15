@@ -621,6 +621,15 @@ process.emitWarning = function (warning, ...rest) {
   if (type === 'ExperimentalWarning' && /Type Stripping|stripTypeScriptTypes|vm\.USE_MAIN_CONTEXT_DEFAULT_LOADER|importModuleDynamically/i.test(text)) return;
   return rawEmitWarning.call(process, warning, ...rest);
 };
+// A file of the user's that Node read as CommonJS: V2's error names the package.json (13.5).
+// Node's loader emits that warning past process.emitWarning, to the 'warning' listeners.
+const nodeWarnings = process.listeners('warning');
+process.removeAllListeners('warning');
+process.on('warning', (w) => {
+  const text = w && typeof w.message === 'string' ? w.message : String(w);
+  if (/^Failed to load the ES module: /.test(text) && !/[\\/]node_modules[\\/]/.test(text)) return;
+  for (const l of nodeWarnings) l.call(process, w);
+});
 
 // ---------------------------------------------------------------------------------------------
 // Handles (11.1) and V2 function stubs (11.8)

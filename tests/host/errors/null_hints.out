@@ -1,0 +1,23 @@
+TypeError | unsupported operand types for +: 'null' and 'int'
+  hint: doppelt(…) gave null: a function without return gives null, so end it with return …
+TypeError | cannot index null
+  hint: 'sortiert' is null: it was set from xs.sort(), and sort() changes the list itself and gives null: use the list
+TypeError | unsupported operand types for +: 'str' and 'null'
+  hint: 'name' is null here: a function without return gives null, and so does input() when the input has ended
+TypeError | cannot iterate over int
+  hint: to count, write for i in 0..10 (0 up to 9)
+TypeError | unsupported operand types for +: 'list' and 'int' — add an item with xs.push(x), or join lists with xs + [x]
+  hint: null
+TypeError | unsupported operand types for *: 'str' and 'float' — repeat with a whole number, as in "ab" * 2
+  hint: null
+ValueError | repetition result too large: 1000000000 items (100000000 at most)
+  hint: null
+ValueError | repetition result too large: 3000000000 bytes of text (1 GiB at most)
+  hint: null
+ValueError | range too large: a list of 1000000000 items (100000000 at most)
+  hint: for a long loop, write for i in 0..n, which makes no list
+4999950000
+0 10
+1 7
+2 4
+3 1

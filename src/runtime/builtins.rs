@@ -460,6 +460,14 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
         let name = first.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
         format!("getenv(\"{name}\") in its place")
     } else {
+        // `notes 12:30.txt` on Windows: a `:` after the drive names a hidden stream of the file
+        // before it, so the write would seem to work and leave that file empty.
+        let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
+        if cfg!(windows) && !path.starts_with(r"\\") && after_drive.contains(':') {
+            let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': a Windows file name can't have ':' in it", shown_path(path)));
+            let _ = err.hint.set("use another character, as in 12-30 for a time".into());
+            return Err(Flow::Error(Rc::new(err)));
+        }
         return Ok(());
     };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': V2 doesn't expand {first} in paths", shown_path(path)));
@@ -617,7 +625,7 @@ fn int(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             let t = s.trim();
             let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
             if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return value_error(format!("invalid int: '{s}'"));
+                return Err(number_text(format!("invalid int: '{s}'"), t, true));
             }
             match t.parse::<i64>() {
                 Ok(n) => n,
@@ -625,8 +633,44 @@ fn int(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             }
         }
         Value::Handle(h) => return number_error("int() can't convert handle", &h.tag, true),
+        Value::Null => return Err(null_number("int")),
         other => return type_error(format!("int() can't convert {}", other.type_name())),
     }))
+}
+
+/// `int("13.5")`, `float("3,7")`, `int("13 Jahre")`: the ValueError, with what the text needs to
+/// be (5.10).
+fn number_text(message: String, t: &str, int: bool) -> Flow {
+    let err = ErrorValue::new("ValueError", message);
+    let f = if int { "int" } else { "float" };
+    // The number the text starts with: digits, a sign, a point or a comma.
+    let lead: String = t.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | ',')).collect();
+    let hint = if t.is_empty() {
+        Some("the text is empty: an empty line from input() is \"\"".to_string())
+    } else if int && (t.starts_with("0x") || t.starts_with("0X")) {
+        Some("int() reads decimal digits: for hex text, convert it in a block, as in @py(x) { int(x, 16) }".to_string())
+    } else if lead.contains(',') && lead.replace(',', ".").parse::<f64>().is_ok() {
+        Some("write the decimal point as a point, as in 3.7: x.replace(\",\", \".\") changes it".to_string())
+    } else if int && lead.parse::<i64>().is_err() && lead.parse::<f64>().is_ok() {
+        Some(format!("int() reads whole numbers, as in 13: for {lead}, use float(x), or int(float(x)) to drop what is after the point"))
+    } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() {
+        Some(format!("{f}() reads the number alone, without other text: '{lead}' would work"))
+    } else if !t.chars().any(|c| c.is_ascii_digit()) {
+        Some("the text has no digits: a number is written with digits, as in 13".to_string())
+    } else {
+        None
+    };
+    if let Some(h) = hint {
+        let _ = err.hint.set(h.into());
+    }
+    Flow::Error(Rc::new(err))
+}
+
+/// `int(input())` once the input has ended (5.10).
+fn null_number(f: &str) -> Flow {
+    let err = ErrorValue::new("TypeError", format!("{f}() can't convert null"));
+    let _ = err.hint.set("input() gives null when the input has ended, and a function without return gives null: check for null first".into());
+    Flow::Error(Rc::new(err))
 }
 
 /// A handle where V2 wants a number (Python's `Decimal` or `Fraction`, a numpy array): the
@@ -651,19 +695,44 @@ fn float(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         Value::Bool(b) => *b as i64 as f64,
         Value::Str(s) => match s.trim().parse::<f64>() {
             Ok(x) => x,
-            Err(_) => return value_error(format!("invalid float: '{s}'")),
+            Err(_) => return Err(number_text(format!("invalid float: '{s}'"), s.trim(), false)),
         },
         Value::Handle(h) => return number_error("float() can't convert handle", &h.tag, false),
+        Value::Null => return Err(null_number("float")),
         other => return type_error(format!("float() can't convert {}", other.type_name())),
     }))
 }
+
+/// The most items one `range()` list or `*` repetition makes (5.3): past it, a machine's memory
+/// would run out first.
+pub(crate) const MAX_ITEMS: u64 = 100_000_000;
 
 /// `range(end)` / `range(start, end, step = 1)`: a list of ints, sized before it is built. One
 /// argument is the end; arguments are positional only (5.10).
 fn range(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let Value::List(given) = &args[0] else { unreachable!("a rest parameter is a list") };
-    let given = given.borrow();
-    let (start, end, step) = match given.as_slice() {
+    let (start, step, count) = range_bounds(&given.borrow())?;
+    if count > MAX_ITEMS {
+        let err = ErrorValue::new("ValueError", format!("range too large: a list of {count} items ({MAX_ITEMS} at most)"));
+        let _ = err.hint.set("for a long loop, write for i in 0..n, which makes no list".into());
+        return Err(Flow::Error(Rc::new(err)));
+    }
+    let mut items = Vec::new();
+    if usize::try_from(count).ok().and_then(|n| items.try_reserve_exact(n).ok()).is_none() {
+        return value_error("range too large");
+    }
+    let mut i = start as i128;
+    for _ in 0..count {
+        items.push(Value::Int(i as i64));
+        i += step as i128;
+    }
+    Ok(Value::list(items))
+}
+
+/// `range()`'s arguments (`given`, its rest parameter): the first item, the step and how many
+/// items. A `for` over `range(…)` counts with them without making the list (5.8).
+pub(crate) fn range_bounds(given: &[Value]) -> Exec<(i64, i64, u64)> {
+    let (start, end, step) = match given {
         [] => return fail("ArityError", "range() missing required argument 'end'"),
         [end] => (&Value::Int(0), end, &Value::Int(1)),
         [start, end] => (start, end, &Value::Int(1)),
@@ -677,16 +746,7 @@ fn range(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // Number of items: ceil((end - start) / step) when that is positive.
     let span = end as i128 - start as i128;
     let count = if (span > 0) == (step > 0) && span != 0 { (span.abs() + step.unsigned_abs() as i128 - 1) / step.unsigned_abs() as i128 } else { 0 };
-    let mut items = Vec::new();
-    if usize::try_from(count).ok().and_then(|n| items.try_reserve_exact(n).ok()).is_none() {
-        return value_error("range too large");
-    }
-    let mut i = start as i128;
-    for _ in 0..count {
-        items.push(Value::Int(i as i64));
-        i += step as i128;
-    }
-    Ok(Value::list(items))
+    Ok((start, step, count as u64))
 }
 
 fn json_parse(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
@@ -881,6 +941,13 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             let words: Vec<&str> = if std::path::Path::new(&**s).is_file() { vec![&**s] } else { s.split_whitespace().collect() };
             if words.is_empty() {
                 return type_error("exec() argument 'argv' must be a list, got str");
+            }
+            // `exec("dir")`: a command of the shell needs the shell, so the list alone won't do.
+            let given: Vec<Value> = words.iter().map(|w| Value::str(w)).collect();
+            if let Some(h) = shell_command_hint(words[0], &given) {
+                let err = ErrorValue::new("TypeError", "exec() argument 'argv' must be a list, got str");
+                let _ = err.hint.set(h.into());
+                return Err(Flow::Error(Rc::new(err)));
             }
             let mut list = String::new();
             for (i, w) in words.iter().enumerate() {

@@ -15,3 +15,9 @@ try {
 } catch (e) {
     print(e.type, "|", e.hint)
 }
+// A command line given as one string whose program is the shell's own: the shell form at once.
+try {
+    exec("export X=1")
+} catch (e) {
+    print(e.message, "|", e.hint)
+}
