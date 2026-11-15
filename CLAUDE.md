@@ -33,9 +33,10 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 6 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 7 next
-  on a new distro and sandbox (round 6's prompts: scratchpad/newcomer/prompt-*-r6.md; the Windows
-  one forbids windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
+  Rounds 1 to 7 found and fixed, round 2's fixes reviewed and fixed (ROADMAP log); round 8 next
+  on a new distro and sandbox (round 7's prompts: scratchpad/newcomer/prompt-*-r7.md, made by
+  scratchpad/setup_round7.py; the Windows one forbids windowed programs and files named like PATH
+  programs: round 5's code.cmd ran VS Code). Heredocs mangle `\n` in edit scripts too: Write them.
   CI's minimum Node (22.13) for local checks: WSL Ubuntu's ~/node2213/node-v22.13.0-linux-x64/bin
   first on PATH (copied from round 5's distro, which checked it against nodejs.org's SHASUMS).
   Newcomer agents work as root only: no user accounts, not even in a throwaway distro (the
@@ -108,7 +109,7 @@ it is loaded automatically into every session and every subagent.
   `V2_ENGINE_<TAG>` overrides (canonical tags only; a replaced `command` is not validated);
   `command` must be an array; unknown sections/keys and keys that don't apply are config
   errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
-  raw until Phase 3 (17.1).
+  raw until Phase 3 (17.1). `unexpanded(text)`: the shell variable (`%X%`, `$X`) a hint names.
 - `syntax/`: `span` (SourceMap, FileId, display_path), `lexer`, `scan` (block bodies, profiles,
   `canonical_tag`), `directives` (@export/@import, dedent), `resolve` (layouts, `Loc`, after
   `check`, in `parse_file`, the entry path and `parse_str`), `parser` (MAX_DEPTH 256, expression
@@ -200,7 +201,9 @@ it is loaded automatically into every session and every subagent.
   reporting engine. `UnitLoc::col` returns Option (checked) and knows `@@` escape lines.
   js.js `realPosition` maps V8 lines past U+2028/2029 back (`shifted`).
 - Empty stubs (a doc comment only): `engines/runonly.rs`, `build/*`, `ffi/lib.rs`.
-- `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL); main removes it.
+- `config/rundir.rs`: the private run dir (lazy; 0700 + lstat / protected DACL, made by its `\\?\`
+  path; a temp folder too deep on Windows: its 8.3 name via `choose`, else `temp_problem`); main
+  removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
   `V2_TEST_REQUIRE`. `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
   tests. `tests/v2.toml` is comment-only (it just stops the upward config search).

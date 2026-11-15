@@ -939,7 +939,10 @@ fn list_dir_refuses_names_that_are_not_utf8_and_exists_follows_symlinks() {
     cmd.arg("main.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "IOError: cannot list 'names': a name is not valid UTF-8\ntrue false true\n");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "IOError: cannot list 'names': the name 'bad\u{FFFD}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it\ntrue false true\n"
+    );
 }
 
 #[test]
@@ -2262,8 +2265,9 @@ fn run_with_files_env(files: &[(&str, &str)], args: &[&str], env: &[(&str, &str)
 fn doctor_rows(stdout: &str) -> HashMap<String, Vec<String>> {
     let mut lines = stdout.lines();
     let header = lines.next().unwrap_or_default();
-    assert!(header.split_whitespace().eq(["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"]), "{stdout}");
-    let starts: Vec<usize> = ["STATUS", "COMMAND", "VERSION", "FROM"].iter().map(|h| header.find(h).unwrap()).collect();
+    // 19.2: COMMAND is printed last; the cells come back as STATUS, COMMAND, VERSION, FROM.
+    assert!(header.split_whitespace().eq(["ENGINE", "STATUS", "VERSION", "FROM", "COMMAND"]), "{stdout}");
+    let starts: Vec<usize> = ["STATUS", "VERSION", "FROM", "COMMAND"].iter().map(|h| header.find(h).unwrap()).collect();
     let mut rows = HashMap::new();
     for line in lines.take_while(|l| !l.starts_with("notes:") && !l.starts_with("config file:")) {
         let cell = |i: usize| -> String {
@@ -2272,7 +2276,7 @@ fn doctor_rows(stdout: &str) -> HashMap<String, Vec<String>> {
             line.get(from..to).unwrap_or_default().trim().to_string()
         };
         let id = line[..starts[0]].trim().to_string();
-        rows.insert(id, (0..4).map(cell).collect());
+        rows.insert(id, [0, 3, 1, 2].into_iter().map(cell).collect());
     }
     rows
 }
@@ -2376,7 +2380,8 @@ fn doctor_names_the_programs_it_could_not_use() {
     // The note, then the program it skipped and why, which "see why below" points at.
     let below = format!("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)\n  js: skipped {node} (version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1)\n");
     assert!(stdout.contains(&below), "{stdout}");
-    assert!(stdout.contains("\n  ts: engine 'ts' (TypeScript) can't run — @ts blocks run on the js engine, and engine 'js' (JavaScript) was found but doesn't run (see js above)\n"), "{stdout}");
+    // ts runs on that node: js's notes, fix included, are its own (19.2).
+    assert!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), "{stdout}");
 }
 
 #[test]
@@ -2425,6 +2430,85 @@ fn a_temp_folder_that_doesnt_exist_is_named() {
     let (code, _out, err) = run_in_home(&home.0, &["b.v2"], &env);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("IOError: cannot create a private temp folder in ") && err.contains(&format!("; {problem}")), "{err}");
+}
+
+#[test]
+fn file_and_exec_errors_say_what_to_write() {
+    // 5.10: what a shell would have done for the script (~, %VAR%, $env:VAR, its own commands)
+    // and a folder given to remove_file get a hint with what to write instead.
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let mut cases: Vec<(&str, String)> = vec![
+        ("read_file(\"~/no-such-v2-file.txt\")\n", format!("V2 doesn't expand ~ in paths: write getenv(\"{home}\") + \"/no-such-v2-file.txt\"")),
+        ("read_file(\"%NO_SUCH_V2_VAR%/x.txt\")\n", "V2 doesn't expand %NO_SUCH_V2_VAR% in paths: write getenv(\"NO_SUCH_V2_VAR\") in its place".into()),
+        ("write_file(\"$env:NO_SUCH_V2_VAR/x.txt\", \"x\")\n", "V2 doesn't expand $env:NO_SUCH_V2_VAR in paths: write getenv(\"NO_SUCH_V2_VAR\") in its place".into()),
+        ("make_dir(\"fold\")\nremove_file(\"fold\")\n", "a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into()),
+    ];
+    // macOS has /usr/bin/cd, a program.
+    if cfg!(windows) {
+        cases.push(("exec([\"cd\", \"build\"])\n", "'cd' is a command of cmd.exe, not a program: to run a program in another folder, write exec([\"cmd\", \"/c\", \"cd /d build && program\"])".into()));
+        cases.push(("exec([\"copy\", \"a b\", \"c\"])\n", "'copy' is a command of cmd.exe, not a program: write exec([\"cmd\", \"/c\", \"copy\", \"a b\", \"c\"])".into()));
+    } else if cfg!(target_os = "linux") {
+        cases.push(("exec([\"cd\", \"build\"])\n", "'cd' is a command of the shell, not a program: to run a program in another folder, write exec([\"sh\", \"-c\", \"cd build && program\"])".into()));
+        cases.push(("exec([\"export\", \"A=1\"])\n", "'export' is a command of the shell, not a program: write exec([\"sh\", \"-c\", \"export A=1\"])".into()));
+    }
+    for (src, hint) in cases {
+        let (code, _, stderr) = run_generated("hint.v2", src);
+        assert_eq!(code, Some(1), "{src}{stderr}");
+        assert!(stderr.contains(&format!("\n  hint: {hint}\n")), "{src}{stderr}");
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn list_dir_names_the_name_that_isnt_utf8() {
+    // 5.10: the name, with U+FFFD for what isn't UTF-8 (Linux: a byte; Windows: a lone
+    // surrogate). macOS refuses such names.
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("names")).unwrap();
+    #[cfg(unix)]
+    let bad = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"bad\xff.txt").to_os_string();
+    #[cfg(windows)]
+    let bad = <std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0x62, 0x61, 0x64, 0xD800, 0x2E, 0x74, 0x78, 0x74]);
+    std::fs::write(home.0.join("names").join(bad), "x").unwrap();
+    std::fs::write(home.0.join("l.v2"), "print(list_dir(\"names\"))\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["l.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("IOError: cannot list 'names': the name 'bad\u{FFFD}.txt' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"), "{stderr}");
+}
+
+#[test]
+fn blocks_run_in_a_deep_temp_folder() {
+    // 20.3: a temp folder whose path leaves too little room for the run dir's files under
+    // Windows' 260 characters: the run dir is still made (a `\\?\` path) and used (with long
+    // paths on, or by the folder's short name), so blocks run, and doctor sees no problem.
+    if !needs("py", "blocks_run_in_a_deep_temp_folder") {
+        return;
+    }
+    let home = TempHome::new();
+    let mut tmp = home.0.join("tmp");
+    while tmp.as_os_str().len() < 230 {
+        tmp.push("a folder with a long name");
+    }
+    std::fs::write(home.0.join("deep.v2"), "print(@py { 6 * 7 })\n").unwrap();
+    // A Windows with long paths off and no 8.3 names on that volume has no way to fit: then the
+    // run and doctor say how long the folder is and what to do.
+    let too_long = format!("TMP names {}, which is {} characters long: too long for the files blocks need there", tmp.display(), tmp.display().to_string().chars().count());
+    let mut ran = None;
+    for args in [&["deep.v2"][..], &["doctor"]] {
+        let mut cmd = v2_command(&home.0);
+        with_temp(&mut cmd, &tmp);
+        let out = cmd.args(args).current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if args == ["deep.v2"] {
+            ran = Some(stdout == "42\n");
+            assert!(stdout == "42\n" || (cfg!(windows) && stderr.contains(&too_long)), "{stdout}{stderr}");
+        } else if ran == Some(true) {
+            assert!(!stdout.contains("temp: "), "{stdout}");
+        } else {
+            assert!(stdout.contains(&format!("temp: {too_long}")), "{stdout}");
+        }
+    }
+    assert!(names_in(&tmp).is_empty(), "the run dir is removed");
 }
 
 #[test]
@@ -2683,7 +2767,7 @@ fn doctor_columns_are_longest_cell_plus_two() {
     assert_eq!(code, Some(0), "{stderr}");
     let lines: Vec<&str> = stdout.lines().take_while(|l| !l.starts_with("notes:") && !l.starts_with("config file:")).collect();
     let header = lines[0];
-    let starts: Vec<usize> = ["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].iter().map(|h| header.find(h).unwrap()).collect();
+    let starts: Vec<usize> = ["ENGINE", "STATUS", "VERSION", "FROM", "COMMAND"].iter().map(|h| header.find(h).unwrap()).collect();
     for c in 0..4 {
         let longest = lines.iter().map(|l| l.get(starts[c]..starts[c + 1]).unwrap_or_default().trim_end().chars().count()).max().unwrap();
         assert_eq!(starts[c + 1] - starts[c], longest + 2, "column {c}:\n{stdout}");

@@ -72,8 +72,8 @@ jobs:
         run: |
           top="v2-${{ matrix.target }}"
           mkdir -p "stage/$top"
-          cp LICENSE README.md "stage/$top/"
-          chmod 644 "stage/$top/LICENSE" "stage/$top/README.md"
+          cp LICENSE README.md DOCS.md "stage/$top/"
+          chmod 644 "stage/$top/LICENSE" "stage/$top/README.md" "stage/$top/DOCS.md"
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/release/v2.exe "stage/$top/"
             asset="$top.zip"

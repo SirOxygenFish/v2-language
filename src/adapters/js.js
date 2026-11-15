@@ -810,7 +810,8 @@ function encodeValue(x, root, depth = 0) {
   } catch (e) {
     if (e instanceof Fail && !e.located) {
       e.located = true;
-      e.message += ` (at ${root}${e.steps.slice().reverse().join('')})`;
+      // The whole value needs no path (10.5).
+      if (root !== 'value' || e.steps.length) e.message += ` (at ${root}${e.steps.slice().reverse().join('')})`;
     }
     throw e;
   }
@@ -1124,6 +1125,10 @@ function compileOrExplain(src, m) {
       // a caret under the column.
       const loc = /^(.*):(\d+)\r?\n(?:[^\n]*\r?\n([ \t]*)\^)?/.exec(e.stack || '');
       if (loc && loc[1] === m.file) {
+        // `{"k": t}` on a line of its own: an object read as a block of code (DOCS 4).
+        if (String(e.message) === "Unexpected token ':'" && /^\s*\{/.test(src.split('\n')[Number(loc[2]) - m.line] ?? '')) {
+          e.message = 'an object at the start of a statement needs parentheses, as in ({a: 1}): JavaScript reads { there as a block of code';
+        }
         const [line, col] = realPosition(m.file, Number(loc[2]), loc[3] === undefined ? null : loc[3].length + 1);
         e.v2Frame = { file: m.file, line, col, func: null };
       }
@@ -1383,9 +1388,25 @@ function settle(v, k, what) {
   return Promise.resolve(v).then(k);
 }
 
+// `let v = @js { {a: 1} }`: at the start of the code JavaScript reads `{` as a block of code (and
+// `a:` as a label), so the value would quietly be 1, or a SyntaxError for `{"a": 1}` (DOCS 4).
+const OBJECT_START = /^\s*\{\s*(?:\}|\.\.\.|(?:[A-Za-z_$][\w$]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\d+)\s*[:,}])/;
+
+function objectBraces(src, m) {
+  if (!OBJECT_START.test(src)) return;
+  const at = src.indexOf('{');
+  const lineIdx = src.slice(0, at).split('\n').length - 1;
+  const col = at - (src.lastIndexOf('\n', at - 1) + 1) + 1;
+  const err = new SyntaxError(`an object as the block's value needs parentheses, as in @${m.lang} { ({a: 1}) }: at its start, JavaScript reads { as a block of code`);
+  const [line, cp] = realPosition(m.file, m.line + lineIdx, col);
+  err.v2Frame = { file: m.file, line, col: cp, func: null };
+  throw err;
+}
+
 function doLoad(m) {
   const src = m.lang === 'ts' ? stripTypes(m.source, m) : m.source;
   rememberSource(m.file, m.line, m.source); // stripping keeps every UTF-16 offset (12.6)
+  if (m.kind === 'action' && m.want_value) objectBraces(src, m);
   const ctx = newContext(m.file);
   for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));
   bindImports(ctx, m.imports || [], m.kind !== 'action');
@@ -1921,6 +1942,16 @@ async function main() {
         await new Promise((r) => setImmediate(r));
         stubsSinceGc = 0;
       }
+    } else if (m.t === 'bye') {
+      // The end of the run, with no call waiting: what is still to come (timers, promises) runs,
+      // as Node runs it after a script, and the worker ends when nothing is left. V2's grace
+      // period bounds it; a V2 function called now is an error (9.10, 14.4).
+      closing = true;
+      try {
+        drainOut(true);
+      } catch {}
+      process.once('beforeExit', leave);
+      return;
     } else {
       dispatchOther(m);
     }

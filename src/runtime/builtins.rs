@@ -350,14 +350,55 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         _ => os_message(e),
     };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let tilde = path == "~" || path.starts_with("~/") || path.starts_with("~\\");
     if path.chars().any(char::is_control) {
         let _ = err
             .hint
             .set(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write Windows paths with / or \\, as in "notes/new.txt""#.into());
     } else if let Some(h) = hint {
         let _ = err.hint.set(h.into());
+    } else if verb == "remove" && p.is_dir() {
+        let _ = err.hint.set("a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into());
+    } else if tilde && !p.exists() {
+        // A shell expands them, V2 doesn't (5.10); `$env:X\…` fails as a bad name, not as missing.
+        let _ = err.hint.set(format!("V2 doesn't expand ~ in paths: write getenv(\"{home}\") + \"{}\"", &path[1..]).into());
+    } else if let Some(var) = crate::config::unexpanded(path).filter(|_| !p.exists()) {
+        let name = var.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
+        let _ = err.hint.set(format!("V2 doesn't expand {var} in paths: write getenv(\"{name}\") in its place").into());
     }
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// A command of the shell (`dir`, `cd`), not a program on PATH: what to write instead (5.10).
+fn shell_command_hint(name: &str, argv: &[Value]) -> Option<String> {
+    const CMD: &[&str] = &[
+        "assoc", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", "dir", "echo", "erase", "ftype", "md", "mkdir", "mklink", "move", "path", "pause", "popd",
+        "pushd", "rd", "ren", "rename", "rmdir", "set", "start", "time", "title", "type", "ver", "vol",
+    ];
+    const SH: &[&str] = &["alias", "cd", "eval", "export", "set", "source", "ulimit", "umask", "unalias", "unset"];
+    let lower = name.to_ascii_lowercase();
+    let (shell, list) = if cfg!(windows) { ("cmd.exe", CMD) } else { ("the shell", SH) };
+    if !list.contains(&lower.as_str()) {
+        return None;
+    }
+    let words: Vec<String> = argv.iter().map(|v| if let Value::Str(s) = v { s.to_string() } else { String::new() }).collect();
+    let quoted = |w: &str| {
+        let mut out = String::new();
+        super::value::quoted(w, &mut out);
+        out
+    };
+    // `cd` ends with its shell: the program to run there goes after it, in the same command.
+    if lower == "cd" || lower == "chdir" {
+        let dir = words.get(1).map_or("folder", String::as_str);
+        let line = if cfg!(windows) { format!("cd /d {dir} && program") } else { format!("cd {dir} && program") };
+        let (sh, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+        return Some(format!("'{name}' is a command of {shell}, not a program: to run a program in another folder, write exec([\"{sh}\", \"{flag}\", {}])", quoted(&line)));
+    }
+    let rest: Vec<String> = words.iter().map(|w| quoted(w)).collect();
+    let call = if cfg!(windows) { format!("exec([\"cmd\", \"/c\", {}])", rest.join(", ")) } else { format!("exec([\"sh\", \"-c\", {}])", quoted(&words.join(" "))) };
+    let also = if lower == "dir" { " (or list_dir(path) for the names in a folder)" } else { "" };
+    Some(format!("'{name}' is a command of {shell}, not a program: write {call}{also}"))
 }
 
 /// What text that isn't UTF-8 probably is (5.10).
@@ -580,7 +621,10 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         };
         match name.into_string() {
             Ok(name) => names.push(name),
-            Err(_) => return io_error(format!("cannot list '{path}': a name is not valid UTF-8")),
+            Err(bad) => {
+                let shown = bad.to_string_lossy();
+                return io_error(format!("cannot list '{path}': the name '{shown}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"));
+            }
         }
     }
     names.sort();
@@ -659,7 +703,13 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         }
         // A path that names nothing usable: starting it gives the OS's reason.
         None if name.contains(['/', '\\']) => lookup.cwd.join(&**name).into_os_string(),
-        None => return io_error(format!("exec: cannot start '{name}': not found on PATH")),
+        None => {
+            let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': not found on PATH"));
+            if let Some(hint) = shell_command_hint(name, &items) {
+                let _ = err.hint.set(hint.into());
+            }
+            return Err(Flow::Error(Rc::new(err)));
+        }
     };
     it.out.flush_or_stop();
     let c = match process::run_captured(&argv, &[], None, input) {

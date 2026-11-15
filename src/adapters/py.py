@@ -2,7 +2,8 @@
 # into its private run folder and starts it as `python -B -u py.py`. Python 3.10 is the floor.
 #
 # Everything runs under the __main__ guard, so a multiprocessing spawn child that re-imports
-# __main__ starts no second adapter (14.3).
+# __main__ starts no second adapter (14.3); such a child only learns why it can't import a
+# block's code (the end of this file).
 
 if __name__ == "__main__":
     # 1. Every stdlib module the adapter uses, before any project folder is on sys.path (14.3).
@@ -53,6 +54,21 @@ if __name__ == "__main__":
     if sys.path and same(sys.path[0] or ".", os.path.dirname(ADAPTER)):
         del sys.path[0]
     ORIGINAL_PATH = list(sys.path)
+
+    class BlockNames:
+        """A block's module is named for its place in this run (12.1), so a `__v2_` name that isn't
+        loaded comes from somewhere else, such as a pickle another run saved (14.3)."""
+
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            if name.startswith("__v2_"):
+                raise ModuleNotFoundError(
+                    "No module named %r: that is how V2 names a @py block's code, for its place in one run, so "
+                    "nothing else can import it (pickle saves where each class it saved came from): define what you "
+                    "pickle in a .py file next to your .v2 file, and import that in the block" % name, name=name)
+            return None
+
+    sys.meta_path.append(BlockNames)
 
     # ----------------------------------------------------------------------------------------
     # Errors
@@ -583,7 +599,9 @@ if __name__ == "__main__":
         except Fail as f:
             if not f.located:
                 f.located = True
-                f.message += " (at %s%s)" % (root, "".join(reversed(f.steps)))
+                # The whole value needs no path (10.5).
+                if root != "value" or f.steps:
+                    f.message += " (at %s%s)" % (root, "".join(reversed(f.steps)))
             raise
 
     def encode_list(x, depth, path):
@@ -1006,6 +1024,52 @@ if __name__ == "__main__":
                 if keeps:
                     _importers.setdefault(e["unit"], []).append((g, alias, e["name"], g[alias]))
 
+    def osa(a, b):
+        """Optimal string alignment distance, as V2's own did-you-mean counts it (2.4)."""
+        d = [[i + j if i * j == 0 else 0 for j in range(len(b) + 1)] for i in range(len(a) + 1)]
+        for i in range(1, len(a) + 1):
+            for j in range(1, len(b) + 1):
+                d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] != b[j - 1]))
+                if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                    d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+        return d[-1][-1]
+
+    def near_module(name):
+        """The importable top-level module closest to `name`, within V2's did-you-mean limit (13.5):
+        the standard library's, the built-in ones, and what sys.path holds."""
+        if "pkgutil" not in sys.modules:
+            saved = sys.path[:]
+            sys.path[:] = ORIGINAL_PATH  # the stdlib's pkgutil, not a project file (9.3)
+            try:
+                import pkgutil
+            finally:
+                sys.path[:] = saved
+        try:
+            found = {m.name for m in sys.modules["pkgutil"].iter_modules()}
+        except Exception:
+            found = set()
+        names = set(getattr(sys, "stdlib_module_names", ())) | set(sys.builtin_module_names) | found
+        target = name.lower()
+        limit = max(1, min(3, (len(target) + 2) // 3))
+        best = None
+        for c in sorted(names):
+            if c == name or (c.startswith("_") and not name.startswith("_")) or abs(len(c) - len(target)) > limit:
+                continue
+            dist = osa(target, c.lower())
+            if dist <= limit and (best is None or dist < best[0]):
+                best = (dist, c)
+        return best and best[1]
+
+    def main_guard(node):
+        """`if __name__ == "__main__":` (either way round), which a block's code never passes."""
+        t = node.test if isinstance(node, ast.If) else None
+        if not (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq)):
+            return False
+        sides = [t.left, t.comparators[0]]
+        name = any(isinstance(s, ast.Name) and s.id == "__name__" for s in sides)
+        main = any(isinstance(s, ast.Constant) and s.value == "__main__" for s in sides)
+        return name and main
+
     def unique_name(base):
         name, n = base, 1
         while name in sys.modules:
@@ -1075,6 +1139,14 @@ if __name__ == "__main__":
         except SyntaxError as e:
             e.filename = path
             raise e.with_traceback(None)  # its frame is the .v2 line, not ast's or ours (12.6)
+        for node in tree.body:
+            if main_guard(node):
+                # A script pasted into a block would quietly run nothing (DOCS 4).
+                e = SyntaxError("a block isn't the main module, so its `if __name__ == \"__main__\":` is never true: "
+                                "run that code directly (call main()), or remove the if")
+                e.filename, e.lineno, e.offset = path, node.lineno, node.col_offset + 1
+                e.text = _lines.get(path, {}).get(node.lineno)
+                raise e.with_traceback(None)
         tail = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):
             tail = ast.Expression(tree.body.pop().value)
@@ -1136,7 +1208,11 @@ if __name__ == "__main__":
                 # Only the module asked for (or a parent of it) missing is an ImportError; a
                 # missing dependency is the module's own failure.
                 if e.name is not None and (name == e.name or name.startswith(e.name + ".")):
-                    raise Fail("ImportError", str(e))
+                    message = str(e)
+                    near = near_module(e.name) if "." not in e.name else None
+                    if near:
+                        message += ". Did you mean: %r?" % near  # as Python's own suggestions read
+                    raise Fail("ImportError", message)
                 raise
             units[unit] = (mod, None)
         clash = shadowed(m["name"], lead)
@@ -1417,3 +1493,21 @@ if __name__ == "__main__":
     send({"t": "hello", "vep": VEP, "version": "%d.%d.%d" % sys.version_info[:3], "pid": os.getpid(),
           "caps": ["modules", "handles", "kwargs", "reverse"]})
     serve(None)
+
+elif __name__ == "__mp_main__":
+    # A child that multiprocessing started with spawn or forkserver runs this file as __mp_main__.
+    # A function or class it was sent from a block is named by the block's module, which a new
+    # Python can't import, so it says why and what to do instead (14.3).
+    import sys
+
+    class BlockNames:
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            if name.startswith("__v2_"):
+                raise ModuleNotFoundError(
+                    "No module named %r: it is a @py block's code, which a new Python process can't import "
+                    "(multiprocessing's spawn and forkserver start one): put the functions and classes you send to "
+                    "other processes in a .py file next to your .v2 file, and import that in the block" % name, name=name)
+            return None
+
+    sys.meta_path.append(BlockNames)

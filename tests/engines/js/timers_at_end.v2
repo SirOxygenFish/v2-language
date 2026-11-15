@@ -1,0 +1,12 @@
+// requires: js
+// exit: 1
+// stderr: uncaught exception: Error: boom
+// When the script ends, what JavaScript still has to do (a timer, a promise) runs before the
+// engine stops, as Node runs it after a script: its output comes after V2's, and an error in it
+// is printed and ends the run with exit code 1 (DOCS 5, INTERNALS 9.10).
+@js {
+    setTimeout(() => console.log("a timer, later"), 50)
+    Promise.resolve().then(() => setTimeout(() => console.log("a timer a promise set"), 80))
+    setTimeout(() => { throw new Error("boom") }, 120)
+}
+print("the end of the script")

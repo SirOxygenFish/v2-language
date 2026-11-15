@@ -26,3 +26,9 @@ try {
 } catch (e) {
     print(e.message)
 }
+// A module name: the closest module Python could import, as Python words its suggestions.
+try {
+    @import { mean } from py.statistcs
+} catch (e) {
+    print(e.message)
+}

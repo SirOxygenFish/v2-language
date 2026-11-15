@@ -158,6 +158,25 @@ try {
     Says $r "Add $h\tools to your PATH"
     Result 'a trailing backslash' $r
 
+    # A temp folder so deep that the new v2.exe's path in it passes 259 characters: it runs from the
+    # folder's short (8.3) name, or the install says the temp folder is too long. A folder too long
+    # for v2.exe is refused before anything is made. V2_VERSION with V2_ARCHIVE gets a note.
+    $h = Fresh
+    $deep = Join-Path $h 'tmp'
+    while ($deep.Length -lt 245) { $deep = Join-Path $deep 'a folder with a long name' }
+    New-Item -ItemType Directory -Force -Path $deep | Out-Null
+    $r = Install $h @{ TEMP = $deep; TMP = $deep; V2_VERSION = 'v9.9.9' }
+    if ($r.code -eq 0) { Exists "$h\.v2\bin\v2.exe" $true 'v2.exe installed' } else { Says $r 'characters long, too long for Windows to start the new v2.exe from it' }
+    Says $r 'Note: V2_VERSION is ignored: V2_ARCHIVE names the archive to install'
+    Want (@(Get-ChildItem -LiteralPath $deep -Force).Count) 0 'what the install left in the temp folder'
+    $long = Join-Path $h 'inst'
+    while ($long.Length -lt 255) { $long = Join-Path $long 'deeper folder' }
+    $r2 = Install $h @{ V2_INSTALL_DIR = $long }
+    Want $r2.code 1 'exit code for a folder too long'
+    Says $r2 'characters long, too long a folder for v2.exe: Windows starts no program whose path has 260 characters or more; set V2_INSTALL_DIR to a shorter folder'
+    Exists $long $false 'the folder too long'
+    Result 'a deep temp folder, and a folder too long for v2.exe' $r
+
     # A running v2.exe is replaced, twice while it still runs; then the old copies are removed.
     $h = Fresh
     Set-Content -LiteralPath "$h\wait.v2" -Value 'input()' -Encoding ASCII
