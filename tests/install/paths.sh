@@ -152,10 +152,11 @@ ok=yes
 expect "$code" 0 "exit code"
 expect "$([ -x "$h/tools/v2/v2" ] && echo yes || echo no)" yes "~/tools/v2/v2 installed"
 expect "$(count "$h/.bashrc" 'export PATH="$HOME/tools/v2:$PATH"')" 1 ".bashrc lines"
-install /bin/bash V2_INSTALL_DIR=rel/bin V2_ARCHIVE="dl/$(basename "$archive")" V2_NO_MODIFY_PATH=1
+install /bin/bash V2_INSTALL_DIR=rel/bin V2_ARCHIVE="dl/$(basename "$archive")" V2_NO_MODIFY_PATH=1 V2_VERSION=v9.9.9
 expect "$code" 0 "relative: exit code"
 expect "$([ -x "$h/rel/bin/v2" ] && echo yes || echo no)" yes "relative folder installed"
 says "Installed v2 " || { echo "    no 'Installed' line"; ok=no; }
+says "Note: V2_VERSION is ignored: V2_ARCHIVE names the archive to install" || { echo "    no V2_VERSION note"; ok=no; }
 result "~ and relative paths"
 
 # A folder that is a file.

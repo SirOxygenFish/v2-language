@@ -63,7 +63,7 @@ if you used one). Settings:
 | --------------------- | ------------------------------------------------------------- |
 | `V2_INSTALL_DIR`      | install into this folder instead                              |
 | `V2_NO_MODIFY_PATH=1` | leave PATH alone (`true` and `yes` work too)                  |
-| `V2_VERSION`          | install another release, such as `v0.1.0-alpha.2`             |
+| `V2_VERSION`          | install another release, such as `v0.1.0-alpha.2` (not with `V2_ARCHIVE`) |
 | `V2_ARCHIVE`          | install from a file you downloaded (a `.sha256` file next to it is checked) |
 
 With the one-liner, a setting goes after the pipe, where `sh` sees it:
@@ -80,7 +80,7 @@ the same folder (in WSL, a Windows browser saves to `/mnt/c/Users/<you>/Download
 that folder:
 
 ```bash
-cd ~/Downloads
+cd ~/Downloads        # in WSL: cd /mnt/c/Users/<you>/Downloads
 V2_ARCHIVE=v2-x86_64-unknown-linux-gnu.tar.gz sh install.sh
 ```
 
@@ -104,8 +104,8 @@ Download the file for your computer from
 | macOS (Apple Silicon)            | `v2-aarch64-apple-darwin.tar.gz`     |
 | Linux (64-bit Intel/AMD)         | `v2-x86_64-unknown-linux-gnu.tar.gz` |
 
-Unpack it: the folder inside has `v2` (`v2.exe` on Windows). Put that in a folder that is on
-your PATH. On macOS, a file downloaded with a browser is blocked the first time ("can't be
+Unpack it: the folder inside has `v2` (`v2.exe` on Windows), this README and DOCS.md, the whole
+language. Put `v2` in a folder that is on your PATH. On macOS, a file downloaded with a browser is blocked the first time ("can't be
 opened"): run `xattr -d com.apple.quarantine v2` on it once.
 
 ### Build from source
@@ -299,7 +299,8 @@ ForeignError ZeroDivisionError division by zero
 
 More of V2, in short:
 
-- **Functions:** `int`, `float`, `str`, `round`, `abs`, `min`, `max`, `sum`, `type`, `len`,
+- **Functions:** `int`, `float`, `str`, `round` (ties to even, as in Python: `round(2.5)` is
+  `2`), `abs`, `min`, `max`, `sum`, `type`, `len`,
   `range` (it makes a whole list: for a long loop write `for i in 0..n`), `json_parse` and
   `json_stringify(x, indent: 2)`, `sleep(seconds)`, `time()` (seconds, as a float),
   `print(a, b, sep: ", ")`.
@@ -307,27 +308,40 @@ More of V2, in short:
   `write_file(path, data)`, with `append: true` to add to the end; `exists`, `list_dir`,
   `make_dir`, `remove_file`, `getenv`. `exec(["git", "status"], input: text)` runs a program
   without a shell and returns `{code, stdout, stderr}`, its output as text and all of it in memory.
-  To walk folders, or tell a file from a folder, use Python's `os.walk` in a block. File paths are
-  relative to the folder you run `v2` from; for a file next to the script,
-  `read_file(f"${script_dir()}/data.csv")`.
+  A program that can't start is an `IOError`. To walk folders, or tell a file from a folder, use
+  Python's `os.walk` in a block. File paths are relative to the folder you run `v2` from; for a
+  file next to the script, `read_file(f"${script_dir()}/data.csv")`. They are taken as written:
+  `~` and `%USERPROFILE%` are a shell's, so write `getenv("HOME")` (`getenv("USERPROFILE")` on
+  Windows) instead.
 - **Strings** have `split`, `lines` (Windows line endings too), `upper`, `lower`, `replace`, `trim`,
   `starts_with`, `ends_with` and `index_of`; **lists** `push`, `pop`, `insert`,
-  `sort(key: f, reverse: true)`, `reverse`, `map`, `filter`, `join`, `index_of` and `copy`;
+  `sort(key: f, reverse: true)` and `reverse` (they change the list and return `null`), `map` and
+  `filter` (they return new lists), `join`, `index_of` and `copy`;
   **dicts**, whose keys are strings, `keys`, `values`, `get`, `remove` and `copy`. Lists and
   strings slice as `xs[1:3]`, and `x in xs`, `key in d` and `"lo" in "hello"` test membership.
 - **Syntax:** `cond ? a : b` picks a value, `a ?? b` is `b` when `a` is `null`, `x?.y` is `null`
   when `x` is, `**` is a power; `f"${x:.2f}"` formats a number (`:.Nf` is the only format: pad in a
-  block, or with `" " * n`); `r"C:\new"` keeps its backslashes; a `"""` at the end of a line starts
-  a string of several lines; a caught error has `e.type` and `e.message`.
+  block, or with `" " * n`); in `"…"`, `\n`, `\t`, `\\`, `\"` and `\u{e9}` are escapes, and
+  `r"C:\new"` keeps its backslashes; a `"""` at the end of a line starts a string of several lines;
+  a caught error has `e.type` and `e.message`.
 - **Other `.v2` files:** their top-level names not starting with `_` are imported as a snapshot
   taken when that file finished running: read state that changes through its functions.
 - **Blocks** can't see V2's variables: pass them in, as in `@py(data) { sum(data) }`, and a block's
   last expression is its value. A block is one line, `@py { 1 + 2 }`, or its code starts on the
   line after the `{` and its `}` stands on a line of its own; inside a larger expression it goes in
   parentheses, `(@py { 1 }) + 2`. A `@js` block whose value is an object literal needs them too,
-  `@js { ({a: 1}) }`, or JavaScript reads the braces as code. For code whose braces V2 can't match,
-  a block can use a fence instead: three backticks after the header, and three backticks alone on
-  the line that closes it.
+  `@js { ({a: 1}) }`, or JavaScript reads the braces as code; and in a `@js` block of several
+  lines, end a line with `;` when the next one starts with `(`, `[` or a backtick, or JavaScript
+  joins the two. What a block exports, another block imports with the same `@import` line, written
+  inside it. For code whose braces V2 can't match, a block can use a fence instead: three
+  backticks after the header, and three backticks alone on the line that closes it.
+- **From the shell:** `$1` is `args()[0]`, `$(cmd)` is `exec([...]).stdout.trim()` and `$?` its
+  `.code`. `exec` starts one program, not a shell, so for a pipe, a glob, `cd dir && make` or
+  `VAR=x cmd`, start a shell: `exec(["sh", "-c", "cd build && make"])`, on Windows
+  `exec(["cmd", "/c", "cd /d build && make"])`. It returns when the program ends, with all its
+  output; to see the output as it comes, run the program from a `@py` block with `subprocess.run`
+  (what it prints goes to standard error). `shutil.rmtree(path)` in a `@py` block removes a
+  folder.
 
 `v2 check FILE` checks a script's V2 syntax without running it. The
 [docs](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md) have the whole language:
@@ -341,9 +355,10 @@ and a [cookbook](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#
 
 V2 doesn't install packages: it uses the Python and Node.js that `v2 doctor` shows, with the
 packages installed for them. A Python package is imported with `@import py.numpy as np` (or
-`@import { mean } from py.statistics`), and a `helpers.py` next to the `.v2` file that imports it
-is `py.helpers` (name yours unlike Python's own modules, such as `json` or `numbers`: one Python
-serves the whole run, with one module per name, and V2 says so when another came first).
+`@import { mean } from py.statistics`), and a `helpers.py` next to the `.v2` file that imports it,
+or in its project folder (where its `v2.toml` is), is `py.helpers` (name yours unlike Python's own
+modules, such as `json` or `numbers`: one Python serves the whole run, with one module per name,
+and V2 says so when another came first).
 
 - **npm:** in your project folder, `npm install lodash` (in a Windows PowerShell that blocks
   `npm`, `npm.cmd install lodash`), then
@@ -355,8 +370,8 @@ serves the whole run, with one module per name, and V2 says so when another came
   import the module itself, `@import js.dayjs as dayjs`.
 - **Python on Windows:** `py -m pip install numpy`. If `v2 doctor` shows another Python, use its
   path, with `&` in front in PowerShell: `& "C:\Program Files\Python313\python.exe" -m pip install
-  numpy`. For a virtual environment: `py -m venv .venv`, then `.venv\Scripts\pip install numpy`,
-  and the `v2.toml` shown below.
+  numpy`. For a virtual environment: `py -m venv .venv`, then
+  `.venv\Scripts\python -m pip install numpy`, and the `v2.toml` shown below.
 - **Python on Linux and macOS:** the system's and Homebrew's Python refuse `pip install` outside a
   virtual environment ("externally-managed-environment"), so make one in your project folder:
 
@@ -388,7 +403,8 @@ package prints when it loads, and the error for a misspelled package name, come 
 only terminals opened after the install. Still not found? Check that the folder is on your PATH
 (Windows: `$env:Path -split ';'`; macOS and Linux: `echo $PATH`), or run V2 by its full path
 (`~/.v2/bin/v2`; in PowerShell, `& "$env:USERPROFILE\.v2\bin\v2.exe"`). Changed your shell (to zsh
-or fish) after installing? Run the install command again in it: it sets up the shell it runs in.
+or fish) after installing? Run the install command again in a new terminal of that shell: it sets
+up the shell it runs in.
 
 **`EngineNotFound: engine 'py' (Python) not found`** (or `'js'`, Node.js). Install it with the
 command the message shows, open a new terminal, and run `v2 doctor`. On Windows, if Python is
@@ -397,8 +413,12 @@ installed but still not found, run its installer again and tick "Add python.exe 
 **`... is too old: found 3.9.6, V2 needs 3.10+`.** macOS's own `python3` is 3.9: install a newer
 one (`brew install python`, or [python.org](https://www.python.org/downloads/)). For Node.js,
 Linux distributions often ship older versions than 22.13 (`apt install nodejs` gives 18 on Ubuntu
-24.04): get Node.js 22 or newer from [nodejs.org](https://nodejs.org/en/download). `v2 doctor`
-shows which version V2 found, and where.
+24.04): get Node.js 22 or newer from [nodejs.org](https://nodejs.org/en/download). One way there:
+its Linux `.tar.xz`, unpacked into `/opt` (`sudo apt install xz-utils`, then
+`sudo tar -xf node-v22.*-linux-x64.tar.xz -C /opt`), and its `bin` folder put on PATH in
+`~/.profile` (`echo 'export PATH="/opt/node-v22.21.0-linux-x64/bin:$PATH"' >> ~/.profile`, with the
+version you unpacked), then a new terminal; nvm, which the site also offers, sets up interactive
+shells only. `v2 doctor` shows which version V2 found, and where.
 
 **`ImportError: No module named 'numpy'`** (or `Cannot find module 'lodash'`). Install the package:
 [Python and npm packages](#python-and-npm-packages).
@@ -458,13 +478,15 @@ project folder ([docs, chapter 14](https://github.com/SirOxygenFish/v2-language/
 `[python]` `venv = ".venv"` for a virtual environment, or `[engines.py]`
 `command = ["C:/Python313/python.exe"]` (on macOS, for example, `["/opt/homebrew/bin/python3"]`).
 The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
-program's path, without quotes, does the same while it is set (in PowerShell, for that window:
-`Remove-Item Env:V2_ENGINE_PY` ends it).
+program's path does the same while it is set: in PowerShell, for that window,
+`$env:V2_ENGINE_PY = "C:\Program Files\Python313\python.exe"` (and `Remove-Item Env:V2_ENGINE_PY`
+ends it); in a shell, `export V2_ENGINE_PY=/opt/homebrew/bin/python3`.
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,
 so `add("2", 3)` runs. Run `tsc` yourself for checking. Only TypeScript whose types can simply be
 removed runs: not `enum`, `namespace`, `constructor(public x)` parameter properties, `<T>x` casts
-(write `x as T`) or decorators.
+(write `x as T`) or decorators. Imports between your `.ts` files name the `.ts` file
+(`./math.ts`, not tsc's `./math.js` or `./math`), and a type is imported with `import type`.
 
 **Does V2 leave files around?** No. Temporary files go to a private folder in your temp directory
 and are removed when V2 exits (if V2 was killed, the next script that runs a block removes
@@ -506,7 +528,9 @@ Node.js workers.
   the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep
   (deeper parts of a value from Python or JavaScript arrive as handles).
   V2's integers are 64-bit: a bigger Python or JavaScript integer arrives as a handle, so do big
-  number math inside the block. A handle works only in its own language: `to_v2(h)` makes plain
+  number math inside the block. In JavaScript, a V2 integer from ±2⁵³ on is a `BigInt` (`x + 1`
+  fails there: write `x + 1n`), a whole number comes back as an integer (`2.0` as `2`), and dict
+  keys that look like numbers come back first, as JavaScript orders them. A handle works only in its own language: `to_v2(h)` makes plain
   data that any language takes. Operators don't work on handles (call a method, or do it in the
   block), a handle is always true, and `==` on two handles means the same object.
 - **A V2 function given to Python or JavaScript** can be called whenever V2 is in a call to that
@@ -514,7 +538,12 @@ Node.js workers.
   thread, and not from a timer or an event that fires while V2 runs its own code.
 - **JavaScript's event loop runs only while V2 is in a call to JavaScript:** a server, timer or
   socket in a `@js` block waits in between. Output a Python or JavaScript thread prints in
-  between shows at the next call, or when the program ends.
+  between shows at the next call, or when the program ends. When the script ends, what
+  JavaScript timers and promises and Python threads still have to do runs, for at most a second.
+- **A block's functions and classes can't go to another process:** `multiprocessing` with spawn
+  (the default on Windows and macOS) or forkserver can't import them, and a pickle of a block's
+  class loads only in the same run. Put them in a `.py` file next to the script, and import that
+  in the block.
 - **Each block has its own variables**, also in JavaScript: share them with `@export`. Each `@js`
   block is a JavaScript realm of its own, so a list or dict from V2 isn't `instanceof Array` or
   `Object` there, nor a V2 error `instanceof Error`: test with `Array.isArray(x)` and `e.type`.

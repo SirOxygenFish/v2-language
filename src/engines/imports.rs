@@ -395,6 +395,35 @@ fn missing_package_hint(message: &str, dir: &Path, venv_set: bool) -> Option<Str
     Some(format!("{}if '{package}' isn't misspelled, install it in your project folder: npm install {package}", near.unwrap_or_default()))
 }
 
+/// A TypeScript file's own import that Node couldn't follow (13.5): Node runs a .ts file as it
+/// is written, so imports between .ts files name the .ts file, and types are imported with
+/// `import type` (they are gone when it runs).
+fn ts_import_hint(message: &str) -> Option<String> {
+    let typescript = |p: &str| [".ts", ".mts", ".cts"].iter().any(|e| p.to_ascii_lowercase().ends_with(e));
+    if let Some(rest) = message.split("Cannot find module '").nth(1) {
+        let (missing, rest) = rest.split_once('\'')?;
+        let importer = rest.strip_prefix(" imported from ")?.lines().next()?.trim();
+        if !typescript(importer) {
+            return None;
+        }
+        let missing = Path::new(missing);
+        let as_js = matches!(missing.extension().and_then(|e| e.to_str()), Some("js" | "mjs" | "cjs") | None);
+        let ts = ["ts", "mts", "cts"].iter().map(|e| missing.with_extension(e)).find(|p| p.is_file()).filter(|_| as_js)?;
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return Some(format!(
+            "Node runs .ts files as they are written, so imports between them name the .ts file: write {} for {} in {}",
+            name(&ts),
+            name(missing),
+            name(Path::new(importer))
+        ));
+    }
+    let export = message.split("does not provide an export named '").nth(1)?.split('\'').next()?;
+    let module = message.split("The requested module '").nth(1)?.split('\'').next()?;
+    typescript(module).then(|| {
+        format!("if '{export}' is a type or an interface, import it with import type {{ {export} }} from '{module}': Node removes types as it runs a .ts file, so they aren't exports")
+    })
+}
+
 /// The imported names as an `@export { … }` list would write them.
 fn names_text(list: &[ImportItem]) -> String {
     list.iter().map(|i| i.name.to_string()).collect::<Vec<_>>().join(", ")
@@ -827,7 +856,12 @@ impl Interp {
         let venv_set = self.registry.config().python_venv.is_some() || self.registry.config().engines.get("py").is_some_and(|e| e.command.is_some());
         let reply = self.request(s, frame, &what, at).inspect_err(|f| {
             if let Flow::Error(e) = f {
-                if let Some(hint) = (&*e.kind == "ImportError").then(|| missing_package_hint(&e.message, &dir, venv_set)).flatten() {
+                let hint = match &*e.kind {
+                    "ImportError" => missing_package_hint(&e.message, &dir, venv_set),
+                    "ForeignError" => ts_import_hint(&e.message),
+                    _ => None,
+                };
+                if let Some(hint) = hint {
                     let _ = e.hint.set(hint.into());
                 }
             }
@@ -1034,5 +1068,28 @@ mod tests {
         assert_eq!(hint("Cannot find module '@scope/pkg/sub'", &d), "if '@scope/pkg' isn't misspelled, install it in your project folder: npm install @scope/pkg");
         assert_eq!(hint("Cannot find module './nope.js'", &d), "a local file is found from the .v2 file's folder: check the path");
         assert_eq!(missing_package_hint("something else", &d, false), None);
+    }
+
+    #[test]
+    fn a_typescript_files_own_imports_get_hints() {
+        // 13.5: tsc's `./math.js` or `./math` for a math.ts, and a type imported as a value.
+        let d = temp("ts");
+        std::fs::write(d.join("math.ts"), "export const x = 1\n").unwrap();
+        let importer = d.join("app.ts");
+        for missing in ["math.js", "math"] {
+            let m = format!("Cannot find module '{}' imported from {}", d.join(missing).display(), importer.display());
+            let want = format!("Node runs .ts files as they are written, so imports between them name the .ts file: write math.ts for {missing} in app.ts");
+            assert_eq!(ts_import_hint(&m).as_deref(), Some(&*want));
+        }
+        let elsewhere = format!("Cannot find module '{}' imported from {}", d.join("other.js").display(), importer.display());
+        assert_eq!(ts_import_hint(&elsewhere), None, "no math.ts for it");
+        let from_js = format!("Cannot find module '{}' imported from {}", d.join("math.js").display(), d.join("app.js").display());
+        assert_eq!(ts_import_hint(&from_js), None, "a .js file's import");
+        let m = "The requested module './types.ts' does not provide an export named 'Shape'";
+        assert_eq!(
+            ts_import_hint(m).as_deref(),
+            Some("if 'Shape' is a type or an interface, import it with import type { Shape } from './types.ts': Node removes types as it runs a .ts file, so they aren't exports")
+        );
+        assert_eq!(ts_import_hint("The requested module './x.js' does not provide an export named 'y'"), None);
     }
 }

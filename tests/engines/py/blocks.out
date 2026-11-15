@@ -6,7 +6,7 @@ loading with 0
 2 2.0 s null true [1, [2, 3], {"a": b"\x00"}]
 null null
 handle handle {"$v2": 1, "k": [1.5, inf]}
-MarshalError: string contains an unpaired surrogate (U+D800) at index 0 (at value)
+MarshalError: string contains an unpaired surrogate (U+D800) at index 0
 lucky 126 float b'\xff' 1152921504606846976 None
 [4, 8, 15]
 false yes

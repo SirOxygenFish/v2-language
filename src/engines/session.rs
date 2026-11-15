@@ -149,6 +149,24 @@ fn exit_phrase(exit: Option<&ExitInfo>) -> String {
     }
 }
 
+/// What to do about a value that can't cross (10.1, 10.4): a MarshalError's hint, from its
+/// message and the language it was in.
+fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
+    if message.starts_with("value too large to send") {
+        return Some("write it to a file and pass the file's path, or send it in parts");
+    }
+    let code = message.split("unpaired surrogate (U+").nth(1)?.get(..4)?;
+    let escaped = u32::from_str_radix(code, 16).is_ok_and(|c| (0xDC80..=0xDCFF).contains(&c));
+    Some(match lang {
+        // What Python's surrogateescape makes of bytes that aren't UTF-8.
+        "py" if escaped => {
+            "the text holds bytes that aren't UTF-8, which Python keeps as U+DC80 to U+DCFF (file names, environment variables and program output can): send it as bytes, os.fsencode(s), or with those bytes replaced, s.encode(\"utf-8\", \"surrogateescape\").decode(\"utf-8\", \"replace\")"
+        }
+        "py" => "replace it in the block: s.encode(\"utf-8\", \"replace\").decode()",
+        _ => "replace it in the block: s.toWellFormed()",
+    })
+}
+
 /// An error at no location yet: `raise` places it at the V2 expression.
 fn error(kind: &str, message: String) -> Flow {
     match fail::<()>(kind, message) {
@@ -538,7 +556,14 @@ impl Interp {
         pending.id = id;
         if let Err(e) = self.send(s, &frame) {
             let flow = match e {
-                WriteErr::TooBig(n) => error("MarshalError", vep::too_big_message(&self.tag(s), n)),
+                WriteErr::TooBig(n) => {
+                    let message = vep::too_big_message(&self.tag(s), n);
+                    let flow = error("MarshalError", message.clone());
+                    if let (Flow::Error(e), Some(hint)) = (&flow, marshal_hint(&message, &self.tag(s))) {
+                        let _ = e.hint.set(hint.into());
+                    }
+                    flow
+                }
                 WriteErr::Io(_) => self.worker_gone(s, &pending, at),
             };
             return Err(self.raise(flow, at));
@@ -891,6 +916,9 @@ impl Interp {
         let mut err = if KINDS.contains(&kind) {
             let mut err = ErrorValue::new(kind, message);
             err.foreign_type = e.get("foreign_type").and_then(Json::as_str).map(Rc::from);
+            if let Some(hint) = (kind == "MarshalError").then(|| marshal_hint(message, &self.tag(s))).flatten() {
+                let _ = err.hint.set(hint.into());
+            }
             err
         } else {
             let mut err = ErrorValue::new("ForeignError", message);

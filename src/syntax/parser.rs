@@ -41,7 +41,7 @@ pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag
 
 /// What V2 writes for Python or JavaScript written out of habit, from the tokens where a syntax
 /// error stopped (4.3): `def f(`, `var x`, `and`, `x is None`, `x => …`, `i++`, `i--`, `===`,
-/// `if x:`, `function(x) {`.
+/// `if x:`, `function(x) {`, `class P {`, `switch x {`.
 fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
     let i = toks.iter().position(|t| t.span.file == at.file && t.span.lo == at.lo)?;
     let tok = |back: usize| i.checked_sub(back).map(|j| &toks[j].tok);
@@ -60,6 +60,10 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         (_, Some("and" | "or"), _) => "V2 writes and, or and not as &&, || and !".into(),
         (_, Some("is"), _) => "V2 compares with == and !=, as in x == null".into(),
         (Some("lambda"), Some(_), _) => "V2 writes an anonymous function as func(x) => x * 2".into(),
+        (Some("class"), Some(_), _) => "V2 has no classes: keep the data in a dict and write functions for the rest, or write the class in a @py or @js block".into(),
+        // `switch x {`, Python's `match x:`; `switch (x) {` parses as a call, then stops at `{`.
+        (Some("switch" | "match"), Some(_), _) => "V2 has no switch or match: write if x == 1 { ... } elif x == 2 { ... } else { ... }".into(),
+        _ if matches!(tok(0), Some(Tok::LBrace(_))) && first_word_of_line(toks, i) == Some("switch") => "V2 has no switch or match: write if x == 1 { ... } elif x == 2 { ... } else { ... }".into(),
         // `raise ValueError("bad")`, `throw new Error("bad")`, `new Foo()`.
         (Some("raise"), Some(kind), _) => format!("V2 throws an error with throw error(\"{kind}\", {})", message_after(toks, i)),
         (Some("new"), Some(kind), _) if matches!(tok(2), Some(Tok::Kw(Kw::Throw))) => {
@@ -236,6 +240,19 @@ fn python_placeholder(parts: &[FPartTok]) -> Option<String> {
 
 /// Whether the line before `toks[i]` (a `{`) is `function(…)` or `fn(…)`, another language's
 /// anonymous function.
+/// The name that starts the line of token `i`, if a name does.
+fn first_word_of_line(toks: &[Token], i: usize) -> Option<&str> {
+    let line = toks[i].span.line;
+    let mut j = i;
+    while j > 0 && toks[j - 1].span.line == line && !matches!(toks[j - 1].tok, Tok::Newline | Tok::Semi) {
+        j -= 1;
+    }
+    match &toks[j].tok {
+        Tok::Ident(w) => Some(w),
+        _ => None,
+    }
+}
+
 fn anonymous_function_before(toks: &[Token], i: usize) -> bool {
     let line = toks[i].span.line;
     let mut j = i;
@@ -1106,9 +1123,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 let t = self.bump();
+                // `@py(1 + 2)`, `@py(data.copy())`: a value goes after a name for it (4.1).
+                let args_hint = format!("block args are `name` or `name: expr`, as in @{tag}(n: len(xs))");
                 let Some(name) = name_of(&t) else {
-                    return Err(Diag::new(format!("expected a block arg name, found {}", t.tok), t.span)
-                        .hint("block args are `name` or `name: expr`"));
+                    return Err(Diag::new(format!("expected a block arg name, found {}", t.tok), t.span).hint(args_hint));
                 };
                 let value = if self.at_op(Op::Colon) {
                     self.bump();
@@ -1124,7 +1142,7 @@ impl<'a> Parser<'a> {
                 if self.at_op(Op::Comma) {
                     self.bump();
                 } else if !self.at_op(Op::RParen) {
-                    return Err(Diag::new(format!("expected `,` or `)`, found {}", self.peek()), self.span()));
+                    return Err(Diag::new(format!("expected `,` or `)`, found {}", self.peek()), self.span()).hint(args_hint));
                 }
             }
             if COMPILED_TAGS.contains(&&*tag) && !args.is_empty() {
@@ -1869,6 +1887,16 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("raise ValueError(\"bad\")"), "V2 throws an error with throw error(\"ValueError\", \"bad\")");
         assert_eq!(hint("throw new Error(\"bad\")"), "V2 has no new: throw error(\"Error\", \"bad\"), or throw \"bad\" for a plain Error");
         assert_eq!(hint("let d = new Date()"), "V2 has no new: call it, as in Date(…)");
+        let class = "V2 has no classes: keep the data in a dict and write functions for the rest, or write the class in a @py or @js block";
+        assert_eq!(hint("class Point {\n}"), class);
+        assert_eq!(hint("class Point:\n    pass"), class);
+        let switch = "V2 has no switch or match: write if x == 1 { ... } elif x == 2 { ... } else { ... }";
+        for src in ["switch x {\n}", "let x = 1\nswitch (x) {\n}", "match x:\n    case 1: pass"] {
+            assert_eq!(hint(src), switch, "{src}");
+        }
+        let args = "block args are `name` or `name: expr`, as in @py(n: len(xs))";
+        assert_eq!(hint("let data = [1]\n@py(data.copy()) { 1 }"), args);
+        assert_eq!(hint("@py(1 + 2) { 1 }"), args);
         assert_eq!(hint("let s = \"big\" if x > 2 else \"small\""), "V2 writes a conditional value as cond ? a : b, as in x > 2 ? \"big\" : \"small\"");
         assert_eq!(hint("try {\n} except (e) {\n}"), "V2 writes except as catch: try { ... } catch (e) { ... }");
         assert_eq!(hint("try {\n}\nexcept (e) {\n}"), "V2 writes except as catch: try { ... } catch (e) { ... }");

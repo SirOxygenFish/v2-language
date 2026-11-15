@@ -122,13 +122,13 @@ print(f"Hello, ${who}!")
 
 ```text
 $ v2 doctor
-ENGINE  STATUS  COMMAND                                   VERSION   FROM
-py      ok      C:\Program Files\Python311\python.exe     3.11.6    PATH
-js      ok      C:\Program Files\nodejs\node.exe          22.14.0   PATH
-ts      ok      (js engine, built-in type stripping)      22.14.0   PATH
-c       ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
-cpp     ok      ...\MSVC\14.40\bin\Hostx64\x64\cl.exe     19.40     vswhere
-rust    ok      C:\Users\me\.cargo\bin\rustc.exe          1.91.1    PATH
+ENGINE  STATUS  VERSION  FROM     COMMAND
+py      ok      3.11.6   PATH     C:\Program Files\Python311\python.exe
+js      ok      22.14.0  PATH     C:\Program Files\nodejs\node.exe
+ts      ok      22.14.0  PATH     (js engine, built-in type stripping)
+c       ok      19.40    vswhere  ...\MSVC\14.40\bin\Hostx64\x64\cl.exe
+cpp     ok      19.40    vswhere  ...\MSVC\14.40\bin\Hostx64\x64\cl.exe
+rust    ok      1.91.1   PATH     C:\Users\me\.cargo\bin\rustc.exe
 ...
 config file: none
 v2 0.1.0 (VEP/1), windows x86_64
@@ -588,8 +588,9 @@ Relative paths in the file functions and in `exec` are relative to the folder yo
 (the working directory), like in Python and Node. For a file next to your script, use
 `script_dir()`: `read_file(f"${script_dir()}/data.csv")` (forward slashes work on Windows too).
 `import` paths and `extern` library paths are relative to the `.v2` file instead. The file
-functions raise `IOError` when they fail (`exists` just returns `false`). `getenv` and `args()`
-turn invalid UTF-8 into U+FFFD instead of failing.
+functions raise `IOError` when they fail (`exists` just returns `false`). Paths are taken as
+written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so build such a path with `getenv`
+(the error's hint says so). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
 
 `exec` runs a program directly, without a shell, so its arguments reach it exactly as given:
 
@@ -758,6 +759,11 @@ print(when.year)
 In a `py` block, if the last statement is not an expression, the block's value is `null`.
 Definition blocks are statements only; using one as an expression is a syntax error.
 
+At the start of its code JavaScript reads `{` as a block of code, so a `js` block whose value is
+an object is written `@js { ({a: 1}) }`: `@js { {a: 1} }` used as a value is an error saying so.
+In a block of several lines, end a line with `;` when the next one starts with `(`, `[` or a
+backtick: JavaScript would read the two as one (`1` then `({a: 1})` is the call `1({a: 1})`).
+
 A block value used as an operand, or followed by `.method()`, must be in parentheses:
 `(@py { 1 }) + 2`, `(@py { "ada" }).upper()`.
 
@@ -881,10 +887,14 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - `sys.exit()` inside Python raises a `ForeignError` (with `foreign_type` `"SystemExit"` and the
   message `sys.exit(3) can't end V2's Python engine; raise an error instead, or end the program
   with V2's exit(3)`) instead of ending
-  your program; V2's own `exit(3)` ends it. In blocks, `__name__` is not `"__main__"`.
+  your program; V2's own `exit(3)` ends it. In blocks, `__name__` is not `"__main__"`, so a
+  block whose top level has `if __name__ == "__main__":` is an error at that line: call `main()`
+  directly.
 - `multiprocessing` workers that are started rather than forked (the default on Windows and macOS,
-  and on Linux from Python 3.14) can't load functions defined in `@py` blocks, and a pool using
-  them never finishes: put them in a `.py` file next to the `.v2` file and import them from there.
+  and on Linux from Python 3.14) can't load functions and classes defined in `@py` blocks: each
+  says why, and a `Pool` using them never finishes. Put them in a `.py` file next to the `.v2` file
+  and import them from there. A block's module is named for its place in the run, so a pickle of
+  an object whose class a block defined loads only in that run.
 
 ### JavaScript — `@js`
 
@@ -1095,7 +1105,9 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
   unusual characters are quoted: `@import { format } from js."date-fns"`,
   `@import { z } from js."@scope/pkg"`. A local JavaScript file is a quoted relative path, from
   the `.v2` file's folder: `@import { render } from js."./helpers.js"` (TypeScript:
-  `ts."./helpers.ts"`).
+  `ts."./helpers.ts"`). Node runs a TypeScript file as it is written, so its imports of other
+  `.ts` files name them with `.ts` (`./math.ts`, not tsc's `./math.js` or `./math`), and a type
+  or interface is imported with `import type`; the hint of either error says so.
 - A JavaScript default export is imported by name: `@import { "default" as dayjs } from js.dayjs`.
 - **Whole module as a handle:** `@import py.numpy as np` gives you the module itself. If a
   JavaScript package *is* a function (`module.exports = function …`), the handle can be called
@@ -1260,7 +1272,8 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   language. A callback can be stored and used again during a later call.
 - JavaScript timers, sockets and other async work run only while V2 is waiting on a JS Promise
   (and for a moment right after each call returns): to let them finish, export an async function
-  and call it.
+  and call it. When the program ends, what is still waiting runs, as Node runs it after a script,
+  for at most a second (as Python's threads get), and an error in it ends the run with exit code 1.
 - A foreign function may only call V2 from the thread V2 called it on.
 - When an imported function (another language's, or V2's) throws, the foreign code that called it
   gets a `V2Error` exception with `type`, `message`, `data`, `lang` and `foreign_type`. The name is
@@ -1284,7 +1297,7 @@ Plain data is **copied** when it crosses between languages:
 | `str`   | `str`               | `string`                           | `const char*` / `std::string` | `&str` / `String` |
 | `bytes` | `bytes`             | `Buffer`                           | —                         | —               |
 | `list`  | `list` (tuples come back as lists) | `Array`             | — (pass `json_stringify(x)` as a `str`, 11.7) | — (pass `json_stringify(x)` as a `str`, 11.7) |
-| `dict`  | `dict` (string keys) | plain object                      | — (pass `json_stringify(x)` as a `str`, 11.7) | — (pass `json_stringify(x)` as a `str`, 11.7) |
+| `dict`  | `dict` (string keys) | plain object (keys that look like numbers come first, as JavaScript orders them) | — (pass `json_stringify(x)` as a `str`, 11.7) | — (pass `json_stringify(x)` as a `str`, 11.7) |
 | `func`  | callable            | function                           | —                         | —               |
 
 JSON text is used automatically only when compiled code calls other languages through `@import`
@@ -1754,7 +1767,8 @@ folder is the project root. Every key is optional, except that a custom engine n
 `command` (a `run` command, custom or built-in, must contain `{file}`; `ext` defaults to the tag).
 `command` is always an array of strings; a plain string is a configuration error
 (`[engines.lua] command must be an array: write ["lua", "{file}"]`). Relative paths are relative
-to the folder of the `v2.toml`.
+to the folder of the `v2.toml`, and a path that starts with `~` is in your home folder; nothing
+else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
 
 ```toml
 [engines.py]

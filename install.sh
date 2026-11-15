@@ -83,6 +83,7 @@ download() { # URL FILE
 
 # 2. Get the archive and its checksum.
 if [ -n "${V2_ARCHIVE:-}" ]; then
+    [ -n "${V2_VERSION:-}" ] && say "Note: V2_VERSION is ignored: V2_ARCHIVE names the archive to install"
     archive=$(full_path "$V2_ARCHIVE")
     shown_archive=$(basename "$archive")
     [ -f "$archive" ] || fail "V2_ARCHIVE names no file: $archive"

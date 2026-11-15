@@ -1,0 +1,5 @@
+ForeignError SyntaxError an object as the block's value needs parentheses, as in @js { ({a: 1}) }: at its start, JavaScript reads { as a block of code
+an object as the block's value needs parentheses, as in @js { ({a: 1}) }: at its start, JavaScript reads { as a block of code
+an object at the start of a statement needs parentheses, as in ({a: 1}): JavaScript reads { there as a block of code
+{"a": 1}
+done

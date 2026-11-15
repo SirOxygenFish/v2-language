@@ -48,10 +48,13 @@ impl Lookup {
         }
     }
 
+    /// In `windows_apps`, or in any folder named `Microsoft\WindowsApps` (another user's, or
+    /// with `LOCALAPPDATA` moved): Windows keeps App Execution Aliases there (7.6).
     fn is_alias(&self, path: &Path) -> bool {
         let Some(apps) = &self.windows_apps else { return false };
         let (p, a) = (path.to_string_lossy().to_lowercase(), apps.to_string_lossy().to_lowercase());
-        p.starts_with(&a) && p[a.len()..].starts_with(['\\', '/'])
+        let named = |p: &Path| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("WindowsApps")) && p.parent().and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case("Microsoft"));
+        (p.starts_with(&a) && p[a.len()..].starts_with(['\\', '/'])) || path.parent().is_some_and(named)
     }
 
     /// `PATHEXT` entries that `CreateProcess` can start, in order (unset: `.COM;.EXE;.BAT;.CMD`).
@@ -667,6 +670,10 @@ impl Resolver<'_> {
                         array.join(", ")
                     )
                 }
+                // `%ProgramFiles%\…` from PowerShell's single quotes, or a REG_SZ variable.
+                _ if crate::config::unexpanded(name).is_some() => {
+                    format!("; V2 doesn't expand {}: write the path out", crate::config::unexpanded(name).unwrap_or_default())
+                }
                 _ => String::new(),
             };
             return Err(NotFound::broken(
@@ -699,11 +706,34 @@ impl Resolver<'_> {
                 if r.contains('\\') { format!("venv = '{r}'") } else { format!("venv = \"{r}\"") }
             };
             let is_venv = |p: &Path| p.join("pyvenv.cfg").is_file();
+            // A command to paste: quoted when the path has a space; the `py` launcher on Windows
+            // (`python` may be the Store's stand-in), `python3` elsewhere.
+            let python = if cfg!(windows) { "py" } else { "python3" };
+            let pasted = |p: &Path| {
+                let p = p.display().to_string();
+                if p.contains(' ') { format!("\"{p}\"") } else { p }
+            };
+            // `.venv/bin`, `.venv\Scripts`, or a python in one that isn't there: a path inside
+            // the virtual environment, whose folder is the one above.
+            let bin = |p: &Path| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin") || n.eq_ignore_ascii_case("Scripts"));
+            let a_python = venv.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with("python"));
+            let inside = if bin(venv) {
+                venv.parent()
+            } else if a_python && venv.parent().is_some_and(bin) {
+                venv.parent().and_then(Path::parent)
+            } else {
+                None
+            };
             let message = if is_regular_file(venv) {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
                 let folder = venv.parent().and_then(Path::parent).filter(|f| is_venv(f));
                 let fix = folder.map_or_else(|| "the folder that holds pyvenv.cfg".to_string(), &write);
                 format!("[python] venv '{shown}' is a file: venv names the virtual environment's folder: write {fix}")
+            } else if let Some(folder) = inside {
+                let create = if is_venv(folder) { String::new() } else { format!(" (create it: {python} -m venv {})", pasted(folder)) };
+                format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}{create}", write(folder))
+            } else if let Some(var) = crate::config::unexpanded(&shown) {
+                format!("[python] venv '{shown}' has no {want}: V2 doesn't expand {var}: write the path out (a ~ at its start is your home folder)")
             } else if let Some(near) = venv
                 .parent()
                 .and_then(|dir| std::fs::read_dir(dir).ok())
@@ -716,11 +746,7 @@ impl Resolver<'_> {
             {
                 format!("[python] venv '{shown}' has no {want}; there is a virtual environment in {}: did you mean {}?", near.display(), write(&near))
             } else {
-                // A command to paste: quoted when the path has a space; the `py` launcher on
-                // Windows (`python` may be the Store's stand-in), `python3` elsewhere.
-                let python = if cfg!(windows) { "py" } else { "python3" };
-                let arg = if shown.contains(' ') { format!("\"{shown}\"") } else { shown.clone() };
-                format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {arg})")
+                format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {})", pasted(venv))
             };
             // COMMAND: the venv as given when it names a file, not a path inside it (19.2).
             let shown_command = if is_regular_file(venv) { shown.clone() } else { candidates[0].display().to_string() };
@@ -956,6 +982,21 @@ mod tests {
         assert_eq!(e.version, Some(Version(3, 12, 1)));
         assert_eq!(e.origin, Origin::Path);
         assert_eq!(e.skipped, [(alias, "Microsoft Store placeholder".to_string())]);
+    }
+
+    #[test]
+    fn r41_a_placeholder_outside_localappdata_is_still_one() {
+        // 7.6: a Microsoft\WindowsApps folder that isn't LOCALAPPDATA's (moved, or another
+        // user's) holds aliases too, so with only placeholders py is missing, not broken (7.8).
+        let root = temp("r41moved");
+        let apps = root.join("Microsoft").join("WindowsApps");
+        std::fs::create_dir_all(&apps).unwrap();
+        let alias = exe(&apps, "python3");
+        let p = fake(|_| ProbeOutcome::Exited { code: Some(9009), output: "Python was not found; run without arguments to install from the Microsoft Store".into() });
+        let l = lookup(&[&apps], Some(&root.join("elsewhere").join("WindowsApps")));
+        let nf = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").expect_err("no Python");
+        assert_eq!(nf.status, Status::Missing, "{}", nf.message);
+        assert!(nf.skipped.contains(&(alias, "Microsoft Store placeholder".to_string())), "{:?}", nf.skipped);
     }
 
     #[test]
@@ -1342,6 +1383,11 @@ mod tests {
         let cfg = with_command("py", &["no such python"], ConfigSource::Env("V2_ENGINE_PY".into()));
         let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with("not found (set by V2_ENGINE_PY)"), "{}", nf.message);
+        // A variable V2 doesn't expand, as PowerShell's single quotes keep it (18.4).
+        let unexpanded = d.join("%ProgramFiles%").join("Python311").join("python.exe");
+        let cfg = with_command("py", &[&unexpanded.to_string_lossy()], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with("not found (set by V2_ENGINE_PY); V2 doesn't expand %ProgramFiles%: write the path out"), "{}", nf.message);
         // A py launcher with no Python behind it: Python is missing, not broken (7.8).
         let launcher = temp("noruntime");
         exe(&launcher, if cfg!(windows) { "py" } else { "python3" });
@@ -1385,6 +1431,17 @@ mod tests {
         assert_eq!(nf.message, format!("[python] venv '{}' is a file: venv names the virtual environment's folder: write venv = \".venv\"", python.display()));
         let nf = resolve_with(&at(&d.join("venv")), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with(&format!("; there is a virtual environment in {}: did you mean venv = \".venv\"?", venv.display())), "{}", nf.message);
+        // Its bin (Scripts) folder, or a python in one that isn't there: the folder above (7.6).
+        let nf = resolve_with(&at(&bin), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        let inside = "is inside a virtual environment, and venv names the environment's folder: write";
+        assert_eq!(nf.message, format!("[python] venv '{}' {inside} venv = \".venv\"", bin.display()));
+        let none = d.join("none").join("bin").join("python");
+        let nf = resolve_with(&at(&none), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("[python] venv '{}' {inside} venv = \"none\" (create it: {} -m venv {})", none.display(), if cfg!(windows) { "py" } else { "python3" }, d.join("none").display()));
+        // A variable V2 doesn't expand: no venv to create there (18.1).
+        let var = d.join("%USERPROFILE%").join(".venv");
+        let nf = resolve_with(&at(&var), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with("V2 doesn't expand %USERPROFILE%: write the path out (a ~ at its start is your home folder)") && !nf.message.contains("-m venv"), "{}", nf.message);
         // A configured command wins over the venv, from v2.toml or V2_ENGINE_PY (7.6).
         let other = exe(&d, "python3");
         for command_from in [project_source(), ConfigSource::Env("V2_ENGINE_PY".into())] {

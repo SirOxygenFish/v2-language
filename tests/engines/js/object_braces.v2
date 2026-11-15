@@ -1,0 +1,26 @@
+// requires: js
+// An object as a block's value is written in parentheses: at the start of the code, or of a
+// statement, JavaScript reads { as a block of code (DOCS 4).
+try {
+    let v = @js { {a: 1} }
+} catch (e) {
+    print(e.type, e.foreign_type, e.message)
+}
+try {
+    let v = @js { {"a": 1, "b": 2} }
+} catch (e) {
+    print(e.message)
+}
+let t = 5
+try {
+    let v = @js(t) {
+        const u = t * 2
+        {"k": u}
+    }
+} catch (e) {
+    print(e.message)
+}
+print(@js { ({a: 1}) })
+// Its value unused, the same code is a block with a label, as JavaScript reads it.
+@js { {a: 1} }
+print("done")

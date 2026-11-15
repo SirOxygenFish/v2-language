@@ -1,0 +1,7 @@
+// requires: js ts
+// exit: 1
+// stderr: hint: if 'Shape' is a type or an interface, import it with import type { Shape } from './ts_types.ts': Node removes types as it runs a .ts file, so they aren't exports
+// A type is gone when Node runs the file that has it, so importing one as a value fails; the hint
+// says how to import it (DOCS 7, INTERNALS 13.5).
+@import { s } from ts."./fixtures/ts_type_value.ts"
+print(s)

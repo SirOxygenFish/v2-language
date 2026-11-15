@@ -40,6 +40,10 @@ fn temp_variable() -> Option<&'static str> {
 pub fn temp_problem() -> Option<String> {
     let base = std::env::temp_dir();
     if base.is_dir() {
+        #[cfg(windows)]
+        if let Err(problem) = fitting(base) {
+            return Some(problem);
+        }
         return None;
     }
     let what = if base.exists() { "isn't a folder" } else { "doesn't exist" };
@@ -59,8 +63,99 @@ fn shown(base: &Path) -> String {
     }
 }
 
+/// Windows: the longest path `<run>` adds to the temp folder, `\v2-{pid}-{32 hex}\adapters\py.py`.
+#[cfg(windows)]
+const INSIDE: usize = "\\v2-4294967295-0123456789abcdef0123456789abcdef\\adapters\\py.py".len();
+
+/// Windows paths stop at 259 characters unless long paths are on, and Python can't open its
+/// adapter past that (20.3). So a temp folder that leaves too little room is used by its short
+/// (8.3) name when that fits, and is a problem when nothing fits.
+#[cfg(windows)]
+fn fitting(base: PathBuf) -> Result<PathBuf, String> {
+    choose(base, long_paths, short_name)
+}
+
+/// `fitting`, with what it asks Windows passed in (the tests' seam).
+#[cfg(windows)]
+fn choose(base: PathBuf, long_paths: impl Fn() -> bool, short_name: impl Fn(&Path) -> Option<PathBuf>) -> Result<PathBuf, String> {
+    let len = |p: &Path| shown(p).encode_utf16().count();
+    if len(&base) + INSIDE <= 259 || long_paths() {
+        return Ok(base);
+    }
+    if let Some(short) = short_name(&base).filter(|s| len(s) + INSIDE <= 259) {
+        return Ok(short);
+    }
+    let n = shown(&base).chars().count();
+    let fix = "blocks can't run until TMP and TEMP name a shorter folder, such as C:\\Temp";
+    Err(match temp_variable() {
+        Some(var) => format!("{var} names {}, which is {n} characters long: too long for the files blocks need there, as Windows paths stop at 260 characters; {fix}", shown(&base)),
+        None => format!("the temp folder {} is {n} characters long: too long for the files blocks need there, as Windows paths stop at 260 characters; {fix}", shown(&base)),
+    })
+}
+
+/// `p` as a `\\?\` path, NUL-terminated, which Windows takes at any length.
+#[cfg(windows)]
+fn verbatim(p: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let wide: Vec<u16> = abs.as_os_str().encode_wide().collect();
+    let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    let mut out = if wide.starts_with(&w("\\\\?\\")) {
+        wide
+    } else if let Some(rest) = wide.strip_prefix(&w("\\\\")[..]) {
+        [w("\\\\?\\UNC\\"), rest.to_vec()].concat()
+    } else {
+        [w("\\\\?\\"), wide].concat()
+    };
+    out.push(0);
+    out
+}
+
+/// The 8.3 form of an existing folder (`C:\Users\SIROXY~1\…`), when the volume keeps them.
+#[cfg(windows)]
+fn short_name(p: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let long = verbatim(p);
+    // SAFETY: a NUL-terminated path and a buffer of the size the first call asks for.
+    let n = unsafe { GetShortPathNameW(long.as_ptr(), std::ptr::null_mut(), 0) };
+    if n == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; n as usize];
+    // SAFETY: as above.
+    let m = unsafe { GetShortPathNameW(long.as_ptr(), buf.as_mut_ptr(), n) };
+    if m == 0 || m >= n {
+        return None;
+    }
+    buf.truncate(m as usize);
+    let text = std::ffi::OsString::from_wide(&buf).to_string_lossy().into_owned();
+    let plain = match (text.strip_prefix("\\\\?\\UNC\\"), text.strip_prefix("\\\\?\\")) {
+        (Some(unc), _) => format!("\\\\{unc}"),
+        (None, Some(rest)) => rest.to_string(),
+        _ => text,
+    };
+    Some(PathBuf::from(plain))
+}
+
+/// Whether Windows' long paths are on (`LongPathsEnabled`), so Python and Node.js open paths
+/// past 259 characters.
+#[cfg(windows)]
+fn long_paths() -> bool {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
+    let key: Vec<u16> = "SYSTEM\\CurrentControlSet\\Control\\FileSystem".encode_utf16().chain([0]).collect();
+    let name: Vec<u16> = "LongPathsEnabled".encode_utf16().chain([0]).collect();
+    let (mut value, mut size) = (0u32, 4u32);
+    // SAFETY: NUL-terminated strings and a DWORD buffer of the size given.
+    let status = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size) };
+    status == 0 && value != 0
+}
+
 fn create() -> Result<PathBuf, String> {
     let base = std::env::temp_dir();
+    // Windows: in a temp folder too deep for the files inside, its short (8.3) form.
+    #[cfg(windows)]
+    let base = fitting(base.clone()).map_err(|problem| format!("cannot create a private temp folder in {}; {problem}", shown(&base)))?;
     let fail = |e: Option<&Error>| {
         let why = e.map_or_else(String::new, |e| format!(": {}", crate::syntax::span::os_message(e)));
         let next = match (temp_problem(), temp_variable()) {
@@ -182,13 +277,13 @@ fn random16() -> std::io::Result<[u8; 16]> {
 /// control: `D:P(A;OICI;FA;;;{sid})` (20.3).
 #[cfg(windows)]
 fn make_private(dir: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
     let sddl: Vec<u16> = format!("D:P(A;OICI;FA;;;{})", user_sid()?).encode_utf16().chain([0]).collect();
-    let path: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    // As a `\\?\` path, so a deep temp folder can't make it fail.
+    let path = verbatim(dir);
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: NUL-terminated strings; the descriptor is freed with LocalFree.
     unsafe {
@@ -311,6 +406,38 @@ mod tests {
         std::fs::write(dir.join("file"), "x").unwrap();
         remove();
         assert!(!dir.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_deep_temp_folder_is_used_by_its_short_name() {
+        // 20.3: a temp folder whose path leaves no room for the run dir's files (259 characters
+        // with long paths off) is used by its 8.3 name; with long paths on, or a short name that
+        // fits, as it is; with neither, the problem says how long it is and what to do.
+        let deep = std::env::temp_dir().join(format!("v2deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&deep);
+        let mut dir = deep.clone();
+        while dir.as_os_str().len() < 230 {
+            dir.push("a folder with a long name");
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(choose(dir.clone(), || true, |_| None), Ok(dir.clone()), "long paths on");
+        let short = PathBuf::from(r"C:\Users\ME~1\AppData\Local\Temp\V2DEEP~1");
+        assert_eq!(choose(dir.clone(), || false, |_| Some(short.clone())), Ok(short));
+        let n = dir.display().to_string().chars().count();
+        let problem = choose(dir.clone(), || false, |_| None).unwrap_err();
+        assert!(problem.contains(&format!(", which is {n} characters long: too long for the files blocks need there")), "{problem}");
+        assert!(problem.ends_with("blocks can't run until TMP and TEMP name a shorter folder, such as C:\\Temp"), "{problem}");
+        // Windows' own short name, when the volume keeps 8.3 names, is the same folder.
+        if let Some(s) = short_name(&dir) {
+            assert!(s.as_os_str().len() < dir.as_os_str().len(), "{}", s.display());
+            assert_eq!(std::fs::canonicalize(&s).unwrap(), std::fs::canonicalize(&dir).unwrap());
+        }
+        // The run dir itself is made at any depth (a `\\?\` path).
+        let private = dir.join(format!("v2-{}-0123456789abcdef0123456789abcdef", std::process::id()));
+        make_private(&private).expect("a private folder past 248 characters");
+        std::fs::write(private.join("x"), "x").unwrap();
+        let _ = std::fs::remove_dir_all(&deep);
     }
 
     #[cfg(unix)]
