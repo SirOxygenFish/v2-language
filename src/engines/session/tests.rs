@@ -667,11 +667,10 @@ fn conda_run_without_no_capture_output_is_named() {
     for words in [&[conda_bin, "run", "--no-capture-output", "-n", "sales", "python"][..], &[conda_bin, "run", "--live-stream", "-n", "sales", "python"], &["/usr/bin/env", "python3"], &[conda_bin, "python"]] {
         assert_eq!(wrapper_note("py", &argv(words), false, false), general, "{words:?}");
     }
-    // mamba, micromamba; a prefix instead of a name; node in a conda environment (Windows).
-    let x = if cfg!(windows) { "envs\\x\\python.exe" } else { "envs/x/bin/python" };
-    let mamba = format!("; mamba run passes them through only with --no-capture-output: add it after run, or name the environment's python ({x} in mamba's folder) in [engines.py] command");
-    assert!(wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"]), false, false).ends_with(&mamba));
-    assert!(wrapper_note("py", &argv(&["micromamba", "run", "-p", "/envs/x", "python"]), false, false).ends_with("; micromamba run passes them through only with --no-capture-output: add it after run, or name the environment's python in [engines.py] command"));
+    // micromamba's run (mamba 2's too) passes them through and has no --no-capture-output: no
+    // advice for py (the second review of round 19). Node in a conda environment (Windows).
+    assert_eq!(wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"]), false, false), general);
+    assert_eq!(wrapper_note("py", &argv(&["micromamba", "run", "-p", "/envs/x", "python"]), false, false), general);
     assert!(wrapper_note("js", &argv(&["conda", "run", "-n", "web", "node"]), false, false).ends_with("; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"));
     // Its hello came (capture mode writes it when the program has ended): not "without a word".
     let held = "; it ended before V2 could talk to it over its standard input and output: a command that runs it through another program must pass them through";
@@ -686,7 +685,7 @@ fn conda_run_without_no_capture_output_is_named() {
     }
     assert_eq!(
         wrapper_note("js", &argv(&["micromamba", "run", "-p", "/envs/web", "node"]), true, false),
-        format!("{pipes}; micromamba run closes them, even with --no-capture-output: name the environment's node in [engines.js] command")
+        format!("{pipes}; micromamba run closes them: name the environment's node in [engines.js] command")
     );
     assert_eq!(wrapper_note("js", &argv(&["/usr/local/bin/wrap", "node"]), true, false), pipes);
     assert_eq!(
@@ -709,8 +708,16 @@ fn doctor_names_a_conda_run_that_cant_work() {
         conda_run_note(&engine(0, &["conda", "run", "-n", "sales", "python"])).as_deref(),
         Some(&*format!("V2 talks to the program over its standard input and output, and conda run passes them through only with --no-capture-output: add it after run, or name the environment's python ({python} in conda's folder) in [engines.py] command"))
     );
-    for words in [&["conda", "run", "--no-capture-output", "-n", "sales", "python"][..], &["python3"], &["/usr/bin/env", "python3"]] {
+    // micromamba run (and mamba 2's) passes standard input and output through: a working setup,
+    // no note (the second review of round 19).
+    for words in [&["conda", "run", "--no-capture-output", "-n", "sales", "python"][..], &["python3"], &["/usr/bin/env", "python3"], &["micromamba", "run", "-n", "sales", "python"], &["C:\\mamba\\mamba.exe", "run", "-n", "sales", "python"]] {
         assert_eq!(conda_run_note(&engine(0, words)), None, "{words:?}");
+    }
+    if cfg!(unix) {
+        assert_eq!(
+            conda_run_note(&engine(1, &["micromamba", "run", "-n", "web", "node"])).as_deref(),
+            Some("V2 talks to the program over two pipes it inherits (named in V2_VEP_FDS), and micromamba run closes them: name the environment's node (envs/web/bin/node in micromamba's folder) in [engines.js] command")
+        );
     }
     let node = engine(1, &["conda", "run", "--no-capture-output", "-n", "web", "node"]);
     let js = conda_run_note(&node);

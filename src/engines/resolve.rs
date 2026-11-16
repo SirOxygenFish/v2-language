@@ -981,14 +981,21 @@ impl Resolver<'_> {
             let not_a_venv = |what: &str, py: &Path| {
                 format!("[python] venv '{shown}' is {what}, not a virtual environment: name its python instead, {}, or make a virtual environment with it: {} -m venv .venv", command(py), pasted(py))
             };
+            // The bin (Scripts) folder or the python of a damaged venv: that venv, made again.
+            let in_damaged = |what: &str, folder: &Path| {
+                format!("[python] venv '{shown}' is {what} a virtual environment that has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}, and write {}", pasted(folder), write(folder))
+            };
             // Its python links to one that is gone, as after the system's Python was upgraded.
             let dangling = candidates.iter().find_map(|c| dangling_target(c));
             let message = if let Some(target) = dangling {
                 format!("[python] venv '{shown}' has a python that links to {}, which isn't there (was Python upgraded?): {}", target.display(), remake_venv(venv))
             } else if is_regular_file(venv) {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
-                match venv.parent().and_then(Path::parent).filter(|f| is_venv(f)) {
+                let above = venv.parent().and_then(Path::parent);
+                match above.filter(|f| is_venv(f)) {
                     Some(folder) => format!("[python] venv '{shown}' is a file: venv names the virtual environment's folder: write {}", write(folder)),
+                    // Its launcher (Windows), which can't run without pyvenv.cfg: no command to name.
+                    None if above.is_some_and(damaged) => in_damaged("a file in", above.unwrap_or(venv)),
                     // A Python's name (python3, python.exe, pypy3): that program may be meant.
                     None if venv.file_name().is_some_and(|f| f.to_string_lossy().to_ascii_lowercase().starts_with("py")) => {
                         format!("[python] venv '{shown}' is a file: venv names a virtual environment's folder; for a Python that isn't in one, write {} instead of venv", command(venv))
@@ -999,6 +1006,8 @@ impl Resolver<'_> {
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}", write(folder))
             } else if damaged(venv) {
                 format!("[python] venv '{shown}' has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}", pasted(venv))
+            } else if let Some(folder) = inside.filter(|f| damaged(f)) {
+                in_damaged("inside", folder)
             } else if let Some(py) = installed(venv) {
                 if venv.join("conda-meta").is_dir() {
                     // The base environment (Miniforge's own folder, with condabin) is `base`.
@@ -2388,6 +2397,13 @@ mod tests {
         let nf = resolve_with(&at(&bare), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert_eq!(nf.message, format!("[python] venv '{}' has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}", bare.display(), bare.display()));
         assert_eq!((nf.status, nf.from.as_deref()), (Status::Broken, Some("venv")));
+        // Its Scripts (bin) folder, or its python (the launcher on Windows), named instead: the
+        // same venv made again, never its launcher as a command (round 19, the second review).
+        for (v, what) in [(bare_py.parent().unwrap().to_path_buf(), "inside"), (bare_py.clone(), "a file in")] {
+            let nf = resolve_with(&at(&v), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+            let want = format!("[python] venv '{}' is {what} a virtual environment that has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}, and write venv = ", v.display(), bare.display());
+            assert!(nf.message.starts_with(&want) && !nf.message.contains("[engines.py]"), "{}", nf.message);
+        }
         // A conda environment (conda-meta), its python at its root on Windows, in bin elsewhere;
         // the base environment (with condabin) is activated as base.
         let quoted = |p: &Path| if cfg!(windows) { format!("['{}']", p.display()) } else { format!("[\"{}\"]", p.display()) };

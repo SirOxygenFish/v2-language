@@ -188,9 +188,12 @@ fn remove_command(link: &str, dir: bool, git_bash: bool) -> String {
 /// Where the link `at` points, absolute: a relative target (`ln -s ../shared lib`) is relative to
 /// the link's own folder, so `make gone` would make the wrong folder (DOCS 3.10).
 fn link_target(at: &Path, to: &Path) -> PathBuf {
-    let to = crate::syntax::span::strip_verbatim(to);
     if to.is_absolute() {
-        return to;
+        // `\\?\C:\x` reads as `C:\x`; `\\?\Volume{…}\x` (a mount point's or a junction into a
+        // volume's target) has no other name: as it is, never joined to the link's folder (the
+        // second review of round 19).
+        let plain = crate::syntax::span::strip_verbatim(to);
+        return if plain.is_absolute() { plain } else { to.to_path_buf() };
     }
     let folder = at.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     absolute_clean(&canonical(folder).unwrap_or_else(|| folder.to_path_buf()).join(to))
@@ -274,13 +277,12 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
             if std::fs::metadata(&target).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
                 return Err((format!("cannot import '{spec}': it is a pipe or a device, not a file"), None));
             }
-            let message = match std::fs::read_link(&target) {
-                Ok(to) if e.kind() == std::io::ErrorKind::NotFound => {
-                    format!("cannot import '{spec}': it is a symbolic link to {}, which isn't there", crate::syntax::span::strip_verbatim(&to).to_string_lossy())
-                }
-                _ if is_link_loop(&e) => format!("cannot import '{spec}': it is a link in a loop"),
-                _ => format!("cannot import '{spec}': {}", os_message(&e)),
-            };
+            // A link that leads nowhere (its target absolute) or in a loop: that, and what fixes it,
+            // as for a folder on the way (DOCS 3.10; the second review of round 19).
+            if let Some(link) = link_problem(&target).filter(|l| l.at == target) {
+                return Err((format!("cannot import '{spec}': {}", link.problem("it")), Some(link.fix(&shown(&link.at)))));
+            }
+            let message = if is_link_loop(&e) { format!("cannot import '{spec}': it is a link in a loop") } else { format!("cannot import '{spec}': {}", os_message(&e)) };
             return Err((message, None));
         }
         Err(e) => {
@@ -630,6 +632,12 @@ mod tests {
         assert_eq!(link_target(&base.join("sub").join("broken"), Path::new("../gone")), absolute_clean(&base.join("gone")));
         assert_eq!(link_target(&base.join("sub").join("broken"), Path::new("gone")), absolute_clean(&base.join("sub").join("gone")));
         assert_eq!(link_target(&base.join("broken"), &base.join("abs")), base.join("abs"));
+        #[cfg(windows)]
+        {
+            assert_eq!(link_target(&base.join("broken"), Path::new(r"\\?\C:\gone")), PathBuf::from(r"C:\gone"));
+            let volume = Path::new(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\gone");
+            assert_eq!(link_target(&base.join("broken"), volume), volume.to_path_buf());
+        }
         #[cfg(unix)]
         {
             // A real one: its folder as it really is.

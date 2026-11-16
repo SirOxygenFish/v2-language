@@ -162,19 +162,21 @@ fn channel(fds: bool) -> (&'static str, &'static str) {
 }
 
 /// A command that runs the program with `conda run` (`mamba run`, `micromamba run`), from its words
-/// alone (8.4, 19.2): what to write instead. It passes standard input and output through only with
-/// `--no-capture-output` (or `--live-stream`); with `fds` (js on Unix) it closes the two pipes even
-/// then, so only naming the environment's node works. `None` for any other command.
+/// alone (8.4, 19.2): what to write instead. `conda run` passes standard input and output through
+/// only with `--no-capture-output` (or `--live-stream`); micromamba's `run` (mamba 2's too) passes
+/// them through and has no such option, so py through it gets no advice. With `fds` (js on Unix)
+/// each of them closes the two pipes, so only naming the environment's node works. `None` for any
+/// other command.
 fn conda_run_advice(id: &str, argv: &[OsString], fds: bool) -> Option<String> {
     let words: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let stem = |w: &str| Path::new(w).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let at = words.iter().position(|w| matches!(stem(w).as_str(), "conda" | "mamba" | "micromamba"))?;
     let run = words.iter().skip(at + 1).position(|w| w == "run").map(|i| i + at + 1)?;
-    let passed = words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream");
+    let tool = stem(&words[at]);
+    let passed = tool != "conda" || words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream");
     if passed && !fds {
         return None;
     }
-    let tool = stem(&words[at]);
     // `-n sales`, `--name sales` or `--name=sales`: the environment's own python or node.
     let name = words[run + 1..].windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].clone());
     let name = name.or_else(|| words[run + 1..].iter().find_map(|w| w.strip_prefix("--name=").map(str::to_string)));
@@ -187,7 +189,8 @@ fn conda_run_advice(id: &str, argv: &[OsString], fds: bool) -> Option<String> {
         _ => ("node", String::new()),
     };
     Some(if fds {
-        format!("{tool} run closes them, even with --no-capture-output: name the environment's {program}{place} in [engines.{id}] command")
+        let even = if tool == "conda" { ", even with --no-capture-output" } else { "" };
+        format!("{tool} run closes them{even}: name the environment's {program}{place} in [engines.{id}] command")
     } else {
         format!("{tool} run passes them through only with --no-capture-output: add it after run, or name the environment's {program}{place} in [engines.{id}] command")
     })
