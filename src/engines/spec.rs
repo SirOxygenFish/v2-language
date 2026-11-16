@@ -233,14 +233,31 @@ pub fn probe_variables(id: &str) -> &'static [&'static str] {
     }
 }
 
-/// What doctor runs to see that the program really starts, when a startup variable is set
-/// (19.2): `--version` answers before Python reads `PYTHONHOME`, and before Node runs a
-/// `--require` preload (8.4).
+/// What doctor runs to see that the program really starts, when a startup variable or an
+/// address-space limit is set (19.2): `--version` answers before Python reads `PYTHONHOME`, and
+/// before Node runs a `--require` preload or reserves its memory (8.4). Python imports what V2's
+/// worker imports as it starts (py.py, step 1), as a stale `PYTHONPATH`, another version's
+/// standard library, starts Python but breaks `re`; without the folder `-c` puts first on
+/// `sys.path` (the current one), as the worker, a script in V2's run folder, has none of it.
 pub fn start_args(id: &str) -> &'static [&'static str] {
     match id {
-        "py" => &["-c", "pass"],
+        "py" => &["-c", PY_START_CHECK],
         "js" => &["-e", "0"],
         _ => &[],
+    }
+}
+
+#[cfg(not(windows))]
+const PY_START_CHECK: &str = "import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback, linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit, warnings";
+#[cfg(windows)]
+const PY_START_CHECK: &str = "import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback, linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit, warnings, msvcrt, ctypes";
+
+/// How doctor names that check in its note (19.2): `-e 0 failed`, or for Python, whose check is
+/// long, what it does.
+pub fn start_check_failed(id: &str) -> String {
+    match id {
+        "py" => "can't import the standard modules V2's worker uses".into(),
+        _ => format!("{} failed", start_args(id).join(" ")),
     }
 }
 
@@ -248,9 +265,26 @@ pub fn start_args(id: &str) -> &'static [&'static str] {
 /// fix it` (7.8, 19.2), for the variables `set` (each `startup_variables`' pair).
 pub fn startup_fix(id: &str, set: &[(&str, String)]) -> String {
     let program = if id == "py" { "python" } else { "node" };
+    format!("{program} didn't start: {}", startup_vars_fix(set))
+}
+
+/// `NODE_OPTIONS is set (--bogus), which it reads as it starts: unset it or fix it`, the end of
+/// a worker's startup crash (8.4) and of `startup_fix`.
+pub fn startup_vars_fix(set: &[(&str, String)]) -> String {
     let vars: Vec<String> = set.iter().map(|(n, v)| format!("{n} is set ({v})")).collect();
     let it = if set.len() == 1 { "it" } else { "them" };
-    format!("{program} didn't start: {}, which it reads as it starts: unset {it} or fix {it}", vars.join(" and "))
+    format!("{}, which it reads as it starts: unset {it} or fix {it}", vars.join(" and "))
+}
+
+/// Unix, under an address-space limit (`ulimit -v`): `a memory limit (ulimit -v) of 585 MB is set
+/// for this shell, and Node.js reserves about 1 GB as it starts: raise it` (8.4, 19.2).
+pub fn limit_fix(id: &str) -> Option<String> {
+    #[cfg(unix)]
+    let megabytes = crate::address_limit().map(|l| l >> 20);
+    #[cfg(not(unix))]
+    let megabytes: Option<u64> = None;
+    let needs = if id == "js" { "Node.js reserves about 1 GB" } else { "the engine may need more" };
+    megabytes.map(|mb| format!("a memory limit (ulimit -v) of {mb} MB is set for this shell, and {needs} as it starts: raise it"))
 }
 
 /// Which package manager a Linux uses, from `/etc/os-release`'s `ID` and `ID_LIKE` (7.8).
@@ -320,6 +354,41 @@ mod tests {
         assert_eq!(specs[1].min_version, Some(Version(22, 13, 0)));
         assert_eq!(specs[2].session_of.as_deref(), Some("js"));
         assert!(py.env.iter().any(|(k, v)| &**k == "PYTHONUTF8" && &**v == "1"));
+    }
+
+    #[test]
+    fn doctors_python_check_imports_what_the_worker_imports_as_it_starts() {
+        // Round 19, 19.2: a stale PYTHONPATH passes `python -c pass` but breaks the worker's
+        // first imports (py.py, step 1, up to the protocol's fds), so the check imports them all.
+        let check = start_args("py")[1];
+        let mut imported: Vec<&str> = check.split("; import ").nth(1).unwrap().split(", ").collect();
+        let step1 = crate::adapters::PY.split("IN = os.dup(0)").next().unwrap();
+        let mut modules: Vec<&str> = Vec::new();
+        for line in step1.lines().map(str::trim).filter(|l| l.starts_with("import ")) {
+            let windows_only = matches!(line, "import msvcrt, ctypes");
+            if windows_only && !cfg!(windows) {
+                continue;
+            }
+            modules.extend(line["import ".len()..].split(", ").filter(|m| *m != "sys"));
+        }
+        assert!(modules.len() > 20, "{modules:?}");
+        imported.sort_unstable();
+        modules.sort_unstable();
+        assert_eq!(imported, modules, "the worker's first imports and doctor's check");
+        // Not the folder `-c` puts first on sys.path (the current one): the worker has none.
+        assert!(check.starts_with("import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import "), "{check}");
+        assert_eq!(start_args("js"), ["-e", "0"]);
+        assert_eq!(start_check_failed("js"), "-e 0 failed");
+    }
+
+    #[test]
+    fn a_startup_crash_names_the_variables_and_what_to_do() {
+        // Round 19, 8.4: the run's message ends like doctor's fix line.
+        let one = [("PYTHONPATH", "/old/lib".to_string())];
+        assert_eq!(startup_vars_fix(&one), "PYTHONPATH is set (/old/lib), which it reads as it starts: unset it or fix it");
+        assert_eq!(startup_fix("py", &one), "python didn't start: PYTHONPATH is set (/old/lib), which it reads as it starts: unset it or fix it");
+        let two = [("PYTHONHOME", "/nope".to_string()), ("PYTHONPATH", "/old/lib".to_string())];
+        assert_eq!(startup_vars_fix(&two), "PYTHONHOME is set (/nope) and PYTHONPATH is set (/old/lib), which it reads as it starts: unset them or fix them");
     }
 
     #[test]

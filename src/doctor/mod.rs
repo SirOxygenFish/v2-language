@@ -219,10 +219,12 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
             Ok(e) => {
                 let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
                 // Read as it starts, after the version probe: one that is wrong stops every block,
-                // so with one set the program has to start (`python -c pass`).
+                // so with one set the program has to start (importing what the worker imports).
+                // So under an address-space limit, which Node.js needs about 1 GB of (8.4).
                 let vars = crate::engines::spec::startup_variables(&id);
+                let limit = crate::engines::spec::limit_fix(&id);
                 let host_failed = spec.session_of.as_ref().is_some_and(|h| no_start.contains(&**h));
-                let failure = if vars.is_empty() || spec.session_of.is_some() { None } else { reg.start_failure(&e) };
+                let failure = if (vars.is_empty() && limit.is_none()) || spec.session_of.is_some() { None } else { reg.start_failure(&e) };
                 if host_failed || failure.is_some() {
                     rows.push([id.clone(), "broken".into(), e.shown(), version, e.origin.label()]);
                     match (&spec.session_of, failure) {
@@ -230,7 +232,10 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                         (None, why) => {
                             skipped(&e.skipped, &mut notes);
                             notes.push(format!("{id}: {} {}", e.shown(), why.unwrap_or_default()));
-                            notes.push(format!("{id}: fix: {}", crate::engines::spec::startup_fix(&id, &vars)));
+                            if !vars.is_empty() {
+                                notes.push(format!("{id}: fix: {}", crate::engines::spec::startup_fix(&id, &vars)));
+                            }
+                            notes.extend(limit.map(|fix| format!("{id}: fix: {fix}")));
                             no_start.insert(id.clone());
                         }
                     }

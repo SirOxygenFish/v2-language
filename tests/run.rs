@@ -1187,11 +1187,12 @@ fn a_python_that_cant_start_names_pythonhome() {
     let env = [("PYTHONHOME", nowhere)];
     let (code, _, stderr) = run_in_home(&home.0, &["start.v2"], &env);
     assert_eq!(code, Some(1), "{stderr}");
-    let named = "; PYTHONHOME is set (no-python-home), which it reads as it starts";
+    // Round 19: what to do, as doctor's fix line says.
+    let named = "; PYTHONHOME is set (no-python-home), which it reads as it starts: unset it or fix it\n";
     assert!(stderr.contains("EngineCrashed: engine 'py' exited during startup") && stderr.contains(named), "{stderr}");
     let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &env);
     assert_eq!((code, doctor_rows(&stdout)["py"][0].as_str()), (Some(0), "broken"), "{stdout}");
-    assert!(stdout.contains(" -c pass failed (exit code ") && stdout.contains("): Fatal Python error: "), "{stdout}");
+    assert!(stdout.contains(" can't import the standard modules V2's worker uses (exit code ") && stdout.contains("): Fatal Python error: "), "{stdout}");
     let fix = "\n  py: fix: python didn't start: PYTHONHOME is set (no-python-home), which it reads as it starts: unset it or fix it\n";
     assert!(stdout.contains(fix) && !stdout.contains("which Python reads as it starts"), "{stdout}");
     assert!(stdout.lines().any(|l| l.starts_with("not ready: py")) && !stdout.lines().any(|l| l.starts_with("ready:") && l.contains("py")), "{stdout}");
@@ -1199,6 +1200,30 @@ fn a_python_that_cant_start_names_pythonhome() {
     let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &[("PYTHONPATH", std::ffi::OsStr::new("."))]);
     assert_eq!(doctor_rows(&stdout)["py"][0], "ok", "{stdout}");
     assert!(stdout.contains("\n  py: PYTHONPATH is set (.), which Python reads as it starts\n"), "{stdout}");
+}
+
+#[test]
+fn a_stale_pythonpath_that_breaks_the_workers_imports_is_broken_in_doctor() {
+    // Round 19, 19.2: a PYTHONPATH left from another Python passes `python -c pass` but breaks
+    // `re`, which the worker's json imports as it starts: doctor imports what the worker imports,
+    // so py is broken, with Python's own line (not a source line of its traceback) and the fix.
+    if !needs("py", "a_stale_pythonpath_that_breaks_the_workers_imports_is_broken_in_doctor") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("stale")).unwrap();
+    std::fs::write(home.0.join("stale").join("re.py"), "raise ImportError('a re from another Python')\n").unwrap();
+    std::fs::write(home.0.join("start.v2"), "@py { 1 }\n").unwrap();
+    // Relative, as the run and doctor start Python in this folder: short, so no 80-character cut.
+    let env = [("PYTHONPATH", std::ffi::OsStr::new("stale"))];
+    let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &env);
+    assert_eq!((code, doctor_rows(&stdout)["py"][0].as_str()), (Some(0), "broken"), "{stdout}");
+    assert!(stdout.contains(" can't import the standard modules V2's worker uses (exit code 1): ImportError: a re from another Python\n"), "{stdout}");
+    assert!(stdout.contains("\n  py: fix: python didn't start: PYTHONPATH is set (stale), which it reads as it starts: unset it or fix it\n"), "{stdout}");
+    let (code, _, stderr) = run_in_home(&home.0, &["start.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("ImportError: a re from another Python"), "Python's own traceback comes first: {stderr}");
+    assert!(stderr.contains("; PYTHONPATH is set (stale), which it reads as it starts: unset it or fix it\n"), "{stderr}");
 }
 
 #[test]
@@ -2993,6 +3018,53 @@ fn a_virtual_memory_limit_gets_a_smaller_interpreter_stack() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn doctor_starts_node_under_a_memory_limit() {
+    // Round 19, 19.2: `node --version` answers under a limit too small for Node.js to start,
+    // so doctor also runs `node -e 0` then: one that can't start is broken, with the run's words
+    // about the limit. This node dies as Node.js does there (SIGTRAP), except for --version.
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    let home = TempHome::new();
+    let bin = home.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let node = bin.join("node");
+    std::fs::write(&node, "#!/bin/sh\n[ \"$1\" = --version ] && { echo v22.13.0; exit 0; }\nkill -TRAP $$\n").unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let doctor = |limit: Option<libc::rlim_t>| {
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("doctor").current_dir(&home.0).env("PATH", &bin).env_remove("NODE_OPTIONS").stdin(Stdio::null());
+        if let Some(bytes) = limit {
+            // SAFETY: setrlimit is async-signal-safe and touches only the child.
+            unsafe {
+                cmd.pre_exec(move || {
+                    let limit = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+                    if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // No limit: --version is all doctor asks.
+    let stdout = doctor(None);
+    assert_eq!(doctor_rows(&stdout)["js"][0], "ok", "{stdout}");
+    let stdout = doctor(Some(400 << 20));
+    let rows = doctor_rows(&stdout);
+    assert_eq!((rows["js"][0].as_str(), rows["ts"][0].as_str()), ("broken", "broken"), "{stdout}");
+    let notes = format!(
+        "\n  js: {} -e 0 failed (killed by signal 5 (SIGTRAP))\n  js: fix: a memory limit (ulimit -v) of 400 MB is set for this shell, and Node.js reserves about 1 GB as it starts: raise it\n",
+        node.display()
+    );
+    assert!(stdout.contains(&notes), "{stdout}");
+    assert!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), "{stdout}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_write_past_the_file_size_limit_is_an_ioerror() {
     // INTERNALS 8.3: V2 ignores SIGXFSZ, so a write past ulimit -f fails with EFBIG, an IOError
     // the script can catch, instead of killing v2.
@@ -3677,6 +3749,70 @@ fn doctor_calls_node_23_1_unsupported() {
     assert_eq!(rows["js"], ["unsupported", node.as_str(), "23.1.0", "PATH"], "{stdout}");
     assert!(stdout.contains("\n  js: not supported: found 23.1.0, which has no type stripping; V2 needs 22.13+, not 23.0 or 23.1; install: "), "{stdout}");
     assert!(!stdout.contains("js: skipped"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tilde_path_entry_is_named_by_doctor_and_engine_not_found() {
+    // Round 19, 7.5: export PATH="~/.nvm/…/bin:$PATH" (quoted, so not expanded): only bash's own
+    // lookup expands ~, so V2 skips the entry as relative, as execvp and dash do, and says so.
+    use std::os::unix::fs::PermissionsExt;
+    let home = TempHome::new();
+    let (nvm, system) = (home.0.join(".nvm/v24/bin"), home.0.join("system"));
+    for (dir, version) in [(&nvm, "v24.1.0"), (&system, "v22.13.0")] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("node"), format!("#!/bin/sh\necho {version}\n")).unwrap();
+        std::fs::set_permissions(dir.join("node"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let why = "(its PATH entry starts with ~, which only bash expands: write $HOME/.nvm/v24/bin in your startup file)";
+    let path = format!("~/.nvm/v24/bin:{}", system.display());
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[("PATH", std::ffi::OsStr::new(&path))]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let used = system.join("node").display().to_string();
+    assert_eq!(doctor_rows(&stdout)["js"], ["ok", used.as_str(), "22.13.0", "PATH"], "{stdout}");
+    assert!(stdout.contains(&format!("\n  js: skipped ~/.nvm/v24/bin/node {why}\n")), "{stdout}");
+    // After the one V2 uses, bash runs that one too: nothing to say.
+    let after = format!("{}:~/.nvm/v24/bin", system.display());
+    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &[("PATH", std::ffi::OsStr::new(&after))]);
+    assert!(!stdout.contains("~/.nvm"), "{stdout}");
+    // Nothing else on PATH: EngineNotFound's skipped line.
+    std::fs::write(home.0.join("j.v2"), "@js { 1 }\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["j.v2"], &[("PATH", std::ffi::OsStr::new("~/.nvm/v24/bin"))]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains("EngineNotFound: engine 'js' (JavaScript) not found\n"), "{stderr}");
+    assert!(stderr.contains(&format!("\n    tried: node on PATH\n    skipped: ~/.nvm/v24/bin/node {why}\n    install: ")), "{stderr}");
+}
+
+#[test]
+fn a_conda_run_command_is_told_to_pass_input_and_output_through() {
+    // Round 19, 8.4: `conda run` keeps the program's standard input and output unless given
+    // --no-capture-output, so the worker ends with code 0 before its hello, with nothing above
+    // the message. This conda answers --version as the environment's Python, then exits at once.
+    let home = TempHome::new();
+    let bin = home.0.join("conda").join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let conda = bin.join(if cfg!(windows) { "conda.cmd" } else { "conda" });
+    if cfg!(windows) {
+        std::fs::write(&conda, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.1& exit /b 0)\r\nexit /b 0\r\n").unwrap();
+    } else {
+        std::fs::write(&conda, "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --version ] && { echo Python 3.12.1; exit 0; }; done\nexit 0\n").unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&conda, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let general = "EngineCrashed: engine 'py' exited during startup (exit code 0); see its error output above, if any; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through";
+    let python = if cfg!(windows) { "envs\\sales\\python.exe" } else { "envs/sales/bin/python" };
+    let conda_line = format!("; conda run passes them through only with --no-capture-output: add it after run, or name the environment's python ({python} in conda's folder) in [engines.py] command\n");
+    for (words, named) in [("'run', '-n', 'sales', 'python'", true), ("'run', '--no-capture-output', '-n', 'sales', 'python'", false)] {
+        std::fs::write(home.0.join("v2.toml"), format!("[engines.py]\ncommand = ['{}', {words}]\n", conda.display())).unwrap();
+        let (code, _, stderr) = run_in_home(&home.0, &["s.v2"], &[]);
+        assert_eq!(code, Some(1), "{stderr}");
+        let want = if named { format!("{general}{conda_line}") } else { format!("{general}\n") };
+        assert!(stderr.starts_with("s.v2:1:1: ") && stderr.contains(&want), "{words}: {stderr}");
+    }
 }
 
 #[test]
