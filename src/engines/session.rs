@@ -132,33 +132,76 @@ pub fn worker_command(e: &ResolvedEngine, adapter: &Path) -> (Vec<OsString>, Vec
     (argv, env)
 }
 
-/// What a worker that exited with code 0 before its `hello` means (8.4): V2 speaks to the program
-/// over its standard input and output, which a wrapper in the command may keep for itself.
-/// `conda run` (`mamba run`, `micromamba run`) does, unless given `--no-capture-output` (or
-/// `--live-stream`): then what to write instead. `id`: the engine's.
-fn wrapper_note(id: &str, argv: &[OsString]) -> String {
+/// What a worker that exited with code 0 during startup means (8.4): V2 speaks to the program over
+/// a channel (`channel`) that a wrapper in the command may keep for itself, as `conda run` does
+/// (`conda_run_advice`: then what to write instead). `id`: the engine's; `fds`: the worker speaks
+/// on two pipes of its own (js on Unix, 9.9); `hello`: its `hello` arrived (a wrapper that held the
+/// program's output until it ended), so it wasn't "without a word".
+fn wrapper_note(id: &str, argv: &[OsString], fds: bool, hello: bool) -> String {
+    let (over, must) = channel(fds);
+    let mut note = if hello {
+        format!("; it ended before V2 could talk to it over {over}: a command that runs it through another program must {must}")
+    } else {
+        format!("; it ended without a word to V2, which talks to the program over {over}: a command that runs it through another program must {must}")
+    };
+    if let Some(advice) = conda_run_advice(id, argv, fds) {
+        note.push_str(&format!("; {advice}"));
+    }
+    note
+}
+
+/// How V2 talks to a worker (8.4, 9.9), and what a command that runs it through another program
+/// must do with that: two pipes it inherits, named in `V2_VEP_FDS` (`fds`: js on Unix), or its
+/// standard input and output.
+fn channel(fds: bool) -> (&'static str, &'static str) {
+    if fds {
+        ("two pipes it inherits (named in V2_VEP_FDS)", "leave them open")
+    } else {
+        ("its standard input and output", "pass them through")
+    }
+}
+
+/// A command that runs the program with `conda run` (`mamba run`, `micromamba run`), from its words
+/// alone (8.4, 19.2): what to write instead. It passes standard input and output through only with
+/// `--no-capture-output` (or `--live-stream`); with `fds` (js on Unix) it closes the two pipes even
+/// then, so only naming the environment's node works. `None` for any other command.
+fn conda_run_advice(id: &str, argv: &[OsString], fds: bool) -> Option<String> {
     let words: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-    let mut note = "; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through".to_string();
     let stem = |w: &str| Path::new(w).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    let Some(at) = words.iter().position(|w| matches!(stem(w).as_str(), "conda" | "mamba" | "micromamba")) else { return note };
-    let Some(run) = words.iter().skip(at + 1).position(|w| w == "run").map(|i| i + at + 1) else { return note };
-    if words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream") {
-        return note;
+    let at = words.iter().position(|w| matches!(stem(w).as_str(), "conda" | "mamba" | "micromamba"))?;
+    let run = words.iter().skip(at + 1).position(|w| w == "run").map(|i| i + at + 1)?;
+    let passed = words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream");
+    if passed && !fds {
+        return None;
     }
     let tool = stem(&words[at]);
-    // `-n sales`, `--name sales` or `--name=sales`: the environment's own python.
+    // `-n sales`, `--name sales` or `--name=sales`: the environment's own python or node.
     let name = words[run + 1..].windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].clone());
     let name = name.or_else(|| words[run + 1..].iter().find_map(|w| w.strip_prefix("--name=").map(str::to_string)));
     let (program, place) = match (id, name) {
         ("py", Some(n)) if cfg!(windows) => ("python", format!(" (envs\\{n}\\python.exe in {tool}'s folder)")),
         ("py", Some(n)) => ("python", format!(" (envs/{n}/bin/python in {tool}'s folder)")),
         ("py", None) => ("python", String::new()),
+        // `fds` is js on Unix, where an environment's node is in its bin folder.
+        (_, Some(n)) if fds =>("node", format!(" (envs/{n}/bin/node in {tool}'s folder)")),
         _ => ("node", String::new()),
     };
-    note.push_str(&format!(
-        "; {tool} run passes them through only with --no-capture-output: add it after run, or name the environment's {program}{place} in [engines.{id}] command"
-    ));
-    note
+    Some(if fds {
+        format!("{tool} run closes them, even with --no-capture-output: name the environment's {program}{place} in [engines.{id}] command")
+    } else {
+        format!("{tool} run passes them through only with --no-capture-output: add it after run, or name the environment's {program}{place} in [engines.{id}] command")
+    })
+}
+
+/// Doctor's note for an engine whose command runs it with `conda run` in a way that can't work
+/// (19.2): 8.4's advice, from the command's words, with no process started.
+pub(crate) fn conda_run_note(e: &ResolvedEngine) -> Option<String> {
+    if e.spec.session_of.is_some() {
+        return None;
+    }
+    let fds = cfg!(unix) && e.spec.protocol_fds;
+    let advice = conda_run_advice(&e.spec.id, &e.argv, fds)?;
+    Some(format!("V2 talks to the program over {}, and {advice}", channel(fds).0))
 }
 
 /// `5 s`, `0.3 s`.
@@ -436,9 +479,12 @@ impl Interp {
                 self.sessions[s].state = State::Dead(DeadReason::SpawnFailed(e.clone()));
                 return Flow::Error(e);
             }
-            // A clean exit before `hello`: a wrapper that kept the protocol from the program (8.4).
-            // By the session's engine: a session a ts block started is js's.
-            let wrapper = if exit.is_some_and(|e| e.code == Some(0)) { wrapper_note(&tag, &self.sessions[s].engine.argv) } else { String::new() };
+            // A clean exit during startup: a wrapper that kept the protocol from the program (8.4),
+            // or held its output until it ended (then its `hello` came). By the session's engine: a
+            // session a ts block started is js's.
+            let session = &self.sessions[s];
+            let fds = cfg!(unix) && session.engine.spec.protocol_fds;
+            let wrapper = if exit.is_some_and(|e| e.code == Some(0)) { wrapper_note(&tag, &session.engine.argv, fds, session.hello.is_some()) } else { String::new() };
             // A variable the program reads as it starts may be why (8.4).
             let set = super::spec::startup_variables(&tag);
             let vars = if set.is_empty() { String::new() } else { format!("; {}", super::spec::startup_vars_fix(&set)) };
