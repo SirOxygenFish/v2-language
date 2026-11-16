@@ -334,8 +334,12 @@ expect "$found" "$outside/v2" "sh finds it outside the home folder after '$cmd'"
 if command -v fish >/dev/null 2>&1; then
     install /usr/bin/fish V2_INSTALL_DIR="$odd"
     cmd=$(now 'Open a new terminal to use v2 (or, in this one, run: ')
-    found=$(env -i HOME="$h" PATH="$sys" LANG=C.UTF-8 fish -c "$cmd; command -v v2" 2>&1 || true)
+    # Without the conf.d file the install just wrote, which puts the folder on PATH by itself.
+    mkdir "$tmp/no config $n"
+    found=$(env -i HOME="$h" XDG_CONFIG_HOME="$tmp/no config $n" PATH="$sys" LANG=C.UTF-8 fish -c "$cmd; command -v v2" 2>&1 || true)
     expect "$found" "$odd/v2" "fish finds it after '$cmd'"
+else
+    echo "SKIP fish's command for this terminal (fish isn't installed)"
 fi
 fresh
 mkdir "$h/.bashrc" "$h/$login"
