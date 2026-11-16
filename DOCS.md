@@ -269,9 +269,11 @@ count += 1             // also -=, *=, /=, %=
   so building a long one with `s += piece` in a loop is fine, and other names keep the old text.
 - `const` stops reassignment of the name. A `const` list can still be changed with `.push()`.
 - Assigning to a name that was never declared is an error — there are no accidental globals.
-- A name is usable from its `let` on: reading it before that line runs is a `NameError` that says
-  where it is declared (`'total' is used before its let on line 12`), also from a function called
-  before then.
+- A name is usable from its `let` on. Until that line runs in a body, the name still means what it
+  means outside it, if anything: a variable of an outer scope (a function's `print(x)` before its
+  own `let x` reads the file's `x`), or V2's builtin of that name (`len` before a `let len`). Only
+  when there is none is reading it a `NameError`, which for a name of the file says where it is
+  declared (`'total' is used before its let on line 12`), also from a function called before then.
 
 ### 3.4 Operators
 
@@ -412,6 +414,9 @@ such as `from:` or `if:`) is a string key, and after a dot it is a name (`d.from
 | `remove(k)`              | remove and return the value                   |
 | `copy()`                 | shallow copy                                  |
 
+To merge two dicts, copy one and set the other's keys: `let c = a.copy()`, then
+`for k, v in b { c[k] = v }` (V2 has no `{...a, ...b}`, `{**a, **b}`, `a | b` or `a + b` for dicts).
+
 If a dict holds a function (or a foreign function you got as a value) under a key, `d.name(args)`
 calls it — even when a dict method has the same name. Otherwise `d.name(args)` calls the dict
 method.
@@ -479,6 +484,9 @@ let shout = func(s) {
 - A function without `return` returns `null`.
 - Calls are checked: missing arguments, extra arguments and unknown argument names are all an
   `ArityError`.
+- `...xs` spreads a list into positional arguments; there is no `**` or dict spread for named
+  arguments. Name them in the call, or, for a dict of them, call the function in a block:
+  `@py(f, opts) { f(**opts) }`.
 - Functions are values: pass them around, store them in lists and dicts, return them.
 - Closures capture variables, not copies. Each loop iteration gets its own variable, so
   `func() => i` made inside `for i in 0..3` remembers that iteration's `i`.
@@ -584,13 +592,13 @@ bigger come from the languages you embed.
 | `min(...values)`, `max(...values)`      | smallest / largest of the arguments, or of a list's items when the only argument is a list (`max(xs)`); all numbers or all strings; on a tie the first wins; no values is a `ValueError` |
 | `sum(xs)`                               | sum of a list of numbers: a float if any item is one; `sum([])` is `0` |
 | `abs(x)`                                | absolute value of an int or float                           |
-| `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int (so NaN and infinity are a `ValueError`), more gives a float, fewer is a `ValueError`; an int `x` comes back unchanged |
+| `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int, so NaN, infinity and floats beyond the 64-bit range (about ±9.22e18) are a `ValueError`; more gives a float, for any float (`round(1e300, 1)` is `1e300`); fewer is a `ValueError`; an int `x` comes back unchanged |
 | `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
-| `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
+| `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out, nested 1,000 levels deep at most (deeper is a `ValueError`) |
 | `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME` is refused, below) |
-| `list_dir(path)`                        | sorted list of the names in a folder                        |
+| `list_dir(path)`                        | sorted list of the names in a folder; one name that isn't UTF-8 fails the whole call, an `IOError` (rename that file, or list the names as bytes with `os.listdir` in a `@py` block, as its hint shows) |
 | `make_dir(path)`                        | create a folder and any missing parents; an existing folder is fine |
 | `remove_file(path)`                     | delete a file (not a folder)                                |
 | `script_dir()`                          | absolute path of the folder of the `.v2` file containing the call |
@@ -1314,7 +1322,9 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   language straight into another's (an `@import` inside a block) goes through V2, so it counts as
   two.
 - Each hop between processes costs roughly a tenth of a millisecond: keep tight loops inside one
-  language.
+  language. Each run of a `@js` action block also makes a new JavaScript realm, about 0.4 ms
+  (against about 0.06 ms for a `@py` one): in a loop, export a function from a `@js` definition
+  block and call it, or pass the whole list in once.
 - A JavaScript function that returns a Promise is awaited, except while JavaScript is itself
   waiting on a cross-language call it made (JS → … → this JS function): its event loop can't run
   then, so returning a Promise is an error. Likewise a Python coroutine is awaited unless Python is
@@ -1831,12 +1841,14 @@ define_engine("rb", kind: "bridged", command: ["ruby", "adapters/v2_adapter.rb"]
 
 V2 looks for `v2.toml` in the script's folder and its parents (`v2 doctor` starts from the
 current folder); the folder where it is found is the **project root**. Without one, the script's
-folder is the project root. Every key is optional, except that a custom engine needs `kind` and
-`command` (a `run` command, custom or built-in, must contain `{file}`; `ext` defaults to the tag).
-`command` is always an array of strings; a plain string is a configuration error
-(`[engines.lua] command must be an array: write ["lua", "{file}"]`). Relative paths are relative
-to the folder of the `v2.toml`, and a path that starts with `~` is in your home folder; nothing
-else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
+folder is the project root. Only a regular file named `v2.toml` counts (or a link to one): a
+broken link, a folder or a pipe of that name is passed over, and the search goes on (`v2 doctor`'s
+`config file:` line shows which file was used). Every key is optional, except that a custom
+engine needs `kind` and `command` (a `run` command, custom or built-in, must contain `{file}`;
+`ext` defaults to the tag). `command` is always an array of strings; a plain string is a
+configuration error (`[engines.lua] command must be an array: write ["lua", "{file}"]`).
+Relative paths are relative to the folder of the `v2.toml`, and a path that starts with `~` is
+in your home folder; nothing else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
 
 > **Not built yet** (ROADMAP Phase 3): a custom engine's table (`[engines.lua]`) is read but not
 > checked for now (`kind`, `command`, `{file}`, the tag's spelling), and `v2 doctor` lists it as
@@ -1924,6 +1936,12 @@ that isn't there.
 - `v2 check file.v2` only parses and checks the code; it runs nothing. `v2 doctor`, by contrast,
   runs toolchain commands — including ones a project's `v2.toml` configures — so don't run it on a
   project you don't trust.
+- A run trusts some files near the script as much as the script itself: the nearest `v2.toml` in
+  the script's folder or a folder above it (it can name the programs that run the blocks;
+  `v2 doctor`'s `config file:` line names it), the `.py` files Python imports from the script's
+  folder, the folders of the `.v2` files it imports and the project root, and the `node_modules`
+  and `package.json` that Node finds in those folders and the ones above. V2 doesn't check who
+  owns them, so don't keep or run scripts under a folder other users can write to, such as `/tmp`.
 - When V2 searches `PATH` for toolchains or `exec` programs it skips relative entries like `.`,
   so a project folder can't slip in its own fake `python` or `gcc`.
 - Processes started by `exec`, run-engine blocks and compiled programs (and everything they start)

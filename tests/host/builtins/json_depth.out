@@ -1,0 +1,6 @@
+list
+ValueError invalid JSON at line 1 column 1001: nested deeper than 1000 levels
+2000
+ValueError cannot convert to JSON: nested deeper than 1000 levels
+5996
+ValueError cannot convert to JSON: nested deeper than 1000 levels
