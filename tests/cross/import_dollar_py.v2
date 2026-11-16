@@ -1,0 +1,17 @@
+// requires: py js
+// JavaScript's $x imported into a @py block the way the hint for `@import { $x }` writes it,
+// quoted with a plain name after as: Python binds an imported name only as a Python name
+// (INTERNALS 4.4, 12.2).
+@js dollar {
+    const $x = () => "dollar"
+    const $class = () => "class"
+    @export { "$x", "$class" }
+}
+@py u {
+    @import { "$x" as x, "$class" as other } from dollar
+    def shout():
+        return x().upper() + " " + other()
+    @export { shout }
+}
+@import { shout } from u
+print(shout())
