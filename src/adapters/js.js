@@ -1355,7 +1355,7 @@ const STRIP_HINTS = [
   [/import equals/, (forms) => STRIPPED + `import x = require(…) is code: write ${forms[0]}`],
   [/export assignment/, (forms) => STRIPPED + `export = is code: write ${forms[1]}`],
   // Node 24's message for `module M { … }`, which also names `namespace`.
-  [/`module` keyword/, () => "write namespace M for module M: Node's type stripping takes only that spelling"],
+  [/`module` keyword/, () => "write namespace M for module M: Node's type stripping takes only that spelling, and only for a namespace of types (one with values is code: use a module of its own (a file) or an object, as in const NS = { x: 1 })"],
   [/namespace/, () => STRIPPED + 'a namespace with values is code (an older Node, such as 22.13, refuses even one with only types): use a module of its own (a file) or an object, as in const NS = { x: 1 }'],
   [/angle-bracket/, () => STRIPPED + 'a <T>x cast is code: write x as T'],
 ];

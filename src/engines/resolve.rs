@@ -643,8 +643,7 @@ impl Resolver<'_> {
                             let named = match from {
                                 ConfigSource::Env(var) => format!("{var}={name}"),
                                 ConfigSource::Project(_) => {
-                                    let quote = |w: String| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
-                                    let words: Vec<String> = std::iter::once(name).chain(found.argv[1..].iter().map(|a| a.to_string_lossy().into_owned())).map(quote).collect();
+                                    let words: Vec<String> = std::iter::once(name).chain(found.argv[1..].iter().map(|a| a.to_string_lossy().into_owned())).map(|w| crate::config::toml_string(&w)).collect();
                                     format!("[engines.{}] command = [{}]", spec.id, words.join(", "))
                                 }
                             };
@@ -692,7 +691,6 @@ impl Resolver<'_> {
         let Some(path) = first_program(name, self.lookup) else {
             // `V2_ENGINE_PY="C:\Python311"`: a folder; `V2_ENGINE_PY="py -3"`: the variable holds
             // one program, never split (18.4).
-            let quote = |w: &str| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
             // The shortest run of words that is a program, then its arguments: a path with spaces
             // (`C:\Program Files\…\python.exe -X utf8`) is one program.
             let words: Vec<&str> = name.split_whitespace().collect();
@@ -709,7 +707,7 @@ impl Resolver<'_> {
                 }
                 ConfigSource::Env(var) if split.is_some() => {
                     let k = split.unwrap_or(1);
-                    let array: Vec<String> = std::iter::once(words[..k].join(" ")).chain(words[k..].iter().map(|w| w.to_string())).map(|w| quote(&w)).collect();
+                    let array: Vec<String> = std::iter::once(words[..k].join(" ")).chain(words[k..].iter().map(|w| w.to_string())).map(|w| crate::config::toml_string(&w)).collect();
                     format!(
                         "; {var} names one program, without arguments: for a command with arguments, write [engines.{}] command = [{}] in v2.toml",
                         spec.id,

@@ -452,7 +452,7 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     // A file where the path goes on (`notes.txt/sub`), or a folder that isn't there: the OS's
     // words for them ("The system cannot find the path specified") don't say which part.
     let in_the_way = p.ancestors().skip(1).find(|a| !a.as_os_str().is_empty() && a.exists()).filter(|a| a.is_file());
-    let no_folder = p.parent().filter(|d| !d.as_os_str().is_empty() && !d.exists() && e.kind() == std::io::ErrorKind::NotFound);
+    let no_folder = p.parent().filter(|d| !d.as_os_str().is_empty() && !as_folder(d).exists() && e.kind() == std::io::ErrorKind::NotFound);
     let why = match verb {
         "remove" if p.is_dir() => "it is a folder, and remove_file removes files only".to_string(),
         "read" | "write" if p.is_dir() => "it is a folder".to_string(),
@@ -533,12 +533,26 @@ fn bad_windows_name(path: &str) -> bool {
     after_drive.split(['/', '\\']).any(|part| {
         end += part.len();
         let through = &path[..end];
+        let last = end >= path.len();
         end += 1;
         let stem = part.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
         let device_name = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
             || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-        (device_name && windows_device(through)) || (!matches!(part, "." | "..") && (part.ends_with('.') || part.ends_with(' '))) || part.contains(['<', '>', '"', '|', '?', '*'])
+        // A bare `aux` is the device, but in `aux/x.txt` Windows 11 reads a folder `aux`, which
+        // `make_dir("./aux")` can make: a folder there is no bad name.
+        let device = device_name && windows_device(through) && (last || !as_folder(std::path::Path::new(through)).is_dir());
+        device || (!matches!(part, "." | "..") && (part.ends_with('.') || part.ends_with(' '))) || part.contains(['<', '>', '"', '|', '?', '*'])
     })
+}
+
+/// A folder of a longer path as Windows reads it there: a relative `aux` with `.\` before it,
+/// as Windows 11 takes a bare `aux` for the device but `aux\x.txt` for a file in a folder (5.10).
+fn as_folder(d: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> {
+    if cfg!(windows) && matches!(d.components().next(), Some(std::path::Component::Normal(_))) {
+        std::path::Path::new(".").join(d).into()
+    } else {
+        d.into()
+    }
 }
 
 /// Whether Windows takes the path `name` for a device, as its full path says (`\\.\CON`):
