@@ -132,9 +132,10 @@ fn missing_message(file: &str, path: &Path, rest: &[&str], command: &str) -> Vec
         let shown = std::env::current_dir().map(|cwd| shown_folder(&cwd.join(&folder))).unwrap_or_else(|_| folder.display().to_string());
         format!("cannot find '{name}' in {shown}")
     };
-    // A link to a file that isn't there is listed in its folder, but can't be run.
-    if let Some(target) = std::fs::read_link(path).ok().filter(|_| !path.exists()) {
-        return vec![first, format!("'{name}' is a symbolic link to {}, which isn't there", target.display())];
+    // A link to a file that isn't there is listed in its folder, but can't be run: where it points
+    // (absolute: a relative target is from the link's folder) and what fixes it (DOCS 3.10).
+    if let Some(link) = crate::runtime::module::link_problem(path).filter(|l| l.at == path) {
+        return vec![first, format!("{}: {}", link.problem(&format!("'{name}'")), link.fix(file))];
     }
     // A link on the way that leads nowhere (a junction whose folder was removed), which is listed
     // in its folder but is no folder to look in (DOCS 3.10).
