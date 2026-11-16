@@ -574,7 +574,8 @@ print(util.slug("Hello World"))    // hello-world
 - Paths are relative to the importing file and end in `.v2`. Another kind of file (`data.csv`,
   `helper.py`) is an `ImportError` that says how to use it instead. So is a pipe or a device
   (`cannot import './m.v2': it is a pipe or a device, not a file`, also for a link to
-  `/dev/zero`), and a link that leads nowhere or in a loop says that, in a run and in `v2 check`.
+  `/dev/zero`, and for `/dev/stdin` from a pipe), and a link that leads nowhere or in a loop says
+  that, in a run and in `v2 check`.
 - A module runs once, the first time it is imported; later imports reuse it.
 - `util` is a dict of the module's exported names, taken when the module finishes running.
   Reassigning a module variable later does not change what importers see — export a function
@@ -634,10 +635,11 @@ it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_
 wrote, and `read_file("/dev/stdin")` reads the rest of standard input, after what `input()` read. The file
 functions raise `IOError` when they fail (`exists` just returns `false`); on Windows, for a file
 another program keeps open (as Excel does), its hint says to close it there. Paths are taken as
-written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path that starts with one is an
+written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path whose first part is one is an
 `IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
-in paths`, `./~` for a folder really named so), and so is another user's home folder, `~root/x`:
-build such a path with `getenv` (the error's hint says so). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
+in paths`, `./~` for a folder really named so), and on Linux and macOS so is another user's home
+folder, `~root/x`, when there is such a user (Word's `~WRL0001.tmp` is just a name): build such a
+path with `getenv` (the error's hint says so). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
 
 `exec` runs a program directly, without a shell, so its arguments reach it exactly as given:
 

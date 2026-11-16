@@ -4108,6 +4108,50 @@ fn imports_of_pipes_devices_and_broken_links_are_import_errors() {
 
 #[cfg(unix)]
 #[test]
+fn an_import_of_standard_input_from_a_pipe_is_a_pipe() {
+    // 6.4 step 1 (round 17 review): /dev/stdin from a pipe is a link canonicalize can't follow
+    // (Linux's /proc/self/fd/0 names "pipe:[N]"), yet the pipe is there: it is refused as a pipe,
+    // not called a link to a file that isn't there.
+    let home = TempHome::new();
+    let mut names = vec!["/dev/stdin"];
+    if cfg!(target_os = "linux") {
+        names.push("/proc/self/fd/0");
+    }
+    let main: String = names.iter().map(|n| format!("try {{ import \"{n}\" as m }} catch (e) {{ print(e.type + \": \" + e.message) }}\n")).collect();
+    std::fs::write(home.0.join("main.v2"), main).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("main.v2").current_dir(&home.0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), b"hi\n".to_vec(), Duration::from_secs(30)).unwrap();
+    let want: String = names.iter().map(|n| format!("ImportError: cannot import '{n}': it is a pipe or a device, not a file\n")).collect();
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!((out.status.code(), stdout), (Some(0), want), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_v2_toml_path_with_control_characters_is_shown_escaped() {
+    // 2.1 (round 17 review): the v2.toml path in a config error, in an engine's "(set by …)" and
+    // on doctor's `config file:` line shows control characters escaped, as a script's name does.
+    let home = TempHome::new();
+    let dir = home.0.join("p\u{1b}[2Jq");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("v2.toml"), "[pythn]\n").unwrap();
+    std::fs::write(dir.join("m.v2"), "print(1)\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["p\u{1b}[2Jq/m.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(2), ""), "{stderr:?}");
+    assert!(stderr.contains("p\\u{1b}[2Jq/v2.toml: config error: unknown section [pythn]"), "{stderr:?}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+    std::fs::write(dir.join("v2.toml"), "[engines.py]\ncommand = [\"nosuch-v2-test\"]\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&dir, &["doctor"], &[]);
+    assert_eq!(code, Some(0), "{stderr:?}");
+    let toml = std::fs::canonicalize(&dir).unwrap().join("v2.toml").display().to_string().replace('\u{1b}', "\\u{1b}");
+    assert!(stdout.contains(&format!("py: engine 'py' command 'nosuch-v2-test' not found (set by {toml})")), "{stdout:?}");
+    assert!(stdout.contains(&format!("\nconfig file: {toml}\n")), "{stdout:?}");
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn control_characters_in_file_names_are_shown_escaped() {
     // 2.1, 19.1: a file name holding an escape sequence or a line break shows them escaped in the
     // listing of a folder's .v2 files, a did-you-mean, a diagnostic's header, `at` frames and

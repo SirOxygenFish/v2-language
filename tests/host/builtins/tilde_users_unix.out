@@ -1,0 +1,9 @@
+IOError: cannot check '~root/x': V2 doesn't expand ~root in paths
+IOError: cannot check '~nobody': V2 doesn't expand ~nobody in paths
+IOError: cannot check '~root': V2 doesn't expand ~root in paths
+cannot create '~root/x': V2 doesn't expand ~root in paths | write the path of root's home folder (what ~root is in a shell), or ./~root for a folder that is really named ~root
+cannot write '~nobody': V2 doesn't expand ~nobody in paths | write the path of nobody's home folder (what ~nobody is in a shell), or ./~nobody for a folder that is really named ~nobody
+cannot read '~nobody': V2 doesn't expand ~nobody in paths
+cannot list '~root': V2 doesn't expand ~root in paths
+cannot remove '~nobody/notes.txt': V2 doesn't expand ~nobody in paths
+false false
