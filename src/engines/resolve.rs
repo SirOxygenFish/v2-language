@@ -453,7 +453,34 @@ fn cache_key(spec: &EngineSpec, argv: &[OsString], path: &Path) -> Option<String
     field(&meta.len().to_le_bytes());
     field(&mtime.to_le_bytes());
     field(&spec_hash(spec));
+    if &*spec.id == "py" {
+        for part in venv_stamps(path) {
+            field(&part);
+        }
+    }
     Some(hex(&h.finalize()))
+}
+
+/// For a python in a venv (a `pyvenv.cfg` in its folder's parent): the stat of that `pyvenv.cfg`,
+/// and the path and stat of the program its `home` names (`python.exe` there on Windows, else
+/// `python3`), a missing one as a value of its own (7.7). A Windows venv's python is a copied
+/// launcher whose own file doesn't change when that Python is uninstalled or `home` is edited.
+/// Nothing for another python.
+fn venv_stamps(python: &Path) -> Vec<Vec<u8>> {
+    let Some(venv) = venv_of(python) else { return Vec::new() };
+    let stamp = |p: &Path| match std::fs::metadata(p) {
+        Ok(m) => {
+            let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            [&m.len().to_le_bytes()[..], &mtime.to_le_bytes()[..]].concat()
+        }
+        Err(_) => b"missing".to_vec(),
+    };
+    let base = pyvenv_value(&venv, "home").map(|home| PathBuf::from(home).join(if cfg!(windows) { "python.exe" } else { "python3" }));
+    let (path, stat) = match base.as_deref() {
+        Some(b) => (b.as_os_str().as_encoded_bytes().to_vec(), stamp(b)),
+        None => (Vec::new(), b"no home".to_vec()),
+    };
+    vec![stamp(&venv.join("pyvenv.cfg")), path, stat]
 }
 
 /// sha256(engine id, probe args, pattern, V2 version): a new V2 or rule re-probes (7.7).
@@ -667,16 +694,19 @@ fn venv_mismatch(venv: &Path, probed: Version, who: &str) -> Option<String> {
     })
 }
 
-/// The activated venv (`VIRTUAL_ENV`), when its python links to nothing or is missing, so that
-/// the search can't find it there: what is wrong and what to do, for doctor's note (19.2) and an
-/// `ImportError`'s hint (13.5). `None` when its python is there.
-pub fn activated_venv_problem(venv: &Path) -> Option<String> {
+/// The activated venv (`VIRTUAL_ENV`), when the search can't use its python: one that links to
+/// nothing or is missing, which the search never meets, or one that is there but whose version
+/// probe failed (among `skipped`, the search's: Windows' copied launcher, once the Python it runs
+/// is uninstalled, says `No Python at '…'`). What is wrong and what to do, for doctor's note
+/// (19.2) and an `ImportError`'s hint (13.5); `None` when its python is there and wasn't skipped
+/// for that.
+pub fn activated_venv_problem(venv: &Path, skipped: &[(PathBuf, String)]) -> Option<String> {
     let names: &[&str] = if cfg!(windows) { &["Scripts\\python.exe"] } else { &["bin/python3", "bin/python"] };
     let pythons: Vec<PathBuf> = names.iter().map(|n| venv.join(n)).collect();
-    if pythons.iter().any(|p| is_regular_file(p)) {
-        return None;
-    }
     let who = format!("the activated venv {} (VIRTUAL_ENV)", crate::syntax::span::shown_path(&venv.display().to_string()));
+    if pythons.iter().any(|p| is_regular_file(p)) {
+        return failed_probe_in(venv, skipped).map(|said| format!("{who} has a python that doesn't run ({said}), so V2 can't use it: {}", remake_venv(venv)));
+    }
     Some(match pythons.iter().find_map(|p| dangling_target(p)) {
         Some(target) => format!("{who} has a python that links to {}, which isn't there (was Python upgraded?), so V2 can't use it: {}", target.display(), remake_venv(venv)),
         None if !venv.is_dir() => {
@@ -685,6 +715,34 @@ pub fn activated_venv_problem(venv: &Path) -> Option<String> {
         }
         None => format!("{who} has no {}, so V2 can't use it: {}", if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }, remake_venv(venv)),
     })
+}
+
+/// What the first hit of `skipped` in `venv`'s bin (Scripts) folder whose version probe failed
+/// printed (`No Python at '…'`), else that reason (`version probe failed (exit code 103)`).
+fn failed_probe_in(venv: &Path, skipped: &[(PathBuf, String)]) -> Option<String> {
+    let canonical = std::fs::canonicalize(venv).ok();
+    let same = |dir: &Path| dir == venv || (canonical.is_some() && std::fs::canonicalize(dir).ok() == canonical);
+    let (_, why) = skipped.iter().find(|(p, why)| why.starts_with("version probe failed (") && p.parent().and_then(Path::parent).is_some_and(same))?;
+    Some(why.split_once("): ").map_or(why.as_str(), |(_, said)| said).to_string())
+}
+
+/// Whether the Python a venv was made with (its `pyvenv.cfg`'s `home`) has `ensurepip`, which
+/// Debian and Ubuntu leave out without python3-venv: the folder in its standard library,
+/// `<home>/../lib/python3.X` (Windows `<home>\Lib`). True when V2 can't tell (no `home`, or no
+/// standard library there).
+pub fn base_has_ensurepip(venv: &Path) -> bool {
+    let Some(home) = pyvenv_value(venv, "home").map(PathBuf::from) else { return true };
+    let libs: Vec<PathBuf> = if cfg!(windows) {
+        vec![home.join("Lib")]
+    } else {
+        let lib = home.parent().unwrap_or(&home).join("lib");
+        match made_with(venv) {
+            Some((major, minor)) => vec![lib.join(format!("python{major}.{minor}"))],
+            None => std::fs::read_dir(&lib).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("python"))).collect(),
+        }
+    };
+    let stdlibs: Vec<&PathBuf> = libs.iter().filter(|l| l.join("os.py").is_file()).collect();
+    stdlibs.is_empty() || stdlibs.iter().any(|l| l.join("ensurepip").is_dir())
 }
 
 /// What resolution needs besides the spec: config, lookup, prober and cache.
@@ -896,12 +954,24 @@ impl Resolver<'_> {
             } else {
                 None
             };
+            // A venv's python (Windows: Scripts\python.exe, a launcher that can't run without its
+            // pyvenv.cfg) or, elsewhere, a bin/activate, but no pyvenv.cfg: a damaged venv, to make
+            // again, not a Python installation (python.exe at the root, bin/python3 without
+            // activate) nor a conda environment, whose base has a bin/activate too.
+            let damaged = |dir: &Path| {
+                let venv_files = if cfg!(windows) {
+                    is_regular_file(&dir.join("Scripts").join("python.exe")) && !is_regular_file(&dir.join("python.exe"))
+                } else {
+                    is_regular_file(&dir.join("bin").join("activate"))
+                };
+                venv_files && !is_venv(dir) && !dir.join("conda-meta").is_dir()
+            };
             // A conda environment's or an installation's Python (`C:\Program Files\Python311`,
             // `/usr`): never a place to run `-m venv` in, which would turn it into a venv of
             // another Python. Nor is a folder that holds anything else.
             let installed = |dir: &Path| -> Option<PathBuf> {
-                let names: &[&str] = if cfg!(windows) { &["python.exe", "Scripts\\python.exe"] } else { &["bin/python3", "bin/python"] };
-                names.iter().map(|n| dir.join(n)).find(|p| is_regular_file(p)).filter(|_| !is_venv(dir))
+                let names: &[&str] = if cfg!(windows) { &["python.exe"] } else { &["bin/python3", "bin/python"] };
+                names.iter().map(|n| dir.join(n)).find(|p| is_regular_file(p)).filter(|_| !is_venv(dir) && !damaged(dir))
             };
             let free = |dir: &Path| std::fs::read_dir(dir).map_or(true, |mut d| d.next().is_none());
             let command = |p: &Path| {
@@ -927,6 +997,8 @@ impl Resolver<'_> {
                 }
             } else if let Some(folder) = inside.filter(|f| is_venv(f)) {
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}", write(folder))
+            } else if damaged(venv) {
+                format!("[python] venv '{shown}' has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}", pasted(venv))
             } else if let Some(py) = installed(venv) {
                 if venv.join("conda-meta").is_dir() {
                     // The base environment (Miniforge's own folder, with condabin) is `base`.
@@ -1464,7 +1536,7 @@ mod tests {
         assert_eq!(nf.message, format!("[python] venv '{}' has a python that links to {gone}, which isn't there (was Python upgraded?): {again}", venv.display()));
         // Activated (VIRTUAL_ENV), the search passes it over: doctor and the hint say so.
         assert_eq!(
-            activated_venv_problem(&venv),
+            activated_venv_problem(&venv, &[]),
             Some(format!("the activated venv {} (VIRTUAL_ENV) has a python that links to {gone}, which isn't there (was Python upgraded?), so V2 can't use it: {again}", venv.display()))
         );
     }
@@ -1474,16 +1546,88 @@ mod tests {
         // Round 19 (L4): VIRTUAL_ENV names a venv whose python is missing (or the venv itself).
         let d = temp("activated");
         let (venv, python) = fake_venv(&d, ".venv", "home = x\n");
-        assert_eq!(activated_venv_problem(&venv), None, "its python is there");
+        assert_eq!(activated_venv_problem(&venv, &[]), None, "its python is there");
         std::fs::remove_file(&python).unwrap();
         let (py, want) = if cfg!(windows) { ("py", r"Scripts\python.exe") } else { ("python3", "bin/python") };
         let who = format!("the activated venv {} (VIRTUAL_ENV)", venv.display());
         assert_eq!(
-            activated_venv_problem(&venv),
+            activated_venv_problem(&venv, &[]),
             Some(format!("{who} has no {want}, so V2 can't use it: make the venv again, {py} -m venv --clear {}, and install its packages again", venv.display()))
         );
         std::fs::remove_dir_all(&venv).unwrap();
-        assert_eq!(activated_venv_problem(&venv), Some(format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {py} -m venv {}", venv.display())));
+        assert_eq!(activated_venv_problem(&venv, &[]), Some(format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {py} -m venv {}", venv.display())));
+    }
+
+    #[test]
+    fn an_activated_venv_whose_python_doesnt_run_is_named() {
+        // Round 19 review (P1): a Windows venv's python.exe is a copied launcher, there after the
+        // Python it was made with is uninstalled, but its probe fails ("No Python at", exit 103),
+        // so the search passes it over and finds another Python: the skipped list says so.
+        let d = temp("activated-fails");
+        let (venv, python) = fake_venv(&d, ".venv", "home = C:\\nonexistent\\Python311\n");
+        let other = d.join("Python312");
+        std::fs::create_dir_all(&other).unwrap();
+        let found = exe(&other, "python");
+        let said = "No Python at '\"C:\\nonexistent\\Python311\\python.exe'";
+        let venv2 = venv.clone();
+        let p = fake(move |prog| if prog.starts_with(&venv2) { ProbeOutcome::Exited { code: Some(103), output: format!("{said}\n") } } else { says("Python 3.12.1") });
+        let e = resolve_with(&Config::default(), &lookup(&[python.parent().unwrap(), &other], None), &p, &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!((e.origin.clone(), e.argv.clone()), (Origin::Path, vec![found.into_os_string()]));
+        assert_eq!(e.skipped, [(python.clone(), format!("version probe failed (exit code 103): {said}"))]);
+        let py = if cfg!(windows) { "py" } else { "python3" };
+        let again = format!("make the venv again, {py} -m venv --clear {}, and install its packages again", venv.display());
+        let who = format!("the activated venv {} (VIRTUAL_ENV)", venv.display());
+        assert_eq!(activated_venv_problem(&venv, &e.skipped), Some(format!("{who} has a python that doesn't run ({said}), so V2 can't use it: {again}")));
+        // A failed probe that printed nothing: its reason.
+        let quiet = [(python.clone(), "version probe failed (exit code 103)".to_string())];
+        assert_eq!(activated_venv_problem(&venv, &quiet), Some(format!("{who} has a python that doesn't run (version probe failed (exit code 103)), so V2 can't use it: {again}")));
+        // Not skipped, skipped for another reason (a slow probe may pass next time), or another
+        // venv's python: nothing to say.
+        assert_eq!(activated_venv_problem(&venv, &[]), None);
+        assert_eq!(activated_venv_problem(&venv, &[(python.clone(), "version probe timed out (10 s)".to_string())]), None);
+        let (elsewhere, elsewhere_py) = fake_venv(&d, "env2", "home = x\n");
+        assert_eq!(activated_venv_problem(&venv, &[(elsewhere_py.clone(), format!("version probe failed (exit code 103): {said}"))]), None);
+        assert!(activated_venv_problem(&elsewhere, &[(elsewhere_py, format!("version probe failed (exit code 103): {said}"))]).is_some());
+    }
+
+    #[test]
+    fn a_venv_pythons_cache_entry_follows_its_pyvenv_cfg_and_base_python() {
+        // Round 19 review (P1): a Windows venv's python is a copied launcher whose file doesn't
+        // change when the Python its pyvenv.cfg's home names is uninstalled or home is edited, so
+        // those key its cache entry too (7.7): a stale "usable" entry made the run's worker exit
+        // with 103 (EngineCrashed) instead of a probe that says what is wrong.
+        let home = temp("venvcache-home");
+        let d = temp("venvcache");
+        let base = d.join("Python311");
+        std::fs::create_dir_all(&base).unwrap();
+        let base_py = exe(&base, if cfg!(windows) { "python" } else { "python3" });
+        let (venv, _) = fake_venv(&d, ".venv", &format!("home = {}\n", base.display()));
+        let p = fake(|_| says("Python 3.11.6"));
+        let run = || {
+            let mut cache = ProbeCache::open(Some(&home), CacheMode::ReadWrite);
+            resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut cache, "py").unwrap();
+            cache.save();
+            p.calls.get()
+        };
+        assert_eq!(run(), 1);
+        assert_eq!(run(), 1, "served from the cache");
+        // The Python it was made with is uninstalled: probed again (and then cached as missing).
+        std::fs::remove_file(&base_py).unwrap();
+        assert_eq!(run(), 2);
+        assert_eq!(run(), 2, "a missing home python is a value of its own");
+        // pyvenv.cfg's home edited to another Python (the same length: the program's path, not
+        // the file's mtime, which a coarse clock may leave as it was, tells).
+        let other = d.join("Python312");
+        std::fs::create_dir_all(&other).unwrap();
+        exe(&other, if cfg!(windows) { "python" } else { "python3" });
+        std::fs::write(venv.join("pyvenv.cfg"), format!("home = {}\n", other.display())).unwrap();
+        assert_eq!(run(), 3);
+        // Any other change to pyvenv.cfg.
+        std::fs::write(venv.join("pyvenv.cfg"), format!("home = {}\nversion = 3.11.6\n", other.display())).unwrap();
+        assert_eq!(run(), 4);
+        assert_eq!(run(), 4);
+        // A python that isn't in a venv keeps the key it had.
+        assert!(venv_stamps(&base_py).is_empty());
     }
 
     #[test]
@@ -2217,18 +2361,18 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let py = exe(&bin, if cfg!(windows) { "python" } else { "python3" });
         // The folder itself (round 19, L13: on Linux and macOS too, where its bin/python3 was
-        // used), a folder with a venv's python but no pyvenv.cfg, and its bin folder (Scripts).
+        // used), and its bin folder (Scripts); on Linux and macOS, a bin/python without a
+        // bin/activate or pyvenv.cfg too.
         let bare = d.join("nocfg");
         let bare_py = {
             let bin = bare.join(if cfg!(windows) { "Scripts" } else { "bin" });
             std::fs::create_dir_all(&bin).unwrap();
             exe(&bin, "python")
         };
-        let named = [
-            (root.join(if cfg!(windows) { "Scripts" } else { "bin" }), "a folder of a Python installation", &py),
-            (root.clone(), "a Python installation", &py),
-            (bare.clone(), "a Python installation", &bare_py),
-        ];
+        let mut named = vec![(root.join(if cfg!(windows) { "Scripts" } else { "bin" }), "a folder of a Python installation", &py), (root.clone(), "a Python installation", &py)];
+        if !cfg!(windows) {
+            named.push((bare.clone(), "a Python installation", &bare_py));
+        }
         for (v, what, py) in named {
             let nf = resolve_with(&at(&v), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
             let head = format!("[python] venv '{}' is {what}, not a virtual environment: name its python instead, [engines.py] command = ", v.display());
@@ -2236,6 +2380,14 @@ mod tests {
             assert!(nf.message.contains(&py.display().to_string()) && !nf.message.contains(&format!("-m venv {created}")), "{}", nf.message);
             assert_eq!(nf.from.as_deref(), Some("venv"));
         }
+        // Round 19 review (P4): a venv's Scripts\python.exe without pyvenv.cfg (a launcher that
+        // can't run without it, "No pyvenv.cfg file"), or elsewhere a bin/activate without one, is
+        // a damaged venv: made again, not named as a Python to run.
+        #[cfg(unix)]
+        std::fs::write(bare.join("bin").join("activate"), "").unwrap();
+        let nf = resolve_with(&at(&bare), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("[python] venv '{}' has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}", bare.display(), bare.display()));
+        assert_eq!((nf.status, nf.from.as_deref()), (Status::Broken, Some("venv")));
         // A conda environment (conda-meta), its python at its root on Windows, in bin elsewhere;
         // the base environment (with condabin) is activated as base.
         let quoted = |p: &Path| if cfg!(windows) { format!("['{}']", p.display()) } else { format!("[\"{}\"]", p.display()) };
@@ -2247,6 +2399,10 @@ mod tests {
             let conda_bin = if cfg!(windows) { env.clone() } else { env.join("bin") };
             std::fs::create_dir_all(&conda_bin).unwrap();
             let conda_py = exe(&conda_bin, if cfg!(windows) { "python" } else { "python3" });
+            // Conda's base has a bin/activate too, and is no damaged venv (P4).
+            if cfg!(unix) && name == "base" {
+                std::fs::write(conda_bin.join("activate"), "").unwrap();
+            }
             let nf = resolve_with(&at(&env), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
             let want = format!(
                 "[python] venv '{}' is a conda environment, not a virtual environment: run v2 where it is activated (conda activate {name}) and leave venv out, or name its python instead: [engines.py] command = {}",
