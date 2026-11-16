@@ -171,6 +171,14 @@ try {
     Says $r "install.ps1: V2_INSTALL_DIR names a file, not a folder: $h\afile"
     Result 'V2_INSTALL_DIR names a file' $r
 
+    # A folder with ';', which PATH would split in two: refused before anything is made.
+    $h = Fresh
+    $r = Install $h @{ V2_INSTALL_DIR = "$h\a;b" }
+    Want $r.code 1 'exit code'
+    Says $r "install.ps1: $h\a;b has a ';' in it, which PATH uses between folders: set V2_INSTALL_DIR to a folder without one"
+    Exists "$h\a;b" $false "the folder with ';'"
+    Result "V2_INSTALL_DIR with a ';'" $r
+
     # The archive layouts: files in a v2-<target> folder (since alpha.2), or at the top.
     $h = Fresh
     Expand-Archive -LiteralPath $Archive -DestinationPath "$h\x"

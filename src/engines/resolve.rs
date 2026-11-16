@@ -250,14 +250,21 @@ fn folder_hint(who: &str, id: &str, dir: &Path) -> String {
     };
     let inside = names.iter().map(|n| dir.join(n)).find(|p| p.is_file());
     if id == "py" && dir.join("pyvenv.cfg").is_file() {
-        let its = inside.map(|p| format!(", or point {who} at its python, {}", p.display())).unwrap_or_default();
+        let its = inside.map(|p| format!(", or point {who} at its python, {}", slashed(&p))).unwrap_or_default();
         let venv = crate::config::toml_string(&dir.display().to_string());
         return format!("; {who} names a virtual environment: write [python] venv = {venv} in v2.toml{its}");
     }
     match inside {
-        Some(p) => format!("; {who} names a folder: point it at the program in it, {}", p.display()),
+        Some(p) => format!("; {who} names a folder: point it at the program in it, {}", slashed(&p)),
         None => format!("; {who} names a folder: point it at the program, not at its folder"),
     }
+}
+
+/// A path to paste into `v2.toml` or a variable: on Windows with `/`, which is the same there and
+/// is no escape in a TOML `"…"`, as `\n` in `"C:/Program Files/nodejs\node.exe"` is (7.8).
+fn slashed(p: &Path) -> String {
+    let text = p.display().to_string();
+    if cfg!(windows) { text.replace('\\', "/") } else { text }
 }
 
 /// The skip reason of a `py` launcher left with no Python (7.6): like the placeholder, no Python
@@ -835,6 +842,8 @@ impl Resolver<'_> {
                 }
                 _ => String::new(),
             };
+            // `"C:/Program Files/nodejs\node.exe"`: `\n` became a line break (18.5).
+            let hint = crate::config::configured_escape_hint(Path::new(name), from, &spec.id).map_or(hint, |h| format!("; {h}"));
             return Err(NotFound::broken(
                 format!("engine '{}' command '{}' not found (set by {}){hint}", spec.id, crate::syntax::span::shown_path(name), set_by(from)),
                 join(&command.iter().map(OsString::from).collect::<Vec<_>>()),
@@ -858,6 +867,10 @@ impl Resolver<'_> {
         let Some(exe) = candidates.iter().find(|p| is_regular_file(p)).filter(|_| venv.join("pyvenv.cfg").is_file()) else {
             let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
             let shown = crate::syntax::span::shown_path(&venv.display().to_string());
+            // `venv = "C:/work\new"`: `\n` became a line break, so no venv to make there (18.5).
+            if let Some(h) = crate::config::configured_escape_hint(venv, from, "venv") {
+                return Err(NotFound::broken(format!("[python] venv '{shown}' has no {want}: {h}"), candidates[0].display().to_string(), from));
+            }
             // What to write instead, as v2.toml's folder sees it (18.1).
             let base = match from {
                 ConfigSource::Project(file) => file.parent().map(Path::to_path_buf),
@@ -950,7 +963,9 @@ impl Resolver<'_> {
             };
             // COMMAND: the venv as given when it names a file, not a path inside it (19.2).
             let shown_command = if is_regular_file(venv) { shown.clone() } else { candidates[0].display().to_string() };
-            return Err(NotFound::broken_venv(message, shown_command));
+            // Every path in it with its control characters escaped, the commands to paste too (2.1):
+            // each of these messages is one line.
+            return Err(NotFound::broken_venv(crate::syntax::span::shown_path(&message), shown_command));
         };
         let what = format!("[python] venv '{}'", venv.display());
         let e = self.usable(spec, vec![exe.clone().into_os_string()], Origin::Venv, &what, from)?;
@@ -2064,7 +2079,9 @@ mod tests {
         let inside = folder.join(if cfg!(windows) { "python.exe" } else { "python3" });
         std::fs::write(&inside, "").unwrap();
         let m = says_for(&env, &folder);
-        assert!(m.ends_with(&format!("; V2_ENGINE_PY names a folder: point it at the program in it, {}", inside.display())), "{m}");
+        // With / on Windows, so it pastes into a TOML "…" too (round 19).
+        let slashed = |p: &Path| p.display().to_string().replace('\\', if cfg!(windows) { "/" } else { "\\" });
+        assert!(m.ends_with(&format!("; V2_ENGINE_PY names a folder: point it at the program in it, {}", slashed(&inside))), "{m}");
         let venv = d.join(".venv");
         let python = venv.join(if cfg!(windows) { "Scripts\\python.exe" } else { "bin/python3" });
         std::fs::create_dir_all(python.parent().unwrap()).unwrap();
@@ -2072,9 +2089,9 @@ mod tests {
         std::fs::write(&python, "").unwrap();
         let shown = crate::config::toml_string(&venv.display().to_string());
         let m = says_for(&env, &venv);
-        assert!(m.ends_with(&format!("; V2_ENGINE_PY names a virtual environment: write [python] venv = {shown} in v2.toml, or point V2_ENGINE_PY at its python, {}", python.display())), "{m}");
+        assert!(m.ends_with(&format!("; V2_ENGINE_PY names a virtual environment: write [python] venv = {shown} in v2.toml, or point V2_ENGINE_PY at its python, {}", slashed(&python))), "{m}");
         let m = says_for(&ConfigSource::Project(d.join("v2.toml")), &venv);
-        assert!(m.ends_with(&format!("; [engines.py] command names a virtual environment: write [python] venv = {shown} in v2.toml, or point [engines.py] command at its python, {}", python.display())), "{m}");
+        assert!(m.ends_with(&format!("; [engines.py] command names a virtual environment: write [python] venv = {shown} in v2.toml, or point [engines.py] command at its python, {}", slashed(&python))), "{m}");
         let cfg = with_command("py", &["no such python"], ConfigSource::Env("V2_ENGINE_PY".into()));
         let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with("not found (set by V2_ENGINE_PY)"), "{}", nf.message);
@@ -2096,6 +2113,43 @@ mod tests {
         let next = format!("; point it at a newer Python, or install one: {}", install_hint("py"));
         assert!(nf.message.contains(&format!("(set by V2_ENGINE_PY) is too old: found 3.9.6, V2 needs 3.10+{next}")), "{}", nf.message);
         assert_eq!(nf.status, Status::Old(Version(3, 9, 6)), "{}", nf.message);
+    }
+
+    #[test]
+    fn a_configured_path_holding_an_escape_says_so() {
+        // 18.5, 7.6 (round 19): "C:/Program Files/nodejs\node.exe" in a TOML "…" holds a line
+        // break, so the program isn't found: the message says why, for a command and a venv (whose
+        // command to make it would make that name). Not for V2_ENGINE_*, which has no escapes, nor
+        // for the name of v2.toml's own folder, which the user didn't write.
+        let d = temp("escape");
+        let toml = ConfigSource::Project(d.join("v2.toml"));
+        let hint = |example: &str| format!(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write the path with / or in single quotes, as in {example}"#);
+        let js = |program: &Path, from: ConfigSource| {
+            let cfg = with_command("js", &[&program.to_string_lossy()], from);
+            resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("v22.13.0")), &mut ProbeCache::off(), "js").unwrap_err().message
+        };
+        let program = d.join("nodejs\node.exe");
+        let m = js(&program, toml.clone());
+        let shown = crate::syntax::span::shown_path(&program.display().to_string());
+        assert!(m.starts_with(&format!("engine 'js' command '{shown}' not found")), "{m}");
+        assert!(m.ends_with(&format!("; {}", hint(r"command = ['C:\Program Files\nodejs\node.exe']"))), "{m}");
+        assert!(!js(&program, ConfigSource::Env("V2_ENGINE_JS".into())).contains("backslash"));
+        let cfg = with_command("py", &[&d.join("Python311\tpython.exe").to_string_lossy()], toml.clone());
+        let nf = resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("; {}", hint(r"command = ['C:\Program Files\Python311\python.exe']"))), "{}", nf.message);
+        let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
+        let venv_says = |venv: &Path, from: ConfigSource| {
+            let cfg = Config { python_venv: Some(Sourced { value: venv.to_path_buf(), from }), ..Config::default() };
+            resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err().message
+        };
+        let venv = d.join("work\new");
+        let shown = crate::syntax::span::shown_path(&venv.display().to_string());
+        assert_eq!(venv_says(&venv, toml.clone()), format!("[python] venv '{shown}' has no {want}: {}", hint(r"venv = 'C:\proj\.venv'")));
+        // A folder named with a control character (Linux and macOS allow one): no such hint, and
+        // the command to make the venv shows it escaped, as every printed path (2.1).
+        let odd = d.join("a\u{1b}b");
+        let m = venv_says(&odd.join(".venv"), ConfigSource::Project(odd.join("v2.toml")));
+        assert!(m.contains("-m venv") && m.contains(r"a\u{1b}b") && !m.contains('\u{1b}') && !m.contains("backslash"), "{m}");
     }
 
     #[test]

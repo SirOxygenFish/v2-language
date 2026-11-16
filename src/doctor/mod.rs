@@ -60,8 +60,16 @@ impl Checker {
     /// An import problem, shown as the `ImportError` the run would raise there (6.4), control
     /// characters escaped (2.1).
     fn import_error(&mut self, message: String, at: Span) {
+        self.import_error_hint(message, None, at);
+    }
+
+    /// `import_error` with the hint the run would give (a file another program has locked).
+    fn import_error_hint(&mut self, message: String, hint: Option<&str>, at: Span) {
         self.errors += 1;
         let e = ErrorValue::new("ImportError", crate::syntax::span::shown_path(&message));
+        if let Some(h) = hint {
+            let _ = e.hint.set(h.into());
+        }
         let _ = e.span.set(at);
         let text = render_error(&self.sm, &e);
         self.problems.push(Problem { met: self.met[&at.file.0], lo: at.lo, text });
@@ -110,8 +118,14 @@ impl Checker {
                 self.done.insert(path);
                 continue;
             };
-            let canonical = match module::locate(&self.sm, id, &spec) {
-                Ok(p) => p,
+            let canonical = match module::locate_noted(&self.sm, id, &spec) {
+                Ok((p, note)) => {
+                    // A spelling whose case differs from the file's: a note, not an error (6.4).
+                    if let Some(note) = note {
+                        self.problems.push(Problem { met: self.met[&at.file.0], lo: at.lo, text: format!("{note}\n") });
+                    }
+                    p
+                }
                 Err(msg) => {
                     self.import_error(msg, at);
                     continue;
@@ -141,9 +155,9 @@ impl Checker {
                         self.done.insert(canonical);
                     }
                 },
-                Err(LoadError::Io(msg)) => {
+                Err(LoadError::Io(msg, hint)) => {
                     self.done.insert(canonical);
-                    self.import_error(format!("cannot import '{spec}': {msg}"), at);
+                    self.import_error_hint(format!("cannot import '{spec}': {msg}"), hint, at);
                 }
                 Err(LoadError::NotUtf8 { display, line, col, message }) => {
                     self.done.insert(canonical);
@@ -177,8 +191,12 @@ pub fn check(file: &str) -> i32 {
             c.walk(entry);
             c.sm.file(entry).display.clone()
         }
-        Err(LoadError::Io(msg)) => {
+        Err(LoadError::Io(msg, hint)) => {
             stderrln!("v2: {msg}");
+            // What to do next, as for a run (19.1).
+            if let Some(h) = hint {
+                stderrln!("{h}");
+            }
             return 2;
         }
         Err(LoadError::NotUtf8 { display, line, col, message }) => {
