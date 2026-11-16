@@ -4397,6 +4397,74 @@ fn a_python_venv_from_v2_toml_is_used_unless_v2_engine_py_is_set() {
 }
 
 #[test]
+fn a_venv_made_with_another_python_is_broken_and_doctor_says_venv() {
+    // Round 19 (L0, L9): a venv whose pyvenv.cfg names another Python than its python now runs
+    // (an unversioned python3 an upgrade repointed) is EngineNotFound, exit 3, and doctor's row
+    // is broken, FROM venv, as it is for a venv that isn't there (INTERNALS 7.6, 19.2).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".nope\"\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let py = &doctor_rows(&stdout)["py"];
+    assert_eq!((py[0].as_str(), py[3].as_str()), ("broken", "venv"), "{stdout}");
+    if !needs("py", "a_venv_made_with_another_python_is_broken_and_doctor_says_venv") {
+        return;
+    }
+    let python = block_python();
+    let made = Command::new(&python).args(["-m", "venv", "--without-pip"]).arg(home.0.join(".venv")).output().expect("run python -m venv");
+    assert!(made.status.success(), "python -m venv: {}", String::from_utf8_lossy(&made.stderr));
+    // Python 3.1 made it, says its pyvenv.cfg.
+    let cfg = home.0.join(".venv").join("pyvenv.cfg");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    let older: String = text
+        .lines()
+        .map(|l| match l.split_once('=') {
+            Some((key, _)) if key.trim().starts_with("version") => format!("{} = 3.1.0\n", key.trim()),
+            _ => format!("{l}\n"),
+        })
+        .collect();
+    assert!(older.contains("version = 3.1.0"), "{text}");
+    std::fs::write(&cfg, older).unwrap();
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    std::fs::write(home.0.join("m.v2"), "print(@py { 1 + 1 })\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(3), ""), "{stderr}");
+    assert!(stderr.contains("EngineNotFound: [python] venv '") && stderr.contains("' was made with Python 3.1 (its pyvenv.cfg says so), but its python now runs 3."), "{stderr}");
+    assert!(stderr.contains(" (was Python upgraded?): make the venv again, ") && stderr.contains(" -m venv --clear "), "{stderr}");
+    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &[]);
+    let py = &doctor_rows(&stdout)["py"];
+    assert_eq!((py[0].as_str(), py[3].as_str()), ("broken", "venv"), "{stdout}");
+    assert!(stdout.contains("py: [python] venv '") && stdout.contains("' was made with Python 3.1 (its pyvenv.cfg says so)"), "{stdout}");
+}
+
+#[test]
+fn an_activated_venv_whose_python_is_gone_is_named_by_doctor_and_the_hint() {
+    // Round 19 (L4): VIRTUAL_ENV names a venv whose python links to an uninstalled Python (or is
+    // missing), which the PATH search can't see: doctor's notes say so, and an ImportError's hint
+    // says it instead of pip for the Python found on PATH (INTERNALS 13.5, 19.2).
+    let home = TempHome::new();
+    let venv = home.0.join("proj").join(".venv");
+    std::fs::create_dir_all(venv.join(if cfg!(windows) { "Scripts" } else { "bin" })).unwrap();
+    std::fs::write(venv.join("pyvenv.cfg"), "home = /nonexistent\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/nonexistent/python3.99", venv.join("bin").join("python3")).unwrap();
+    let env = [("VIRTUAL_ENV", venv.as_os_str())];
+    let what = if cfg!(windows) { r"has no Scripts\python.exe" } else { "has a python that links to /nonexistent/python3.99, which isn't there (was Python upgraded?)" };
+    let problem = format!("the activated venv {} (VIRTUAL_ENV) {what}, so V2 can't use it: make the venv again, ", venv.display());
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &env);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains(&format!("\n  py: {problem}")), "{stdout}");
+    if !needs("py", "an_activated_venv_whose_python_is_gone_is_named_by_doctor_and_the_hint") {
+        return;
+    }
+    std::fs::write(home.0.join("proj").join("m.v2"), "@import py.nosuch_r19_pkg as p\nprint(p.x)\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["proj/m.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("hint: {problem}")), "{stderr}");
+    assert!(!stderr.contains("pip") && !stderr.contains("which V2 isn't using"), "{stderr}");
+}
+
+#[test]
 fn startup_timeout_from_v2_toml_reaches_the_worker() {
     // DOCS 14, INTERNALS 8.4: a configured command that never says hello is stopped after the
     // project's startup_timeout, and the engine stays down for the rest of the run.
