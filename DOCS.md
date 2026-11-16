@@ -656,7 +656,7 @@ file function, `exists` too: a name that ends in a dot or a space, which Windows
 `COM1`), where `read_file("CON")` would wait for typed input; when a file of such a name is there
 (WSL and Macs make them), the hint shows its full path with `\\?\` in front, which reaches it.
 On Windows a drive that isn't there (an unplugged USB drive) is said as such, `there is no drive Q:`,
-and so is a network share that can't be reached; a write to a read-only file says how to make it
+and so is a network drive or share that can't be reached; a write to a read-only file says how to make it
 writable (`attrib -r`; `chmod u+w` on Linux and macOS); and `/tmp`, Linux's and macOS's temp folder,
 gets `getenv("TEMP")` (`make_dir("/tmp/x")` is refused there, as it would make `C:\tmp`, which
 every user can write to).
