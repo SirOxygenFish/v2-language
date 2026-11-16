@@ -509,6 +509,8 @@ fn worker_main() {
             std::thread::sleep(Duration::from_secs(20));
         }
         "placeholder" => std::process::exit(9009),
+        // A wrapper that keeps the program's input and output (`conda run`): a clean exit.
+        "quiet_exit" => std::process::exit(0),
         other => panic!("unknown worker script {other}"),
     }
 }
@@ -620,6 +622,40 @@ fn status_9009_before_hello_is_engine_not_found() {
     let s = it.sessions.len() - 1;
     let later = err_of(it.request(s, call("f"), "a call to 'f'", at()));
     assert_eq!((&*later.kind, &*later.message), (&*e.kind, &*e.message));
+}
+
+#[test]
+fn a_clean_exit_before_hello_says_the_command_must_pass_input_and_output_through() {
+    // Round 19, 8.4: `conda run` keeps the program's input and output, so it ends with code 0
+    // and nothing above the message.
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let e = err_of(start(&mut it, "quiet_exit", no_timeouts()));
+    assert_eq!(&*e.kind, "EngineCrashed");
+    assert!(e.message.starts_with("engine 'py' exited during startup (exit code 0); see its error output above, if any; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through"), "{}", e.message);
+    assert!(!e.message.contains("conda"), "{}", e.message);
+}
+
+#[test]
+fn conda_run_without_no_capture_output_is_named() {
+    let argv = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+    let general = "; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through";
+    let python = if cfg!(windows) { "envs\\sales\\python.exe" } else { "envs/sales/bin/python" };
+    let conda = format!("{general}; conda run passes them through only with --no-capture-output: add it after run, or name the environment's python ({python} in conda's folder) in [engines.py] command");
+    let conda_bin = if cfg!(windows) { "C:\\miniconda3\\condabin\\conda.bat" } else { "/root/miniforge3/bin/conda" };
+    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "-n", "sales", "python"])), conda);
+    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "--name=sales", "python"])), conda);
+    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "--name", "sales", "python"])), conda);
+    // Passed through: only the general part. Not conda run: the same.
+    for words in [&[conda_bin, "run", "--no-capture-output", "-n", "sales", "python"][..], &[conda_bin, "run", "--live-stream", "-n", "sales", "python"], &["/usr/bin/env", "python3"], &[conda_bin, "python"]] {
+        assert_eq!(wrapper_note("py", &argv(words)), general, "{words:?}");
+    }
+    // mamba, micromamba; a prefix instead of a name; node in a conda environment.
+    let x = if cfg!(windows) { "envs\\x\\python.exe" } else { "envs/x/bin/python" };
+    let mamba = format!("; mamba run passes them through only with --no-capture-output: add it after run, or name the environment's python ({x} in mamba's folder) in [engines.py] command");
+    assert!(wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"])).ends_with(&mamba));
+    assert!(wrapper_note("py", &argv(&["micromamba", "run", "-p", "/envs/x", "python"])).ends_with("; micromamba run passes them through only with --no-capture-output: add it after run, or name the environment's python in [engines.py] command"));
+    assert!(wrapper_note("js", &argv(&["conda", "run", "-n", "web", "node"])).ends_with("; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"));
 }
 
 #[test]
