@@ -57,10 +57,11 @@ impl Checker {
         self.problems.push(Problem { met: self.files, lo: 0, text });
     }
 
-    /// An import problem, shown as the `ImportError` the run would raise there (6.4).
+    /// An import problem, shown as the `ImportError` the run would raise there (6.4), control
+    /// characters escaped (2.1).
     fn import_error(&mut self, message: String, at: Span) {
         self.errors += 1;
-        let e = ErrorValue::new("ImportError", message);
+        let e = ErrorValue::new("ImportError", crate::syntax::span::shown_path(&message));
         let _ = e.span.set(at);
         let text = render_error(&self.sm, &e);
         self.problems.push(Problem { met: self.met[&at.file.0], lo: at.lo, text });

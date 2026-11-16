@@ -1,0 +1,12 @@
+// A path whose first part is ~ and a login name (~root/x, ~user) is a shell's other user's home
+// folder, refused as ~ is (round 17, DOCS 3.11): make_dir("~root/x") made ./~root/x here. A name
+// that merely starts with ~ and isn't one (Office's ~$report.docx, ~1) is taken as written.
+for p in ["~root/x", "~user/projects", "~nobody", "~web-admin.2/a"] {
+    try { print(exists(p)) } catch (e) { print(e.type + ": " + e.message) }
+}
+try { make_dir("~root/x") } catch (e) { print(e.message, "|", e.hint) }
+try { write_file("~nobody", "x") } catch (e) { print(e.message, "|", e.hint) }
+try { read_file("~nobody") } catch (e) { print(e.message) }
+try { list_dir("~root") } catch (e) { print(e.message) }
+try { remove_file("~user\\notes.txt") } catch (e) { print(e.message) }
+print(exists("~$report.docx"), exists("~1"), exists("./~root"))

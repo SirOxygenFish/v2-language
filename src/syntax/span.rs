@@ -121,14 +121,14 @@ impl SourceMap {
     /// Read, validate and normalize a file (3.1). A path that is already loaded returns its id.
     pub fn load(&mut self, path: &Path) -> Result<FileId, LoadError> {
         let canonical = std::fs::canonicalize(path)
-            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", path.display(), os_message(&e))))?;
+            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", shown_path(&path.to_string_lossy()), os_message(&e))))?;
         let canonical = strip_verbatim(&canonical);
         // `v2 x.v2` in a folder whose name isn't UTF-8: script_dir() and messages couldn't name
         // it, as main says for such a FILE (19.1, round 16).
         if canonical.to_str().is_none() {
             return Err(LoadError::Io(format!(
                 "the path '{}' is not valid UTF-8, which V2 needs: a folder on the way has a name in another encoding; rename it",
-                canonical.to_string_lossy()
+                shown_path(&canonical.to_string_lossy())
             )));
         }
         if let Some(&id) = self.by_path.get(&canonical) {
@@ -278,22 +278,39 @@ pub fn strip_verbatim(p: &Path) -> PathBuf {
     }
 }
 
-/// Relative to the current directory with `/` separators when inside it, else absolute (2.1).
+/// Relative to the current directory with `/` separators when inside it, else absolute, with
+/// control characters escaped (2.1).
 pub fn display_path(canonical: &Path) -> Rc<str> {
     if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
         let cwd = strip_verbatim(&cwd);
         // Relative to a filesystem root (`cd /`), a path would only lose its first `/`.
-        if cwd.parent().is_none() {
-            return canonical.to_string_lossy().into_owned().into();
-        }
-        if let Ok(rel) = canonical.strip_prefix(&cwd) {
-            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-            if !parts.is_empty() {
-                return parts.join("/").into();
+        if cwd.parent().is_some() {
+            if let Ok(rel) = canonical.strip_prefix(&cwd) {
+                let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                if !parts.is_empty() {
+                    return shown_path(&parts.join("/")).into();
+                }
             }
         }
     }
-    canonical.to_string_lossy().into_owned().into()
+    shown_path(&canonical.to_string_lossy()).into()
+}
+
+/// A path or a file name as messages show it: control characters escaped (`\n`, `\r`, `\t`, the
+/// others as `\u{1b}`), so a name can't split a message or act on the terminal, and the line
+/// break that `"C:\new"` holds shows as written (2.1, 5.10). Text with none comes back as it is.
+pub fn shown_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The OS error text without Rust's ` (os error N)` suffix.

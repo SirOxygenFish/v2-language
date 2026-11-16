@@ -71,7 +71,7 @@ impl Interp {
                     (format!("{display}:{line}, in {}", self.block_desc(b)), Some((id, b)))
                 }
                 None => {
-                    let shown = id.map_or_else(|| file.to_string(), |id| self.sm.file(id).display.to_string());
+                    let shown = id.map_or_else(|| crate::syntax::span::shown_path(file), |id| self.sm.file(id).display.to_string());
                     // A TypeScript file runs on the js engine, but is TypeScript (2.5).
                     let lower = file.to_ascii_lowercase();
                     let lang = if &*tag == "js" && [".ts", ".mts", ".cts"].iter().any(|e| lower.ends_with(e)) { "ts" } else { &*tag };

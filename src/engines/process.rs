@@ -1165,6 +1165,42 @@ pub struct Captured {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub timed_out: bool,
+    /// Stdout or stderr went past `read_cap()`: the tree was stopped there, and that stream's
+    /// bytes are dropped.
+    pub too_much: bool,
+}
+
+/// 1 GiB, the most text repetition makes (5.3): what `read_file` reads, and what `run_captured`
+/// keeps of each stream, at most (5.10).
+pub const MAX_READ: usize = 1 << 30;
+
+/// `MAX_READ`; in debug builds `V2_TEST_MAX_READ` (bytes) instead, so tests needn't fill 1 GiB.
+pub fn read_cap() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("V2_TEST_MAX_READ").ok().and_then(|v| v.parse().ok()) {
+        return n;
+    }
+    MAX_READ
+}
+
+/// Read `r` to its end into `out`; `Ok(false)` once it holds more than `cap` bytes, which are not
+/// kept, so memory stays bounded by `cap` (a device or a program that never ends). `size`: what a
+/// regular file's metadata says, so its buffer is made once.
+pub fn read_capped(mut r: impl Read, cap: usize, size: usize, out: &mut Vec<u8>) -> std::io::Result<bool> {
+    let _ = out.try_reserve_exact(size.min(cap));
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match r.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(n) if out.len() + n > cap => {
+                out.clear();
+                return Ok(false);
+            }
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// A child's stdout that ends when the child does. A descendant that called `setsid` is out of
@@ -1219,21 +1255,27 @@ impl Read for UntilExit {
     }
 }
 
-fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<Vec<u8>> {
+/// A pipe read to its end on a thread of its own, keeping `read_cap()` bytes at most: past that
+/// it stops `kill`'s tree, so the wait for its exit ends, and gives `None` (5.10).
+fn drain<R: Read + Send + 'static>(stream: Option<R>, kill: KillHandle) -> JoinHandle<Option<Vec<u8>>> {
     spawn_helper(std::thread::Builder::new(), move || {
         let mut out = Vec::new();
-        if let Some(mut s) = stream {
-            let _ = s.read_to_end(&mut out);
+        if let Some(s) = stream {
+            if let Ok(false) = read_capped(s, read_cap(), 0, &mut out) {
+                kill.kill_tree();
+                return None;
+            }
         }
-        out
+        Some(out)
     })
     .expect("start a reader thread")
 }
 
 /// Run `argv` to its end with stdout and stderr captured, and at most `limit`. Stdin is the null
 /// device, or a pipe that a helper thread writes `input` into and then closes. Each output pipe
-/// is read on its own thread; this thread waits for the exit (or the timer's kill), kills the
-/// tree, joins the readers, then reaps (8.3).
+/// is read on its own thread, up to `read_cap()` bytes; this thread waits for the exit (or the
+/// timer's kill, or a reader's past that size), kills the tree, joins the readers, then reaps
+/// (8.3).
 pub fn run_captured(
     argv: &[OsString],
     env: &[(OsString, OsString)],
@@ -1250,20 +1292,21 @@ pub fn run_captured(
         })
         .expect("start a writer thread")
     });
-    let out = drain(child.take_stdout());
-    let err = drain(child.take_stderr());
+    let out = drain(child.take_stdout(), child.kill_handle());
+    let err = drain(child.take_stderr(), child.kill_handle());
     let timer = limit.map(|l| push_timer(Some(l), child.kill_handle()));
     child.wait_exit();
     child.kill_tree();
     let timed_out = timer.as_ref().is_some_and(TimerGuard::fired);
     drop(timer);
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
+    let stdout = out.join().unwrap_or(Some(Vec::new()));
+    let stderr = err.join().unwrap_or(Some(Vec::new()));
+    let too_much = stdout.is_none() || stderr.is_none();
     // Not joined: its writes fail now that the tree is dead, and a process that escaped the
     // tree could keep it blocked (8.3).
     drop(feed);
     let status = child.reap();
-    Ok(Captured { status, stdout, stderr, timed_out })
+    Ok(Captured { status, stdout: stdout.unwrap_or_default(), stderr: stderr.unwrap_or_default(), timed_out, too_much })
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::runtime::error::did_you_mean;
+use crate::syntax::span::shown_path;
 
 /// Words people type expecting a command V2 doesn't have; with no such file they get a hint.
 const NOT_COMMANDS: &[&str] = &[
@@ -18,48 +19,54 @@ const DATA_LIMIT: u64 = 1 << 20;
 /// The message for an entry FILE that is missing, a folder, not a regular file, or a large file
 /// that isn't a script, ending with what to do next; `None` when FILE is fine (the loader reports
 /// anything else). `rest` is the arguments after FILE, for `v2 run hello.v2`; `command` is how the
-/// suggestions start (`v2`, or `v2 check`).
+/// suggestions start (`v2`, or `v2 check`). Each line has control characters escaped, so a file
+/// name that holds one can't split it or act on the terminal (2.1).
 pub fn entry_error(file: &str, rest: &[&str], command: &str) -> Option<String> {
+    let lines = entry_lines(file, rest, command)?;
+    Some(lines.iter().map(|l| shown_path(l)).collect::<Vec<_>>().join("\n"))
+}
+
+fn entry_lines(file: &str, rest: &[&str], command: &str) -> Option<Vec<String>> {
     // Windows's usual help switch; `?` can't be in a Windows file name.
     if file == "/?" {
-        return Some("'/?' isn't a V2 command\nfor help, type: v2 --help".into());
+        return Some(vec!["'/?' isn't a V2 command".into(), "for help, type: v2 --help".into()]);
     }
     let path = Path::new(file);
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => Some(folder_message(file, path, command)),
-        Ok(m) if !m.is_file() => Some(format!("'{file}' is a pipe or a device, not a file: V2 runs scripts saved as .v2 files")),
-        Ok(m) if m.len() > DATA_LIMIT && path.extension().is_some_and(|x| !x.eq_ignore_ascii_case("v2")) => Some(format!(
-            "'{file}' is {} MB and isn't a .v2 script\nto give it to a script, type: v2 SCRIPT.v2 {}",
-            m.len().div_ceil(1 << 20),
-            quoted(file)
-        )),
+        Ok(m) if !m.is_file() => Some(vec![format!("'{file}' is a pipe or a device, not a file: V2 runs scripts saved as .v2 files")]),
+        Ok(m) if m.len() > DATA_LIMIT && path.extension().is_some_and(|x| !x.eq_ignore_ascii_case("v2")) => Some(vec![
+            format!("'{file}' is {} MB and isn't a .v2 script", m.len().div_ceil(1 << 20)),
+            format!("to give it to a script, type: v2 SCRIPT.v2 {}", quoted(file)),
+        ]),
         Ok(_) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(missing_message(file, path, rest)),
         Err(_) => None,
     }
 }
 
-fn folder_message(file: &str, path: &Path, command: &str) -> String {
+fn folder_message(file: &str, path: &Path, command: &str) -> Vec<String> {
     let scripts = v2_files(path);
     let pick = scripts.iter().find(|n| n.eq_ignore_ascii_case("main.v2")).or(scripts.first());
     match pick {
         Some(name) => {
             let sep = if file.ends_with('/') || file.ends_with(std::path::MAIN_SEPARATOR) { "" } else { std::path::MAIN_SEPARATOR_STR };
             let what = if command == "v2" { "run" } else { "check" };
-            format!("'{file}' is a folder, not a script\n{what} one of its .v2 files, for example: {command} {}", quoted(&format!("{file}{sep}{name}")))
+            vec![format!("'{file}' is a folder, not a script"), format!("{what} one of its .v2 files, for example: {command} {}", quoted(&format!("{file}{sep}{name}")))]
         }
         None => {
             // Notepad's `hallo.v2.txt`, as `v2 hallo.v2` inside that folder says too.
             let saved_txt = std::fs::read_dir(path).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).find(|n| n.ends_with(".v2.txt"));
+            let first = format!("'{file}' is a folder, not a script, and it has no .v2 files");
             match saved_txt {
-                Some(t) => format!("'{file}' is a folder, not a script, and it has no .v2 files\nthere is a '{t}': your editor added '.txt', so rename it to '{}'", t.trim_end_matches(".txt")),
-                None => format!("'{file}' is a folder, not a script, and it has no .v2 files"),
+                Some(t) => vec![first, format!("there is a '{t}': your editor added '.txt', so rename it to '{}'", t.trim_end_matches(".txt"))],
+                None => vec![first],
             }
         }
     }
 }
 
-fn missing_message(file: &str, path: &Path, rest: &[&str]) -> String {
+fn missing_message(file: &str, path: &Path, rest: &[&str]) -> Vec<String> {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -68,7 +75,10 @@ fn missing_message(file: &str, path: &Path, rest: &[&str]) -> String {
     let name = path.file_name().map_or_else(|| file.to_string(), |n| n.to_string_lossy().into_owned());
     // A terminal still in a folder that was deleted: nothing relative can be found there.
     if !path.is_absolute() && std::env::current_dir().is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        return format!("cannot find '{file}': the current folder no longer exists (it was deleted or moved)\ncd to another folder, or give the script's full path");
+        return vec![
+            format!("cannot find '{file}': the current folder no longer exists (it was deleted or moved)"),
+            "cd to another folder, or give the script's full path".into(),
+        ];
     }
     let first = if path.is_absolute() {
         format!("cannot find '{file}'")
@@ -78,7 +88,7 @@ fn missing_message(file: &str, path: &Path, rest: &[&str]) -> String {
     };
     // A link to a file that isn't there is listed in its folder, but can't be run.
     if let Some(target) = std::fs::read_link(path).ok().filter(|_| !path.exists()) {
-        return format!("{first}\n'{name}' is a symbolic link to {}, which isn't there", target.display());
+        return vec![first, format!("'{name}' is a symbolic link to {}, which isn't there", target.display())];
     }
     // A folder on the way that isn't there: say so, with the one it probably meant.
     if !folder.is_dir() {
@@ -100,9 +110,9 @@ fn missing_message(file: &str, path: &Path, rest: &[&str]) -> String {
             Some(close) => format!("there is no folder {shown}: did you mean '{close}'?"),
             None => format!("there is no folder {shown}"),
         };
-        return format!("cannot find '{file}'\n{hint}");
+        return vec![format!("cannot find '{file}'"), hint];
     }
-    format!("{first}\n{}", missing_hint(file, path, &folder, rest))
+    vec![first, missing_hint(file, path, &folder, rest)]
 }
 
 /// A path as messages show it, made absolute against the current folder and with `.` and `..`
@@ -242,6 +252,7 @@ pub fn foreign_file_note(file: &str) -> Option<String> {
         "rs" => ("Rust", "rust"),
         _ => return None,
     };
+    let file = shown_path(file);
     Some(match tag {
         "py" | "js" | "ts" => format!(
             "note: '{file}' is a {language} file, and V2 runs .v2 scripts: put {language} code in a @{tag} {{ }} block in a .v2 file"

@@ -3985,3 +3985,206 @@ fn docs_examples_run_as_documented() {
     }
     assert!(failures.is_empty(), "{} of {ran} docs examples:\n{}", failures.len(), failures.join("\n"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Paths, files and processes (round 17)
+
+#[cfg(unix)]
+fn run_capped(home: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = v2_command(home);
+    cmd.args(args).current_dir(home).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.envs(env.iter().copied());
+    // A regression would read /dev/zero or `yes` until the memory runs out: 2 GiB ends it sooner.
+    // SAFETY: setrlimit is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            let limit = libc::rlimit { rlim_cur: 2 << 30, rlim_max: 2 << 30 };
+            libc::setrlimit(libc::RLIMIT_AS, &limit);
+            Ok(())
+        });
+    }
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(30)).unwrap();
+    let text = |b: &[u8]| normalize(&String::from_utf8_lossy(b));
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+#[cfg(unix)]
+#[test]
+fn imports_of_pipes_devices_and_broken_links_are_import_errors() {
+    // 6.4 step 1: an imported path that is a pipe or a device (a FIFO, a link to /dev/zero) is
+    // refused as the entry FILE is (19.1), in a run and in `v2 check`, instead of a read that
+    // never ends; a link that can't be followed says why; a name that isn't there is still
+    // "cannot find".
+    use std::os::unix::ffi::OsStringExt;
+    let home = TempHome::new();
+    let fifo = std::ffi::CString::new(home.0.join("fifo.v2").into_os_string().into_vec()).unwrap();
+    // SAFETY: a NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+    std::os::unix::fs::symlink("/dev/zero", home.0.join("zero.v2")).unwrap();
+    std::os::unix::fs::symlink("loop.v2", home.0.join("loop.v2")).unwrap();
+    std::os::unix::fs::symlink("gone.v2", home.0.join("dangling.v2")).unwrap();
+    let names = ["fifo", "zero", "loop", "dangling", "nope"];
+    let main: String = names.iter().map(|n| format!("try {{ import \"./{n}.v2\" as m }} catch (e) {{ print(e.type + \": \" + e.message) }}\n")).collect();
+    std::fs::write(home.0.join("main.v2"), main).unwrap();
+    std::fs::write(home.0.join("uncaught.v2"), "import \"./zero.v2\" as z\n").unwrap();
+    let want = [
+        "ImportError: cannot import './fifo.v2': it is a pipe or a device, not a file",
+        "ImportError: cannot import './zero.v2': it is a pipe or a device, not a file",
+        "ImportError: cannot import './loop.v2': Too many levels of symbolic links",
+        "ImportError: cannot import './dangling.v2': it is a symbolic link to gone.v2, which isn't there",
+        "ImportError: cannot find module './nope.v2' (looked for nope.v2)",
+    ];
+    let (code, stdout, stderr) = run_capped(&home.0, &["main.v2"], &[]);
+    assert_eq!((code, stdout), (Some(0), want.join("\n") + "\n"), "{stderr}");
+    let (code, stdout, stderr) = run_capped(&home.0, &["check", "main.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 5 errors\n"), "{stderr}");
+    for (i, w) in want.iter().enumerate() {
+        assert!(stderr.contains(&format!("main.v2:{}:7: {w}\n", i + 1)), "{w}: {stderr}");
+    }
+    let (code, _, stderr) = run_capped(&home.0, &["uncaught.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.starts_with("uncaught.v2:1:1: ImportError: cannot import './zero.v2': it is a pipe or a device, not a file\n"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn control_characters_in_file_names_are_shown_escaped() {
+    // 2.1, 19.1: a file name holding an escape sequence or a line break shows them escaped in the
+    // listing of a folder's .v2 files, a did-you-mean, a diagnostic's header, `at` frames and
+    // check's summary, so an unpacked archive's names can't drive the terminal or split a line.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("a\u{1b}[2Jb.v2"), "").unwrap();
+    std::fs::write(home.0.join("new\nline.v2"), "").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["nosuch.v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("\nthe .v2 files there: a\\u{1b}[2Jb.v2, new\\nline.v2\n"), "{stderr:?}");
+    let (_, _, stderr) = run_in_home(&home.0, &["a\u{1b}[2Jc.v2"], &[]);
+    assert!(stderr.starts_with("v2: cannot find 'a\\u{1b}[2Jc.v2' in ") && stderr.contains("\ndid you mean 'a\\u{1b}[2Jb.v2'?\n"), "{stderr:?}");
+    let name = "z\u{1b}[2Jz.v2";
+    std::fs::write(home.0.join(name), "func f() { throw \"boom\" }\nf()\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &[name], &[]);
+    assert_eq!(code, Some(1), "{stderr:?}");
+    assert!(stderr.starts_with("z\\u{1b}[2Jz.v2:1:12: Error: boom\n"), "{stderr:?}");
+    assert!(stderr.contains("\n  at f (z\\u{1b}[2Jz.v2:1)\n  at z\\u{1b}[2Jz.v2:2\n"), "{stderr:?}");
+    let bad = "y\u{1b}[2Jy.v2";
+    std::fs::write(home.0.join(bad), "let = 1\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["check", bad], &[]);
+    assert_eq!(code, Some(1), "{stderr:?}");
+    assert!(stderr.starts_with("y\\u{1b}[2Jy.v2:1:5: SyntaxError: "), "{stderr:?}");
+    assert!(stdout.starts_with("check y\\u{1b}[2Jy.v2: 1 file, 1 error"), "{stdout:?}");
+    for text in [&stdout, &stderr] {
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the V2_TEST_MAX_READ cap exists in debug builds only")]
+fn read_file_and_exec_stop_past_what_a_str_holds() {
+    // 5.10: past 1 GiB, the most text `*` makes (here the debug builds' V2_TEST_MAX_READ,
+    // 1000 bytes), read_file and exec raise IOError instead of using up the memory, and exec
+    // stops the program there; what fits is read whole.
+    let main = "let v2 = args()[0]\n\
+                for f in [\"fits.txt\", \"big.txt\"] {\n\
+                \x20   try { print(len(read_file(f)), len(read_file(f, binary: true))) } catch (e) { print(e.type + \": \" + e.message) }\n\
+                }\n\
+                print(len(exec([v2, \"fits.v2\"]).stdout))\n\
+                for f in [\"more.v2\", \"more_err.v2\"] {\n\
+                \x20   try { exec([v2, f]) } catch (e) { print(e.type + \": \" + e.message.replace(v2, \"v2\")) }\n\
+                }\n";
+    let fits = "a".repeat(1000);
+    let big = "a".repeat(1001);
+    let files = [
+        ("main.v2", main),
+        ("fits.txt", fits.as_str()),
+        ("big.txt", big.as_str()),
+        ("fits.v2", "print(\"x\" * 999)\n"),
+        ("more.v2", "for i in 0..100 { print(\"x\" * 99) }\n"),
+        ("more_err.v2", "for i in 0..100 { print(\"x\" * 99, stderr: true) }\n"),
+    ];
+    let (code, stdout, stderr, _home) = run_with_files_env(&files, &["main.v2", BIN], &[("V2_TEST_MAX_READ", "1000")]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let exec = "IOError: exec: 'v2' wrote more than 1 GiB of output: send it to a file in the command, or read it in pieces in a block";
+    let want = format!("1000 1000\nIOError: cannot read 'big.txt': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block\n1000\n{exec}\n{exec}\n");
+    assert_eq!(stdout, want);
+    // Sources that never end: a device, and a program that writes until it is stopped.
+    #[cfg(unix)]
+    {
+        let home = TempHome::new();
+        let src = "for f in [func() => read_file(\"/dev/zero\"), func() => read_file(\"/dev/zero\", binary: true), func() => exec([\"yes\"])] {\n    try { f() } catch (e) { print(e.message) }\n}\n";
+        std::fs::write(home.0.join("endless.v2"), src).unwrap();
+        let (code, stdout, stderr) = run_capped(&home.0, &["endless.v2"], &[("V2_TEST_MAX_READ", "100000")]);
+        assert_eq!(code, Some(0), "{stderr}");
+        let device = "cannot read '/dev/zero': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block";
+        assert_eq!(stdout, format!("{device}\n{device}\n{}\n", exec.trim_start_matches("IOError: ").replace("'v2'", "'yes'")));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_file_another_program_holds_open_says_to_close_it_there() {
+    // 5.10: a file another program opened without sharing, as Excel does, is refused by Windows
+    // with ERROR_SHARING_VIOLATION; each file builtin's IOError says what to do.
+    use std::os::windows::fs::OpenOptionsExt;
+    let home = TempHome::new();
+    let csv = home.0.join("results.csv");
+    std::fs::write(&csv, "a,b\n").unwrap();
+    let held = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&csv).unwrap();
+    let src = "let f = \"results.csv\"\n\
+               for op in [func() => read_file(f), func() => write_file(f, \"x\"), func() => write_file(f, \"x\", append: true), func() => remove_file(f)] {\n\
+               \x20   try { op() } catch (e) { print(e.message.split(\": \")[0] + \" | \" + e.hint) }\n\
+               }\n";
+    std::fs::write(home.0.join("locked.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["locked.v2"], &[]);
+    drop(held);
+    assert_eq!(code, Some(0), "{stderr}");
+    let hint = "another program has it open (Excel keeps an open file locked): close it there, or use another file name";
+    let want: String = ["read", "write", "write", "remove"].iter().map(|v| format!("cannot {v} 'results.csv' | {hint}\n")).collect();
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn an_uncaught_error_starts_on_a_line_of_its_own() {
+    // 2.4: with stdout and stderr one pipe or file (`2>&1`), the report of an error after
+    // print("x", end: "") starts on the next line; so it does after such a write to stderr. A
+    // finished line gets no blank line, and with stdout apart nothing is added.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("open.v2"), "print(\"9 stdout\", end: \"\")\nthrow \"10 uncaught\"\n").unwrap();
+    std::fs::write(home.0.join("err.v2"), "print(\"w\", stderr: true, end: \"\")\nthrow \"e\"\n").unwrap();
+    std::fs::write(home.0.join("ended.v2"), "print(\"line\")\nthrow \"e\"\n").unwrap();
+    let one_pipe = |name: &str| {
+        let (mut reader, writer) = std::io::pipe().expect("a pipe");
+        let mut cmd = v2_command(&home.0);
+        cmd.arg(name).current_dir(&home.0).stdin(Stdio::null()).stdout(writer.try_clone().unwrap()).stderr(writer);
+        let child = cmd.spawn().expect("start v2");
+        drop(cmd);
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+        assert_eq!(out.status.code(), Some(1), "{text}");
+        normalize(&text)
+    };
+    let one_file = |name: &str| {
+        let path = home.0.join("both.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg(name).current_dir(&home.0).stdin(Stdio::null()).stdout(file.try_clone().unwrap()).stderr(file);
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        normalize(&std::fs::read_to_string(&path).unwrap())
+    };
+    let joiners: [&dyn Fn(&str) -> String; 2] = [&one_pipe, &one_file];
+    for joined in joiners {
+        let text = joined("open.v2");
+        assert!(text.starts_with("9 stdout\nopen.v2:2:1: Error: 10 uncaught\n"), "{text:?}");
+        let text = joined("err.v2");
+        assert!(text.starts_with("w\nerr.v2:2:1: Error: e\n"), "{text:?}");
+        let text = joined("ended.v2");
+        assert!(text.starts_with("line\nended.v2:2:1: Error: e\n"), "{text:?}");
+    }
+    let (code, stdout, stderr) = run_in_home(&home.0, &["open.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "9 stdout"));
+    assert!(stderr.starts_with("open.v2:2:1: Error: 10 uncaught\n"), "{stderr:?}");
+    let (_, _, stderr) = run_in_home(&home.0, &["err.v2"], &[]);
+    assert!(stderr.starts_with("w\nerr.v2:2:1: Error: e\n"), "{stderr:?}");
+}
