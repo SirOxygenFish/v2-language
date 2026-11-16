@@ -1479,13 +1479,65 @@ if have {
     assert_eq!(lines.len(), 6, "{stdout}");
     // pandas names its Timestamp pandas.Timestamp from 3.0, pandas._libs.tslibs.timestamps.Timestamp before.
     let series = ": make plain data of it in a block first, as in @py(h) { h.astype(str).tolist() }";
-    assert!(lines[0].starts_with("MarshalError: to_v2(): an item of h is a pandas.") && lines[0].ends_with(&format!("Timestamp{series}")), "{stdout}");
+    assert!(lines[0].starts_with("MarshalError: to_v2(): an item of h has the type pandas.") && lines[0].ends_with(&format!("Timestamp{series}")), "{stdout}");
     assert_eq!(lines[1], r#"["2026-01-01", "2026-01-02"]"#);
     let frame = r#"Timestamp: make plain data of it in a block first, as in @py(h) { import json; json.loads(h.to_json(date_format="iso")) }"#;
-    assert!(lines[2].starts_with("MarshalError: to_v2(): an item of h is a pandas.") && lines[2].ends_with(frame), "{stdout}");
+    assert!(lines[2].starts_with("MarshalError: to_v2(): an item of h has the type pandas.") && lines[2].ends_with(frame), "{stdout}");
     assert!(lines[3].starts_with(r#"{"d": {"0": "2026-01-01T00:00:00"#) && lines[3].ends_with(r#""n": {"0": 1.5, "1": 2.0}}"#), "{stdout}");
-    assert_eq!(lines[4], format!("MarshalError: to_v2(): an item of h is a datetime.date{series}"));
+    assert_eq!(lines[4], format!("MarshalError: to_v2(): an item of h has the type datetime.date{series}"));
     assert_eq!(lines[5], r#"["2026-01-01"]"#);
+}
+
+#[test]
+fn to_v2_of_pandas_indexed_by_dates_names_a_block_that_converts_them() {
+    // INTERNALS 11.5, round 17 review: a Series or DataFrame indexed by dates (a time series) fails
+    // on a key of what its to_dict() gave. The message names the object, not that dict, and a block
+    // that converts it. The real pandas (engines/py/to_v2_items.v2 has stand-ins), so it skips
+    // where pandas isn't installed.
+    let test = "to_v2_of_pandas_indexed_by_dates_names_a_block_that_converts_them";
+    if !needs("py", test) {
+        return;
+    }
+    let src = r#"func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let have = @py { __import__("importlib.util").util.find_spec("pandas") is not None }
+if have {
+    let series = @py {
+        import pandas as pd
+        pd.Series([1, 2], index=pd.to_datetime(["2026-01-01", "2026-01-02"]))
+    }
+    show(func() => to_v2(series))
+    show(func() => @py(h: series) { __import__("json").loads(h.to_json(date_format="iso")) })
+    let frame = @py(series) {
+        import pandas as pd
+        pd.DataFrame({"n": series})
+    }
+    show(func() => to_v2(frame))
+    show(func() => @py(h: frame) { __import__("json").loads(h.to_json(date_format="iso")) })
+} else {
+    print("no pandas")
+}
+"#;
+    let (code, stdout, stderr, _home) = run_with_files(&[("keys.v2", src)], &["keys.v2"]);
+    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    if stdout == "no pandas\n" {
+        let _ = writeln!(std::io::stderr(), "SKIP {test} (pandas not installed)");
+        return;
+    }
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4, "{stdout}");
+    // pandas names its Timestamp pandas.Timestamp from 3.0, pandas._libs.tslibs.timestamps.Timestamp before.
+    let block = r#"Timestamp: make plain data of h in a block first, as in @py(h) { __import__("json").loads(h.to_json(date_format="iso")) }"#;
+    assert!(lines[0].starts_with("MarshalError: to_v2(): a key of h has the type pandas.") && lines[0].ends_with(block), "{stdout}");
+    assert_eq!(lines[1], r#"{"2026-01-01T00:00:00.000": 1, "2026-01-02T00:00:00.000": 2}"#);
+    // A DataFrame's to_dict() is {column: {index: value}}: the key sits inside it.
+    assert!(lines[2].starts_with("MarshalError: to_v2(): a key inside h has the type pandas.") && lines[2].ends_with(block), "{stdout}");
+    assert_eq!(lines[3], r#"{"n": {"2026-01-01T00:00:00.000": 1, "2026-01-02T00:00:00.000": 2}}"#);
 }
 
 #[test]

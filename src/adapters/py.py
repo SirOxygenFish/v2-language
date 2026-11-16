@@ -1077,7 +1077,28 @@ if __name__ == "__main__":
             s = n.strip("_") + "_"
             raise Fail("ValueError", "%s '%s' is reserved in @py blocks: %s" % (what, k, other(s if s[1:] and s.isidentifier() else "name")))
         how = "pass it under that name, as in @py(%s: %s)" % (n, k) if arg else "import it under that name, as in @import { … as %s } from …" % n
-        raise Fail("ValueError", "%s '%s' is read by Python as '%s': %s" % (what, k, n, how))
+        was, now = changed(k, n)
+        raise Fail("ValueError", "%s '%s' (%s) is read by Python as '%s' (%s): %s" % (what, k, was, n, now, how))
+
+    def changed(k, n):
+        """The code points of the first character NFKC changes in `k`, and of what it becomes in
+        `n`: µ (U+00B5) and μ (U+03BC) look the same (12.2)."""
+        import unicodedata
+
+        i = 0
+        while i < min(len(k), len(n)) and k[i] == n[i]:
+            i += 1
+        j = 0
+        while j < min(len(k), len(n)) - i and k[-1 - j] == n[-1 - j]:
+            j += 1
+        a, b = k[i : len(k) - j], n[i : len(n) - j]
+        # One character that changes on its own (µ of µµ); else the whole change (two Hangul
+        # jamo that NFKC makes one syllable).
+        c = a[:1]
+        f = unicodedata.normalize("NFKC", c)
+        if f != c and b.startswith(f):
+            a, b = c, f
+        return tuple(" ".join("U+%04X" % ord(ch) for ch in s) for s in (a, b))
 
     _absent = object()
 
@@ -1446,7 +1467,7 @@ if __name__ == "__main__":
             r = mant + "e" + str(int(exp))
         return r
 
-    def key_text(k, mapping):
+    def key_text(k, mapping, depth, path):
         if isinstance(k, str):
             return surrogate_check(str.__str__(k))
         if k is None:
@@ -1459,7 +1480,25 @@ if __name__ == "__main__":
                 return str(int(k))
         elif isinstance(k, float) or (is_numpy(k) and isinstance(k, numbers.Real)):
             return float_text(float(k))
-        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data (key of type %s)" % (type_name(mapping), type_name(k)))
+        raise Fail("MarshalError", key_message(k, mapping, depth, path))
+
+    def key_message(k, mapping, depth, path):
+        """to_v2's message for a key that can't convert. Under the object's own to_dict() (a
+        pandas Series indexed by dates) it names the object, with a block that converts it (11.5);
+        a mapping's own key names the mapping, and V2 adds the hint (session.rs)."""
+        name = type_name(k)
+        if not path.chain:
+            return "to_v2(): can't convert %s to V2 data (key of type %s)" % (type_name(mapping), name)
+        top = path.top
+        mod = getattr(type(top), "__module__", None)
+        what = "a key of h" if depth == 0 else "a key inside h"
+        if isinstance(mod, str) and mod.split(".")[0] == "pandas" and callable(getattr(top, "to_json", None)):
+            how = '__import__("json").loads(h.to_json(date_format="iso"))'
+        elif depth == 0:
+            how = "{str(k): v for k, v in %s.items()}" % ("h" + "".join(".%s()" % c for c in path.chain))
+        else:
+            return "to_v2(): a key inside h has the type %s: make plain data of h in a block first, with str(k) for each such key k" % name
+        return "to_v2(): %s has the type %s: make plain data of h in a block first, as in @py(h) { %s }" % (what, name, how)
 
     def to_v2(x, depth=0, path=None):
         """`op value`: the object as plain data, converted here (11.5). `depth` is the level the
@@ -1500,7 +1539,7 @@ if __name__ == "__main__":
                     return [to_v2(v, depth + 1, path) for v in x]
                 out = {}
                 for k, v in x.items():
-                    key = key_text(k, x)
+                    key = key_text(k, x, depth, path)
                     if key in out:
                         raise Fail("MarshalError", 'to_v2(): can\'t convert %s to V2 data (two keys become "%s")' % (type_name(x), key))
                     out[key] = to_v2(v, depth + 1, path)
@@ -1549,8 +1588,7 @@ if __name__ == "__main__":
         """to_v2's message for a node that can't convert and isn't the object asked for: an item
         of it, or what its to_dict() or tolist() gave. The block it names converts the object, as
         fits its kind: a pandas or numpy object as text, a container item by item (11.5)."""
-        top, name = path.top, type_name(x)
-        a = "an" if name[:1] in "aeiouAEIOU" else "a"
+        top, name = path.top, type_name(x)  # "has the type X": no article to pick (a uuid.UUID)
         src = "h" + "".join(".%s()" % c for c in path.chain)
         what = "an item of h" if depth else src
         mod = getattr(type(top), "__module__", None)
@@ -1563,13 +1601,13 @@ if __name__ == "__main__":
             how = form % src
         elif depth == 1 and path.hooks == len(path.chain):
             if isinstance(path.base, collections.abc.Mapping):
-                key = "k" if all(isinstance(k, str) for k in path.base) else "str(k)"
-                how = "{%s: %s for k, v in %s.items()}" % (key, form % "v", src)
+                # The keys stay: to_v2 of the block's dict gives them V2's form (None: "null").
+                how = "{k: %s for k, v in %s.items()}" % (form % "v", src)
             else:
                 how = "[%s for x in %s]" % (form % "x", src)
         else:
-            return "to_v2(): an item inside h is %s %s: make plain data of h in a block first, with %s for each such item x" % (a, name, form % "x")
-        return "to_v2(): %s is %s %s: make plain data of it in a block first, as in @py(h) { %s }" % (what, a, name, how)
+            return "to_v2(): an item inside h has the type %s: make plain data of h in a block first, with %s for each such item x" % (name, form % "x")
+        return "to_v2(): %s has the type %s: make plain data of it in a block first, as in @py(h) { %s }" % (what, name, how)
 
     def do_op(m):
         op = m.get("op")
