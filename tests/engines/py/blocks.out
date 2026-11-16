@@ -12,7 +12,7 @@ lucky 126 float b'\xff' 1152921504606846976 None
 false yes
 true
 ValueError: block arg 'pass' is not a valid Python name: pass it under another name, as in @py(pass_: …)
-ValueError: block arg '__file__' is not a valid Python name
+ValueError: block arg '__file__' is reserved in @py blocks: pass it under another name, as in @py(file_: …)
 [<builtin print>] true
 MarshalError: cannot send a list that contains itself (at x[1])
 py action runs 0

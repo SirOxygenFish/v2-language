@@ -6,7 +6,7 @@ true
 13
 ["ArityError", "twice() takes 1 positional argument but 2 were given"]
 ["ArityError", "greet() got an unexpected argument 'colour'"]
-['Error', "V2 function 'twice' called from another thread"]
+['Error', "V2 function 'twice' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results"]
 8
 [["Error", "V2 function 'twice' called outside an active V2 call: Python called it while V2 wasn't waiting on Python (a thread, a timer or a finalizer after its call returned); call V2 from the code V2 called, and return to V2 when done"]]
 ["Linus", "Ada", "Grace"]
@@ -16,3 +16,4 @@ true
 3
 ValueError negative: -2 kept 107
 ["check (callbacks.v2:107)", "each (callbacks.v2:115, in @py apply)", "run (callbacks.v2:123)", "callbacks.v2:129"]
+Error py V2 function 'score' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results
