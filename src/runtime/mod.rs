@@ -38,8 +38,12 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     let mut sm = SourceMap::new();
     let file = match sm.load(Path::new(path)) {
         Ok(id) => id,
-        Err(LoadError::Io(msg)) => {
+        Err(LoadError::Io(msg, hint)) => {
             stderrln!("v2: {msg}");
+            // What to do next (19.1).
+            if let Some(h) = hint {
+                stderrln!("{h}");
+            }
             return 2;
         }
         Err(LoadError::NotUtf8 { display, line, col, message }) => {

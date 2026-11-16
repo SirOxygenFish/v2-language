@@ -67,8 +67,16 @@ if __name__ == "__main__":
 
     # 3. The adapter's own folder leaves sys.path; init puts the project root on it (9.3). Python
     # resolves symlinks in sys.path[0] (macOS's temp folder is one), so both sides are resolved
-    # (`same` is also shadowed()'s test of one file).
-    same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    # (`same` is also shadowed()'s test of one file: one reached two ways that resolve apart, a
+    # share of a local folder, \\localhost\C$\..., and its C:\... path, is one file too).
+    def same(a, b):
+        if os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b)):
+            return True
+        try:
+            return os.path.samefile(a, b)
+        except (OSError, ValueError):
+            return False
+
     if sys.path and same(sys.path[0] or ".", os.path.dirname(ADAPTER)):
         del sys.path[0]
     ORIGINAL_PATH = list(sys.path)

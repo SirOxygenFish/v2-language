@@ -54,6 +54,16 @@ pub fn version_line() -> String {
     format!("v2 {} (VEP/1)", env!("CARGO_PKG_VERSION"))
 }
 
+/// The README's loop that checks every `.v2` file of a folder: PowerShell's on Windows (cmd and
+/// PowerShell don't expand `*`), the shell's in Git Bash (`MSYSTEM` is set) and elsewhere (19.1).
+fn check_loop() -> &'static str {
+    if cfg!(windows) && std::env::var_os("MSYSTEM").is_none() {
+        "loop in PowerShell: $ok = 0; Get-ChildItem *.v2 | ForEach-Object { v2 check $_.Name; if ($LASTEXITCODE -ne 0) { $ok = 1 } }"
+    } else {
+        "loop in the shell: ok=0; for f in *.v2; do v2 check \"$f\" || ok=1; done"
+    }
+}
+
 /// Parse the arguments after the program name.
 pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let Some(word) = args.first() else {
@@ -77,6 +87,10 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "check" => match rest {
             [file] => Ok(Command::Check { file: file.clone() }),
             [] => Err(UsageError("`v2 check` needs a FILE".into())),
+            // Several scripts: a shell that expanded `*.v2` (19.1).
+            [_, extra, ..] if rest.iter().all(|f| f.to_ascii_lowercase().ends_with(".v2")) => {
+                Err(UsageError(format!("unexpected argument `{extra}` after `v2 check FILE`: it checks one file; to check several, {}", check_loop())))
+            }
             [_, extra, ..] => Err(UsageError(format!("unexpected argument `{extra}` after `v2 check FILE`"))),
         },
         "doctor" => match rest {
