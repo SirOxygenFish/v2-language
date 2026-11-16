@@ -1046,10 +1046,26 @@ mod tests {
         assert_eq!(hint("@js d {\n  @export { from as f }\n}"), rename("from", "\"from\""));
         assert_eq!(hint("@js d {\n  @export { show as $s }\n}"), rename("show", "show"));
         assert_eq!(hint("@js d {\n  @export { $x }\n}"), "write a name that isn't a V2 name in quotes: @export { \"$x\" }");
-        // A block's own list binds a quoted name as it is; after `as` goes a plain name.
-        assert_eq!(hint("@js u {\n  @import { $x } from d\n}"), "write a name that isn't a V2 name in quotes: @import { \"$x\" } from …");
-        assert_eq!(hint("@py u {\n  @import { $x as dx } from d\n}"), "write a name that isn't a V2 name in quotes: @import { \"$x\" as dx } from …");
+        // A block's own list gets the alias form, which Python needs (it binds an imported name
+        // only as a Python name): the alias written, else the name without its `$` when that is
+        // a V2 and a Python name, else `other`. After `as` goes a plain name.
+        let quoted = |item: &str| format!("write a name that isn't a V2 name in quotes, with a plain name after as: @import {{ {item} }} from …");
+        for (tag, list, item) in [
+            ("py", "$x", "\"$x\" as x"),
+            ("js", "$x", "\"$x\" as x"),
+            ("ts", "a, $el", "\"$el\" as el"),
+            ("py", "$x as dx", "\"$x\" as dx"),
+            ("py", "$class", "\"$class\" as other"),
+            ("py", "$None", "\"$None\" as other"),
+            ("js", "$lambda", "\"$lambda\" as other"),
+            ("py", "$from", "\"$from\" as other"),
+            ("py", "$", "\"$\" as other"),
+            ("py", "$$", "\"$$\" as other"),
+        ] {
+            assert_eq!(hint(&format!("@{tag} u {{\n  @import {{ {list} }} from d\n}}")), quoted(item), "@{tag} {list}");
+        }
         assert_eq!(hint("@py u {\n  @import { show as $s } from d\n}"), "after as goes a plain name, without $: as s");
+        assert_eq!(hint("@py u {\n  @import { show as $class } from d\n}"), "after as goes a plain name, without $: as other");
     }
 
     #[test]
