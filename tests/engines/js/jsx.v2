@@ -1,6 +1,7 @@
 // requires: js ts
-// Node has no JSX: an @import of a .jsx or .tsx file is refused before anything loads, and one a
-// block or an imported file loads gets a hint (DOCS 7, INTERNALS 13.5).
+// Node has no JSX: a .jsx or .tsx file that V2 imports, a block requires or an imported file
+// loads fails with a hint (DOCS 7, INTERNALS 13.5). With a loader registered for it, it runs:
+// run.rs jsx_files_run_through_a_loader_from_node_options.
 func show(f) {
     try {
         print(f())

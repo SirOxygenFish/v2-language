@@ -1352,13 +1352,6 @@ impl Interp {
             }
         } else if name.is_empty() {
             return Err(import_error("'' is not a valid module name".into()));
-        } else if let Some(ext) = [".jsx", ".tsx"].into_iter().find(|e| key == "js" && name.to_ascii_lowercase().ends_with(e)) {
-            // Node has no JSX: it would load the file as plain JavaScript (13.5).
-            let f = import_error(format!("'{name}' is a {ext} file, which V2 can't import: Node has no JSX, so it can't run .jsx or .tsx files"));
-            if let Flow::Error(e) = &f {
-                let _ = e.hint.set("compile it first and import the .js your build writes (TypeScript without JSX can be a .ts file)".into());
-            }
-            return Err(f);
         }
         let relative = name == "." || name == ".." || name.starts_with("./") || name.starts_with("../")
             || (cfg!(windows) && (name.starts_with(".\\") || name.starts_with("..\\")));
