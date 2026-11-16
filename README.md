@@ -399,10 +399,12 @@ and a [cookbook](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#
 V2 doesn't install packages: it uses the Python and Node.js that `v2 doctor` shows, with the
 packages installed for them. A Python package is imported with `@import py.numpy as np` (or
 `@import { mean } from py.statistics`), and a `helpers.py` next to the `.v2` file that imports it,
-or in its project folder (where its `v2.toml` is), is `py.helpers`, and a `stages/clean.py` there
-is `py.stages.clean` (name yours unlike Python's own
+or in the project folder (where the `v2.toml` of the script you run is), is `py.helpers`, and a
+`stages/clean.py` there is `py.stages.clean` (name yours unlike Python's own
 modules, such as `json` or `numbers`: one Python serves the whole run, with one module per name,
-and V2 says so when another came first).
+and V2 says so when another came first). One project serves the run, too: a `.v2` file imported
+from another project uses your script's `v2.toml`, venv and project folder, and only its own
+folder is added for its `.py` files.
 
 - **npm:** in your project folder, `npm install lodash` (in a Windows PowerShell that blocks
   `npm`, `npm.cmd install lodash`; in WSL, check that `type -P npm` names Linux's npm, as the
