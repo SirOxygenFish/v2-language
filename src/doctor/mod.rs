@@ -201,6 +201,8 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
     let mut rows: Vec<[String; 5]> = vec![["ENGINE", "STATUS", "COMMAND", "VERSION", "FROM"].map(String::from)];
     let mut notes: Vec<String> = Vec::new();
     let (mut ready, mut not_ready) = (Vec::new(), Vec::new());
+    // The engines whose program answered --version but didn't start.
+    let mut no_start: HashSet<String> = HashSet::new();
     for spec in reg.specs() {
         let id = spec.id.to_string();
         let skipped = |list: &[(std::path::PathBuf, String)], notes: &mut Vec<String>| {
@@ -209,10 +211,28 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         match reg.resolve(spec) {
             Ok(e) => {
                 let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
+                // Read as it starts, after the version probe: one that is wrong stops every block,
+                // so with one set the program has to start (`python -c pass`).
+                let vars = crate::engines::spec::startup_variables(&id);
+                let host_failed = spec.session_of.as_ref().is_some_and(|h| no_start.contains(&**h));
+                let failure = if vars.is_empty() || spec.session_of.is_some() { None } else { reg.start_failure(&e) };
+                if host_failed || failure.is_some() {
+                    rows.push([id.clone(), "broken".into(), e.shown(), version, e.origin.label()]);
+                    match (&spec.session_of, failure) {
+                        (Some(host), _) => notes.push(format!("{id}: @{id} blocks run on the {host} engine: see {host} above")),
+                        (None, why) => {
+                            skipped(&e.skipped, &mut notes);
+                            notes.push(format!("{id}: {} {}", e.shown(), why.unwrap_or_default()));
+                            notes.push(format!("{id}: fix: {}", crate::engines::spec::startup_fix(&id, &vars)));
+                            no_start.insert(id.clone());
+                        }
+                    }
+                    not_ready.push(id);
+                    continue;
+                }
                 rows.push([id.clone(), "ok".into(), e.shown(), version, e.origin.label()]);
                 skipped(&e.skipped, &mut notes);
-                // Read as it starts, after the version probe: one that is wrong stops every block.
-                for (name, value) in crate::engines::spec::startup_variables(&id) {
+                for (name, value) in vars {
                     notes.push(format!("{id}: {name} is set ({value}), which {} reads as it starts", if id == "py" { "Python" } else { "Node.js" }));
                 }
                 ready.push(id);
@@ -279,12 +299,16 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let others: Vec<(std::path::PathBuf, String)> =
                     nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
                 skipped(&others, &mut notes);
-                // A program that can't load a library: the package that has it (7.8). Any other
-                // that doesn't run: repair it, or install one, as for a missing engine.
+                // A program that can't load a library: the package that has it (7.8). One that
+                // stopped at a NODE_OPTIONS its probe reads: that variable. Any other that doesn't
+                // run: repair it, or install one, as for a missing engine.
                 let fixes: Vec<String> = nf.skipped.iter().filter_map(|(p, why)| crate::engines::resolve::library_fix(p, why)).map(|fix| format!("{id}: fix: {fix}")).collect();
                 if fixes.is_empty() && matches!(nf.status, Status::Broken) && nf.command.is_none() {
                     let program = if id == "py" { "Python" } else { "Node.js" };
-                    notes.push(format!("{id}: fix: repair that {program}, or install one: {}", install_hint(&id)));
+                    notes.push(match crate::engines::resolve::probe_fix(&id, &nf.skipped, &crate::engines::spec::startup_variables(&id)) {
+                        Some(fix) => format!("{id}: fix: {fix}"),
+                        None => format!("{id}: fix: repair that {program}, or install one: {}", install_hint(&id)),
+                    });
                 }
                 notes.extend(fixes);
                 not_ready.push(id);

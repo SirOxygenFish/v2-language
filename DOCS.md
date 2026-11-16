@@ -154,6 +154,10 @@ ready: py
 not ready: js, ts (see the notes); scripts that don't use them still run
 ```
 
+With `PYTHONHOME`, `PYTHONPATH` or `NODE_OPTIONS` set, which Python or Node.js reads as it starts,
+doctor also starts the program (`python -c pass`, `node -e 0`): one that can't is `broken`, and
+its note names the variable to unset or fix.
+
 ### A project
 
 A folder with a `v2.toml` is a V2 project (see [chapter 14](#14-project-file-v2toml)). Projects
@@ -1164,6 +1168,7 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 | -------------------------------------- | ----------------------------------------------------------- |
 | name not exported                      | `'sprad' is not exported by 'stats' — did you mean 'spread'?`, or, with no close name, `… (did the block @export it?)` |
 | no block has that label                | `no block in this file is labeled 'stat' — did you mean 'stats'?`, or, with no close label, `…: a Python module is imported with py.stat, an npm package with js.stat` |
+| the selector starts with a V2 module's name (`import "./lib.v2" as lib`) | the hint says so: `lib is a V2 module (import "./lib.v2" as lib): use lib.total directly; …` |
 | the block has no `@export`             | `block 'stats' exports nothing: add @export { mean } inside it` |
 | block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
 | block not loaded yet when a block calls `x` | `block 'stats' has not run yet — 'x' can't be called before it loads` |
@@ -1227,7 +1232,11 @@ venv = ".venv"
 ```
 
 Python looks in the `.v2` file's folder, the project root, then its normal module path (your
-`PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). Node
+`PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). The
+project root, the venv and the `v2.toml` are the script's you run: a `.v2` file imported from
+another project uses them too, and only its own folder is added for its `.py` files. A module is
+named by its dotted name from one of these folders (`py.stages.clean` for `stages/clean.py`), not
+by a path; for a folder outside them, add it to `sys.path` in a `@py` block first. Node
 looks the way Node always does: in the `node_modules` folders from the `.v2` file's folder upwards
 (so your project's is found), then in your own `NODE_PATH` if you set one. (A Yarn Plug'n'Play
 project has no `node_modules`: `nodeLinker: node-modules` in its `.yarnrc.yml` makes one, as the
@@ -1887,7 +1896,9 @@ define_engine("rb", kind: "bridged", command: ["ruby", "adapters/v2_adapter.rb"]
 
 V2 looks for `v2.toml` in the script's folder and its parents (`v2 doctor` starts from the
 current folder); the folder where it is found is the **project root**. Without one, the script's
-folder is the project root. Only a regular file named `v2.toml` counts (or a link to one): a
+folder is the project root. One project serves the whole run: a `.v2` file imported from another
+folder, even one with a `v2.toml` of its own, uses the script's `v2.toml`, venv and project root.
+Only a regular file named `v2.toml` counts (or a link to one): a
 broken link, a folder or a pipe of that name is passed over, and the search goes on (`v2 doctor`'s
 `config file:` line shows which file was used). Every key is optional, except that a custom
 engine needs `kind` and `command` (a `run` command, custom or built-in, must contain `{file}`;
