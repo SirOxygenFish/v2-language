@@ -1,0 +1,15 @@
+// requires: js
+// A block's own require() or import() of a package Node doesn't find gets the hints an @import of
+// it gets, from the committed node_modules next to this file, in the block's words (INTERNALS
+// 13.5): a near name of an installed package, and an installed package without that subpath.
+let here = @js { __dirname }
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.hint == null ? null : e.hint.replace(here, "<here>").replace("\\", "/"))
+    }
+}
+show(func() => @js { require("v2-test-pkk") })
+show(func() => @js { import("v2-test-pkk") })
+show(func() => @js { require("v2-test-pkg/nothere") })

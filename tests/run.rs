@@ -4079,6 +4079,68 @@ fn a_conda_run_command_is_told_to_pass_input_and_output_through() {
     }
 }
 
+/// A `conda` in `home`/conda/bin that answers `--version` as the environment's program (Node.js
+/// when the words have `node`, else Python), then exits at once, as `conda run` does to a worker
+/// whose protocol it keeps or closes.
+fn fake_conda(home: &Path) -> PathBuf {
+    let bin = home.join("conda").join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let conda = bin.join(if cfg!(windows) { "conda.cmd" } else { "conda" });
+    if cfg!(windows) {
+        let script = "@echo off\r\nset v2_node=\r\nfor %%a in (%*) do if \"%%~a\"==\"node\" set v2_node=1\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" goto version\r\nexit /b 0\r\n:version\r\nif defined v2_node (echo v22.14.0) else (echo Python 3.12.1)\r\nexit /b 0\r\n";
+        std::fs::write(&conda, script).unwrap();
+    } else {
+        let script = "#!/bin/sh\nnode=\nfor a in \"$@\"; do [ \"$a\" = node ] && node=1; done\nfor a in \"$@\"; do\n  if [ \"$a\" = --version ]; then\n    if [ -n \"$node\" ]; then echo v22.14.0; else echo Python 3.12.1; fi\n    exit 0\n  fi\ndone\nexit 0\n";
+        std::fs::write(&conda, script).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&conda, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    conda
+}
+
+#[test]
+fn doctor_and_a_js_run_name_a_conda_run_that_cant_work() {
+    // Review of round 19, 8.4 and 19.2: doctor gives the run's advice from the configured
+    // command's words; js on Unix talks over two pipes of its own (V2_VEP_FDS), which conda run
+    // closes even with --no-capture-output, so naming the environment's node is the fix there.
+    let home = TempHome::new();
+    let conda = fake_conda(&home.0);
+    let toml = |py: &str, js: &str| format!("[engines.py]\ncommand = ['{0}', {py}]\n[engines.js]\ncommand = ['{0}', {js}]\n", conda.display());
+    let (captured, passed) = ("'run', '-n', 'sales', 'python'", "'run', '--no-capture-output', '-n', 'sales', 'python'");
+    let (node_captured, node_passed) = ("'run', '-n', 'web', 'node'", "'run', '--no-capture-output', '-n', 'web', 'node'");
+    let python = if cfg!(windows) { "envs\\sales\\python.exe" } else { "envs/sales/bin/python" };
+    let py_note = format!("\n  py: V2 talks to the program over its standard input and output, and conda run passes them through only with --no-capture-output: add it after run, or name the environment's python ({python} in conda's folder) in [engines.py] command\n");
+    let pipes = "\n  js: V2 talks to the program over two pipes it inherits (named in V2_VEP_FDS), and conda run closes them, even with --no-capture-output: name the environment's node (envs/web/bin/node in conda's folder) in [engines.js] command\n";
+    let node_io = "\n  js: V2 talks to the program over its standard input and output, and conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command\n";
+    for (py, js, py_told, js_note) in [(captured, node_passed, true, cfg!(unix).then_some(pipes)), (passed, node_captured, false, Some(if cfg!(unix) { pipes } else { node_io }))] {
+        std::fs::write(home.0.join("v2.toml"), toml(py, js)).unwrap();
+        let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
+        assert_eq!(code, Some(0), "{stderr}");
+        let rows = doctor_rows(&stdout);
+        assert_eq!((&*rows["py"][0], &*rows["js"][0]), ("ok", "ok"), "{stdout}");
+        assert_eq!(stdout.contains(&py_note), py_told, "{py}: {stdout}");
+        match js_note {
+            Some(note) => assert!(stdout.contains(note), "{js}: {stdout}"),
+            None => assert!(!stdout.contains("js: V2 talks"), "{js}: {stdout}"),
+        }
+        assert!(!stdout.contains("ts: V2 talks"), "{stdout}");
+    }
+    // The run's words, js's channel on each OS.
+    std::fs::write(home.0.join("v2.toml"), toml(captured, if cfg!(unix) { node_passed } else { node_captured })).unwrap();
+    std::fs::write(home.0.join("j.v2"), "@js { 1 }\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["j.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    let want = if cfg!(unix) {
+        "EngineCrashed: engine 'js' exited during startup (exit code 0); see its error output above, if any; it ended without a word to V2, which talks to the program over two pipes it inherits (named in V2_VEP_FDS): a command that runs it through another program must leave them open; conda run closes them, even with --no-capture-output: name the environment's node (envs/web/bin/node in conda's folder) in [engines.js] command"
+    } else {
+        "EngineCrashed: engine 'js' exited during startup (exit code 0); see its error output above, if any; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"
+    };
+    assert!(stderr.starts_with("j.v2:1:1: ") && stderr.contains(want), "{stderr}");
+}
+
 #[test]
 fn doctor_quotes_a_configured_command_with_a_space() {
     // 19.2: an item with a space is quoted when there is more than one, also when it isn't found.
