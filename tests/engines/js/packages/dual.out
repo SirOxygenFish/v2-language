@@ -1,0 +1,9 @@
+ImportError | 'Vec' is not exported by 'js."v2-test-dual"'
+  hint: V2 loaded <here>/node_modules/v2-test-dual/cjs/index.cjs, the package's "require" build, as require() does; its "import" build, <here>/node_modules/v2-test-dual/esm/index.js, is loaded with import(), which a @js block can do: async function load() { return await import("v2-test-dual") }, then @export { load } and call load()
+ImportError | 'only' is not exported by 'js."v2-test-dual/extra"'
+  hint: V2 loaded <here>/node_modules/v2-test-dual/cjs/extra.cjs, the package's "require" build, as require() does; its "import" build, <here>/node_modules/v2-test-dual/esm/extra.js, is loaded with import(), which a @js block can do: async function load() { return await import("v2-test-dual/extra") }, then @export { load } and call load()
+16 cjs
+ImportError | 'sqare' is not exported by 'js."v2-test-dual"' — did you mean 'square'?
+  hint: null
+ImportError | 'nope' is not exported by 'js."v2-test-pkg"'
+  hint: null

@@ -2723,6 +2723,43 @@ fn a_local_es_module_under_commonjs_shows_v2s_hint_without_nodes_warning() {
     assert!(!stderr.contains("Failed to load the ES module"), "{stderr}");
 }
 
+#[test]
+fn a_package_another_folder_has_its_own_copy_of_is_noted_once() {
+    // DOCS 7, INTERNALS 13.5: a bare name is loaded once per run, from the first importer's
+    // folder; a later importer whose folder resolves it to another file is told once.
+    let legacy = |v: &str| format!("exports.version = '{v}'\nexports.v = () => '{v}'\n");
+    let (old, new) = (legacy("0.9"), legacy("2.0"));
+    let files = [
+        ("node_modules/legacy/index.js", old.as_str()),
+        ("tools/deep/node_modules/legacy/index.js", new.as_str()),
+        ("scripts/lib2.v2", "@import js.legacy as legacy\nfunc lib_version() {\n    return legacy.version\n}\n"),
+        // Same folder as two.v2: no second note. Its own folder resolves to the first copy: none.
+        ("tools/deep/other.v2", "@import { v } from js.legacy\nfunc other() {\n    return v()\n}\n"),
+        ("scripts/sub/same.v2", "@import { v } from js.legacy\nfunc same() {\n    return v()\n}\n"),
+        (
+            "tools/deep/two.v2",
+            "import \"../../scripts/lib2.v2\" as lib\nimport \"./other.v2\" as other\nimport \"../../scripts/sub/same.v2\" as same\nprint(lib.lib_version())\n@import js.legacy as legacy\nprint(legacy.version)\nfunc again() {\n    @import { v } from js.legacy\n    return v()\n}\nprint(again(), again(), other.other(), same.same())\nprint(@js { require(\"legacy\").version })\n",
+        ),
+    ];
+    let (code, stdout, stderr, _home) = run_with_files(&files, &["tools/deep/two.v2"]);
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default().split([',', ' ']).any(|t| t == "js");
+    if stderr.contains("EngineNotFound") && !required {
+        return;
+    }
+    assert_eq!(code, Some(0), "{stderr}");
+    // @import gets the first copy everywhere; a block's require looks from its own folder.
+    assert_eq!(stdout, "0.9\n0.9\n0.9 0.9 0.9 0.9\n2.0\n", "{stderr}");
+    let notes: Vec<&str> = stderr.lines().filter(|l| l.starts_with("note: ")).collect();
+    assert_eq!(notes.len(), 1, "{stderr}");
+    let rest = notes[0].strip_prefix("note: js.legacy from ").expect(notes[0]);
+    let (dir, rest) = rest.split_once(" resolves to ").expect(notes[0]);
+    let (here, rest) = rest.split_once(", but this run already loaded ").expect(notes[0]);
+    let first = rest.strip_suffix(": a package is loaded once per run (DOCS 7)").expect(notes[0]);
+    assert!(Path::new(dir).ends_with("tools/deep"), "{dir}");
+    assert!(Path::new(here).ends_with("tools/deep/node_modules/legacy/index.js"), "{here}");
+    assert!(Path::new(first).ends_with("node_modules/legacy/index.js") && !first.contains("deep"), "{first}");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_virtual_memory_limit_gets_a_smaller_interpreter_stack() {
