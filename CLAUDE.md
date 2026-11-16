@@ -33,9 +33,9 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 16 found and fixed (ROADMAP log); the owner ended the rounds after round 16
-  (2026-11-15): no round 17 unless asked. The final report went to the owner on 2026-11-15 (CI
-  green at 8314d5d); next is the owner's OK for merge, tag and publish, or Phase 2. (Round 16's prompts:
+  Rounds 1 to 16 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds: round 17 next, as a Workflow (two
+  newcomers, then refuters that reproduce each finding and check e.hint and the docs first). (Round 16's prompts:
   scratchpad/newcomer/prompt-*-r16.md, made by scratchpad/setup_round16.py; its distro v2new24p, where
   paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
