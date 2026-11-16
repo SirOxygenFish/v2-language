@@ -53,6 +53,12 @@ impl HandleRef {
         Some(format!("a {t} isn't data: make plain data of it in a block, as in @{tag}(h) {{ {how} }}"))
     }
 
+    /// An integer too big for V2's 64-bit int: a Python `int` or a JavaScript `bigint` arrives as
+    /// a handle only then (9.1).
+    pub fn big_int(&self) -> bool {
+        matches!(&*self.type_name, "int" | "bigint")
+    }
+
     pub fn new(session: usize, tag: Rc<str>, id: u64, type_name: Rc<str>, releases: ReleaseQueue) -> HandleRef {
         HandleRef { session, tag, id, type_name, callable: false, releases }
     }

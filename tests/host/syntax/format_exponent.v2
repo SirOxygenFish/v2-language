@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: format_exponent.v2:6:22: SyntaxError: the only format in ${…} is :.Nf, with N up to 99
+// stderr: hint: format it in a block, as in @py(loss) { f"{loss:.3e}" }
+// A format other than a width or an alignment is done in a block, with the format as written
+// (INTERNALS 3.5).
+print(f"loss ${loss:.3e}")

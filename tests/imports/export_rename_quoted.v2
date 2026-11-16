@@ -1,0 +1,9 @@
+// exit: 1
+// stderr: export_rename_quoted.v2:8:20: SyntaxError: expected `,` or `}` in the @export list, found keyword `as`
+// stderr: hint: @export can't rename: export "$x" and rename it where it is imported, as in @import { "$x" as other } from …
+// A name that isn't a V2 name keeps its quotes in the hint, so the @import it shows works
+// (DOCS 6.1, 6.2; INTERNALS 4.4).
+@js dollar {
+    const $x = () => "dollar"
+    @export { "$x" as dx }
+}

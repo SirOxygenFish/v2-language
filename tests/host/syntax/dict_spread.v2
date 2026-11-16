@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: dict_spread.v2:7:10: SyntaxError: dict keys are names, strings or [expr]
+// stderr: hint: copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }
+// JavaScript's {...a, ...b} (and Python's {**a, **b}): V2 merges dicts by setting keys (INTERNALS 4.5).
+let a = {x: 1}
+let b = {y: 2}
+let c = {...a, ...b}

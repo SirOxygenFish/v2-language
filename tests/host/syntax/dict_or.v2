@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: dict_or.v2:7:11: SyntaxError: V2 has no bitwise operators
+// stderr: hint: to merge two dicts, copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }
+// Python's a | b of two dicts (INTERNALS 3.2).
+let a = {x: 1}
+let b = {y: 2}
+let c = a | b
