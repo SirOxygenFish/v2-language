@@ -34,6 +34,15 @@ irm https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.ps1
 It puts `v2.exe` in `%USERPROFILE%\.v2\bin` and adds that folder to your user PATH. `v2` works in
 that window right away; windows that were already open need to be closed and opened again.
 
+From **cmd.exe** or **Git Bash**, run the same line through PowerShell:
+
+```text
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/SirOxygenFish/v2-language/main/install.ps1 | iex"
+```
+
+Then open a new window: cmd, PowerShell and Git Bash all find `v2` there (Git Bash reads the
+Windows PATH when it starts), but the window you ran it in doesn't.
+
 ### macOS and Linux
 
 Open a terminal, paste this line and press Enter:
@@ -92,8 +101,8 @@ $env:V2_ARCHIVE = "v2-x86_64-pc-windows-msvc.zip"
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-Run as a file, `install.ps1` shows the line that makes `v2` work in that same window; new windows
-have it anyway.
+Run as a file, `install.ps1` shows the line that makes `v2` work in that same PowerShell window
+(from cmd.exe or Git Bash, open a new window instead); new windows have it anyway.
 
 ### Install by hand
 

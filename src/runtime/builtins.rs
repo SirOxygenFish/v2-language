@@ -16,7 +16,7 @@ use super::ops::{binop, handle_hint, order};
 use super::value::{float_str, DictMap, Str, Value};
 use crate::codec::json;
 use crate::engines::process::{self, stop_if_interrupted};
-use crate::engines::resolve::{first_program, is_drive_relative, Lookup};
+use crate::engines::resolve::{first_program, git_bash, is_drive_relative, Lookup};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::{os_message, shown_path, Span};
 
@@ -479,6 +479,10 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     } else if cfg!(windows) && matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr") {
         // Linux's and macOS's names for the standard streams.
         let _ = err.hint.set("/dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)".into());
+    } else if let Some(h) = msys_hint(path).filter(|_| e.kind() == std::io::ErrorKind::NotFound) {
+        let _ = err.hint.set(h.into());
+    } else if bad_windows_name(path) {
+        let _ = err.hint.set(r#"Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > " | ? *): choose another name"#.into());
     } else if tilde && !p.exists() {
         // A shell expands them, V2 doesn't (5.10); `$env:X\…` fails as a bad name, not as missing.
         let write = if path == "~" { format!("getenv(\"{home}\")") } else { format!("getenv(\"{home}\") + \"{}\"", &path[1..]) };
@@ -495,6 +499,57 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("the file size limit (ulimit -f) stops it: raise the limit, or write less".into());
     }
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// Windows: `/c/Users/me/x.txt`, Git Bash's spelling of `C:/Users/me/x.txt` (one letter after
+/// the first `/`, a drive that exists, and no such folder on this drive: `\c`): what to write
+/// instead (5.10).
+fn msys_hint(path: &str) -> Option<String> {
+    let b = path.as_bytes();
+    if !cfg!(windows) || b.first() != Some(&b'/') || !b.get(1).is_some_and(u8::is_ascii_alphabetic) || !matches!(b.get(2), None | Some(b'/')) {
+        return None;
+    }
+    let drive = format!("{}:", (b[1] as char).to_ascii_uppercase());
+    if !std::path::Path::new(&format!("{drive}/")).is_dir() || std::path::Path::new(&path[..2]).exists() {
+        return None;
+    }
+    let mut write = String::new();
+    super::value::quoted(&format!("{drive}{}", if path.len() > 2 { &path[2..] } else { "/" }), &mut write);
+    Some(format!("on Windows, /{}/… is Git Bash's spelling of {drive}/…: write {write}", (b[1] as char).to_ascii_lowercase()))
+}
+
+/// Windows: a part of `path` that Windows refuses as a file name: a device (`CON`, `PRN`, `AUX`,
+/// `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`; Windows 10 also with an extension, as `con.txt`), one
+/// that ends in a dot or a space, or one holding `< > " | ? *` (5.10). A `\\?\` or `\\.\` path
+/// is taken as written.
+fn bad_windows_name(path: &str) -> bool {
+    if !cfg!(windows) || path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
+        return false;
+    }
+    let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
+    after_drive.split(['/', '\\']).any(|part| {
+        let stem = part.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
+        let device_name = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        (device_name && windows_device(part)) || (!matches!(part, "." | "..") && (part.ends_with('.') || part.ends_with(' '))) || part.contains(['<', '>', '"', '|', '?', '*'])
+    })
+}
+
+/// Whether Windows takes `name` for a device, as its full path says (`\\.\CON`): Windows 11
+/// takes `con.txt` for a file.
+#[cfg(windows)]
+fn windows_device(name: &str) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut buf = [0u16; 1024];
+    // SAFETY: a NUL-terminated name and a buffer of the length given.
+    let n = unsafe { GetFullPathNameW(wide.as_ptr(), buf.len() as u32, buf.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+    n > 0 && n < buf.len() && String::from_utf16_lossy(&buf[..n]).starts_with(r"\\.\")
+}
+
+#[cfg(not(windows))]
+fn windows_device(_name: &str) -> bool {
+    false
 }
 
 /// A path whose first part a shell would have expanded (`~`, `~root`, `$HOME`, `%USERPROFILE%`):
@@ -588,11 +643,21 @@ fn shell_command_hint(name: &str, argv: &[Value]) -> Option<String> {
 /// A script that doesn't start by itself (`./build.ps1`, `./tool.py` on Windows; one without
 /// `#!` or the execute bit elsewhere): the program that runs it (5.10).
 fn script_hint(name: &str) -> Option<String> {
-    let (ext, call) = script_call(name)?;
-    Some(format!("a .{ext} file runs through its program: write {call}"))
+    match script_call(name) {
+        Some((ext, call)) => Some(format!("a .{ext} file runs through its program: write {call}")),
+        // Windows without Git for Windows: no bash to name (7.6).
+        None if cfg!(windows) && std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("sh")) => {
+            let mut path = String::new();
+            super::value::quoted(name, &mut path);
+            Some(format!("a .sh file needs a shell to run it, such as Git for Windows' bash (winget install -e --id Git.Git): then write exec([\"C:/Program Files/Git/bin/bash.exe\", {path}])"))
+        }
+        None => None,
+    }
 }
 
-/// The exec call that runs a script through its program, and the script's extension.
+/// The exec call that runs a script through its program, and the script's extension. On
+/// Windows a `.sh` runs through Git for Windows' bash, by its full path: a `bash` on PATH is
+/// often WSL's, which runs Linux (7.6).
 fn script_call(name: &str) -> Option<(String, String)> {
     let ext = std::path::Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
     let mut path = String::new();
@@ -602,7 +667,14 @@ fn script_call(name: &str) -> Option<(String, String)> {
         "ps1" => format!("exec([\"pwsh\", \"-File\", {path}])"),
         "py" => format!("exec([\"{}\", {path}]), or run its code in a @py block", if cfg!(windows) { "python" } else { "python3" }),
         "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" => format!("exec([\"node\", {path}])"),
-        "sh" => format!("exec([\"{}\", {path}])", if cfg!(windows) { "bash" } else { "sh" }),
+        "sh" if cfg!(windows) => {
+            let program_files = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from);
+            let bash = git_bash(&Lookup::from_env(), program_files.as_deref())?;
+            let mut shown = String::new();
+            super::value::quoted(&bash.to_string_lossy().replace('\\', "/"), &mut shown);
+            format!("exec([{shown}, {path}])")
+        }
+        "sh" => format!("exec([\"sh\", {path}])"),
         "v2" => format!("exec([\"v2\", {path}])"),
         _ => return None,
     };
@@ -1094,6 +1166,13 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "make_dir", "path")?;
     shell_shorthand("create", &path)?;
+    // Windows: `/c/Users/me/out`, Git Bash's spelling, would make `\c\Users\me\out` on this
+    // drive, where nothing else finds it: refused as the missing folder it is (5.10).
+    if let Some(h) = msys_hint(&path) {
+        let err = ErrorValue::new("IOError", format!("cannot create '{}': there is no folder '{}'", shown_path(&path), &path[..2]));
+        let _ = err.hint.set(h.into());
+        return Err(Flow::Error(Rc::new(err)));
+    }
     match std::fs::create_dir_all(&*path) {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("create", &path, &e),
@@ -1203,7 +1282,11 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             }
             // Not there: a batch file's path would go to cmd.exe, which says so as its output.
             if !p.exists() {
-                return io_error(format!("exec: cannot start '{name}': there is no such file"));
+                let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': there is no such file"));
+                if let Some(h) = msys_hint(name) {
+                    let _ = err.hint.set(h.into());
+                }
+                return Err(Flow::Error(Rc::new(err)));
             }
             // A path that names nothing usable: starting it gives the OS's reason.
             p.into_os_string()

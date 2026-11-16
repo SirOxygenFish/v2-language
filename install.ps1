@@ -199,6 +199,10 @@
                     # single quotes, each quote doubled, so a $ or a backtick in its name stays as is.
                     $quoted = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($dir)
                     Write-Host "Open a new window to use v2 (or, in this one, run: `$env:Path = '$quoted;' + `$env:Path)"
+                } elseif ((@([Environment]::GetCommandLineArgs()) -match '^(-|--|/)c(o(m(m(a(n(d)?)?)?)?)?)?$') -and -not (@([Environment]::GetCommandLineArgs()) -match '^(-|--|/)noe')) {
+                    # `powershell -c "irm … | iex"` from cmd or Git Bash: a PowerShell that ends
+                    # with the command, so the window, that shell's, keeps its PATH.
+                    Write-Host "Open a new window to use v2 (cmd, PowerShell and Git Bash all find it there)."
                 } else {
                     Write-Host "v2 works in this window now; other open windows need to be reopened first."
                 }

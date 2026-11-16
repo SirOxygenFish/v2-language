@@ -121,6 +121,14 @@ pub fn first_program(name: &str, l: &Lookup) -> Option<PathBuf> {
     search(name, l, 1).pop()
 }
 
+/// Windows: Git for Windows' bash, as 7.6 finds the bash engine's: `bin\bash.exe` in the folder
+/// above the one holding `git`, else `<program_files>\Git\bin\bash.exe`. Never a `bash` on PATH,
+/// which on many machines is WSL's launcher (`System32\bash.exe`), running Linux.
+pub fn git_bash(l: &Lookup, program_files: Option<&Path>) -> Option<PathBuf> {
+    let beside_git = first_program("git", l).and_then(|git| Some(git.parent()?.parent()?.join("bin").join("bash.exe")));
+    beside_git.into_iter().chain(program_files.map(|d| d.join("Git").join("bin").join("bash.exe"))).find(|p| p.is_file())
+}
+
 fn search(name: &str, l: &Lookup, wanted: usize) -> Vec<PathBuf> {
     let mut hits: Vec<PathBuf> = Vec::new();
     // `X_OK` only on the PATH walk: a named file that can't run fails its probe with the OS
@@ -618,7 +626,22 @@ impl Resolver<'_> {
                 } else if reason.starts_with("version probe timed out") {
                     format!("; raise [engines.{}] startup_timeout if it is only slow", spec.id)
                 } else if reason == PLACEHOLDER {
-                    format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id))
+                    // `V2_ENGINE_PY=python3`, a Linux habit, where Windows' Python is `python`:
+                    // the one the search finds, named the way this one was (7.6).
+                    match matches!(origin, Origin::Config(_)).then(|| self.search(spec).ok()).flatten() {
+                        Some(found) => {
+                            let name = Path::new(&found.argv[0]).file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                            let named = match from {
+                                ConfigSource::Env(var) => format!("{var}={name}"),
+                                ConfigSource::Project(_) => {
+                                    let words: Vec<String> = std::iter::once(name).chain(found.argv[1..].iter().map(|a| a.to_string_lossy().into_owned())).map(|w| format!("\"{w}\"")).collect();
+                                    format!("[engines.{}] command = [{}]", spec.id, words.join(", "))
+                                }
+                            };
+                            format!("; {} is installed as {}: name that one, as in {named}", spec.language, Path::new(&found.argv[0]).display())
+                        }
+                        None => format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id)),
+                    }
                 } else if let Some(fix) = library_fix(&path, reason) {
                     format!("\nfix: {fix}")
                 } else if origin == Origin::Venv {
@@ -1426,6 +1449,59 @@ mod tests {
         assert_eq!(e.argv[1..], [OsString::from("-X"), OsString::from("utf8")]);
         assert_eq!(e.origin.label(), "V2_ENGINE_PY");
         assert_eq!(p.argvs.borrow()[0][1..], [OsString::from("-X"), OsString::from("utf8"), OsString::from("--version")]);
+    }
+
+    #[test]
+    fn git_bash_is_found_beside_git_then_in_program_files() {
+        // 7.6 (round 18): bin\bash.exe above git's folder, else Program Files' Git; never a bash
+        // on PATH (WSL's launcher, System32\bash.exe).
+        let root = temp("gitbash");
+        let (cmd, wsl, pf) = (root.join("Git").join("cmd"), root.join("System32"), root.join("Program Files"));
+        for d in [&cmd, &wsl, &root.join("Git").join("bin"), &pf.join("Git").join("bin")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        exe(&cmd, "git");
+        exe(&wsl, "bash");
+        let beside = root.join("Git").join("bin").join("bash.exe");
+        let installed = pf.join("Git").join("bin").join("bash.exe");
+        std::fs::write(&beside, "").unwrap();
+        std::fs::write(&installed, "").unwrap();
+        assert_eq!(git_bash(&lookup(&[&wsl, &cmd], None), Some(&pf)), Some(beside));
+        assert_eq!(git_bash(&lookup(&[&wsl], None), Some(&pf)), Some(installed));
+        assert_eq!(git_bash(&lookup(&[&wsl], None), Some(&root.join("none"))), None);
+    }
+
+    #[test]
+    fn a_configured_store_placeholder_names_the_python_on_path() {
+        // 7.8 (round 18): V2_ENGINE_PY=python3 on Windows is the Store's placeholder while Python
+        // is installed as python: the message names that one, the way the command was set.
+        let root = temp("r18ph");
+        let (apps, real) = (root.join("WindowsApps"), root.join("Python311"));
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        exe(&apps, "python3");
+        let python = exe(&real, "python");
+        let apps2 = apps.clone();
+        let p = fake(move |prog| {
+            if prog.starts_with(&apps2) {
+                ProbeOutcome::Exited { code: Some(9009), output: "Python was not found; run without arguments to install from the Microsoft Store".into() }
+            } else {
+                says("Python 3.11.6")
+            }
+        });
+        let start = "engine 'py' command 'python3' (set by";
+        let l = lookup(&[&apps, &real], Some(&apps));
+        let env = with_command("py", &["python3"], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&env, &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
+        let installed = format!("is not usable: Microsoft Store placeholder; Python is installed as {}: name that one, as in", python.display());
+        assert_eq!(nf.message, format!("{start} V2_ENGINE_PY) {installed} V2_ENGINE_PY=python"));
+        let toml = with_command("py", &["python3"], project_source());
+        let nf = resolve_with(&toml, &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("{start} C:/proj/v2.toml) {installed} [engines.py] command = [\"python\"]"));
+        // No Python on PATH: what to install.
+        let nf = resolve_with(&env, &lookup(&[&apps], Some(&apps)), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        let install = format!("is not usable: Microsoft Store placeholder; install Python and name its full path, or leave command out: {}", install_hint("py"));
+        assert_eq!(nf.message, format!("{start} V2_ENGINE_PY) {install}"));
     }
 
     #[test]
