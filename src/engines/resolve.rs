@@ -564,6 +564,120 @@ impl NotFound {
     fn broken(message: String, command: String, from: &ConfigSource) -> NotFound {
         NotFound { status: Status::Broken, message, command: Some(command), from: Some(source_label(from)), skipped: Vec::new() }
     }
+
+    /// A `[python] venv` that can't be used: FROM says `venv`, as for one that works (19.2).
+    fn broken_venv(message: String, command: String) -> NotFound {
+        NotFound { status: Status::Broken, message, command: Some(command), from: Some(Origin::Venv.label()), skipped: Vec::new() }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Virtual environments (7.6)
+
+/// A `key = value` line of a venv's `pyvenv.cfg` (the key in any case, as `site` reads it).
+fn pyvenv_value(venv: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(venv.join("pyvenv.cfg")).ok()?;
+    text.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim().eq_ignore_ascii_case(key)).map(|(_, v)| v.trim().to_string())
+}
+
+/// The virtual environment `python` is in: the folder above its `bin` (`Scripts`) folder, when
+/// that holds a `pyvenv.cfg`.
+pub fn venv_of(python: &Path) -> Option<PathBuf> {
+    python.parent()?.parent().filter(|v| v.join("pyvenv.cfg").is_file()).map(Path::to_path_buf)
+}
+
+/// Whether uv made the venv (its `pyvenv.cfg` has a `uv` line): it has no pip unless seeded, and
+/// uv, not `-m venv`, makes it again.
+pub fn made_by_uv(venv: &Path) -> bool {
+    pyvenv_value(venv, "uv").is_some()
+}
+
+/// The uv project whose environment the venv is: it is the `.venv` of a folder that holds a
+/// `pyproject.toml` and a `uv.lock`, the one `uv add` and `uv sync` use.
+pub fn uv_project(venv: &Path) -> Option<PathBuf> {
+    let project = venv.parent()?;
+    let project_venv = venv.file_name().is_some_and(|n| n == ".venv") && project.join("pyproject.toml").is_file() && project.join("uv.lock").is_file();
+    project_venv.then(|| project.to_path_buf())
+}
+
+/// Whether the venv has pip: a `pip` folder in its site-packages (`lib/python3.X/site-packages`,
+/// Windows `Lib\site-packages`). True when V2 can't tell (no site-packages found).
+pub fn venv_has_pip(venv: &Path) -> bool {
+    let unix = std::fs::read_dir(venv.join("lib")).into_iter().flatten().flatten().map(|e| e.path().join("site-packages"));
+    let sites: Vec<PathBuf> = std::iter::once(venv.join("Lib").join("site-packages")).chain(unix).filter(|s| s.is_dir()).collect();
+    sites.is_empty() || sites.iter().any(|s| s.join("pip").is_dir())
+}
+
+/// How to make a broken venv again: uv's way for one uv made (`uv sync` in its project, else `uv
+/// venv --clear`), else `python3 -m venv --clear` (`py` on Windows), the path pasteable.
+pub fn remake_venv(venv: &Path) -> String {
+    let dir = crate::cli::shell_word(&venv.display().to_string());
+    if made_by_uv(venv) {
+        return match uv_project(venv) {
+            Some(project) => format!("make the venv again and install its packages: run uv sync in {}", crate::cli::shell_word(&project.display().to_string())),
+            None => format!("make the venv again, uv venv --clear {dir}, and install its packages again"),
+        };
+    }
+    let python = if cfg!(windows) { "py" } else { "python3" };
+    format!("make the venv again, {python} -m venv --clear {dir}, and install its packages again")
+}
+
+/// Where a link that leads nowhere was meant to lead: its last link's target, a relative one read
+/// from that link's folder (a uv venv's `python3` links to `python`, which links to uv's Python).
+fn dangling_target(link: &Path) -> Option<PathBuf> {
+    let mut at = link.to_path_buf();
+    let mut target = None;
+    for _ in 0..40 {
+        let Ok(next) = std::fs::read_link(&at) else { break };
+        let next = at.parent().map_or_else(|| next.clone(), |dir| dir.join(&next));
+        target = Some(next.clone());
+        at = next;
+    }
+    target.filter(|_| !link.exists())
+}
+
+/// The major.minor a venv was made with: its `pyvenv.cfg`'s `version_info` (uv, virtualenv:
+/// `3.12.3.final.0`), else `version` (`python -m venv`).
+fn made_with(venv: &Path) -> Option<(u32, u32)> {
+    let major_minor = |v: String| -> Option<(u32, u32)> {
+        let mut parts = v.split('.');
+        let major = parts.next()?.trim().parse().ok()?;
+        let minor = parts.next()?;
+        let digits = &minor[..minor.find(|c: char| !c.is_ascii_digit()).unwrap_or(minor.len())];
+        Some((major, digits.parse().ok()?))
+    };
+    ["version_info", "version"].iter().find_map(|k| pyvenv_value(venv, k).and_then(major_minor))
+}
+
+/// A venv whose python now runs another Python than the one it was made with: it links to an
+/// unversioned `python3` that was repointed (`uv python install --default --force`, a release
+/// upgrade, Homebrew), so the packages in its `lib/python3.13` are gone for it. `who` begins the
+/// message.
+fn venv_mismatch(venv: &Path, probed: Version, who: &str) -> Option<String> {
+    let (major, minor) = made_with(venv)?;
+    ((major, minor) != (probed.0, probed.1)).then(|| {
+        format!("{who} was made with Python {major}.{minor} (its pyvenv.cfg says so), but its python now runs {} (was Python upgraded?): {}", probed.short(), remake_venv(venv))
+    })
+}
+
+/// The activated venv (`VIRTUAL_ENV`), when its python links to nothing or is missing, so that
+/// the search can't find it there: what is wrong and what to do, for doctor's note (19.2) and an
+/// `ImportError`'s hint (13.5). `None` when its python is there.
+pub fn activated_venv_problem(venv: &Path) -> Option<String> {
+    let names: &[&str] = if cfg!(windows) { &["Scripts\\python.exe"] } else { &["bin/python3", "bin/python"] };
+    let pythons: Vec<PathBuf> = names.iter().map(|n| venv.join(n)).collect();
+    if pythons.iter().any(|p| is_regular_file(p)) {
+        return None;
+    }
+    let who = format!("the activated venv {} (VIRTUAL_ENV)", crate::syntax::span::shown_path(&venv.display().to_string()));
+    Some(match pythons.iter().find_map(|p| dangling_target(p)) {
+        Some(target) => format!("{who} has a python that links to {}, which isn't there (was Python upgraded?), so V2 can't use it: {}", target.display(), remake_venv(venv)),
+        None if !venv.is_dir() => {
+            let python = if cfg!(windows) { "py" } else { "python3" };
+            format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {python} -m venv {}", crate::cli::shell_word(&venv.display().to_string()))
+        }
+        None => format!("{who} has no {}, so V2 can't use it: {}", if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }, remake_venv(venv)),
+    })
 }
 
 /// What resolution needs besides the spec: config, lookup, prober and cache.
@@ -658,9 +772,7 @@ impl Resolver<'_> {
                 } else if origin == Origin::Venv {
                     // A venv's python that doesn't run: the Python it was made with is gone (an
                     // upgrade that removed it: Windows says "No Python at …").
-                    let venv = path.parent().and_then(Path::parent).unwrap_or(&path);
-                    let python = if cfg!(windows) { "py" } else { "python3" };
-                    format!("; make the venv again, {python} -m venv --clear {}, and install its packages again", crate::cli::shell_word(&venv.display().to_string()))
+                    format!("; {}", remake_venv(path.parent().and_then(Path::parent).unwrap_or(&path)))
                 } else {
                     String::new()
                 };
@@ -680,6 +792,9 @@ impl Resolver<'_> {
                 let mut nf = NotFound::broken(message, join(&argv), from);
                 if let Judged::TooOld(v, _) = other {
                     nf.status = Status::Old(v);
+                }
+                if origin == Origin::Venv {
+                    nf.from = Some(origin.label());
                 }
                 Err(nf)
             }
@@ -737,7 +852,10 @@ impl Resolver<'_> {
         } else {
             vec![venv.join("bin").join("python"), venv.join("bin").join("python3")]
         };
-        let Some(exe) = candidates.iter().find(|p| is_regular_file(p)) else {
+        // Only a virtual environment (a pyvenv.cfg) is used: a conda environment or a Python
+        // installation (`/usr`, a pyenv version) has a bin/python too, and gets the messages below
+        // on every system.
+        let Some(exe) = candidates.iter().find(|p| is_regular_file(p)).filter(|_| venv.join("pyvenv.cfg").is_file()) else {
             let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
             let shown = crate::syntax::span::shown_path(&venv.display().to_string());
             // What to write instead, as v2.toml's folder sees it (18.1).
@@ -769,7 +887,7 @@ impl Resolver<'_> {
             // `/usr`): never a place to run `-m venv` in, which would turn it into a venv of
             // another Python. Nor is a folder that holds anything else.
             let installed = |dir: &Path| -> Option<PathBuf> {
-                let names: &[&str] = if cfg!(windows) { &["python.exe"] } else { &["bin/python3", "bin/python"] };
+                let names: &[&str] = if cfg!(windows) { &["python.exe", "Scripts\\python.exe"] } else { &["bin/python3", "bin/python"] };
                 names.iter().map(|n| dir.join(n)).find(|p| is_regular_file(p)).filter(|_| !is_venv(dir))
             };
             let free = |dir: &Path| std::fs::read_dir(dir).map_or(true, |mut d| d.next().is_none());
@@ -781,13 +899,9 @@ impl Resolver<'_> {
                 format!("[python] venv '{shown}' is {what}, not a virtual environment: name its python instead, {}, or make a virtual environment with it: {} -m venv .venv", command(py), pasted(py))
             };
             // Its python links to one that is gone, as after the system's Python was upgraded.
-            let dangling = candidates.iter().find_map(|c| std::fs::read_link(c).ok().filter(|_| !c.exists()));
+            let dangling = candidates.iter().find_map(|c| dangling_target(c));
             let message = if let Some(target) = dangling {
-                format!(
-                    "[python] venv '{shown}' has a python that links to {}, which isn't there (was Python upgraded?): make the venv again, {python} -m venv --clear {}, and install its packages again",
-                    target.display(),
-                    pasted(venv)
-                )
+                format!("[python] venv '{shown}' has a python that links to {}, which isn't there (was Python upgraded?): {}", target.display(), remake_venv(venv))
             } else if is_regular_file(venv) {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
                 match venv.parent().and_then(Path::parent).filter(|f| is_venv(f)) {
@@ -802,7 +916,8 @@ impl Resolver<'_> {
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}", write(folder))
             } else if let Some(py) = installed(venv) {
                 if venv.join("conda-meta").is_dir() {
-                    let name = venv.file_name().map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
+                    // The base environment (Miniforge's own folder, with condabin) is `base`.
+                    let name = if venv.join("condabin").is_dir() { "base".to_string() } else { venv.file_name().map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned()) };
                     format!("[python] venv '{shown}' is a conda environment, not a virtual environment: run v2 where it is activated (conda activate {name}) and leave venv out, or name its python instead: {}", command(&py))
                 } else {
                     not_a_venv("a Python installation", &py)
@@ -835,10 +950,16 @@ impl Resolver<'_> {
             };
             // COMMAND: the venv as given when it names a file, not a path inside it (19.2).
             let shown_command = if is_regular_file(venv) { shown.clone() } else { candidates[0].display().to_string() };
-            return Err(NotFound::broken(message, shown_command, from));
+            return Err(NotFound::broken_venv(message, shown_command));
         };
         let what = format!("[python] venv '{}'", venv.display());
-        self.usable(spec, vec![exe.clone().into_os_string()], Origin::Venv, &what, from)
+        let e = self.usable(spec, vec![exe.clone().into_os_string()], Origin::Venv, &what, from)?;
+        // Its python runs, but another Python than the venv's packages are for.
+        let who = format!("[python] venv '{}'", crate::syntax::span::shown_path(&venv.display().to_string()));
+        match e.version.and_then(|v| venv_mismatch(venv, v, &who)) {
+            Some(message) => Err(NotFound::broken_venv(message, exe.display().to_string())),
+            None => Ok(e),
+        }
     }
 
     fn search(&mut self, spec: &Rc<EngineSpec>) -> Result<ResolvedEngine, NotFound> {
@@ -879,6 +1000,14 @@ impl Resolver<'_> {
                 argv.extend(candidate[1..].iter().map(|a| OsString::from(&**a)));
                 match self.probe(spec, &argv, &hit, Some(PROBE_LIMIT)) {
                     Judged::Usable(v) => {
+                        // An activated venv's python that now runs another Python than the venv
+                        // was made with: broken, as a [python] venv would be, not passed over (a
+                        // node in a venv's bin, from a pip package, has no say).
+                        let who = |venv: &Path| format!("the venv {} on PATH", crate::syntax::span::shown_path(&venv.display().to_string()));
+                        let venv = venv_of(&hit).filter(|_| &*spec.id == "py");
+                        if let Some(message) = venv.and_then(|venv| venv_mismatch(&venv, v, &who(&venv))) {
+                            return Err(NotFound { status: Status::Broken, message, command: Some(join(&argv)), from: Some(Origin::Path.label()), skipped });
+                        }
                         // A program that didn't answer in time cost this run its wait, and will
                         // cost the next: said once, as doctor isn't what the user ran (7.6).
                         if self.cache.mode == CacheMode::ReadWrite {
@@ -1152,6 +1281,123 @@ mod tests {
             d.join(".venv").display()
         );
         assert_eq!(nf.message, want);
+        // Round 19 (L9): FROM says venv, as for a venv that works.
+        assert_eq!((nf.status, nf.from.as_deref()), (Status::Broken, Some("venv")));
+    }
+
+    /// A venv `dir/name` with this pyvenv.cfg and a python where this system's venvs have one.
+    fn fake_venv(dir: &Path, name: &str, cfg: &str) -> (PathBuf, PathBuf) {
+        let venv = dir.join(name);
+        let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), cfg).unwrap();
+        (venv, exe(&bin, if cfg!(windows) { "python" } else { "python3" }))
+    }
+
+    fn venv_config(venv: &Path) -> Config {
+        Config { python_venv: Some(Sourced { value: venv.to_path_buf(), from: project_source() }), ..Config::default() }
+    }
+
+    #[test]
+    fn a_venv_whose_python_now_runs_another_version_is_broken() {
+        // Round 19 (L0): the venv's pyvenv.cfg says 3.13, but its python links to an unversioned
+        // python3 that now runs 3.11, so its packages are gone for it: broken, not ok with a pip
+        // line that can't work. FROM says venv (L9).
+        let d = temp("mismatch");
+        let (venv, python) = fake_venv(&d, ".venv", "home = /usr/bin\nversion = 3.13.18\n");
+        let p = fake(|_| says("Python 3.11.18"));
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        let py = if cfg!(windows) { "py" } else { "python3" };
+        let made = |who: String| {
+            format!(
+                "{who} was made with Python 3.13 (its pyvenv.cfg says so), but its python now runs 3.11 (was Python upgraded?): make the venv again, {py} -m venv --clear {}, and install its packages again",
+                venv.display()
+            )
+        };
+        assert_eq!(nf.message, made(format!("[python] venv '{}'", venv.display())));
+        assert_eq!((nf.status, nf.command.clone(), nf.from.as_deref()), (Status::Broken, Some(python.display().to_string()), Some("venv")));
+        // Another patch release is the same Python.
+        let e = resolve_with(&venv_config(&venv), &lookup(&[], None), &fake(|_| says("Python 3.13.2")), &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!(e.origin, Origin::Venv);
+        // version_info (uv's, virtualenv's 3.11.18.final.0) is read before version; none: used.
+        for cfg in ["version_info = 3.11.18.final.0\nversion = 3.13.18\n", "home = /usr/bin\n"] {
+            std::fs::write(venv.join("pyvenv.cfg"), cfg).unwrap();
+            assert!(resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").is_ok(), "{cfg}");
+        }
+        // The same venv found on PATH (an activated one): named by its folder, FROM PATH.
+        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\nversion = 3.13.18\n").unwrap();
+        let bin = python.parent().unwrap();
+        let nf = resolve_with(&Config::default(), &lookup(&[bin], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, made(format!("the venv {} on PATH", venv.display())));
+        assert_eq!((nf.status, nf.command, nf.from.as_deref()), (Status::Broken, Some(python.display().to_string()), Some("PATH")));
+        // A node in a venv's bin (a pip package's) has no say.
+        exe(bin, "node");
+        assert!(resolve_with(&Config::default(), &lookup(&[bin], None), &fake(|_| says("v24.11.1")), &mut ProbeCache::off(), "js").is_ok());
+    }
+
+    #[test]
+    fn a_venv_uv_made_is_made_again_with_uv() {
+        // Round 19 (L1): uv's venvs (a `uv` line in pyvenv.cfg) are made again with uv: -m venv
+        // would make one without the lockfile's packages.
+        let d = temp("uvvenv");
+        let (venv, _) = fake_venv(&d, ".venv", "uv = 0.13.8\nversion_info = 3.13.18\n");
+        let p = fake(|_| says("Python 3.11.18"));
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("(was Python upgraded?): make the venv again, uv venv --clear {}, and install its packages again", venv.display())), "{}", nf.message);
+        // A uv project's .venv (a pyproject.toml and uv.lock beside it): uv sync there.
+        std::fs::write(d.join("pyproject.toml"), "").unwrap();
+        std::fs::write(d.join("uv.lock"), "").unwrap();
+        let sync = format!("make the venv again and install its packages: run uv sync in {}", d.display());
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("(was Python upgraded?): {sync}")), "{}", nf.message);
+        // A python that doesn't run, the same way.
+        let gone = fake(|_| ProbeOutcome::Exited { code: Some(103), output: "No Python at 'C:\\uv\\python.exe'".into() });
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("; {sync}")), "{}", nf.message);
+        assert_eq!(nf.from.as_deref(), Some("venv"));
+        // Another folder name than .venv: uv sync wouldn't make that one.
+        let (other, _) = fake_venv(&d, "env2", "uv = 0.13.8\n");
+        assert_eq!(remake_venv(&other), format!("make the venv again, uv venv --clear {}, and install its packages again", other.display()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_uv_venv_whose_python_is_gone_says_uv_venv() {
+        // Round 19 (L1, L4): `uv python uninstall` leaves python linking to nothing, and python3
+        // linking to python: the message names where the chain was meant to end.
+        let d = temp("uvgone");
+        let venv = d.join(".venv");
+        let bin = venv.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "uv = 0.13.8\nversion_info = 3.13.18\n").unwrap();
+        let gone = "/nonexistent/uv/cpython-3.13.99/bin/python3.13";
+        std::os::unix::fs::symlink(gone, bin.join("python")).unwrap();
+        std::os::unix::fs::symlink("python", bin.join("python3")).unwrap();
+        let again = format!("make the venv again, uv venv --clear {}, and install its packages again", venv.display());
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &fake(|_| says("Python 3.13.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("[python] venv '{}' has a python that links to {gone}, which isn't there (was Python upgraded?): {again}", venv.display()));
+        // Activated (VIRTUAL_ENV), the search passes it over: doctor and the hint say so.
+        assert_eq!(
+            activated_venv_problem(&venv),
+            Some(format!("the activated venv {} (VIRTUAL_ENV) has a python that links to {gone}, which isn't there (was Python upgraded?), so V2 can't use it: {again}", venv.display()))
+        );
+    }
+
+    #[test]
+    fn an_activated_venv_without_its_python_is_named() {
+        // Round 19 (L4): VIRTUAL_ENV names a venv whose python is missing (or the venv itself).
+        let d = temp("activated");
+        let (venv, python) = fake_venv(&d, ".venv", "home = x\n");
+        assert_eq!(activated_venv_problem(&venv), None, "its python is there");
+        std::fs::remove_file(&python).unwrap();
+        let (py, want) = if cfg!(windows) { ("py", r"Scripts\python.exe") } else { ("python3", "bin/python") };
+        let who = format!("the activated venv {} (VIRTUAL_ENV)", venv.display());
+        assert_eq!(
+            activated_venv_problem(&venv),
+            Some(format!("{who} has no {want}, so V2 can't use it: make the venv again, {py} -m venv --clear {}, and install its packages again", venv.display()))
+        );
+        std::fs::remove_dir_all(&venv).unwrap();
+        assert_eq!(activated_venv_problem(&venv), Some(format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {py} -m venv {}", venv.display())));
     }
 
     #[test]
@@ -1729,6 +1975,8 @@ mod tests {
         let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
         let python = if cfg!(windows) { "py" } else { "python3" };
         assert!(nf.message.starts_with(&format!("[python] venv '{}' has no {want} (create it: {python} -m venv ", venv.display())), "{}", nf.message);
+        // Round 19 (L9): FROM says venv for a missing one too.
+        assert_eq!((nf.command.clone(), nf.from.as_deref()), (Some(venv.join(if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }).display().to_string()), Some("venv")));
         // A folder with a space is quoted, so the command can be pasted (7.6).
         let spaced = d.join("my env");
         let cfg = Config { python_venv: Some(Sourced { value: spaced.clone(), from: project_source() }), ..Config::default() };
@@ -1737,10 +1985,10 @@ mod tests {
         let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
         std::fs::create_dir_all(&bin).unwrap();
         let python = exe(&bin, "python");
+        std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
         let e = resolve_with(&missing, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
         assert_eq!((e.argv, e.origin), (vec![python.clone().into_os_string()], Origin::Venv));
         // The interpreter instead of its folder, and a venv under another name (7.6).
-        std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
         let toml = d.join("v2.toml");
         let at = |p: &Path| Config { python_venv: Some(Sourced { value: p.to_path_buf(), from: ConfigSource::Project(toml.clone()) }), ..Config::default() };
         let nf = resolve_with(&at(&python), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
@@ -1781,28 +2029,42 @@ mod tests {
         let bin = if cfg!(windows) { root.clone() } else { root.join("bin") };
         std::fs::create_dir_all(&bin).unwrap();
         let py = exe(&bin, if cfg!(windows) { "python" } else { "python3" });
-        // Windows: the folder itself (elsewhere its bin/python3 is simply used); everywhere: its
-        // bin folder, Scripts on Windows.
-        let mut named = vec![(root.join(if cfg!(windows) { "Scripts" } else { "bin" }), "a folder of a Python installation")];
-        if cfg!(windows) {
-            named.push((root.clone(), "a Python installation"));
-        }
-        for (v, what) in named {
+        // The folder itself (round 19, L13: on Linux and macOS too, where its bin/python3 was
+        // used), a folder with a venv's python but no pyvenv.cfg, and its bin folder (Scripts).
+        let bare = d.join("nocfg");
+        let bare_py = {
+            let bin = bare.join(if cfg!(windows) { "Scripts" } else { "bin" });
+            std::fs::create_dir_all(&bin).unwrap();
+            exe(&bin, "python")
+        };
+        let named = [
+            (root.join(if cfg!(windows) { "Scripts" } else { "bin" }), "a folder of a Python installation", &py),
+            (root.clone(), "a Python installation", &py),
+            (bare.clone(), "a Python installation", &bare_py),
+        ];
+        for (v, what, py) in named {
             let nf = resolve_with(&at(&v), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
             let head = format!("[python] venv '{}' is {what}, not a virtual environment: name its python instead, [engines.py] command = ", v.display());
             assert!(nf.message.starts_with(&head) && nf.message.ends_with(" -m venv .venv"), "{}", nf.message);
             assert!(nf.message.contains(&py.display().to_string()) && !nf.message.contains(&format!("-m venv {created}")), "{}", nf.message);
+            assert_eq!(nf.from.as_deref(), Some("venv"));
         }
-        #[cfg(windows)]
-        {
-            let env = d.join("miniconda3").join("envs").join("sales");
+        // A conda environment (conda-meta), its python at its root on Windows, in bin elsewhere;
+        // the base environment (with condabin) is activated as base.
+        let quoted = |p: &Path| if cfg!(windows) { format!("['{}']", p.display()) } else { format!("[\"{}\"]", p.display()) };
+        for (env, name) in [(d.join("miniconda3").join("envs").join("sales"), "sales"), (d.join("miniforge3"), "base")] {
             std::fs::create_dir_all(env.join("conda-meta")).unwrap();
-            let conda_py = exe(&env, "python");
+            if name == "base" {
+                std::fs::create_dir_all(env.join("condabin")).unwrap();
+            }
+            let conda_bin = if cfg!(windows) { env.clone() } else { env.join("bin") };
+            std::fs::create_dir_all(&conda_bin).unwrap();
+            let conda_py = exe(&conda_bin, if cfg!(windows) { "python" } else { "python3" });
             let nf = resolve_with(&at(&env), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
             let want = format!(
-                "[python] venv '{}' is a conda environment, not a virtual environment: run v2 where it is activated (conda activate sales) and leave venv out, or name its python instead: [engines.py] command = ['{}']",
+                "[python] venv '{}' is a conda environment, not a virtual environment: run v2 where it is activated (conda activate {name}) and leave venv out, or name its python instead: [engines.py] command = {}",
                 env.display(),
-                conda_py.display()
+                quoted(&conda_py)
             );
             assert_eq!(nf.message, want);
         }
@@ -2132,6 +2394,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let python = exe(&bin, "python");
         exe(&bin, "python3");
+        std::fs::write(d.join(".venv").join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
         let cfg = Config { python_venv: Some(Sourced { value: d.join(".venv"), from: project_source() }), ..Config::default() };
         let p = fake(|_| says("Python 3.12.1"));
         let e = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
