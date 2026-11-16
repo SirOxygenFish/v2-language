@@ -1,0 +1,16 @@
+// requires: py
+// A dict of named arguments: V2 has no ** in calls, so the call goes in a block, as in
+// @py(f, opts) { f(**opts) } (README "Coming from Python or JavaScript", DOCS 3.8). It works for
+// a Python function and for a V2 one.
+@import { dumps } from py.json
+let f = dumps
+let opts = {indent: 2, sort_keys: true}
+print(@py(f, opts) { f({"b": 1, "a": 2}, **opts) })
+
+func greet(name, greeting = "Hello", end = "!") {
+    return f"${greeting}, ${name}${end}"
+}
+let g = greet
+let named = {greeting: "Welcome", end: "."}
+print(@py(g, named) { g("Ada", **named) })
+print(greet("Ada", greeting: "Hi"))

@@ -1,0 +1,10 @@
+// Merging two dicts: copy one and set the other's keys (README "Coming from Python or
+// JavaScript", DOCS 3.6). The later dict wins, the first keeps its own order, and the original
+// is unchanged.
+let a = {x: 1, y: 2}
+let b = {y: 20, z: 30}
+let c = a.copy()
+for k, v in b { c[k] = v }
+print(c)
+print(a)
+print(b)
