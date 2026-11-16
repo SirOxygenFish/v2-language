@@ -155,8 +155,12 @@ not ready: js, ts (see the notes); scripts that don't use them still run
 ```
 
 With `PYTHONHOME`, `PYTHONPATH` or `NODE_OPTIONS` set, which Python or Node.js reads as it starts,
-doctor also starts the program (`python -c pass`, `node -e 0`): one that can't is `broken`, and
-its note names the variable to unset or fix.
+or under a memory limit (`ulimit -v`), doctor also starts the program (Python imports the
+standard modules V2's worker uses; `node -e 0`): one that can't is `broken`, and its note names
+the variable to unset or fix, or the limit to raise. A `PATH` entry that starts with `~` (from a
+quoted `export PATH="~/.nvm/…/bin:$PATH"`) is one only bash expands: V2 skips it, as other
+programs do, and when it holds the program, doctor's notes (and the error, when nothing else is
+found) say to write `$HOME/…` instead.
 
 ### A project
 
@@ -1012,8 +1016,9 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   and in a `.ts` file alike; or use `@js`. Node 24 refuses `module M { … }` for its keyword: write
   `namespace M`, which takes types only (one with values is code, as above).
 - Node doesn't read `tsconfig.json`: to it a `"paths"` alias (`@/lib`, `~/utils`) is a package
-  that isn't installed, and the error's hint says so. Import by a relative path, or name the
-  alias in `package.json` `"imports"` (`"#lib/*": "./lib/*"`).
+  that isn't installed, and the error's hint says so, for an `@import`, a `.ts` file's import and
+  a block's `require()` or `import()` alike. Import by a relative path, or name the alias in
+  `package.json` `"imports"` (`"#lib/*": "./lib/*"`).
 - `@js` and `@ts` blocks can import from each other directly.
 
 ### C — `@c`, C++ — `@cpp`, Rust — `@rust`
@@ -1264,7 +1269,9 @@ and V2 says so once on stderr, `note: js.legacy from … resolves to …, but th
 
 A module that doesn't exist is an `ImportError` carrying the foreign message
 (`No module named 'pandas'`), raised at the `@import`, or when the language starts or at the first
-call if the `@import` [waited](#when-a-language-starts).
+call if the `@import` [waited](#when-a-language-starts). Its hint says what to check or install. A
+`require()` or `import()` in a `@js` or `@ts` block of a package Node can't find is a
+`ForeignError` from the block, with the same hint.
 
 ---
 
