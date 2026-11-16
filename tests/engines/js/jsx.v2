@@ -1,0 +1,34 @@
+// requires: js ts
+// Node has no JSX: an @import of a .jsx or .tsx file is refused before anything loads, and one a
+// block or an imported file loads gets a hint (DOCS 7, INTERNALS 13.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message.split(" for ")[0])
+        print("  hint:", e.hint)
+    }
+}
+show(func() {
+    @import { typed } from ts."./fixtures/typed.tsx"
+    return typed(2)
+})
+show(func() {
+    @import js."./fixtures/comp.jsx" as comp
+    return comp
+})
+show(func() {
+    return @js { require("./fixtures/comp.jsx") }
+})
+show(func() {
+    @import js."./fixtures/requires_jsx.js" as r
+    return r
+})
+show(func() {
+    @import { four } from ts."./fixtures/uses_tsx.ts"
+    return four
+})
+// Another file's syntax error gets no such hint.
+show(func() {
+    return @js { require("./fixtures/syntax_bad.cjs") }
+})

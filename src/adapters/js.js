@@ -1231,6 +1231,7 @@ function blockRequire(file) {
         const site = frames(new Error()).find((f) => f.file === file);
         if (site) errorCallers.set(e, site);
       }
+      loadHint(e, id);
       throw e;
     }
   };
@@ -1329,8 +1330,57 @@ function stripTypes(src, m) {
     else if (header) [line, col] = [Number(header[1]), codePointAtWidth(bodyLine(Number(header[1])), header[2].length)];
     if (line !== null) err.v2Frame = { file: m.file, line: m.line + line - 1, col, func: null };
     err.stack = stack || 'SyntaxError: ' + err.message;
+    const hint = stripHint(e && e.code, message);
+    if (hint) errorHints.set(err, hint);
     throw err;
   }
+}
+
+// TypeScript that is code, which type stripping refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX; on
+// early Node 22 releases ERR_INVALID_TYPESCRIPT_SYNTAX, which their other syntax errors have too):
+// what to write instead, by the feature Node's message names (DOCS 5, INTERNALS 12.5).
+const STRIP_CODES = new Set(['ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX', 'ERR_INVALID_TYPESCRIPT_SYNTAX']);
+const STRIP_HINTS = [
+  [/\benum\b/, 'an enum is code: use a const object, as in const Color = { Red: 0, Green: 1 } as const'],
+  [/parameter property/, 'a parameter property is code: declare the field and assign it in the constructor, as in who: string; constructor(who: string) { this.who = who }'],
+  [/import equals/, 'import x = require(…) is code: write import x from "…", or const x = require("…")'],
+  [/export assignment/, 'export = is code: write export default x, or module.exports = x'],
+  [/namespace|`module` keyword/, 'a namespace with values is code: use a module of its own (a file) or an object, as in const NS = { x: 1 }'],
+  [/angle-bracket/, 'a <T>x cast is code: write x as T'],
+];
+
+function stripHint(code, message) {
+  // The line that says so: Node 22's message goes on with the source lines around it.
+  const what = STRIP_CODES.has(code) ? String(message).split('\n').find((l) => /not supported/.test(l)) : undefined;
+  const hit = what === undefined ? undefined : STRIP_HINTS.find(([re]) => re.test(what));
+  return hit ? `Node runs TypeScript by removing its types, and ${hit[1]}` : null;
+}
+
+// Node has no JSX: a .jsx or .tsx file is code it can't run (13.5). The file, from Node's
+// unknown-extension error, a syntax error's position, or what a block required.
+const JSX_FILE = /\.[jt]sx$/i;
+
+function jsxHint(e, id) {
+  let file = null;
+  const unknown = e.code === 'ERR_UNKNOWN_FILE_EXTENSION' ? /\bfor (.+)$/m.exec(String(e.message)) : null;
+  if (unknown) file = unknown[1].trim();
+  else if (e.name === 'SyntaxError') {
+    // An ES module's syntax error has no position: then the file is what was required.
+    const at = (e.v2Frame && e.v2Frame.file) || (/^(.+):\d+\r?$/.exec(String(e.stack || '').split('\n')[0]) || [])[1];
+    file = at || id;
+  }
+  if (!file || !JSX_FILE.test(file)) return null;
+  return `Node has no JSX, so it can't run .jsx or .tsx files: compile ${path.basename(file)} first and import the .js your build writes (TypeScript without JSX can be a .ts file)`;
+}
+
+// The hint of an error from loading a file (a module V2 imports, or what a block requires).
+function loadHint(e, id) {
+  if (e === null || typeof e !== 'object' || errorHints.has(e)) return;
+  let hint = null;
+  try {
+    hint = stripHint(e.code, String(e.message)) || jsxHint(e, id);
+  } catch {} // an error whose fields throw keeps none
+  if (hint) errorHints.set(e, hint);
 }
 
 const units = new Map(); // wire unit id -> {ctx, get, kinds} for definitions, {mod} for modules (14.2)
@@ -1614,7 +1664,8 @@ function doInit() {
   return { value: null };
 }
 
-function moduleReply(mod, names) {
+function moduleReply(unit, names) {
+  const mod = unit.mod;
   const nothing = mod === null || mod === undefined;
   if (names === null || names === undefined) return { value: nothing ? null : handleTag(mod), exports: [], missing: [] };
   const exports = [];
@@ -1635,21 +1686,119 @@ function moduleReply(mod, names) {
   try {
     keys = [...new Set([...own(mod), ...own(nothing ? null : mod.default)])];
   } catch {} // a Proxy that refuses
-  return { value: null, exports, missing, names: keys.filter((k) => !k.startsWith('_') && k.isWellFormed()).sort().slice(0, 5000) };
+  const reply = { value: null, exports, missing, names: keys.filter((k) => !k.startsWith('_') && k.isWellFormed()).sort().slice(0, 5000) };
+  // A dual package: what require loaded may lack what its ES module build has (9.4, 13.5).
+  let esm = null;
+  try {
+    esm = importBuild(unit.spec, unit.file);
+  } catch {} // a package.json that can't be read gives no hint
+  if (esm) {
+    reply.hint = wellFormed(`V2 loaded ${unit.file}, the package's "require" build, as require() does; its "import" build, ${esm}, is loaded with import(), which a @js block can do: async function load() { return await import(${JSON.stringify(unit.spec)}) }, then @export { load } and call load()`);
+  }
+  return reply;
+}
+
+// A package name, as require takes it from npm (not a path, a URL or Node's own module).
+const isBare = (spec) => typeof spec === 'string' && !/^(?:\.|\/|\\|[A-Za-z]:|node:|file:)/.test(spec) && !Module.builtinModules.includes(spec);
+
+// The conditions Node's import() matches in a package's `exports`.
+const IMPORT_CONDITIONS = new Set(['node', 'import', 'module-sync', 'node-addons', 'default']);
+
+function importBuild(spec, file) {
+  // The file the package's `exports` give import() for `spec`, when that isn't `file`, the one
+  // require loaded (13.5); else null. The package.json is the first above `file` with the
+  // package's name (a build's folder may have one of its own).
+  if (!isBare(spec) || typeof file !== 'string') return null;
+  const parts = /^((?:@[^/]+\/)?[^/]+)(.*)$/.exec(spec);
+  if (!parts) return null;
+  for (let dir = path.dirname(file); ; ) {
+    let pkg = null;
+    try {
+      pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    } catch {}
+    if (pkg !== null && typeof pkg === 'object' && pkg.name === parts[1]) {
+      const target = exportsTarget(pkg.exports, '.' + parts[2], IMPORT_CONDITIONS);
+      if (typeof target !== 'string' || !target.startsWith('./')) return null;
+      const esm = path.resolve(dir, target);
+      return fs.existsSync(esm) && fs.realpathSync(esm) !== fs.realpathSync(file) ? esm : null;
+    }
+    const up = path.dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
+function exportsTarget(exports, sub, conditions) {
+  // The target a package's `exports` give `sub` (`.`, `./x`) under `conditions`, as Node reads
+  // them: a subpath or a one-`*` pattern (the longest prefix first), then conditions in order;
+  // undefined or null when none.
+  if (exports === undefined || exports === null) return undefined;
+  const sugar = typeof exports !== 'object' || Array.isArray(exports) || !Object.keys(exports).some((k) => k.startsWith('.'));
+  const map = sugar ? { '.': exports } : exports;
+  let target = Object.hasOwn(map, sub) ? map[sub] : undefined;
+  let star = null;
+  if (target === undefined) {
+    let best = -1;
+    for (const k of Object.keys(map)) {
+      const i = k.indexOf('*');
+      if (i < 0 || k.indexOf('*', i + 1) >= 0 || i <= best) continue;
+      const [pre, post] = [k.slice(0, i), k.slice(i + 1)];
+      if (sub.length >= k.length - 1 && sub.startsWith(pre) && sub.endsWith(post)) {
+        [best, target, star] = [i, map[k], sub.slice(pre.length, sub.length - post.length)];
+      }
+    }
+  }
+  const pick = (t) => {
+    if (typeof t === 'string') return t;
+    if (Array.isArray(t)) return t.map(pick).find((r) => typeof r === 'string');
+    if (t === null || typeof t !== 'object') return t === null ? null : undefined;
+    for (const [k, v] of Object.entries(t)) {
+      if (!conditions.has(k)) continue;
+      const r = pick(v);
+      if (r !== undefined) return r;
+    }
+    return undefined;
+  };
+  const r = pick(target);
+  return typeof r === 'string' && star !== null ? r.split('*').join(star) : r;
+}
+
+// A bare name is loaded once per run, from the first importer's folder (13.5): a later importer
+// whose folder resolves it to another file is told, once for each such file.
+function otherCopy(u, m) {
+  if (!u.dirs || !isBare(m.name)) return;
+  const dir = path.dirname(m.from);
+  if (u.dirs.has(dir)) return;
+  u.dirs.add(dir);
+  let here;
+  try {
+    here = Module.createRequire(m.from).resolve(m.name);
+  } catch {
+    return; // not found from there: the import works, a block's require would not
+  }
+  if (here === u.file || u.noted.has(here)) return;
+  u.noted.add(here);
+  const shown = /^[A-Za-z0-9_]+$/.test(m.name) ? `js.${m.name}` : `js."${m.name}"`;
+  writeOut('stderr', wellFormed(`note: ${shown} from ${dir} resolves to ${here}, but this run already loaded ${u.file}: a package is loaded once per run (DOCS 7)\n`));
 }
 
 function doModule(m) {
   // A module unit (13.5): loaded once per unit through require (ES modules too), then the names
   // asked for.
   const u = units.get(m.unit);
-  if (u) return moduleReply(u.mod, m.names);
-  const loaded = (mod) => {
-    units.set(m.unit, { mod });
-    return moduleReply(mod, m.names);
-  };
+  if (u) {
+    otherCopy(u, m);
+    return moduleReply(u, m.names);
+  }
   const req = Module.createRequire(m.from);
+  let file;
+  const loaded = (mod) => {
+    const unit = { mod, spec: m.name, file, dirs: new Set([path.dirname(m.from)]), noted: new Set() };
+    units.set(m.unit, unit);
+    return moduleReply(unit, m.names);
+  };
   try {
-    req.resolve(m.name);
+    file = req.resolve(m.name);
   } catch (e) {
     // Not found: resolving looks only for the module asked for, not the ones it requires.
     if (e && NOT_FOUND.has(e.code)) throw new Fail('ImportError', String(e.message).split('\n')[0]);
@@ -1672,6 +1821,7 @@ function doModule(m) {
         e.v2Frame = syntaxFrame(e, req, m.name) || e.v2Frame;
       } catch {} // a frozen error keeps the frames it has
     }
+    loadHint(e, m.name);
     throw e;
   }
   return loaded(mod);

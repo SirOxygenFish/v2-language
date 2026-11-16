@@ -1,0 +1,5 @@
+'Point' is not exported by 'ts."./fixtures/ts_shapes.ts"' | Point is a type, which TypeScript removes before it runs: there is nothing to import; use it in TypeScript only
+'Shape' is not exported by 'ts."./fixtures/ts_shapes.ts"' | Shape is a type, which TypeScript removes before it runs: there is nothing to import; use it in TypeScript only
+'Hidden' is not exported by 'js."./fixtures/ts_shapes.ts"' | Hidden is a type, which TypeScript removes before it runs: there is nothing to import; use it in TypeScript only
+'Shap' is not exported by 'ts."./fixtures/ts_shapes.ts"' | null
+5

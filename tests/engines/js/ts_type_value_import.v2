@@ -1,0 +1,28 @@
+// requires: js ts
+// A type or an interface is gone when Node runs the file, so V2 can't import one: the hint says so
+// (DOCS 7, INTERNALS 13.5). A name the file doesn't declare as a type gets none.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.message, "|", e.hint)
+    }
+}
+show(func() {
+    @import { Point, dist } from ts."./fixtures/ts_shapes.ts"
+    return dist
+})
+show(func() {
+    @import { Shape } from ts."./fixtures/ts_shapes.ts"
+    return Shape
+})
+show(func() {
+    @import { Hidden } from js."./fixtures/ts_shapes.ts"
+    return Hidden
+})
+show(func() {
+    @import { Shap } from ts."./fixtures/ts_shapes.ts"
+    return Shap
+})
+@import { dist } from ts."./fixtures/ts_shapes.ts"
+print(dist({"x": 3, "y": 4}))
