@@ -22,6 +22,16 @@ try {
 // What the hint says reads it.
 write_file(path, b"\xff\xfen\x00a\x00m\x00e\x00")
 print(@py(path) { open(path, encoding="utf-16").read() })
+// A binary file opened as text gets the same message from Python (a JPEG starts FF D8): the
+// hint names open(path, "rb") too, which reads it (round 19 review).
+write_file(path, b"\xff\xd8\xff\xe0")
+try {
+    @py(path) { open(path).read() }
+} catch (e) {
+    print(e.message)
+    print("  hint: " + e.hint)
+}
+print(@py(path) { open(path, "rb").read()[:2] })
 // Another bad byte keeps the code-page hint.
 write_file(path, b"caf\xe9")
 try {
