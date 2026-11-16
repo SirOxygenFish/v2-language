@@ -4200,6 +4200,30 @@ fn a_v2_toml_path_with_control_characters_is_shown_escaped() {
     assert!(stdout.contains(&format!("py: engine 'py' command 'nosuch-v2-test' not found (set by {toml})")), "{stdout:?}");
     assert!(stdout.contains(&format!("\nconfig file: {toml}\n")), "{stdout:?}");
     assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    // The same folder in a program's or a venv's path: the message, doctor's COMMAND column and
+    // its notes (round 17's second review).
+    let real = std::fs::canonicalize(&dir).unwrap().display().to_string().replace('\u{1b}', "\\u{1b}");
+    for toml_text in ["[engines.py]\ncommand = [\"./nosuch-python\"]\n", "[python]\nvenv = \".venv\"\n"] {
+        std::fs::write(dir.join("v2.toml"), toml_text).unwrap();
+        let (code, _, stderr) = run_in_home(&home.0, &["p\u{1b}[2Jq/m.v2"], &[]);
+        assert!(!stderr.contains('\u{1b}'), "{toml_text}: {code:?} {stderr:?}");
+        let (_, stdout, stderr) = run_in_home(&dir, &["doctor"], &[]);
+        assert!(!stdout.contains('\u{1b}') && !stderr.contains('\u{1b}'), "{toml_text}: {stdout:?} {stderr:?}");
+        assert!(stdout.contains(&real), "{toml_text}: {stdout:?}");
+    }
+}
+
+#[test]
+fn an_absolute_import_of_a_data_file_hints_read_file_with_that_path() {
+    // 6.4 (round 17's second review): the read_file hint for an absolute path is that path, not
+    // script_dir() glued before it.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("data.csv"), "a,b\n").unwrap();
+    let abs = home.0.join("data.csv").display().to_string().replace('\\', "/");
+    std::fs::write(home.0.join("t.v2"), format!("try {{ import \"{abs}\" as m }} catch (e) {{ print(e.message) }}\n")).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["t.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.trim_end().ends_with(&format!("import loads .v2 files; read a data file with read_file(\"{abs}\")")), "{stdout}");
 }
 
 #[cfg(unix)]

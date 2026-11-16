@@ -136,6 +136,12 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         "py" => "a Python file next to a .v2 file is imported with @import { name } from py.NAME".to_string(),
         "js" | "mjs" | "cjs" => format!("a JavaScript file is imported with @import {{ name }} from js.\"{spec}\""),
         "ts" | "mts" | "cts" => format!("a TypeScript file is imported with @import {{ name }} from ts.\"{spec}\""),
+        // An absolute path is read as it is: script_dir() would come before it (round 17).
+        _ if Path::new(rel).is_absolute() || Path::new(rel).has_root() => {
+            let mut path = String::new();
+            crate::runtime::value::quoted(&rel.replace('\\', "/"), &mut path);
+            format!("read a data file with read_file({path})")
+        }
         _ => format!("read a data file with read_file(f\"${{script_dir()}}/{}\")", rel.replace('\\', "/")),
     };
     Err(format!("cannot import '{spec}': import loads .v2 files; {next}"))
