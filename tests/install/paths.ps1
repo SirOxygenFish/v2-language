@@ -1,12 +1,14 @@
 # install.ps1's choices (INTERNALS 22.6), each in a fresh profile folder whose path has a space
 # and a non-ASCII letter, run as a file by Windows PowerShell with only the system folders on PATH:
 # ~ and relative paths, a folder that is a file, both archive layouts, a damaged archive, a
-# v2.exe that is running while it is replaced (twice), another v2 that comes first.
+# v2.exe that is running while it is replaced (twice), another v2 that comes first, the command
+# for this window.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\paths.ps1 path\to\v2-....zip [-ModifyPath]
 #
-# Every case sets V2_NO_MODIFY_PATH, and the user PATH must be unchanged at the end. -ModifyPath
-# adds one case that changes the real user PATH and then restores it: only for throwaway machines (CI).
+# Every case sets V2_NO_MODIFY_PATH or gives install.ps1 a private user registry, and the user PATH
+# must be unchanged at the end. -ModifyPath adds one case that changes the real user PATH and then
+# restores it: only for throwaway machines (CI).
 param([Parameter(Mandatory = $true)][string]$Archive, [switch]$ModifyPath)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -33,18 +35,52 @@ function Fresh {
     New-Item -ItemType Directory -Force -Path $h | Out-Null
     $h
 }
+# A script, saved in $tmp, that gives the PowerShell running it a user registry of its own: its
+# HKEY_CURRENT_USER is the registry hive in the file $env:V2_PATHS_HIVE (made when missing), so
+# install.ps1, which it then runs, changes no real setting. (A file, for -File: a PowerShell started
+# with -EncodedCommand sends its lines back in a form this one would also show in its window.)
+$privateUser = Join-Path $tmp 'private user.ps1'
+$privateUserText = @'
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition '
+using System;
+using System.Runtime.InteropServices;
+public static class PrivateUser {
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegLoadAppKey(string file, out IntPtr key, int access, int options, int reserved);
+    [DllImport("advapi32.dll")]
+    static extern int RegOverridePredefKey(IntPtr key, IntPtr newKey);
+    public static void Use(string file) {
+        IntPtr key;
+        int e = RegLoadAppKey(file, out key, 0xF003F, 0, 0);
+        if (e == 0) e = RegOverridePredefKey(new IntPtr(unchecked((int)0x80000001)), key);
+        if (e != 0) throw new System.ComponentModel.Win32Exception(e);
+    }
+}'
+[PrivateUser]::Use($env:V2_PATHS_HIVE)
+[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment').Close()
+& $env:V2_PATHS_INSTALL
+exit $LASTEXITCODE
+'@
 # install.ps1 as a file in a new Windows PowerShell started in $h, with USERPROFILE=$h, the system
-# folders as PATH and V2_NO_MODIFY_PATH=1, then $vars (a $null value removes one).
-function Install($h, $vars = @{}) {
+# folders as PATH and V2_NO_MODIFY_PATH=1, then $vars (a $null value removes one). With $hive, that
+# PowerShell's user registry is the hive in that file ($privateUser).
+function Install($h, $vars = @{}, $hive = $null) {
     $set = @{ USERPROFILE = $h; Path = $sysPath; V2_ARCHIVE = $Archive; V2_NO_MODIFY_PATH = '1'; V2_INSTALL_DIR = $null }
     foreach ($k in $vars.Keys) { $set[$k] = $vars[$k] }
+    $file = Join-Path $root 'install.ps1'
+    if ($hive) {
+        $set['V2_PATHS_HIVE'] = $hive
+        $set['V2_PATHS_INSTALL'] = $file
+        $file = $privateUser
+    }
     $saved = @{}
     foreach ($k in $set.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $set[$k]) }
     # A program started from PowerShell starts in PowerShell's current location.
     Push-Location -LiteralPath $h
     try {
         $ErrorActionPreference = 'Continue'
-        $out = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install.ps1') 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $out = (& $powershell -NoProfile -ExecutionPolicy Bypass -File $file 2>&1 | ForEach-Object { "$_" }) -join "`n"
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = 'Stop'
@@ -81,6 +117,7 @@ function StartWaiting($exe, $file) {
 }
 
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+Set-Content -LiteralPath $privateUser -Value $privateUserText -Encoding ASCII
 try {
     # The default: %USERPROFILE%\.v2\bin; with V2_NO_MODIFY_PATH (1, true, yes) nothing else.
     foreach ($value in '1', 'true', 'YES') {
@@ -220,13 +257,28 @@ try {
     if ($r2.out.Contains('Note:')) { $script:problems += 'a note when this v2 comes first' }
     Result 'another v2 first on PATH' $r2
 
+    # The command for a window that isn't this PowerShell's works when pasted, for a folder named
+    # with $, a backtick and ': run in a new PowerShell, it puts exactly that folder first. The user
+    # PATH it changes is a private registry's.
+    $h = Fresh
+    $odd = "$h\we`$ird ``dir`` it's"
+    $r = Install $h @{ V2_NO_MODIFY_PATH = $null; V2_INSTALL_DIR = $odd } "$tmp\user $script:n.dat"
+    Want $r.code 0 'exit code'
+    Says $r "Added $odd to your user PATH"
+    $cmd = if ($r.out -match '(?m)in this one, run: (.*)\)$') { $Matches[1] } else { '' }
+    Want $cmd "`$env:Path = '$($odd.Replace("'", "''"));' + `$env:Path" 'the command'
+    $env:V2_PATHS_CMD = $cmd
+    try { $first = & $powershell -NoProfile -Command 'Invoke-Expression $env:V2_PATHS_CMD; ($env:Path -split '';'')[0]' } finally { $env:V2_PATHS_CMD = $null }
+    Want $first $odd "the first Path entry after the command"
+    Result "the command for this window, for a folder named with `$, `` and '" $r
+
     # The user PATH, then the message for a window that isn't this PowerShell's (CI only).
     if ($ModifyPath) {
         $h = Fresh
         $r = Install $h @{ V2_NO_MODIFY_PATH = $null }
         Want $r.code 0 'exit code'
         Says $r "Added $h\.v2\bin to your user PATH"
-        Says $r "Open a new window to use v2 (or, in this one, run: `$env:Path = `"$h\.v2\bin;`" + `$env:Path)"
+        Says $r "Open a new window to use v2 (or, in this one, run: `$env:Path = '$h\.v2\bin;' + `$env:Path)"
         $user = RawUserPath
         Want (($user -split ';')[0]) "$h\.v2\bin" 'the user PATH starts with'
         $r2 = Install $h @{ V2_NO_MODIFY_PATH = $null }

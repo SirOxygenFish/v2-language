@@ -595,9 +595,10 @@ them); caches live in
 **Is a `.v2` file safe to run?** Like any script, it runs with your rights, every block in every
 language: only run scripts you trust ([docs, chapter 16](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#16-security-and-trust)).
 A run trusts some files near the script as much: the nearest `v2.toml` in its folder or a folder
-above (it can name the programs that run the blocks), `.py` files in the script's folder and the
-project folder, and the `node_modules` and `package.json` Node finds there and in the folders
-above. So don't keep or run scripts under a folder that other users can write to, such as `/tmp`.
+above (it can name the programs that run the blocks), the modules Python imports from the
+script's folder and the project folder, and the `node_modules` and `package.json` Node finds
+there and in the folders above. So don't keep or run scripts under a folder that other users can
+write to, such as `/tmp`.
 
 **Is it fast?** V2's own code is a small interpreter, fine for gluing things together. Heavy
 loops belong in a Python or JavaScript block (and, later, in C or Rust blocks). Each call from one
