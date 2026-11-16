@@ -65,6 +65,8 @@
         if ((Join-Path $dir 'v2.exe').Length -ge 260) {
             Fail "$dir is $($dir.Length) characters long, too long a folder for v2.exe: Windows starts no program whose path has 260 characters or more; set V2_INSTALL_DIR to a shorter folder"
         }
+        # PATH would split such a folder in two (only cmd reads a quoted entry).
+        if ($dir.Contains(';')) { Fail "$dir has a ';' in it, which PATH uses between folders: set V2_INSTALL_DIR to a folder without one" }
 
         # 1. Which binary: x64 (Windows on Arm runs it too, emulated).
         if (-not [Environment]::Is64BitOperatingSystem) { Fail "V2 needs 64-bit Windows: $fromSource" }

@@ -582,9 +582,13 @@ print(util.slug("Hello World"))    // hello-world
 - Paths are relative to the importing file and end in `.v2`. Another kind of file (`data.csv`,
   `helper.py`) is an `ImportError` that says how to use it instead. So is a pipe or a device
   (`cannot import './m.v2': it is a pipe or a device, not a file`, also for a link to
-  `/dev/zero`, and for `/dev/stdin` from a pipe), and a link that leads nowhere or in a loop says
-  that, in a run and in `v2 check`.
-- A module runs once, the first time it is imported; later imports reuse it.
+  `/dev/zero`, and for `/dev/stdin` from a pipe), and a link that leads nowhere or in a loop (the
+  file, or a folder on the way, a Windows junction too) says that, in a run and in `v2 check`; a
+  file V2 may not read gives the system's reason (`Access is denied`). A path whose letters
+  differ from the file's name only in case (`./Util.v2` for `util.v2`) works on Windows and
+  macOS, with a note, since Linux won't find it.
+- A module runs once, the first time it is imported; later imports reuse it, also when they reach
+  it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`).
 - `util` is a dict of the module's exported names, taken when the module finishes running.
   Reassigning a module variable later does not change what importers see — export a function
   if you need the current value.
@@ -636,7 +640,8 @@ Relative paths in the file functions and in `exec` are relative to the folder yo
 `import` paths and `extern` library paths are relative to the `.v2` file instead. A block that
 changes its working directory (`os.chdir`, `process.chdir`) changes it for its own language only:
 V2's file functions and `exec` keep V2's. Paths go through symbolic links: `script_dir()` is the
-real folder of the script, where the search for `v2.toml` starts too. `write_file` replaces a file's
+real folder of the script, where the search for `v2.toml` starts too. A link on the way that leads
+nowhere or in a loop (a junction too) is named in the error, with what fixes it. `write_file` replaces a file's
 contents in place, not all at once: for a file another program reads, write a new file and rename
 it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
@@ -1921,7 +1926,8 @@ define_engine("rb", kind: "bridged", command: ["ruby", "adapters/v2_adapter.rb"]
 ## 14. Project file: `v2.toml`
 
 V2 looks for `v2.toml` in the script's folder and its parents (`v2 doctor` starts from the
-current folder); the folder where it is found is the **project root**. Without one, the script's
+current folder, its links followed, as a run of a script there starts from the script's real
+folder); the folder where it is found is the **project root**. Without one, the script's
 folder is the project root. One project serves the whole run: a `.v2` file imported from another
 folder, even one with a `v2.toml` of its own, uses the script's `v2.toml`, venv and project root.
 Only a regular file named `v2.toml` counts (or a link to one): a
@@ -1932,6 +1938,8 @@ engine needs `kind` and `command` (a `run` command, custom or built-in, must con
 configuration error (`[engines.lua] command must be an array: write ["lua", "{file}"]`).
 Relative paths are relative to the folder of the `v2.toml`, and a path that starts with `~` is
 in your home folder; nothing else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
+In `"…"` a backslash starts an escape (`"C:\new"` holds a line break), so write Windows paths with
+`/` or in single quotes, `'C:\new'`; a path that holds such a character says so.
 
 > **Not built yet** (ROADMAP Phase 3): a custom engine's table (`[engines.lua]`) is read but not
 > checked for now (`kind`, `command`, `{file}`, the tag's spelling), and `v2 doctor` lists it as

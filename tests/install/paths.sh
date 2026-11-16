@@ -168,6 +168,20 @@ expect "$code" 1 "exit code"
 says "V2_INSTALL_DIR names a file, not a folder: $h/afile" || { echo "    no message"; ok=no; }
 result "V2_INSTALL_DIR names a file"
 
+# A folder with ':' or a line break, which PATH would split: refused before anything is made.
+fresh
+install /bin/bash V2_INSTALL_DIR="$h/a:b"
+ok=yes
+expect "$code" 1 "exit code for ':'"
+says "$h/a:b has a ':' in it, which PATH uses between folders: set V2_INSTALL_DIR to a folder without one" || { echo "    no ':' message"; ok=no; }
+expect "$([ -e "$h/a:b" ] && echo yes || echo no)" no "the folder with ':'"
+install /bin/bash V2_INSTALL_DIR="$h/a
+b"
+expect "$code" 1 "exit code for a line break"
+says "V2_INSTALL_DIR has a line break in it: choose a folder without one" || { echo "    no line break message"; ok=no; }
+expect "$(ls -A "$h")" "" "files written"
+result "V2_INSTALL_DIR with ':' or a line break"
+
 # The archive layouts: files in a v2-<target> folder (since alpha.2), or at the top.
 fresh
 mkdir "$h/x" "$h/flat"

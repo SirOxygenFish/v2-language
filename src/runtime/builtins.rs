@@ -446,6 +446,7 @@ fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
 
 /// `file_error`, with a hint of the caller's when the path itself needs none.
 fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<String>) -> Exec<T> {
+    super::module::link_error(verb, path).map_or(Ok(()), |err| Err(Flow::Error(Rc::new(err))))?;
     if let Some(why) = unreachable_root(path, e) {
         return root_error(verb, path, why);
     }
