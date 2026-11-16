@@ -29,11 +29,11 @@ let hs = @py {
 for h in hs {
     show(func() => to_v2(h))
 }
-// What the messages name works. A mapping's keys stay as they are, so to_v2 of the block's dict
-// gives them V2's form (None: "null"), as to_v2(h) would have.
+// What the messages name works, as written. A mapping whose keys aren't all text gets str(k):
+// a block's dict with other keys would come back as a handle.
 show(func() => @py(h: hs[0]) { [x.isoformat() for x in h] })
 show(func() => @py(h: hs[1]) { {k: v.isoformat() for k, v in h.items()} })
-show(func() => to_v2(@py(h: hs[2]) { {k: v.isoformat() for k, v in h.items()} }))
+show(func() => @py(h: hs[2]) { {str(k): v.isoformat() for k, v in h.items()} })
 show(func() => @py(h: hs[3]) { [x.isoformat() for x in h.tolist()] })
 show(func() => @py(h: hs[4]) { h.to_dict().isoformat() })
 // The type follows "has the type", with no article to pick ("a uuid.UUID").

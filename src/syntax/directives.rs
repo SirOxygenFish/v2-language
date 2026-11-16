@@ -1059,6 +1059,10 @@ mod tests {
             ("py", "$None", "\"$None\" as other"),
             ("js", "$lambda", "\"$lambda\" as other"),
             ("py", "$from", "\"$from\" as other"),
+            // An alias every adapter takes (round 17's second review): not js.js's words or a dunder.
+            ("js", "$this", "\"$this\" as other"),
+            ("ts", "$delete", "\"$delete\" as other"),
+            ("py", "$__x__", "\"$__x__\" as other"),
             ("py", "$", "\"$\" as other"),
             ("py", "$$", "\"$$\" as other"),
         ] {

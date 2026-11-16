@@ -321,8 +321,9 @@ More of V2, in short:
   Python's `os.walk` in a block. File paths are relative to the folder you run `v2` from; for a
   file next to the script, `read_file(f"${script_dir()}/data.csv")`. They are taken as written:
   `~` and `%USERPROFILE%` are a shell's, so write `getenv("HOME")` (`getenv("USERPROFILE")` on
-  Windows) instead; a path that starts with one is refused rather than read or made as a folder
-  named `~` (`./~` reaches a folder that is really named so).
+  Windows) instead; a path whose first part is one (or, on Linux and macOS, `~name` for a user
+  that exists) is refused rather than read or made as a folder named `~` (`./~` reaches a folder
+  that is really named so).
 - **Strings** have `split`, `lines` (Windows and old Mac line endings too), `upper`, `lower`, `replace`, `trim`,
   `starts_with`, `ends_with` and `index_of`; **lists** `push`, `pop`, `insert`,
   `sort(key: f, reverse: true)` and `reverse` (they change the list and return `null`), `map` and

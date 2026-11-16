@@ -790,8 +790,8 @@ let nums = [4, 8, 15, 16, 23, 42]
 - The name must be one the block's code can use. A keyword (`class`), a name Python keeps for
   itself (`__name__`) or JavaScript's `undefined` or `yield` is a `ValueError` whose message names
   one that works (`@py(class_: …)`); so is a name Python reads as another (`ﬁle`, with the
-  ligature, is `file` to Python: `@py(file: ﬁle)`), with the code points that differ, since the
-  micro sign `µ` (U+00B5) and Python's `μ` (U+03BC) look the same.
+  ligature, is `file` to Python: `@py(file: ﬁle)`), with the code points of the first character
+  that changes, since the micro sign `µ` (U+00B5) and Python's `μ` (U+03BC) look the same.
 - Args work for `py`, `js` and `ts` blocks, run engines and custom engines. Compiled blocks take
   their inputs through exported functions instead (chapter 11); `@c(x) { }` is a `SyntaxError`.
 
@@ -1457,8 +1457,8 @@ pandas Series with the default index gives `{"0": …, "1": …}`). Other object
 `to_dict()` method if they have one, otherwise `tolist()`. Anything else — a `datetime`, a class
 instance without those methods, an int beyond 64 bits, other key types, two keys that become the
 same string (`1` and `"1"`) — is a `MarshalError`. For a value it can't convert, the message names
-a block that makes plain data of it, and for an item inside the object (a pandas Series of dates)
-one that converts the whole object:
+a block that makes plain data of it, for an item of the object (a pandas Series of dates) one that
+converts the whole object, and for an item deeper inside what to do with each such item:
 `an item of h has the type pandas.Timestamp: … as in @py(h) { h.astype(str).tolist() }`. For a key
 of another type, the hint names a block that makes the keys strings; in Python, a key of what the
 object's `to_dict()` gave (a pandas Series indexed by dates) gets one in the message:

@@ -33,10 +33,13 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 16 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds: round 17 next, as a Workflow (two
-  newcomers, then refuters that reproduce each finding and check e.hint and the docs first). (Round 16's prompts:
-  scratchpad/newcomer/prompt-*-r16.md, made by scratchpad/setup_round16.py; its distro v2new24p, where
+  Rounds 1 to 17 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds: round 18 next. Rounds run as workflows:
+  two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
+  implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
+  the reviews' issues. A worktree may start from main, not v2-reboot: give agents the base commit
+  and have them check it. (Round 17's prompts: scratchpad/newcomer/prompt-*-r17.md, made by
+  scratchpad/make17.py and setup_round17.py; its distro v2new24q, where
   paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
@@ -116,7 +119,8 @@ it is loaded automatically into every session and every subagent.
   `command` must be an array; unknown sections/keys and keys that don't apply are config
   errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
   raw until Phase 3 (17.1). `unexpanded(text)`: the shell variable (`%X%`, `$X`) a hint names.
-- `syntax/`: `span` (SourceMap, FileId, display_path), `lexer`, `scan` (block bodies, profiles,
+- `syntax/`: `span` (SourceMap, FileId, display_path; `shown_path`, the one escaper of control
+  characters in printed paths), `lexer`, `scan` (block bodies, profiles,
   `canonical_tag`), `directives` (@export/@import, dedent), `resolve` (layouts, `Loc`, after
   `check`, in `parse_file`, the entry path and `parse_str`), `parser` (MAX_DEPTH 256, expression
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`

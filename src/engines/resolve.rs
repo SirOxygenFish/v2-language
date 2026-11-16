@@ -688,14 +688,14 @@ impl Resolver<'_> {
                 _ => String::new(),
             };
             return Err(NotFound::broken(
-                format!("engine '{}' command '{name}' not found (set by {}){hint}", spec.id, set_by(from)),
+                format!("engine '{}' command '{}' not found (set by {}){hint}", spec.id, crate::syntax::span::shown_path(name), set_by(from)),
                 join(&command.iter().map(OsString::from).collect::<Vec<_>>()),
                 from,
             ));
         };
         let mut argv = vec![path.into_os_string()];
         argv.extend(command[1..].iter().map(OsString::from));
-        self.usable(spec, argv, Origin::Config(from.clone()), &format!("command '{name}'"), from)
+        self.usable(spec, argv, Origin::Config(from.clone()), &format!("command '{}'", crate::syntax::span::shown_path(name)), from)
     }
 
     fn venv(&mut self, spec: &Rc<EngineSpec>, venv: &Path, from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
@@ -706,7 +706,7 @@ impl Resolver<'_> {
         };
         let Some(exe) = candidates.iter().find(|p| is_regular_file(p)) else {
             let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
-            let shown = venv.display().to_string();
+            let shown = crate::syntax::span::shown_path(&venv.display().to_string());
             // What to write instead, as v2.toml's folder sees it (18.1).
             let base = match from {
                 ConfigSource::Project(file) => file.parent().map(Path::to_path_buf),
@@ -957,7 +957,7 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
     };
     let mut m = format!("{head}\ntried: {} on PATH", tried.join(", "));
     for (path, reason) in skipped {
-        m.push_str(&format!("\nskipped: {} ({reason})", path.display()));
+        m.push_str(&format!("\nskipped: {} ({reason})", crate::syntax::span::shown_path(&path.display().to_string())));
     }
     for fix in skipped.iter().filter_map(|(path, reason)| library_fix(path, reason)) {
         m.push_str(&format!("\nfix: {fix}"));

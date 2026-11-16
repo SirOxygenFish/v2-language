@@ -89,7 +89,16 @@ pub fn format_hint(spec: &str, expr: &str) -> String {
 pub fn quote_import_hint(rest: &str, after_as: bool, v2: bool) -> String {
     let word = |s: &str| -> String { s.chars().take_while(|c| *c == '$' || is_ident_continue(*c)).collect() };
     let name = word(rest);
-    let bare = Some(name.replace('$', "")).filter(|b| is_plain_name(b) && (v2 || !crate::engines::imports::PY_KEYWORDS.contains(&b.as_str())));
+    // In a block the alias must suit every adapter (the block's language isn't known here): not a
+    // Python keyword or dunder, nor a word js.js refuses (`$this`, `$delete`: INTERNALS 12.2).
+    const JS_REFUSED: &[&str] = &[
+        "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
+        "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while",
+        "with", "yield", "let", "static", "implements", "interface", "package", "private", "protected", "public", "await", "undefined", "NaN", "Infinity", "globalThis",
+        "__proto__",
+    ];
+    let suits_blocks = |b: &str| !(crate::engines::imports::PY_KEYWORDS.contains(&b) || JS_REFUSED.contains(&b) || (b.starts_with("__") && b.ends_with("__")));
+    let bare = Some(name.replace('$', "")).filter(|b| is_plain_name(b) && (v2 || suits_blocks(b)));
     if after_as {
         return format!("after as goes a plain name, without $: as {}", bare.as_deref().unwrap_or("other"));
     }
@@ -453,7 +462,12 @@ impl<'a> Lexer<'a> {
         let colon = self.src[open..pos].rfind(':').map_or(pos, |c| open + c);
         let rest = &self.src[colon + 1..];
         let spec = &rest[..rest.find(['}', '\n', '"', '\'']).unwrap_or(rest.len())];
-        format_hint(spec, &self.src[open..colon])
+        // Found by the last `${`, the text may be only part of the expression (a nested f-string
+        // or a "${" in a string inside it): then the hint names `x` instead.
+        let expr = &self.src[open..colon];
+        let depth = |o: char, c: char| expr.matches(o).count() == expr.matches(c).count();
+        let whole = !expr.contains(['"', '\'']) && depth('(', ')') && depth('[', ']') && depth('{', '}');
+        format_hint(spec, if whole { expr } else { "x" })
     }
 
     /// `:.Nf}` right at the top level of an interpolation (3.5).
@@ -1990,6 +2004,10 @@ let n = names
             ("print(f\"${x:~^10}\")", PAD_HINT),
             ("print(f\"${x:#x}\")", "format it in a block, as in @py(x) { f\"{x:#x}\" }"),
             ("print(f\"${x: .2f}\")", "write the format without spaces: ${x:.2f}"),
+            // Round 17's second review: a nested f-string or a "${" in a string inside the
+            // expression isn't taken for its start.
+            ("print(f\"${float(f\"${a}\") * 2:8.2f}\")", &PAD_HINT.replacen("str(x)", "f\"${x:.2f}\"", 1)),
+            ("print(f\"${d[\"${\"]:8.2f}\")", &PAD_HINT.replacen("str(x)", "f\"${x:.2f}\"", 1)),
         ] {
             let d = diag(src);
             assert_eq!((d.message.as_str(), d.hint.as_deref()), (ONLY_FIXED, Some(hint)), "{src}");
