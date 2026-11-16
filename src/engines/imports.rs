@@ -871,6 +871,52 @@ fn imported_alias_hint(message: &str) -> Option<String> {
     alias_hint(spec, importer.parent()?)
 }
 
+/// A block's own `require()` (`MODULE_NOT_FOUND`, the .v2 file first on its `Require stack`) or
+/// `import()` (`ERR_MODULE_NOT_FOUND`, `imported from` the .v2 file) of a bare specifier that Node
+/// didn't find (13.5): the hints an `@import` of it gets, from the .v2 file's folder, where a
+/// block's `require` looks, in the block's words: a `paths` alias of tsconfig.json, a file of the
+/// script's own (by its path, as in `require("./helpers.js")`), Yarn PnP, `npm install`. `code`:
+/// the error's (its data).
+pub(crate) fn block_module_hint(message: &str, code: &str) -> Option<String> {
+    let (spec, importer, call) = match code {
+        "MODULE_NOT_FOUND" => {
+            let (spec, rest) = message.split("Cannot find module '").nth(1)?.split_once('\'')?;
+            (spec, rest.split("Require stack:").nth(1)?.lines().find_map(|l| l.trim().strip_prefix("- "))?.trim(), "require")
+        }
+        // Node names a bare specifier's package part (`@/lib` for `@/lib/math`).
+        "ERR_MODULE_NOT_FOUND" => {
+            let (spec, rest) = message.split("Cannot find package '").nth(1)?.split_once('\'')?;
+            (spec, rest.strip_prefix(" imported from ")?.lines().next()?.trim(), "import")
+        }
+        _ => return None,
+    };
+    let importer = Path::new(importer);
+    let block = importer.extension().is_some_and(|e| e.eq_ignore_ascii_case("v2"));
+    if !block || spec.is_empty() || spec.starts_with(['.', '/', '\\']) || spec.contains(':') {
+        return None;
+    }
+    let dir = importer.parent()?;
+    if let Some(hint) = alias_hint(spec, dir) {
+        return Some(hint);
+    }
+    let with_ext = Path::new(spec).extension().and_then(|e| e.to_str()).is_some_and(|e| OWN_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    let own = if with_ext { vec![dir.join(spec)] } else { OWN_EXTS.iter().map(|e| dir.join(format!("{spec}.{e}"))).collect() };
+    if let Some(file) = own.iter().find(|p| p.is_file()).and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()) {
+        return Some(format!("your own {file} is loaded by its path from the .v2 file's folder: {call}(\"./{file}\") (\"{spec}\", without ./, names an npm package)"));
+    }
+    if with_ext {
+        return Some(format!("a file of your own is loaded by its path from the .v2 file's folder, as in {call}(\"./{spec}\"): check its name (\"{spec}\", without ./, names an npm package)"));
+    }
+    // The rest as for an @import (only its Python branches read the project's root).
+    let site = Site { dir, file: "", root: dir, toml: false };
+    let hint = missing_package_hint(&format!("Cannot find module '{spec}'"), &site, None)?;
+    // Its did-you-mean names an @import's selector, `js.lodash`.
+    Some(match hint.strip_prefix("did you mean js.").and_then(|r| r.split_once("? ")) {
+        Some((near, rest)) => format!("did you mean \"{near}\"? {rest}"),
+        None => hint,
+    })
+}
+
 /// Whether the `paths` key `key` (`@lib/*`, `~/*`, `utils`) can match a specifier that is
 /// `spec` or starts with `spec/` (Node names a package part); never the catch-all `*`.
 fn alias_matches(key: &str, spec: &str) -> bool {

@@ -285,7 +285,7 @@ ForeignError ZeroDivisionError division by zero
 | Python, JavaScript                        | V2                                              |
 | ----------------------------------------- | ----------------------------------------------- |
 | `def f(x, y=2):`, `function f(x, y = 2) { }` | `func f(x, y = 2) { ... }`                   |
-| `lambda x: x * 2`, `x => x * 2`           | `func(x) => x * 2`                              |
+| `lambda x: x * 2`, `x => x * 2`           | `func(x) => x * 2` (anonymous only: a named func has a `{ }` body) |
 | `function (x) { ... }` (several statements) | `func(x) { ... }`                             |
 | `import util`, `import ... from "./util.js"` (a file of yours) | `import "./util.v2" as util`, then `util.f()` |
 | `x = 1`, `var x = 1`, `let x = 1`         | `let x = 1` (and `const` for a constant)        |
@@ -454,7 +454,9 @@ folder upward, as Node does).
   environment. Or name that Python in `v2.toml`, without `venv`, which is for virtual
   environments only: `[engines.py]` and `command = ['C:\Users\you\miniconda3\envs\sales\python.exe']`
   (single quotes keep the backslashes). Activated is the safer way: some conda packages find
-  their DLLs through what activation puts on `PATH`.
+  their DLLs through what activation puts on `PATH`. A `conda run` command needs
+  `--no-capture-output` after `run`, as V2 talks to Python over its input and output:
+  `command = ["conda", "run", "--no-capture-output", "-n", "sales", "python"]`.
 
 Python and Node.js start when the script first needs them, and then every package a file imports
 from that language loads, in order: at the first call of an imported name (for
