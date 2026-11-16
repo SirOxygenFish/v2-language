@@ -619,7 +619,7 @@ bigger come from the languages you embed.
 | `args()`                                | command-line arguments after the script name                |
 | `sleep(seconds)`                        | wait (an int or float ≥ 0); Ctrl+C still stops the program  |
 | `time()`                                | seconds since 1970-01-01 UTC, as a float                    |
-| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; `code` is a 32-bit signed int (else a `ValueError`); on Linux and macOS, and in Git Bash on Windows, a shell sees only its low 8 bits (`exit(256)` reads as 0, and Git Bash shows a negative code as 127), so use 0-255 for a code a shell checks |
+| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; `code` is a 32-bit signed int (else a `ValueError`); on Linux and macOS, and in Git Bash on Windows, a shell sees only 0-255 (`exit(256)` reads as 0), so use 0-255 for a code a shell checks |
 | `error(type, message, data = null)`     | make an error value                                         |
 | `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
 | `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
@@ -656,7 +656,8 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 
 `argv` is a non-empty list of strings, each one argument as written, also on Windows for Git Bash's
 programs (`find`, `grep`, `sh`), which would otherwise expand `*.v2`, `{a,b}` and `~` and drop
-quotes themselves; a program name without a path separator is searched on
+quotes themselves (they do halve a run of two or more backslashes right before a space, a tab, a
+`'` or one of `* ? [ {`); a program name without a path separator is searched on
 `PATH` like engine commands, never in the current folder (as on Linux and macOS): a program there is
 run by its path, `exec(["./build.bat"])` (a `.bat` or `.cmd` whose path holds a `%` is refused, as
 cmd.exe would read it as a variable: keep it in a folder without one). A script runs through its
