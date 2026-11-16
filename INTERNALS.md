@@ -1618,7 +1618,10 @@ ts blocks run in the js session; the stripped text goes through 12.4 unchanged.
 - **Adapters** compile with the `.v2` path as filename and the block's line offset (12.3, 12.4), so frames inside blocks
   already carry the `.v2` file and line. V8 also counts U+2028 and U+2029 as line breaks, even in strings, so the js
   adapter maps its lines in a body holding them back to `.v2` lines. Frames go innermost first, in 9.6's shape; adapter frames and engine
-  internals (`<frozen importlib._bootstrap…>`, `node:internal/…`, `node:vm`) are dropped; library frames stay. A
+  internals (`<frozen importlib._bootstrap…>`, `node:internal/…`, `node:vm`) are dropped; library frames stay. An ES module
+  that a block `require`s runs with nothing of the block on its stack (Node's require of an ES module), so the block's
+  `require` (`blockRequire`) adds its own call site as the outermost frame of an error that has none of the block's
+  (kept in a WeakMap, `errorCallers`): the error is placed at the `require` line, not at the block's first line. A
   worker sends only the frames of the request it answers: Python's traceback starts at its handler, and the js adapter
   stops at its request dispatch (`handle`, `handleSync`), so the frames of a request still waiting below a nested one
   are left to the host (9.6). JS frames come from the stack after the message, so another error's stack quoted in a
