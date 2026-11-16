@@ -20,7 +20,8 @@ pub const KWARGS_HINT: &str = "V2 has no ** for named arguments: write them by n
 pub const MERGE_HINT: &str = "copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }";
 
 /// The hint for a format V2 doesn't have (`spec` is what follows the `:`, `expr` the expression
-/// before it as written): a width or an alignment, with `.Nf` or nothing more, can be padded;
+/// before it as written): a width or an alignment, with `.Nf` or nothing more, can be padded
+/// (with `.Nf`, the text padded is `f"${x:.Nf}"`);
 /// `.Nf` with spaces around it is written without them; anything else (`.3e`, `,`, `%`, `+`) is
 /// formatted in a block with the format as written, the expression passed in (3.5).
 pub fn format_hint(spec: &str, expr: &str) -> String {
@@ -41,19 +42,28 @@ pub fn format_hint(spec: &str, expr: &str) -> String {
         i += 1;
     }
     let width = i > width_at;
+    let mut places = "";
     if b.get(i) == Some(&b'.') && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
         i += 1;
+        let at = i;
         while i < b.len() && b[i].is_ascii_digit() {
             i += 1;
         }
+        places = &spec[at..i];
     }
+    let fixed_type = b.get(i) == Some(&b'f');
     if matches!(b.get(i), Some(b'f' | b'd' | b's')) {
         i += 1;
     }
+    let expr = expr.trim();
     if (aligned || width) && i == b.len() {
+        // `8.3f`: what is padded is the number with its places, as `:.Nf` writes it.
+        if fixed_type && (1..=2).contains(&places.len()) {
+            let x = if !expr.is_empty() && expr.chars().count() <= 40 && !expr.contains('\n') { expr } else { "x" };
+            return PAD_HINT.replacen("str(x)", &format!("f\"${{{x}:.{places}f}}\""), 1);
+        }
         return PAD_HINT.into();
     }
-    let expr = expr.trim();
     let trimmed = spec.trim();
     let fixed = trimmed.strip_prefix('.').and_then(|r| r.strip_suffix('f')).is_some_and(|d| (1..=2).contains(&d.len()) && d.bytes().all(|c| c.is_ascii_digit()));
     if fixed && trimmed != spec {
@@ -71,25 +81,25 @@ pub fn format_hint(spec: &str, expr: &str) -> String {
 }
 
 /// For a name that isn't a V2 name (`$x`, JavaScript's) at the start of `rest`, in an `@import`
-/// list: the list's quoted form (DOCS 6.2). V2 code (`v2`) binds a quoted name only with a V2
-/// name after `as`: the one written, else the name without its `$`; a block's own list binds it
-/// as it is. After `as` goes the importer's own name, a plain one.
+/// list: the list's quoted form with a name after `as` (DOCS 6.2): the one written, else the name
+/// without its `$`, else `other`. V2 code (`v2`) binds a quoted name only with a V2 name after
+/// `as`; a block's own list needs the alias in Python, which binds an imported name only as a
+/// Python name (12.2), so there the name without its `$` must be a Python name too. After `as`
+/// goes the importer's own name, a plain one.
 pub fn quote_import_hint(rest: &str, after_as: bool, v2: bool) -> String {
     let word = |s: &str| -> String { s.chars().take_while(|c| *c == '$' || is_ident_continue(*c)).collect() };
     let name = word(rest);
-    let bare = Some(name.replace('$', "")).filter(|b| is_plain_name(b));
+    let bare = Some(name.replace('$', "")).filter(|b| is_plain_name(b) && (v2 || !crate::engines::imports::PY_KEYWORDS.contains(&b.as_str())));
     if after_as {
         return format!("after as goes a plain name, without $: as {}", bare.as_deref().unwrap_or("other"));
     }
     let after = rest[name.len()..].trim_start_matches([' ', '\t']);
     let written = after.strip_prefix("as").filter(|r| r.starts_with([' ', '\t'])).map(|r| word(r.trim_start_matches([' ', '\t'])));
-    match written.filter(|a| is_plain_name(a)) {
-        Some(alias) if !v2 => format!("write a name that isn't a V2 name in quotes: @import {{ {name:?} as {alias} }} from …"),
-        None if !v2 => format!("write a name that isn't a V2 name in quotes: @import {{ {name:?} }} from …"),
-        alias => {
-            let alias = alias.or(bare).unwrap_or_else(|| "other".into());
-            format!("write a name that isn't a V2 name in quotes, with a V2 name after as: @import {{ {name:?} as {alias} }} from …")
-        }
+    let alias = written.filter(|a| is_plain_name(a)).or(bare).unwrap_or_else(|| "other".into());
+    if v2 {
+        format!("write a name that isn't a V2 name in quotes, with a V2 name after as: @import {{ {name:?} as {alias} }} from …")
+    } else {
+        format!("write a name that isn't a V2 name in quotes, with a plain name after as: @import {{ {name:?} as {alias} }} from …")
     }
 }
 
@@ -1943,9 +1953,22 @@ let n = names
     fn a_format_gets_the_hint_that_fits_it() {
         // 3.5, round 17: a width or an alignment is padded; another format is done in a block,
         // as written, with the expression passed in.
-        for spec in [">8", "<5", "8.3f", "10", "^10", "*^10", "£>8", "<<5", "05.2f", "=10", " >5", ">10s", "5d"] {
+        for spec in [">8", "<5", "10", "^10", "*^10", "£>8", "<<5", "=10", " >5", ">10s", "5d", "8.3", "8.3d", "8.100f"] {
             assert_eq!(format_hint(spec, "x"), PAD_HINT, "{spec}");
         }
+        // A width with places pads the number as `:.Nf` writes it, the expression as written.
+        let pad = |text: &str| PAD_HINT.replacen("str(x)", text, 1);
+        for (spec, expr, text) in [
+            ("8.3f", "x", "f\"${x:.3f}\""),
+            ("8.2f", " price ", "f\"${price:.2f}\""),
+            (">10.1f", "d.rate * 100", "f\"${d.rate * 100:.1f}\""),
+            ("05.2f", "x", "f\"${x:.2f}\""),
+            ("*^12.10f", "x", "f\"${x:.10f}\""),
+            ("8.2f", "xs[0] + xs[1] + xs[2] + xs[3] + xs[4] + xs[5]", "f\"${x:.2f}\""),
+        ] {
+            assert_eq!(format_hint(spec, expr), pad(text), "{spec}");
+        }
+        assert_eq!(format_hint("8.3f", "x"), "pad with \" \" * n, as in let s = f\"${x:.3f}\", then \" \" * (5 - len(s)) + s for 5 wide");
         let long = "xs[0] + xs[1] + xs[2] + xs[3] + xs[4] + xs[5]";
         for (spec, expr, hint) in [
             (".3e", "loss", "format it in a block, as in @py(loss) { f\"{loss:.3e}\" }"),
@@ -1970,6 +1993,10 @@ let n = names
         ] {
             let d = diag(src);
             assert_eq!((d.message.as_str(), d.hint.as_deref()), (ONLY_FIXED, Some(hint)), "{src}");
+        }
+        for (src, text) in [("print(f\"${x:8.3f}\")", "f\"${x:.3f}\""), ("print(f\"${ price :>8.2f}\")", "f\"${price:.2f}\"")] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint), (ONLY_FIXED, Some(pad(text))), "{src}");
         }
         // Outside a format, they are what they are elsewhere.
         assert_eq!(diag("print(f\"${x ^ 2}\")").message, "V2 has no bitwise operators");
