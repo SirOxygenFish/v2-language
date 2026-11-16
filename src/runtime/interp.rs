@@ -159,10 +159,34 @@ fn null_from(name: &str, value: &str) -> Option<String> {
     }
     let callee: String = value.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
     if callee == "getenv" {
-        return Some(format!("'{name}' is null: it was set from getenv(…), and that variable isn't set: pass a default, as in getenv(\"HOME\", \"/root\")"));
+        // `getenv("HOME")` as written: the name between its quotes.
+        let var = value[callee.len()..].trim_start().strip_prefix('(').and_then(|r| r.trim_start().strip_prefix('"')).and_then(|r| r.split_once('"')).map(|(v, _)| v).filter(|v| !v.contains('\\'));
+        let call = var.map_or("getenv(…)".to_string(), |v| format!("getenv({})", quoted_text(v)));
+        return Some(format!("'{name}' is null: it was set from {call}, and {}", getenv_advice(var)));
     }
     (!callee.is_empty() && value[callee.len()..].starts_with('('))
         .then(|| format!("'{name}' is null: it was set from {callee}(…), which gave null (a function without return does)"))
+}
+
+/// What to do when `getenv(var)` gave null (5.3), for the variable the call names when it is a
+/// literal: pass a default; on Windows for `HOME`, which only Git Bash sets, name `USERPROFILE`
+/// (and `HOME` for `USERPROFILE` elsewhere).
+fn getenv_advice(var: Option<&str>) -> String {
+    match var {
+        Some(v) if cfg!(windows) && v.eq_ignore_ascii_case("HOME") => {
+            "Windows sets USERPROFILE for the home folder, not HOME (Git Bash sets both): write getenv(\"USERPROFILE\")".into()
+        }
+        Some("USERPROFILE") if !cfg!(windows) => "USERPROFILE is Windows' name for the home folder: write getenv(\"HOME\")".into(),
+        Some(v) => format!("that environment variable isn't set: pass a default, as in getenv({}, \"…\")", quoted_text(v)),
+        None => "that environment variable isn't set: pass a default, as in getenv(name, \"…\")".into(),
+    }
+}
+
+/// `s` as a V2 string literal.
+fn quoted_text(s: &str) -> String {
+    let mut out = String::new();
+    quoted(s, &mut out);
+    out
 }
 
 /// `x.items()`, `x.iteritems()`, `x.iterrows()`, `x.entries()`: a loop over pairs, which Python and
@@ -1095,8 +1119,15 @@ impl Interp {
             return "input() gives null when the input has ended: check it first, as in let line = input(); if line == null { break }".into();
         }
         match &e.kind {
-            ExprKind::Call { callee, .. } => match &callee.kind {
-                ExprKind::Name(n, _) if &**n == "getenv" => "getenv(…) gave null: that environment variable isn't set: pass a default, as in getenv(\"HOME\", \"/root\")".into(),
+            ExprKind::Call { callee, args, .. } => match &callee.kind {
+                ExprKind::Name(n, _) if &**n == "getenv" => {
+                    let var = match args.first() {
+                        Some(Arg::Pos(Expr { kind: ExprKind::Str(s), .. })) => Some(&**s),
+                        _ => None,
+                    };
+                    let call = var.map_or("getenv(…)".to_string(), |v| format!("getenv({})", quoted_text(v)));
+                    format!("{call} gave null: {}", getenv_advice(var))
+                }
                 // A builtin that gives null (print, write_file, sleep): its value isn't data.
                 ExprKind::Name(n, _) if super::builtins::BUILTINS.iter().any(|b| b.name == &**n) => format!("{n}() gives null: it does its work and has no value to use"),
                 ExprKind::Name(n, _) => format!("{n}(…) gave null: a function without return gives null, so end it with return …"),

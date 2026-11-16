@@ -1,0 +1,32 @@
+// requires: py
+// open() in a block reads UTF-8 (Python's UTF-8 mode): a UTF-16 file, its byte-order mark first
+// (Excel's Unicode Text, PowerShell's Export-Csv -Encoding Unicode), gets encoding="utf-16" in
+// the hint, not a code page, which would read it as garbage (INTERNALS 9.6, round 19).
+let home = getenv("HOME") ?? getenv("USERPROFILE")
+let path = home + "/v2_utf16.csv"
+write_file(path, b"\xff\xfen\x00a\x00m\x00e\x00")
+try {
+    @py(path) { open(path).read() }
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print("  hint: " + e.hint)
+}
+// Big-endian, its mark starting with 0xfe.
+write_file(path, b"\xfe\xff\x00n\x00a")
+try {
+    @py(path) { open(path).read() }
+} catch (e) {
+    print(e.message)
+    print("  hint: " + e.hint)
+}
+// What the hint says reads it.
+write_file(path, b"\xff\xfen\x00a\x00m\x00e\x00")
+print(@py(path) { open(path, encoding="utf-16").read() })
+// Another bad byte keeps the code-page hint.
+write_file(path, b"caf\xe9")
+try {
+    @py(path) { open(path).read() }
+} catch (e) {
+    print(e.message)
+    print("  hint: " + e.hint)
+}

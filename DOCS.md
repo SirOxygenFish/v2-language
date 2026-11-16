@@ -210,7 +210,7 @@ only an expression must be a call or a block, so `x == 1` meant as `x = 1`, or a
 with `-` meant to continue the previous one, is caught as a `SyntaxError`.
 
 Source files are UTF-8 (a BOM is fine); any other encoding is a `SyntaxError` that says to save the
-file as UTF-8 (and names UTF-16, which Windows PowerShell 5's `>` writes). Identifiers are letters,
+file as UTF-8 (and names UTF-16, which Windows PowerShell 5's `>` writes, and UTF-32). Identifiers are letters,
 digits and `_`, not starting with a digit. Keywords are listed in the [appendix](#keywords).
 
 ### 3.2 Values
@@ -613,10 +613,10 @@ bigger come from the languages you embed.
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out, nested 1,000 levels deep at most (deeper is a `ValueError`); `json_parse` skips one leading byte-order mark, as `read_file` does, and JSON has no NaN or infinity, so `json_stringify` of one is a `TypeError` (its hint: store `null` instead) |
 | `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it; one that holds more than 1 GiB (`/dev/zero` too) is an `IOError` that says to read it in pieces in a block |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
-| `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME` is refused, below) |
+| `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME`, or one Windows would read as another, is refused, below) |
 | `list_dir(path)`                        | sorted list of the names in a folder; one name that isn't UTF-8 fails the whole call, an `IOError` (rename that file, or list the names as bytes with `os.listdir` in a `@py` block, as its hint shows) |
 | `make_dir(path)`                        | create a folder and any missing parents; an existing folder is fine |
-| `remove_file(path)`                     | delete a file (not a folder)                                |
+| `remove_file(path)`                     | delete a file (not a folder), a read-only one too, on every OS, as `rm` does |
 | `script_dir()`                          | absolute path of the folder of the `.v2` file containing the call |
 | `exec(argv, input = null)`              | run a program without a shell (below)                       |
 | `getenv(name, default = null)`          | environment variable                                        |
@@ -645,11 +645,21 @@ functions raise `IOError` when they fail (`exists` just returns `false`); on Win
 another program keeps open (as Excel does), its hint says to close it there, for a Git Bash path
 that isn't there (`/c/Users/me/notes`, which `make_dir` doesn't make) it gives the Windows spelling (`C:/Users/me/notes`),
 and for a name Windows doesn't allow (`what?.txt`, `CON`, one that ends in a dot) it says why.
+A path that Windows would read as another is refused before anything is read or written, in every
+file function, `exists` too: a name that ends in a dot or a space, which Windows drops
+(`remove_file("data.txt.")` would delete `data.txt`), and a device (`CON`, `NUL` in any folder,
+`COM1`), where `read_file("CON")` would wait for typed input; when a file of such a name is there
+(WSL and Macs make them), the hint shows its full path with `\\?\` in front, which reaches it.
+On Windows a drive that isn't there (an unplugged USB drive) is said as such, `there is no drive Q:`,
+and so is a network share that can't be reached; a write to a read-only file says how to make it
+writable (`attrib -r`; `chmod u+w` on Linux and macOS); and `/tmp`, Linux's and macOS's temp folder,
+gets `getenv("TEMP")` (`make_dir("/tmp/x")` is refused there, as it would make `C:\tmp`, which
+every user can write to).
 Paths are taken as written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path whose first part is one is an
 `IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
 in paths`, `./~` for a folder really named so), and on Linux and macOS so is another user's home
 folder, `~root/x`, when there is such a user (Word's `~WRL0001.tmp` is just a name): build such a
-path with `getenv` (the error's hint says so). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
+path with `getenv` (the error's hint says so: on Windows `getenv("USERPROFILE")`, as only Git Bash sets `HOME`). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
 
 `exec` runs a program directly, without a shell, so its arguments reach it exactly as given:
 
@@ -966,7 +976,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   exception).
 - Output is UTF-8 on every platform: blocks run in Python's UTF-8 mode, so `open()` also reads
   and writes UTF-8 unless given an encoding (an Excel CSV file: the code page of the Windows that saved it,
-  `encoding="cp1252"` for Western European text, `cp1254` Turkish, `cp1256` Arabic), and Python
+  `encoding="cp1252"` for Western European text, `cp1254` Turkish, `cp1256` Arabic; Excel's Unicode
+  Text and PowerShell's `Out-File` write UTF-16, `encoding="utf-16"`: the error's hint says which), and Python
   programs a block starts run in it too.
 - The value of a block is its last expression, like in a Jupyter cell
   ([4.5](#45-getting-values-out-blocks-as-expressions)).
@@ -2018,7 +2029,9 @@ that isn't there.
   `v2 doctor`'s `config file:` line names it), the modules Python imports from the script's
   folder, the folders of the `.v2` files it imports and the project root, and the `node_modules`
   and `package.json` that Node finds in those folders and the ones above. V2 doesn't check who
-  owns them, so don't keep or run scripts under a folder other users can write to, such as `/tmp`.
+  owns them, so don't keep or run scripts under a folder other users can write to, such as `/tmp`,
+  or on Windows `C:\Users\Public` and folders made directly under `C:\` (such as `C:\work`), which
+  every user can write to by default: keep projects under your user folder.
 - When V2 searches `PATH` for toolchains or `exec` programs it skips relative entries like `.`,
   so a project folder can't slip in its own fake `python` or `gcc`.
 - Processes started by `exec`, run-engine blocks and compiled programs (and everything they start)
