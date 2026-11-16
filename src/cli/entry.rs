@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::runtime::error::did_you_mean;
-use crate::syntax::span::shown_path;
+use crate::syntax::span::{os_message, shown_path};
 
 /// Words people type expecting a command V2 doesn't have; with no such file they get a hint.
 const NOT_COMMANDS: &[&str] = &[
@@ -40,13 +40,58 @@ fn entry_lines(file: &str, rest: &[&str], command: &str) -> Option<Vec<String>> 
             format!("to give it to a script, type: v2 SCRIPT.v2 {}", quoted(file)),
         ]),
         Ok(_) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(missing_message(file, path, rest)),
-        Err(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(missing_message(file, path, rest, command)),
+        Err(e) => other_message(file, path, rest, command, &e),
     }
 }
 
+/// FILE that the OS can't even look for: through a link in a loop (Windows says "The name of the
+/// file cannot be resolved by the system"), or, on Windows, a wildcard that cmd and PowerShell
+/// pass on as it is ("The filename, directory name, or volume label syntax is incorrect"). Git
+/// Bash expands one, so there it matched nothing. `None`: the loader says what the OS said.
+fn other_message(file: &str, path: &Path, rest: &[&str], command: &str, e: &std::io::Error) -> Option<Vec<String>> {
+    if let Some(link) = crate::runtime::module::link_problem(path) {
+        return Some(vec![format!("cannot find '{file}'"), link_line(file, path, &link)]);
+    }
+    if !cfg!(windows) || !file.contains(['*', '?']) || e.kind() == std::io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    if std::env::var_os("MSYSTEM").is_some() {
+        return Some(missing_message(file, path, rest, command));
+    }
+    let first = |what: &str| format!("cannot find '{file}': cmd and PowerShell don't expand * and ?, and {what}");
+    if command == "v2" {
+        let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        return Some(vec![first("v2 runs one script"), files_there(folder)]);
+    }
+    // The README's loop, over FILE's pattern (in quotes only for what PowerShell would split).
+    let name = if file.contains(['/', '\\']) { "FullName" } else { "Name" };
+    let pattern = if file.chars().all(|c| c.is_alphanumeric() || "._-+~\\/:*?".contains(c)) { file.to_string() } else { quoted(file) };
+    Some(vec![
+        first("v2 check takes one file"),
+        format!("to check several, loop in PowerShell: $ok = 0; Get-ChildItem {pattern} | ForEach-Object {{ v2 check $_.{name}; if ($LASTEXITCODE -ne 0) {{ $ok = 1 }} }}"),
+    ])
+}
+
+/// The line for a link on FILE's way that leads nowhere or in a loop, and what fixes it.
+fn link_line(file: &str, path: &Path, link: &crate::runtime::module::LinkProblem) -> String {
+    let name = if link.at == path { "it".to_string() } else { format!("'{}'", crate::runtime::module::written_prefix(file, &link.at)) };
+    format!("{}: {}", link.problem(&name), link.fix())
+}
+
 fn folder_message(file: &str, path: &Path, command: &str) -> Vec<String> {
-    let scripts = v2_files(path);
+    let scripts = match v2_files(path) {
+        Ok(s) => s,
+        // A folder V2 may not list (a deny on it): not one without .v2 files.
+        Err(e) => {
+            let sep = if file.ends_with('/') || file.ends_with(std::path::MAIN_SEPARATOR) { "" } else { std::path::MAIN_SEPARATOR_STR };
+            let what = if command == "v2" { "run" } else { "check" };
+            return vec![
+                format!("'{file}' is a folder, not a script, and V2 can't list it: {}", os_message(&e)),
+                format!("{what} a .v2 file in it by its name: {command} {}", quoted(&format!("{file}{sep}FILE.v2"))),
+            ];
+        }
+    };
     let pick = scripts.iter().find(|n| n.eq_ignore_ascii_case("main.v2")).or(scripts.first());
     match pick {
         Some(name) => {
@@ -66,7 +111,7 @@ fn folder_message(file: &str, path: &Path, command: &str) -> Vec<String> {
     }
 }
 
-fn missing_message(file: &str, path: &Path, rest: &[&str]) -> Vec<String> {
+fn missing_message(file: &str, path: &Path, rest: &[&str], command: &str) -> Vec<String> {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -89,6 +134,20 @@ fn missing_message(file: &str, path: &Path, rest: &[&str]) -> Vec<String> {
     // A link to a file that isn't there is listed in its folder, but can't be run.
     if let Some(target) = std::fs::read_link(path).ok().filter(|_| !path.exists()) {
         return vec![first, format!("'{name}' is a symbolic link to {}, which isn't there", target.display())];
+    }
+    // A link on the way that leads nowhere (a junction whose folder was removed), which is listed
+    // in its folder but is no folder to look in (DOCS 3.10).
+    if let Some(link) = crate::runtime::module::link_problem(path) {
+        return vec![format!("cannot find '{file}'"), link_line(file, path, &link)];
+    }
+    // Windows: Git Bash's `/c/Users/…` pasted into cmd or PowerShell, which read it as `\c\…` on
+    // this drive; the file builtins say the same (5.10).
+    if let Some(drive_path) = git_bash_path(file) {
+        let letter = &file[1..2];
+        return vec![
+            format!("cannot find '{file}'"),
+            format!("on Windows, /{}/… is Git Bash's spelling of {}:/…: run {command} {}", letter.to_ascii_lowercase(), letter.to_ascii_uppercase(), quoted(&drive_path)),
+        ];
     }
     // A folder on the way that isn't there: say so, with the one it probably meant.
     if !folder.is_dir() {
@@ -183,7 +242,7 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String
     if path.extension().is_none() && folder.join(format!("{name}.v2.txt")).is_file() {
         return format!("there is a '{name}.v2.txt': your editor added '.txt', so rename it to '{name}.v2'");
     }
-    let scripts = v2_files(folder);
+    let scripts = v2_files(folder).unwrap_or_default();
     // By the names without `.v2`, which every one shares: `nope.v2` isn't a typo of `tour.v2`.
     let stem = |s: &str| s.strip_suffix(".v2").unwrap_or(s).to_string();
     let stems: Vec<String> = scripts.iter().map(|s| stem(s)).collect();
@@ -197,25 +256,45 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String
         }
         return format!("did you mean '{suggestion}'?");
     }
-    match scripts.len() {
-        0 => "there are no .v2 files there: cd to the folder that holds your script, or give its full path".into(),
-        n if n <= 5 => format!("the .v2 files there: {}", scripts.join(", ")),
-        _ => format!("the .v2 files there: {}, …", scripts[..5].join(", ")),
+    files_there(folder)
+}
+
+/// The last hint for a missing FILE: the folder's `.v2` files, sorted, five at most, that it has
+/// none, or that V2 can't list it (a deny on the folder), with the OS's reason (19.1).
+fn files_there(folder: &Path) -> String {
+    match v2_files(folder) {
+        Err(e) => format!("V2 can't list that folder: {} (check the name, or the folder's permissions)", os_message(&e)),
+        Ok(scripts) if scripts.is_empty() => "there are no .v2 files there: cd to the folder that holds your script, or give its full path".into(),
+        Ok(scripts) if scripts.len() <= 5 => format!("the .v2 files there: {}", scripts.join(", ")),
+        Ok(scripts) => format!("the .v2 files there: {}, …", scripts[..5].join(", ")),
     }
 }
 
-/// The `.v2` files directly in `folder`, sorted.
-fn v2_files(folder: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(folder)
-        .into_iter()
-        .flatten()
+/// The `.v2` files directly in `folder`, sorted, or why the folder can't be listed.
+fn v2_files(folder: &Path) -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)?
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| Path::new(n).extension().is_some_and(|x| x.eq_ignore_ascii_case("v2")))
         .collect();
     names.sort();
-    names
+    Ok(names)
+}
+
+/// Windows: `/c/Users/me/x.v2`, Git Bash's spelling of `C:/Users/me/x.v2` (one letter after the
+/// first `/`, a drive that exists, and no folder `\c` on this drive), as `C:/Users/me/x.v2`;
+/// the file builtins' `msys_hint` reads it the same way (5.10).
+fn git_bash_path(file: &str) -> Option<String> {
+    let b = file.as_bytes();
+    if !cfg!(windows) || b.first() != Some(&b'/') || !b.get(1).is_some_and(u8::is_ascii_alphabetic) || !matches!(b.get(2), None | Some(b'/')) {
+        return None;
+    }
+    let drive = format!("{}:", (b[1] as char).to_ascii_uppercase());
+    if !Path::new(&format!("{drive}/")).is_dir() || Path::new(&file[..2]).exists() {
+        return None;
+    }
+    Some(format!("{drive}{}", if file.len() > 2 { &file[2..] } else { "/" }))
 }
 
 /// A folder as messages show it: absolute, without Windows's `\\?\`.

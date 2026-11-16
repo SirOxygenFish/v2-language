@@ -3252,9 +3252,9 @@ fn doctor_reports_configured_problems() {
     assert_eq!((rows["js"][0].as_str(), rows["js"][3].as_str()), ("broken", "V2_ENGINE_JS"), "{stdout}");
     assert!(stdout.contains("js: engine 'js' command '") && stdout.contains("not found (set by V2_ENGINE_JS)"), "{stdout}");
     assert_eq!(rows["ts"][0], "broken", "ts follows js:\n{stdout}");
-    // The folder as the OS reports the working directory: resolved on Unix (macOS's temp folder
-    // is a symlink), as given on Windows.
-    let real = if cfg!(unix) { std::fs::canonicalize(&home.0).unwrap() } else { home.0.clone() };
+    // The working directory with its links followed, as a run's script folder is (18.1, round
+    // 19): macOS's temp folder is a symlink, and Windows' may be an 8.3 short name.
+    let real = PathBuf::from(real_path(&home.0));
     let toml = real.join("v2.toml");
     assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing/python.exe").display(), toml.display())), "{stdout}");
     assert!(stdout.contains(&format!("config file: {}", toml.display())), "{stdout}");
@@ -4656,7 +4656,7 @@ fn imports_of_pipes_devices_and_broken_links_are_import_errors() {
     let want = [
         "ImportError: cannot import './fifo.v2': it is a pipe or a device, not a file",
         "ImportError: cannot import './zero.v2': it is a pipe or a device, not a file",
-        "ImportError: cannot import './loop.v2': Too many levels of symbolic links",
+        "ImportError: cannot import './loop.v2': it is a link in a loop",
         "ImportError: cannot import './dangling.v2': it is a symbolic link to gone.v2, which isn't there",
         "ImportError: cannot find module './nope.v2' (looked for nope.v2)",
     ];
@@ -4880,4 +4880,311 @@ fn an_uncaught_error_starts_on_a_line_of_its_own() {
     assert!(stderr.starts_with("open.v2:2:1: Error: 10 uncaught\n"), "{stderr:?}");
     let (_, _, stderr) = run_in_home(&home.0, &["err.v2"], &[]);
     assert!(stderr.starts_with("w\nerr.v2:2:1: Error: e\n"), "{stderr:?}");
+}
+
+/// A link to a folder: a junction on Windows (which needs no administrator), else a symlink.
+fn dir_link(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    {
+        let ok = Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).stdout(Stdio::null()).status().unwrap().success();
+        assert!(ok, "mklink /J {}", link.display());
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// A path as V2 shows a real one: canonical, without Windows' `\\?\`.
+fn real_path(p: &Path) -> String {
+    let real = std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+    match real.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => real.strip_prefix(r"\\?\").unwrap_or(&real).to_string(),
+    }
+}
+
+#[test]
+fn links_on_the_way_that_lead_nowhere_or_in_a_loop_say_so() {
+    // DOCS 3.10, 6.4, 19.1, 5.10 (round 19): a folder on a path that is a link (a junction on
+    // Windows, the one link a non-administrator can make) to nothing, or in a loop, is named in a
+    // run, in v2 check, for FILE and in the file builtins, with what fixes it: not "cannot find
+    // module", "there is no folder", Windows' words, or a make_dir hint that would fail.
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::create_dir_all(d.join("gone")).unwrap();
+    dir_link(&d.join("broken"), &d.join("gone"));
+    std::fs::remove_dir(d.join("gone")).unwrap();
+    dir_link(&d.join("loop1"), &d.join("loop2"));
+    dir_link(&d.join("loop2"), &d.join("loop1"));
+    let main = "try { import \"./broken/lib.v2\" as a } catch (e) { print(e.message) }\n\
+                try { import \"./loop1/lib.v2\" as b } catch (e) { print(e.message) }\n\
+                for p in [\"broken/new.txt\", \"loop1/x.txt\"] {\n    try { write_file(p, \"x\") } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n\
+                try { make_dir(\"broken\") } catch (e) { print(e.message + \" | \" + e.hint) }\n";
+    std::fs::write(d.join("main.v2"), main).unwrap();
+    let gone = d.join("gone").display().to_string();
+    let rm = if cfg!(windows) { "rmdir" } else { "rm" };
+    let to_gone = format!("is a link to {gone}, which isn't there");
+    let fix = format!("remove the link ({rm} broken), or make {gone}");
+    let in_loop = format!("'loop1' is a link in a loop | remove the link ({rm} loop1), or point it somewhere else");
+    let want = [
+        format!("cannot import './broken/lib.v2': 'broken' {to_gone}"),
+        "cannot import './loop1/lib.v2': 'loop1' is a link in a loop".to_string(),
+        format!("cannot write 'broken/new.txt': 'broken' {to_gone} | {fix}"),
+        format!("cannot write 'loop1/x.txt': {in_loop}"),
+        format!("cannot create 'broken': it {to_gone} | {fix}"),
+    ];
+    let (code, stdout, stderr) = run_in_home(d, &["main.v2"], &[]);
+    assert_eq!((code, stdout), (Some(0), want.join("\n") + "\n"), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(d, &["check", "main.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 2 errors\n"), "{stderr}");
+    for (line, w) in want[..2].iter().enumerate() {
+        assert!(stderr.contains(&format!("main.v2:{}:7: ImportError: {w}\n", line + 1)), "{stderr}");
+    }
+    let lines = [("broken/main.v2", format!("'broken' {to_gone}: {fix}")), ("loop1/main.v2", in_loop.replace(" |", ":"))];
+    for (file, line) in lines {
+        let (code, _, stderr) = run_in_home(d, &[file], &[]);
+        assert_eq!((code, stderr), (Some(2), format!("v2: cannot find '{file}'\n{line}\n")));
+    }
+}
+
+/// Takes away reading `dir` (Windows: a deny for this user that its files inherit; elsewhere its
+/// mode), until the guard is dropped.
+struct Unreadable(PathBuf);
+
+impl Unreadable {
+    fn new(dir: &Path, _mode: u32) -> Unreadable {
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap();
+            let ok = Command::new("icacls").arg(dir).arg("/deny").arg(format!("{user}:(OI)(CI)(R)")).stdout(Stdio::null()).status().unwrap().success();
+            assert!(ok, "icacls /deny");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(_mode)).unwrap();
+        }
+        Unreadable(dir.to_path_buf())
+    }
+}
+
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap_or_default();
+            let _ = Command::new("icacls").arg(&self.0).arg("/remove:d").arg(user).stdout(Stdio::null()).status();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[test]
+fn a_folder_v2_may_not_read_says_so() {
+    // 6.4, 19.1 (round 19): a .v2 file in a folder whose permissions deny reading (as a deny
+    // inherited from the folder does) is "cannot import …: Access is denied", the OS's reason,
+    // not "cannot find module", in a run and in v2 check; and a folder V2 can't list is not one
+    // without .v2 files. Root reads every folder, so the test doesn't run as root.
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        let _ = writeln!(std::io::stderr(), "SKIP a_folder_v2_may_not_read_says_so (root reads every folder)");
+        return;
+    }
+    let home = TempHome::new();
+    let d = &home.0;
+    for f in ["noread/lib.v2", "nolist/main.v2"] {
+        std::fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
+        std::fs::write(d.join(f), "let x = 1\n").unwrap();
+    }
+    std::fs::write(d.join("t.v2"), "import \"./noread/lib.v2\" as l\n").unwrap();
+    // Off Windows a folder that can be looked into but not listed (--x) is the listing's case.
+    let _a = Unreadable::new(&d.join("noread"), 0o000);
+    let _b = Unreadable::new(&d.join("nolist"), 0o111);
+    let why = if cfg!(windows) { "Access is denied" } else { "Permission denied" };
+    let error = format!("t.v2:1:1: ImportError: cannot import './noread/lib.v2': {why}\n");
+    let (code, _, stderr) = run_in_home(d, &["t.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.starts_with(&error), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(d, &["check", "t.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check t.v2: 1 file, 1 error\n"), "{stderr}");
+    assert!(stderr.starts_with(&error), "{stderr}");
+    let (code, _, stderr) = run_in_home(d, &["nolist/nothere.v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.ends_with(&format!("\nV2 can't list that folder: {why} (check the name, or the folder's permissions)\n")), "{stderr}");
+    let sep = std::path::MAIN_SEPARATOR;
+    for (command, what) in [(&["nolist"][..], "run"), (&["check", "nolist"][..], "check")] {
+        let (code, _, stderr) = run_in_home(d, command, &[]);
+        let typed = command[..command.len() - 1].iter().map(|w| format!(" {w}")).collect::<String>();
+        let want = format!("v2: 'nolist' is a folder, not a script, and V2 can't list it: {why}\n{what} a .v2 file in it by its name: v2{typed} nolist{sep}FILE.v2\n");
+        assert_eq!((code, stderr), (Some(2), want));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_script_or_module_another_program_holds_open_says_to_close_it() {
+    // 19.1, 6.4 (round 19): a file another program opened without sharing (as Excel keeps one)
+    // gets the file builtins' hint (5.10) as the script, in v2 check and as an import.
+    use std::os::windows::fs::OpenOptionsExt;
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::write(d.join("locked.v2"), "print(1)\n").unwrap();
+    std::fs::write(d.join("lockedmod.v2"), "let x = 1\n").unwrap();
+    std::fs::write(d.join("usemod.v2"), "import \"./lockedmod.v2\" as m\nprint(m.x)\n").unwrap();
+    let hold = |p: &Path| std::fs::OpenOptions::new().read(true).share_mode(0).open(p).unwrap();
+    let (_a, _b) = (hold(&d.join("locked.v2")), hold(&d.join("lockedmod.v2")));
+    let busy = "The process cannot access the file because it is being used by another process";
+    let hint = "another program has it open (Excel keeps an open file locked): close it there";
+    for args in [&["locked.v2"][..], &["check", "locked.v2"]] {
+        let (code, _, stderr) = run_in_home(d, args, &[]);
+        assert_eq!((code, stderr), (Some(2), format!("v2: cannot read 'locked.v2': {busy}\n{hint}\n")));
+    }
+    for args in [&["usemod.v2"][..], &["check", "usemod.v2"]] {
+        let (code, _, stderr) = run_in_home(d, args, &[]);
+        assert_eq!(code, Some(1), "{stderr}");
+        assert!(stderr.starts_with(&format!("usemod.v2:1:1: ImportError: cannot import './lockedmod.v2': cannot read 'lockedmod.v2': {busy}\n")), "{stderr}");
+        assert!(stderr.contains(&format!("\n  hint: {hint}\n")), "{stderr}");
+    }
+}
+
+/// `v2 ARGS` in `home` with `MSYSTEM` (Git Bash's) set to `msystem`, or unset: (code, stderr).
+fn run_msystem(home: &Path, args: &[&str], msystem: Option<&str>) -> (Option<i32>, String) {
+    let mut cmd = v2_command(home);
+    cmd.args(args).current_dir(home).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    match msystem {
+        Some(v) => cmd.env("MSYSTEM", v),
+        None => cmd.env_remove("MSYSTEM"),
+    };
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    (out.status.code(), normalize(&String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn several_scripts_for_v2_check_get_the_readmes_loop() {
+    // 19.1 (round 19): `v2 check *.v2` that a shell expanded (Git Bash, sh) gives several files:
+    // v2 check takes one, and the README's loop checks them all, the shell's, or on Windows
+    // outside Git Bash PowerShell's.
+    let home = TempHome::new();
+    let shell = "loop in the shell: ok=0; for f in *.v2; do v2 check \"$f\" || ok=1; done";
+    let powershell = "loop in PowerShell: $ok = 0; Get-ChildItem *.v2 | ForEach-Object { v2 check $_.Name; if ($LASTEXITCODE -ne 0) { $ok = 1 } }";
+    let want = |how: &str| (Some(2), format!("v2: unexpected argument `b.v2` after `v2 check FILE`: it checks one file; to check several, {how}\nrun `v2 --help` for usage\n"));
+    assert_eq!(run_msystem(&home.0, &["check", "a.v2", "b.v2"], None), want(if cfg!(windows) { powershell } else { shell }));
+    assert_eq!(run_msystem(&home.0, &["check", "a.v2", "b.v2"], Some("MINGW64")), want(shell));
+    // Anything else after FILE is the plain usage error.
+    let plain = (Some(2), "v2: unexpected argument `--all` after `v2 check FILE`\nrun `v2 --help` for usage\n".to_string());
+    assert_eq!(run_msystem(&home.0, &["check", "a.v2", "--all"], None), plain);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_git_bash_path_or_a_wildcard_for_file_says_what_to_type() {
+    // 19.1 (round 19): Git Bash's /c/… pasted into cmd or PowerShell, which read it as \c\… on
+    // this drive, gets the file builtins' hint (5.10); a * or ?, which they don't expand, says V2
+    // takes one script (v2 check: the README's PowerShell loop). In Git Bash a * that reaches V2
+    // matched nothing, so it is a file that isn't there.
+    let home = TempHome::new();
+    for f in ["hello.v2", "h2.v2"] {
+        std::fs::write(home.0.join(f), "print(1)\n").unwrap();
+    }
+    let real = real_path(&home.0);
+    let (drive, rest) = real.split_at(2);
+    let letter = drive[..1].to_ascii_lowercase();
+    if drive.ends_with(':') && !Path::new(&format!("{drive}\\{letter}")).exists() {
+        let msys = format!("/{letter}{}/hello.v2", rest.replace('\\', "/"));
+        let fixed = format!("{}:{}/hello.v2", letter.to_ascii_uppercase(), rest.replace('\\', "/"));
+        let typed = if fixed.chars().all(|c| c.is_alphanumeric() || "._-+~\\/:".contains(c)) { fixed.clone() } else { format!("\"{fixed}\"") };
+        for (args, command) in [(vec![msys.as_str()], "v2"), (vec!["check", msys.as_str()], "v2 check")] {
+            let want = format!("v2: cannot find '{msys}'\non Windows, /{letter}/… is Git Bash's spelling of {}:/…: run {command} {typed}\n", letter.to_ascii_uppercase());
+            assert_eq!(run_msystem(&home.0, &args, None), (Some(2), want));
+        }
+    }
+    let loop_line = "to check several, loop in PowerShell: $ok = 0; Get-ChildItem *.v2 | ForEach-Object { v2 check $_.Name; if ($LASTEXITCODE -ne 0) { $ok = 1 } }";
+    let want = format!("v2: cannot find '*.v2': cmd and PowerShell don't expand * and ?, and v2 check takes one file\n{loop_line}\n");
+    assert_eq!(run_msystem(&home.0, &["check", "*.v2"], None), (Some(2), want));
+    let want = "v2: cannot find 'h?.v2': cmd and PowerShell don't expand * and ?, and v2 runs one script\nthe .v2 files there: h2.v2, hello.v2\n";
+    assert_eq!(run_msystem(&home.0, &["h?.v2"], None), (Some(2), want.to_string()));
+    let (code, stderr) = run_msystem(&home.0, &["check", "*.v2"], Some("MINGW64"));
+    assert_eq!(code, Some(2));
+    assert!(stderr.starts_with("v2: cannot find '*.v2' in ") && stderr.ends_with("\nthe .v2 files there: h2.v2, hello.v2\n"), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_module_reached_through_a_share_and_its_drive_path_is_one_module() {
+    // 6.4, 13.5 (round 19): a local folder shared as \\localhost\C$\… and its C:\… path
+    // canonicalize apart, yet name one file: a V2 module runs once, and Python's module check
+    // doesn't take one file for two. Skipped where the share isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP a_module_reached_through_a_share_and_its_drive_path_is_one_module (no \\\\localhost share)");
+        return;
+    }
+    let c = real.replace('\\', "/");
+    let files = [
+        ("counter.v2", "print(\"counter.v2 loading\")\nlet n = 0\nfunc bump() {\n    n += 1\n    return n\n}\n".to_string()),
+        ("main.v2", format!("import \"./counter.v2\" as a\nimport \"{c}/counter.v2\" as b\nprint(a.bump(), b.bump())\n")),
+        ("helpers2.py", "def hi():\n    return 'hi'\n".to_string()),
+        ("usehelp.v2", "@import { hi } from py.helpers2\nfunc call() { return hi() }\n".to_string()),
+        ("usehelp2.v2", "@import { hi } from py.helpers2\nfunc call() { return hi() }\n".to_string()),
+        ("pymix.v2", format!("import \"./usehelp2.v2\" as u2\nimport \"{c}/usehelp.v2\" as u1\nprint(u2.call(), u1.call())\n")),
+    ];
+    for (name, text) in &files {
+        std::fs::write(home.0.join(name), text).unwrap();
+    }
+    let (code, stdout, stderr) = run_in_home(&home.0, &[&format!(r"{unc}\main.v2")], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "counter.v2 loading\n1 2\n"), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["check", &format!(r"{unc}\main.v2")], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.ends_with("main.v2: 2 files, 0 errors\n"), "{stdout}");
+    if needs("py", "a_module_reached_through_a_share_and_its_drive_path_is_one_module") {
+        let (code, stdout, stderr) = run_in_home(&home.0, &[&format!(r"{unc}\pymix.v2")], &[]);
+        assert_eq!((code, stdout.as_str()), (Some(0), "hi hi\n"), "{stderr}");
+    }
+}
+
+#[test]
+fn an_import_spelled_in_another_case_gets_a_note_where_case_doesnt_matter() {
+    // 6.4 (round 19): on a file system that ignores case (Windows', macOS's) an import whose
+    // spelling differs from the file's name only in case works, and a note, once per import
+    // site, says a case-sensitive one (Linux's) won't find it; v2 check says it too. Skipped on
+    // a case-sensitive file system, where such an import is "cannot find module".
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("real")).unwrap();
+    std::fs::write(home.0.join("real/counter.v2"), "print(\"loading\")\nfunc f() { return 1 }\n").unwrap();
+    if !home.0.join("REAL/Counter.V2").exists() {
+        let _ = writeln!(std::io::stderr(), "SKIP an_import_spelled_in_another_case_gets_a_note_where_case_doesnt_matter (a case-sensitive file system)");
+        return;
+    }
+    let main = "import \"./real/counter.v2\" as a\nimport \"./REAL/Counter.V2\" as c\nfunc g() {\n    import \"./REAL/Counter.V2\" as d\n    return d.f()\n}\nprint(g(), g(), c.f())\n";
+    std::fs::write(home.0.join("spell.v2"), main).unwrap();
+    let note = "note: './REAL/Counter.V2' is spelled './real/counter.v2' on disk: a case-sensitive file system, as Linux's, won't find it\n";
+    let (code, stdout, stderr) = run_in_home(&home.0, &["spell.v2"], &[]);
+    assert_eq!((code, stdout.as_str(), stderr), (Some(0), "loading\n1 1 1\n", note.repeat(2)));
+    let (code, stdout, stderr) = run_in_home(&home.0, &["check", "spell.v2"], &[]);
+    assert_eq!((code, stdout.as_str(), stderr), (Some(0), "check spell.v2: 2 files, 0 errors\n", note.repeat(2)));
+}
+
+#[test]
+fn doctor_in_a_linked_folder_shows_the_v2_toml_a_run_there_uses() {
+    // 18.1, DOCS 14 (round 19): doctor starts from the current folder with its links followed (a
+    // junction on Windows, whose current folder keeps the link's path), as a run of a script there
+    // starts from the script's real folder, so both name one v2.toml.
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::create_dir_all(d.join("A")).unwrap();
+    std::fs::create_dir_all(d.join("B").join("sub")).unwrap();
+    std::fs::write(d.join("A").join("v2.toml"), "[engines.js]\ncall_timeout = 1\n").unwrap();
+    std::fs::write(d.join("B").join("v2.toml"), "[engines.js]\ncall_timeout = 2\n").unwrap();
+    dir_link(&d.join("A").join("link"), &d.join("B").join("sub"));
+    let mut cmd = v2_command(d);
+    cmd.arg("doctor").current_dir(d.join("A").join("link")).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    assert!(stdout.contains(&format!("\nconfig file: {}\n", real_path(&d.join("B").join("v2.toml")))), "{stdout}");
 }
