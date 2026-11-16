@@ -775,6 +775,10 @@ let nums = [4, 8, 15, 16, 23, 42]
 
 - `@py(nums)` makes a foreign variable `nums` holding a copy of V2's `nums`.
 - `@py(label: expr)` names the foreign variable explicitly and can pass any expression.
+- The name must be one the block's code can use. A keyword (`class`), a name Python keeps for
+  itself (`__name__`) or JavaScript's `undefined` is a `ValueError` whose message names one that
+  works (`@py(class_: …)`); so is a name Python reads as another (`ﬁle`, with the ligature, is
+  `file` to Python: `@py(file: ﬁle)`).
 - Args work for `py`, `js` and `ts` blocks, run engines and custom engines. Compiled blocks take
   their inputs through exported functions instead (chapter 11); `@c(x) { }` is a `SyntaxError`.
 
@@ -1339,7 +1343,9 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   (and for a moment right after each call returns): to let them finish, export an async function
   and call it. When the program ends, what is still waiting runs, as Node runs it after a script,
   for at most a second (as Python's threads get), and an error in it ends the run with exit code 1.
-- A foreign function may only call V2 from the thread V2 called it on.
+- A foreign function may only call V2 from the thread V2 called it on. A Python thread pool that
+  maps a V2 function (`ThreadPoolExecutor().map(score, xs)`) gets an error that says so: do the
+  threaded work in Python and call V2 with the results.
 - When an imported function (another language's, or V2's) throws, the foreign code that called it
   gets a `V2Error` exception with `type`, `message`, `data`, `lang` and `foreign_type`. The name is
   there in Python and JavaScript without importing anything: `except V2Error as e:`,
@@ -1434,7 +1440,9 @@ are numbers, booleans or `None`/`null` become strings in V2's `str()` form (`1` 
 pandas Series with the default index gives `{"0": …, "1": …}`). Other objects use their
 `to_dict()` method if they have one, otherwise `tolist()`. Anything else — a `datetime`, a class
 instance without those methods, an int beyond 64 bits, other key types, two keys that become the
-same string (`1` and `"1"`) — is a `MarshalError`.
+same string (`1` and `"1"`) — is a `MarshalError`. Its message names a block that makes plain data
+of it, and for an item inside the object (a pandas Series of dates) one that converts the whole
+object: `an item of h is a pandas.Timestamp: … as in @py(h) { h.astype(str).tolist() }`.
 
 **Handle rules:**
 
