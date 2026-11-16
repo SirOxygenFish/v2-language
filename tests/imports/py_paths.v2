@@ -1,0 +1,34 @@
+// Round 18: a file's path given for a Python module (INTERNALS 13.5). Below the .v2 file's
+// folder it is that dotted name; below the project root (tests/, which has a v2.toml) the name
+// from there; anywhere else the hint says how Python finds modules. Nothing is sent to Python.
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+    }
+}
+show(func() {
+    @import { add } from py."./lib/helper.py"
+    return add
+})
+show(func() {
+    @import { add } from py."lib\\helper"
+    return add
+})
+// Under the project root: the message names that folder, so only its end is printed.
+try {
+    @import { add } from py."../engines/py/core.py"
+    print(add)
+} catch (e) {
+    print(e.type, "|", e.message.starts_with("'../engines/py/core.py' is not a valid Python module name: the project folder, "))
+    print(e.message.ends_with(", is on Python's path, and from there this is py.engines.py.core"))
+}
+show(func() {
+    @import { add } from py."../../elsewhere/core.py"
+    return add
+})
+show(func() {
+    @import { add } from py."/elsewhere/core.py"
+    return add
+})

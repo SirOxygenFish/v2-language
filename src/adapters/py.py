@@ -66,7 +66,8 @@ if __name__ == "__main__":
         signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 
     # 3. The adapter's own folder leaves sys.path; init puts the project root on it (9.3). Python
-    # resolves symlinks in sys.path[0] (macOS's temp folder is one), so both sides are resolved.
+    # resolves symlinks in sys.path[0] (macOS's temp folder is one), so both sides are resolved
+    # (`same` is also shadowed()'s test of one file).
     same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
     if sys.path and same(sys.path[0] or ".", os.path.dirname(ADAPTER)):
         del sys.path[0]
@@ -1045,8 +1046,8 @@ if __name__ == "__main__":
         for p in lead:
             for mine in (os.path.join(p, top + ".py"), os.path.join(p, top, "__init__.py")):
                 if os.path.isfile(mine):
-                    same = os.path.normcase(os.path.abspath(mine)) == os.path.normcase(os.path.abspath(loaded))
-                    return None if same else (top, loaded, mine)
+                    # Real paths: a helpers.py that links to the one loaded is that module.
+                    return None if same(mine, loaded) else (top, loaded, mine)
         return None
 
     def check_name(k, what="block arg"):

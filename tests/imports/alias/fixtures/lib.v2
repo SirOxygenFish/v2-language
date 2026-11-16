@@ -1,0 +1,8 @@
+// A module for imports/alias/selector.v2.
+func total(xs) {
+    let s = 0
+    for x in xs {
+        s = s + x
+    }
+    return s
+}

@@ -1,0 +1,6 @@
+ImportError | './lib/helper.py' is not a valid Python module name: a Python file next to the .v2 file is imported as a module, py.lib.helper
+ImportError | 'lib\helper' is not a valid Python module name: a Python file next to the .v2 file is imported as a module, py.lib.helper
+ImportError | true
+true
+ImportError | '../../elsewhere/core.py' is not a valid Python module name: Python finds a module by its dotted name in the .v2 file's folder, the project folder or its own path (a venv's packages): write that name, or put the file's folder on sys.path in a @py block before this @import
+ImportError | '/elsewhere/core.py' is not a valid Python module name: Python finds a module by its dotted name in the .v2 file's folder, the project folder or its own path (a venv's packages): write that name, or put the file's folder on sys.path in a @py block before this @import
