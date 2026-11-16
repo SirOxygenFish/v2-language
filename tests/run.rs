@@ -961,6 +961,72 @@ fn exec_refuses_paths_cmd_would_rewrite() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn exec_arguments_reach_msys_programs_and_c_runtimes_as_given() {
+    // DOCS 3.11, INTERNALS 8.3 (round 18): Git Bash's MSYS programs (printf, sh) glob, expand
+    // braces and ~, read @file and take ' as a quote in a word they see unquoted; v2 and Python
+    // read their command line by the C runtime's rules. Each gets every argument as given. A
+    // batch file keeps Rust's quoting for cmd.exe (*.v2 and @data.json unquoted).
+    let cases = [
+        "q\"uote", "it's", "*.v2", "@data.json", "{a,b}.v2", "~", r"a\b", r#"a\\"b"#, r"trailing\", "", "two words", "a\ttab", "Čeština", "%PATH%",
+        r"\\server\share\My Docs", r"C:\some dir\", "-name", "*.json",
+    ];
+    let git = std::path::Path::new(r"C:\Program Files\Git\usr\bin");
+    let main = r#"let cases = json_parse(read_file("cases.json"))
+func same(name, argv) {
+    try {
+        let r = exec(argv + cases)
+        let got = json_parse(r.stdout)
+        print(name, got == cases ? "ok" : r.stdout.trim())
+    } catch (e) {
+        print(name, "skip", e.message)
+    }
+}
+same("v2", [args()[0], "child.v2"])
+same("python", ["python", "-c", "import sys, json; print(json.dumps(sys.argv[1:]))"])
+let git = args()[1]
+if exists(git + "/printf.exe") {
+    let want = "[" + cases.join("][") + "]"
+    let p = exec([git + "/printf.exe", "[%s]"] + cases).stdout
+    print("printf", p == want ? "ok" : p)
+    let s = exec([git + "/sh.exe", "-c", "printf '[%s]' \"$@\"", "sh"] + cases).stdout
+    print("sh", s == want ? "ok" : s)
+    let found = exec([git + "/find.exe", ".", "-maxdepth", "1", "-name", "*.v2"])
+    print(found.code, len(found.stdout.trim().lines()))
+}
+let bat = exec(["./show.bat", "*.v2", "@data.json", "it's", "{a,b}.v2", "~", "two words", r"a\b"]).stdout
+print(bat.trim())
+"#;
+    let json = serde_json::to_string(&cases).unwrap();
+    let bat = "@echo off\r\necho [%~1][%~2][%~3][%~4][%~5][%~6][%~7]\r\necho %1 %2\r\n";
+    let files = [
+        ("main.v2", main),
+        ("child.v2", "print(json_stringify(args()))\n"),
+        ("cases.json", json.as_str()),
+        ("a.v2", ""),
+        ("b.v2", ""),
+        ("data.json", "{\"id\": 1}\n"),
+        ("show.bat", bat),
+    ];
+    let (code, stdout, stderr, _home) = run_with_files(&files, &["main.v2", BIN, &git.to_string_lossy()]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("v2 ok"), "{stdout}");
+    let python = lines.next().unwrap_or_default();
+    assert!(python == "python ok" || python.starts_with("python skip"), "{stdout}");
+    if git.join("printf.exe").is_file() {
+        assert_eq!(lines.next(), Some("printf ok"), "{stdout}");
+        assert_eq!(lines.next(), Some("sh ok"), "{stdout}");
+        // find's own pattern, not the shell's: a.v2, b.v2, child.v2 and main.v2, not "paths must
+        // precede expression".
+        assert_eq!(lines.next(), Some("0 4"), "{stdout}");
+    } else {
+        let _ = writeln!(std::io::stderr(), "SKIP the MSYS part of exec_arguments_reach_msys_programs_and_c_runtimes_as_given (no Git for Windows)");
+    }
+    assert_eq!(lines.collect::<Vec<_>>(), ["[*.v2][@data.json][it's][{a,b}.v2][~][two words][a\\b]", "*.v2 @data.json"], "{stdout}");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn list_dir_refuses_names_that_are_not_utf8_and_exists_follows_symlinks() {
@@ -3179,6 +3245,94 @@ fn exec_and_file_errors_name_the_part_that_is_wrong() {
             None => assert!(!stderr.contains("hint:"), "{src}{stderr}"),
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_sh_script_on_windows_is_shown_git_bash_by_its_path() {
+    // INTERNALS 5.10, 7.6 (round 18): the hint names Git for Windows' bash by its full path
+    // (bin\bash.exe above git's folder, else in Program Files), never a bash on PATH, which is
+    // often WSL's (Linux); with none, it says a shell is needed. The call it shows runs the script.
+    let home = TempHome::new();
+    for f in ["Git/cmd/git.exe", "Git/bin/bash.exe", "wsl/bash.exe"] {
+        std::fs::create_dir_all(home.0.join(f).parent().unwrap()).unwrap();
+        std::fs::write(home.0.join(f), "").unwrap();
+    }
+    std::fs::write(home.0.join("build.sh"), "echo got $1\nuname -s\n").unwrap();
+    std::fs::write(home.0.join("x.v2"), "try { exec([\"./build.sh\", \"a\"]) } catch (e) { print(e.hint) }\n").unwrap();
+    let (wsl, git) = (home.0.join("wsl"), home.0.join("Git").join("cmd"));
+    // Windows sets a 64-bit program's ProgramFiles from ProgramW6432 as it starts.
+    let none = home.0.join("no program files");
+    let path = std::env::join_paths([&wsl, &git]).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["x.v2"], &[("PATH", &path), ("ProgramFiles", none.as_os_str()), ("ProgramW6432", none.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let bash = home.0.join("Git/bin/bash.exe").to_string_lossy().replace('\\', "/");
+    assert_eq!(stdout, format!("a .sh file runs through its program: write exec([\"{bash}\", \"./build.sh\"])\n"));
+    let (code, stdout, stderr) = run_in_home(&home.0, &["x.v2"], &[("PATH", wsl.as_os_str()), ("ProgramFiles", none.as_os_str()), ("ProgramW6432", none.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let want = "a .sh file needs a shell to run it, such as Git for Windows' bash (winget install -e --id Git.Git): then write exec([\"C:/Program Files/Git/bin/bash.exe\", \"./build.sh\"])\n";
+    assert_eq!(stdout, want);
+    let real = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+    if !real.is_file() {
+        let _ = writeln!(std::io::stderr(), "SKIP the Git Bash run of a_sh_script_on_windows_is_shown_git_bash_by_its_path (no Git for Windows)");
+        return;
+    }
+    std::fs::write(home.0.join("run.v2"), "let r = exec([\"C:/Program Files/Git/bin/bash.exe\", \"./build.sh\", \"Čeština\"])\nprint(r.code, r.stdout.trim())\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["run.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.starts_with("0 got Čeština\nMINGW") || stdout.starts_with("0 got Čeština\nMSYS"), "{stdout}");
+}
+
+#[cfg(windows)]
+#[test]
+fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
+    // INTERNALS 5.10 (round 18): /c/Users/… is Git Bash's spelling of C:/Users/…, in every file
+    // builtin's not-found error and for exec's program, and make_dir refuses one; a name Windows
+    // doesn't allow says why.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("data.txt"), "here").unwrap();
+    let full = home.0.to_string_lossy().replace('\\', "/");
+    let (drive, rest) = full.split_once(':').unwrap();
+    let msys = format!("/{}{rest}", drive.to_ascii_lowercase());
+    let windows = format!("{}:{rest}", drive.to_ascii_uppercase());
+    let spelling = format!("on Windows, /{}/… is Git Bash's spelling of {}:/…: write ", drive.to_ascii_lowercase(), drive.to_ascii_uppercase());
+    let q = |s: &str| serde_json::to_string(s).unwrap();
+    let src = format!(
+        "func hint(f) {{\n    try {{\n        f()\n        print(\"no error\")\n    }} catch (e) {{\n        print(e.hint)\n    }}\n}}\n\
+         hint(func() => read_file({m}))\nhint(func() => write_file({mo}, \"x\"))\nhint(func() => list_dir({md}))\nhint(func() => remove_file({m}))\n\
+         hint(func() => exec([{mp}]))\nhint(func() => make_dir({mn}))\nprint(exists({mr}))\nprint(read_file({w}))\n\
+         hint(func() => write_file(\"what?.txt\", \"x\"))\nhint(func() => read_file(\"a|b.txt\"))\nhint(func() => make_dir(\"aux\"))\n\
+         hint(func() => list_dir(\"nul\"))\nhint(func() => write_file(\"sub./x.txt\", \"x\"))\nhint(func() => read_file(\"missing.txt\"))\n",
+        m = q(&format!("{msys}/data.txt")),
+        mo = q(&format!("{msys}/out.txt")),
+        md = q(&msys),
+        mp = q(&format!("{msys}/prog.exe")),
+        mn = q(&format!("{msys}/new/dir")),
+        mr = q(&msys[..2]),
+        w = q(&format!("{windows}/data.txt")),
+    );
+    std::fs::write(home.0.join("h.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["h.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let refused = "Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > \" | ? *): choose another name";
+    let want = [
+        format!("{spelling}{}", q(&format!("{windows}/data.txt"))),
+        format!("{spelling}{}", q(&format!("{windows}/out.txt"))),
+        format!("{spelling}{}", q(&windows)),
+        format!("{spelling}{}", q(&format!("{windows}/data.txt"))),
+        format!("{spelling}{}", q(&format!("{windows}/prog.exe"))),
+        // make_dir would make \c\Users\... on this drive: refused, and nothing is made.
+        format!("{spelling}{}", q(&format!("{windows}/new/dir"))),
+        "false".into(),
+        "here".into(),
+        refused.into(),
+        refused.into(),
+        refused.into(),
+        refused.into(),
+        refused.into(),
+        "null".into(),
+    ];
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
 }
 
 #[cfg(any(windows, target_os = "linux"))]
