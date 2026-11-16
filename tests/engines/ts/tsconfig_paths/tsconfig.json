@@ -1,0 +1,8 @@
+{
+  // tsconfig.json allows comments and trailing commas.
+  "compilerOptions": {
+    "baseUrl": ".",
+    /* the aliases */
+    "paths": { "@lib/*": ["lib/*"], "~/*": ["src/*"], },
+  },
+}

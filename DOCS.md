@@ -991,10 +991,14 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - Runs on the same Node worker as `@js`, with the types stripped first by Node's built-in type
   stripping. Settings go in `[engines.js]`; `ts` has none of its own.
 - Types are **not checked** — run `tsc` yourself if you want checking.
-- Stripping only removes type syntax. `enum`, `namespace` and constructor parameter properties
-  raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on early Node 22 releases
-  `ERR_INVALID_TYPESCRIPT_SYNTAX`): write TypeScript without them, or
-  use `@js`.
+- Stripping only removes type syntax. `enum`, a `namespace` with values, constructor parameter
+  properties (`constructor(private x: T)`), `import x = require(…)`, `export =` and `<T>x` casts
+  are code, and raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on early Node 22
+  releases `ERR_INVALID_TYPESCRIPT_SYNTAX`) whose hint says what to write instead (a const object
+  for an `enum`, `x as T` for a cast), in a block and in a `.ts` file alike; or use `@js`.
+- Node doesn't read `tsconfig.json`: to it a `"paths"` alias (`@/lib`, `~/utils`) is a package
+  that isn't installed, and the error's hint says so. Import by a relative path, or name the
+  alias in `package.json` `"imports"` (`"#lib/*": "./lib/*"`).
 - `@js` and `@ts` blocks can import from each other directly.
 
 ### C — `@c`, C++ — `@cpp`, Rust — `@rust`
@@ -1182,7 +1186,9 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
   the `.v2` file's folder: `@import { render } from js."./helpers.js"` (TypeScript:
   `ts."./helpers.ts"`). Node runs a TypeScript file as it is written, so its imports of other
   `.ts` files name them with `.ts` (`./math.ts`, not tsc's `./math.js` or `./math`), and a type
-  or interface is imported with `import type`; the hint of either error says so.
+  or interface is imported with `import type`; the hint of either error says so. A type is gone
+  when the file runs, so V2 can't import one either. Node has no JSX: a `.jsx` or `.tsx` file is
+  compiled first, and you import the `.js` your build writes.
 - A JavaScript default export is imported by name: `@import { "default" as dayjs } from js.dayjs`.
 - **Whole module as a handle:** `@import py.numpy as np` gives you the module itself. If a
   JavaScript package *is* a function (`module.exports = function …`), the handle can be called
@@ -1216,16 +1222,24 @@ venv = ".venv"
 Python looks in the `.v2` file's folder, the project root, then its normal module path (your
 `PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). Node
 looks the way Node always does: in the `node_modules` folders from the `.v2` file's folder upwards
-(so your project's is found), then in your own `NODE_PATH` if you set one. Packages that only ship
+(so your project's is found), then in your own `NODE_PATH` if you set one. (A Yarn Plug'n'Play
+project has no `node_modules`: `nodeLinker: node-modules` in its `.yarnrc.yml` makes one, as the
+hint says.) `js.pkg` loads a package the way `require()` does. Packages that only ship
 as ES modules work too, except the rare one whose `package.json` `exports` offers only an
 `import` entry: load that one in a `@js` block, `async function load() { return await
-import("pkg") }`, as the error's hint shows. A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
+import("pkg") }`, as the error's hint shows. A package with an `import` build and a `require`
+build gives V2 its `require` one: a name only the `import` build has is an `ImportError` whose
+hint names both files and shows that `import()` way (a `.mjs` or `.ts` file of yours that imports
+the package gets the `import` build). A local `helpers.py` next to your `.v2` file is importable as `py.helpers`.
 
 One Python engine serves every `.v2` file in a run, so two local modules with the same name in
 different folders collide: importing the second is an `ImportError` that names both files, and so
 is a local module named like one Python has already loaded (`json`, `numbers`). Give yours another
 name. Likewise a JavaScript package imported by
-bare name is loaded once per run, from the folder of the first `.v2` file that imports it.
+bare name is loaded once per run, from the folder of the first `.v2` file that imports it: a
+later `.v2` file whose folder has another copy (in its own `node_modules`) gets the first one too,
+and V2 says so once on stderr, `note: js.legacy from … resolves to …, but this run already loaded
+…`. A block's `require()` still looks from its own file's folder.
 
 A module that doesn't exist is an `ImportError` carrying the foreign message
 (`No module named 'pandas'`), raised at the `@import`, or when the language starts or at the first

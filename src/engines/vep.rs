@@ -132,7 +132,8 @@ pub struct Hello {
 /// A frame from a worker (9.2).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
-    Ret { id: u64, value: Json, exports: Option<Json>, missing: Option<Json>, names: Option<Json> },
+    /// `hint`: a string `hint` member, which a module's `ret` may add (9.4).
+    Ret { id: u64, value: Json, exports: Option<Json>, missing: Option<Json>, names: Option<Json>, hint: Option<Box<str>> },
     Err { id: u64, error: Map<String, Json> },
     Call { id: u64, target: Target, args: Vec<Json>, kwargs: Map<String, Json> },
     /// `error`: the text reports an error no V2 call could raise (9.9).
@@ -265,6 +266,7 @@ pub fn parse_frame(line: &[u8], caps: Caps) -> Result<Frame, String> {
             exports: m.get("exports").cloned(),
             missing: m.get("missing").cloned(),
             names: m.get("names").cloned(),
+            hint: m.get("hint").and_then(Json::as_str).filter(|h| !h.is_empty()).map(Box::from),
         }),
         "err" => {
             let error = member(&m, &t, "error")?.as_object().ok_or("'err' frame with a bad 'error'")?;

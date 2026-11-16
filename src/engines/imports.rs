@@ -413,8 +413,15 @@ fn written(name: &str) -> String {
 }
 
 /// A `module` request's answer (13.5): the module or null, the names asked for that it has, the
-/// ones it lacks, and, when it lacks some, its public names for the did-you-mean.
-type ModuleAnswer = (Value, Vec<Export>, Vec<Rc<str>>, Vec<Rc<str>>);
+/// ones it lacks, and, when it lacks some, what the reply says about them.
+type ModuleAnswer = (Value, Vec<Export>, Vec<Rc<str>>, Have);
+
+/// What a module's reply says when it lacks a name asked for (9.4): its public names, for the
+/// did-you-mean, and the worker's hint (a dual package's, 13.5).
+struct Have {
+    names: Vec<Rc<str>>,
+    hint: Option<Rc<str>>,
+}
 
 /// 13.3 step 6: `name` isn't among what the block exports, with the closest of those names.
 /// `listed`: `exported` is the blocks' `@export` lists as written, where the typo may be. `star`:
@@ -533,6 +540,10 @@ fn missing_package_hint(message: &str, dir: &Path, python: Option<&Path>) -> Opt
         let rest = name[package.len()..].trim_start_matches('/');
         return Some(format!("'{package}' is installed, but has no '{rest}': check the path after '{package}/'"));
     }
+    // `@/lib`: an alias of the nearest tsconfig.json, which only TypeScript's own tools read.
+    if let Some(hint) = alias_hint(&name, dir) {
+        return Some(hint);
+    }
     // `js.helpers` for the script's own helpers.js: a file is imported by its path, and
     // `npm install helpers` would fetch whatever package has that name.
     let with_ext = Path::new(&name).extension().and_then(|e| e.to_str()).is_some_and(|e| OWN_EXTS.contains(&e.to_ascii_lowercase().as_str()));
@@ -543,6 +554,13 @@ fn missing_package_hint(message: &str, dir: &Path, python: Option<&Path>) -> Opt
     }
     if with_ext {
         return Some(format!("a file of your own is imported by its path from the .v2 file's folder, as in {}.\"./{name}\": check its name ({}, without ./, names an npm package)", lang(&name), written(&name)));
+    }
+    // Yarn Plug'n'Play keeps packages where only Yarn's loader finds them, with no node_modules.
+    if let Some(pnp) = dir.ancestors().flat_map(|d| [d.join(".pnp.cjs"), d.join(".pnp.js")]).find(|p| p.is_file()) {
+        return Some(format!(
+            "this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install",
+            pnp.display()
+        ));
     }
     let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| format!("did you mean js.{n}? "));
@@ -637,7 +655,10 @@ fn nested_commonjs_hint(message: &str, spec: &str, dir: &Path) -> Option<String>
 /// is written, so imports between .ts files name the .ts file, and types are imported with
 /// `import type` (they are gone when it runs).
 fn ts_import_hint(message: &str) -> Option<String> {
-    let typescript = |p: &str| [".ts", ".mts", ".cts"].iter().any(|e| p.to_ascii_lowercase().ends_with(e));
+    let typescript = |p: &str| ts_file(Path::new(p));
+    if let Some(hint) = imported_alias_hint(message) {
+        return Some(hint);
+    }
     if let Some(rest) = message.split("Cannot find module '").nth(1) {
         let (missing, rest) = rest.split_once('\'')?;
         let importer = rest.strip_prefix(" imported from ")?.lines().next()?.trim();
@@ -660,6 +681,149 @@ fn ts_import_hint(message: &str) -> Option<String> {
     typescript(module).then(|| {
         format!("if '{export}' is a type or an interface, import it with import type {{ {export} }} from '{module}': Node removes types as it runs a .ts file, so they aren't exports")
     })
+}
+
+/// A `.ts`, `.mts` or `.cts` file.
+fn ts_file(p: &Path) -> bool {
+    p.extension().is_some_and(|e| matches!(e.to_string_lossy().to_ascii_lowercase().as_str(), "ts" | "mts" | "cts"))
+}
+
+/// `@import { Shape } from ts."./types.ts"` where types.ts declares Shape as a type or an
+/// interface (`export type Shape`, `export interface Shape`, read from its lines), which
+/// TypeScript removes before the file runs (13.5).
+fn ts_type_hint(name: &str, module: &str, dir: &Path) -> Option<String> {
+    let relative = module.starts_with("./") || module.starts_with("../") || (cfg!(windows) && (module.starts_with(".\\") || module.starts_with("..\\")));
+    if !relative && !Path::new(module).is_absolute() {
+        return None;
+    }
+    let file = absolute_clean(&dir.join(module));
+    if !ts_file(&file) {
+        return None;
+    }
+    let text = std::fs::read_to_string(&file).ok()?;
+    /// What follows `word` and the space after it.
+    fn after<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+        s.strip_prefix(word).filter(|r| r.starts_with(char::is_whitespace)).map(str::trim_start)
+    }
+    let declares = text.lines().any(|line| {
+        let mut rest = line.trim_start();
+        for word in ["export", "declare"] {
+            rest = after(rest, word).unwrap_or(rest);
+        }
+        ["type", "interface"].iter().filter_map(|k| after(rest, k)).filter_map(|r| r.strip_prefix(name)).any(|r| !r.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$'))
+    });
+    declares.then(|| format!("{name} is a type, which TypeScript removes before it runs: there is nothing to import; use it in TypeScript only"))
+}
+
+/// A specifier a `paths` alias of the tsconfig.json nearest `dir` matches (13.5): `@/lib` for
+/// `@/*`. Node doesn't read tsconfig.json.
+fn alias_hint(spec: &str, dir: &Path) -> Option<String> {
+    let (config, keys) = tsconfig_paths(dir)?;
+    let key = keys.iter().find(|k| alias_matches(k, spec))?;
+    Some(format!(
+        "\"{key}\" is a \"paths\" alias in {}, and Node doesn't read tsconfig paths: import by a relative path, or use package.json \"imports\" (#alias)",
+        config.display()
+    ))
+}
+
+/// A TypeScript file's import of an alias: `Cannot find package '@lib/math' imported from
+/// …\paths.ts` (Node names a bare specifier's package part, `~` for `~/utils`), or a `.cts`
+/// file's `Cannot find module '~/utils'` with the file first on its require stack.
+fn imported_alias_hint(message: &str) -> Option<String> {
+    let (spec, rest) = ["Cannot find package '", "Cannot find module '"].iter().find_map(|p| message.split(p).nth(1))?.split_once('\'')?;
+    let importer = match rest.strip_prefix(" imported from ") {
+        Some(r) => r.lines().next()?.trim(),
+        None => rest.split("Require stack:").nth(1)?.lines().find_map(|l| l.trim().strip_prefix("- "))?.trim(),
+    };
+    let importer = Path::new(importer);
+    if spec.starts_with('.') || !ts_file(importer) {
+        return None;
+    }
+    alias_hint(spec, importer.parent()?)
+}
+
+/// Whether the `paths` key `key` (`@lib/*`, `~/*`, `utils`) can match a specifier that is
+/// `spec` or starts with `spec/` (Node names a package part); never the catch-all `*`.
+fn alias_matches(key: &str, spec: &str) -> bool {
+    let within = |k: &str| k.starts_with(&format!("{spec}/"));
+    match key.split_once('*') {
+        Some(("", _)) => false,
+        Some((pre, _)) => spec.starts_with(pre) || within(pre),
+        None => key == spec || within(key),
+    }
+}
+
+/// The `compilerOptions.paths` keys of the tsconfig.json nearest `dir` (its folder or one above),
+/// or of what it extends by a relative path, with the file that has them.
+fn tsconfig_paths(dir: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let mut file = dir.ancestors().map(|d| d.join("tsconfig.json")).find(|p| p.is_file())?;
+    for _ in 0..8 {
+        let json: Json = serde_json::from_str(&plain_json(&std::fs::read_to_string(&file).ok()?)).ok()?;
+        if let Some(paths) = json.pointer("/compilerOptions/paths").and_then(Json::as_object) {
+            return Some((file, paths.keys().cloned().collect()));
+        }
+        let base = json.get("extends").and_then(Json::as_str).filter(|e| e.starts_with("./") || e.starts_with("../"))?;
+        let next = absolute_clean(&file.parent()?.join(base));
+        file = if next.is_file() { next } else { PathBuf::from(format!("{}.json", next.display())) };
+    }
+    None
+}
+
+/// tsconfig.json's text (comments, trailing commas, a byte order mark) as plain JSON.
+fn plain_json(text: &str) -> String {
+    // Each pass keeps strings as they are: `skip(chars, i)` is where the string at `i` ends.
+    let skip = |chars: &[char], mut i: usize| {
+        i += 1;
+        while i < chars.len() && chars[i] != '"' {
+            i += if chars[i] == '\\' { 2 } else { 1 };
+        }
+        (i + 1).min(chars.len())
+    };
+    let chars: Vec<char> = text.trim_start_matches('\u{feff}').chars().collect();
+    let mut bare = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match (chars[i], chars.get(i + 1)) {
+            ('"', _) => {
+                let end = skip(&chars, i);
+                bare.extend_from_slice(&chars[i..end]);
+                i = end;
+            }
+            ('/', Some('/')) => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            ('/', Some('*')) => {
+                i += 2;
+                while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+                bare.push(' ');
+            }
+            (c, _) => {
+                bare.push(c);
+                i += 1;
+            }
+        }
+    }
+    let mut out = String::with_capacity(bare.len());
+    let mut i = 0;
+    while i < bare.len() {
+        match bare[i] {
+            '"' => {
+                let end = skip(&bare, i);
+                out.extend(&bare[i..end]);
+                i = end;
+                continue;
+            }
+            ',' if matches!(bare[i + 1..].iter().find(|c| !c.is_whitespace()), Some('}' | ']')) => {}
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The imported names as an `@export { … }` list would write them.
@@ -1033,14 +1197,13 @@ impl Interp {
                     ImportItems::Module(_) => Json::Null,
                 };
                 let (value, exports, missing, have) = self.import_module(file, &imp.selector, names, self.selector_span(&imp.selector))?;
-                let text = self.selector_text(&imp.selector);
                 match items {
                     ImportItems::Module(alias) => bound.push((alias.text.clone(), value)),
                     ImportItems::Names(list) => {
                         for (name, alias, span) in named_items(list) {
                             match find(&exports, &name) {
                                 Some(e) if !missing.contains(&name) => bound.push((alias, e.value.clone())),
-                                _ => return Err(self.raise(self.not_exported_error(file, &name, &text, &have), span)),
+                                _ => return Err(self.raise(self.not_exported_error(file, &name, &imp.selector, &have), span)),
                             }
                         }
                     }
@@ -1119,6 +1282,13 @@ impl Interp {
             }
         } else if name.is_empty() {
             return Err(import_error("'' is not a valid module name".into()));
+        } else if let Some(ext) = [".jsx", ".tsx"].into_iter().find(|e| key == "js" && name.to_ascii_lowercase().ends_with(e)) {
+            // Node has no JSX: it would load the file as plain JavaScript (13.5).
+            let f = import_error(format!("'{name}' is a {ext} file, which V2 can't import: Node has no JSX, so it can't run .jsx or .tsx files"));
+            if let Flow::Error(e) = &f {
+                let _ = e.hint.set("compile it first and import the .js your build writes (TypeScript without JSX can be a .ts file)".into());
+            }
+            return Err(f);
         }
         let relative = name == "." || name == ".." || name.starts_with("./") || name.starts_with("../")
             || (cfg!(windows) && (name.starts_with(".\\") || name.starts_with("..\\")));
@@ -1163,14 +1333,22 @@ impl Interp {
         })?;
         let unit: Rc<str> = unit.into();
         let exports = reply.exports.into_iter().map(|(name, v)| export(s, &unit, name, v)).collect();
-        Ok((reply.value, exports, reply.missing, reply.names))
+        Ok((reply.value, exports, reply.missing, Have { names: reply.names, hint: reply.hint }))
     }
 
-    /// 13.5's not-exported error, with a hint when a file of the script's own has that name.
-    fn not_exported_error(&self, file: FileId, name: &str, text: &str, have: &[Rc<str>]) -> Flow {
-        let f = import_error(not_exported(name, text, have));
+    /// 13.5's not-exported error, with a hint: a file of the script's own has that name, the
+    /// name is a TypeScript type, or the worker's (a dual package's), unless a name is near.
+    fn not_exported_error(&self, file: FileId, name: &str, sel: &Selector, have: &Have) -> Flow {
+        let text = self.selector_text(sel);
+        let f = import_error(not_exported(name, &text, &have.names));
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
-        if let (Flow::Error(e), Some(hint)) = (&f, shadowed_hint(text, &dir)) {
+        let module = match sel {
+            Selector::Module { path, .. } => path.iter().map(|n| &*n.text).collect::<Vec<_>>().join("."),
+            _ => String::new(),
+        };
+        let worker = || have.hint.as_ref().filter(|_| did_you_mean(name, have.names.iter().map(|n| &**n)).is_none()).map(|h| h.to_string());
+        let hint = shadowed_hint(&text, &dir).or_else(|| ts_type_hint(name, &module, &dir)).or_else(worker);
+        if let (Flow::Error(e), Some(hint)) = (&f, hint) {
             let _ = e.hint.set(hint.into());
         }
         f
@@ -1235,11 +1413,10 @@ impl Interp {
                     }
                     let names = json!(list.iter().map(|i| &*i.name).collect::<Vec<_>>());
                     let (_, exports, missing, have) = self.import_module(file, &imp.selector, names, at)?;
-                    let text = self.selector_text(&imp.selector);
                     for (name, alias, span) in named_items(list) {
                         let found = find(&exports, &name).filter(|_| !missing.contains(&name));
                         let Some(e) = found else {
-                            return Err(self.raise(self.not_exported_error(file, &name, &text, &have), span));
+                            return Err(self.raise(self.not_exported_error(file, &name, &imp.selector, &have), span));
                         };
                         if !e.func {
                             // A package's object (zod's `z`): the block's language imports it itself.
@@ -1329,7 +1506,7 @@ impl Interp {
             return match find(&exports, name) {
                 Some(e) if !missing.contains(name) && e.func => Ok(e.value.clone()),
                 Some(_) if !missing.contains(name) => Err(constant_error(name)),
-                _ => Err(self.not_exported_error(file, name, &self.selector_text(&imp.selector), &have)),
+                _ => Err(self.not_exported_error(file, name, &imp.selector, &have)),
             };
         }
         // What can only fail starts nothing (13.3).
@@ -1470,5 +1647,80 @@ mod tests {
             Some("if 'Shape' is a type or an interface, import it with import type { Shape } from './types.ts': Node removes types as it runs a .ts file, so they aren't exports")
         );
         assert_eq!(ts_import_hint("The requested module './x.js' does not provide an export named 'y'"), None);
+    }
+
+    #[test]
+    fn a_yarn_plug_n_play_project_is_named_in_the_hint() {
+        // Round 18: Yarn's PnP keeps packages out of node_modules, so `npm install` isn't the fix.
+        let d = temp("pnp");
+        std::fs::write(d.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        let npm = missing_package_hint("Cannot find module 'lodash'", &d.join("sub"), None).unwrap();
+        assert!(npm.starts_with("if 'lodash' isn't misspelled, install it with npm install lodash"), "{npm}");
+        std::fs::write(d.join(".pnp.cjs"), "").unwrap();
+        let want = format!(
+            "this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install",
+            d.join(".pnp.cjs").display()
+        );
+        for dir in [d.clone(), d.join("sub")] {
+            assert_eq!(missing_package_hint("Cannot find module 'lodash'", &dir, None).as_deref(), Some(&*want));
+        }
+        // A file of the script's own still gets its hint, and a local path its own.
+        std::fs::write(d.join("helpers.js"), "").unwrap();
+        assert!(missing_package_hint("Cannot find module 'helpers'", &d, None).unwrap().starts_with("your own helpers.js"));
+        assert_eq!(missing_package_hint("Cannot find module './x.js'", &d, None).as_deref(), Some("a local file is found from the .v2 file's folder: check the path"));
+    }
+
+    #[test]
+    fn a_tsconfig_paths_alias_is_named_in_the_hint() {
+        // Round 18: Node doesn't read tsconfig.json, whose "paths" a TypeScript project may use.
+        let d = temp("tsconfig");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("tsconfig.base.json"), "\u{feff}{\n  // shared\n  \"compilerOptions\": {\n    \"paths\": {\n      \"@lib/*\": [\"lib/*\"], /* a comment, \"*/\n      \"~/*\": [\"src/*\"],\n      \"utils\": [\"src/utils.ts\"],\n      \"*\": [\"types/*\"],\n    },\n  },\n}\n").unwrap();
+        std::fs::write(d.join("tsconfig.json"), "{ \"extends\": \"./tsconfig.base\", \"include\": [\"src/**/*\", \"a,]\"], }").unwrap();
+        let base = d.join("tsconfig.base.json");
+        let (file, keys) = tsconfig_paths(&d.join("src")).unwrap();
+        assert_eq!(file, base);
+        assert_eq!(keys, ["@lib/*", "~/*", "utils", "*"]);
+        let hint = |key: &str| format!("\"{key}\" is a \"paths\" alias in {}, and Node doesn't read tsconfig paths: import by a relative path, or use package.json \"imports\" (#alias)", base.display());
+        // The .v2 file's own @import, which names the whole specifier.
+        let missing = |spec: &str| missing_package_hint(&format!("Cannot find module '{spec}'"), &d.join("src"), None).unwrap();
+        assert_eq!(missing("@lib/math"), hint("@lib/*"));
+        assert_eq!(missing("~/x/y"), hint("~/*"));
+        assert_eq!(missing("utils"), hint("utils"));
+        assert!(missing("lodash").starts_with("if 'lodash' isn't misspelled"), "the catch-all * is no alias of every name");
+        // A .ts file's import: Node names a bare specifier's package part (`~` for `~/utils`); a
+        // .cts file's require names it whole, with the file first on its require stack.
+        let ts = d.join("src").join("app.ts");
+        assert_eq!(ts_import_hint(&format!("Cannot find package '~' imported from {}", ts.display())), Some(hint("~/*")));
+        assert_eq!(ts_import_hint(&format!("Cannot find package '@lib/math' imported from {}", ts.display())), Some(hint("@lib/*")));
+        let cts = d.join("src").join("old.cts");
+        assert_eq!(ts_import_hint(&format!("Cannot find module '~/utils'\nRequire stack:\n- {}\n- {}", cts.display(), d.join("x.js").display())), Some(hint("~/*")));
+        assert_eq!(ts_import_hint(&format!("Cannot find package 'lodash' imported from {}", ts.display())), None);
+        assert_eq!(ts_import_hint(&format!("Cannot find package '~' imported from {}", d.join("src").join("app.js").display())), None, "a .js file's import");
+        // Without a tsconfig.json: none.
+        assert_eq!(tsconfig_paths(&temp("no-tsconfig")), None);
+    }
+
+    #[test]
+    fn tsconfig_text_becomes_plain_json() {
+        assert_eq!(plain_json("{\"a\": \"// not a comment\", \"b\": [1, 2,], /* c */ \"d\": \"\\\",]\",}"), "{\"a\": \"// not a comment\", \"b\": [1, 2],   \"d\": \"\\\",]\"}");
+        assert!(alias_matches("@/*", "@/lib") && alias_matches("~/*", "~") && alias_matches("@lib/*", "@lib/math"));
+        assert!(!alias_matches("*", "lodash") && !alias_matches("@lib/*", "@li") && !alias_matches("utils", "util"));
+    }
+
+    #[test]
+    fn a_typescript_type_imported_as_a_value_is_named_in_the_hint() {
+        // Round 18: `@import { Shape } from ts."./types.ts"`, where Shape is a type.
+        let d = temp("ts-type");
+        std::fs::write(d.join("types.ts"), "export interface Point { x: number }\nexport declare type Shape = 'a';\n  type Local<T> = T\nexport const ShapeKinds = 2\n").unwrap();
+        let hint = |name: &str| ts_type_hint(name, "./types.ts", &d);
+        assert_eq!(hint("Point").as_deref(), Some("Point is a type, which TypeScript removes before it runs: there is nothing to import; use it in TypeScript only"));
+        assert!(hint("Shape").is_some() && hint("Local").is_some());
+        assert_eq!(hint("ShapeKinds"), None, "a value");
+        assert_eq!(hint("Shap"), None);
+        std::fs::write(d.join("types.js"), "export type Shape = 1\n").unwrap();
+        assert_eq!(ts_type_hint("Shape", "./types.js", &d), None, "a .js file has no types");
+        assert_eq!(ts_type_hint("Shape", "types", &d), None, "a package");
     }
 }

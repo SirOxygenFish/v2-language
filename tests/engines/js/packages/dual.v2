@@ -1,0 +1,37 @@
+// requires: js
+// A dual package (`exports` with "import" and "require") loads its require build, as require()
+// does: a name only its import build has gets a hint naming both files (DOCS 7, INTERNALS 13.5).
+let here = @js { __dirname }
+func shown(h) {
+    return h == null ? null : h.replace(here, "<here>").replace("\\", "/")
+}
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", shown(e.hint))
+    }
+}
+show(func() {
+    @import { square, flavor, Vec } from js."v2-test-dual"
+    return [square(3), flavor, Vec]
+})
+// A subpath through an `exports` pattern.
+show(func() {
+    @import { only } from js."v2-test-dual/extra"
+    return only()
+})
+// What both builds have loads, from the require build.
+@import { square, flavor } from js."v2-test-dual"
+print(square(4), flavor)
+// A name close to one it has: the did-you-mean is the likely fix, so no hint.
+show(func() {
+    @import { sqare } from js."v2-test-dual"
+    return sqare
+})
+// A package with one build: no hint.
+show(func() {
+    @import { nope } from js."v2-test-pkg"
+    return nope
+})
