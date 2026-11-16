@@ -1330,7 +1330,7 @@ function stripTypes(src, m) {
     else if (header) [line, col] = [Number(header[1]), codePointAtWidth(bodyLine(Number(header[1])), header[2].length)];
     if (line !== null) err.v2Frame = { file: m.file, line: m.line + line - 1, col, func: null };
     err.stack = stack || 'SyntaxError: ' + err.message;
-    const hint = stripHint(e && e.code, message);
+    const hint = stripHint(e && e.code, message, null);
     if (hint) errorHints.set(err, hint);
     throw err;
   }
@@ -1338,38 +1338,59 @@ function stripTypes(src, m) {
 
 // TypeScript that is code, which type stripping refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX; on
 // early Node 22 releases ERR_INVALID_TYPESCRIPT_SYNTAX, which their other syntax errors have too):
-// what to write instead, by the feature Node's message names (DOCS 5, INTERNALS 12.5).
+// what to write instead, by the feature Node's message names (DOCS 5, INTERNALS 12.5). For
+// import = and export =, by where the code is: a .cts file is CommonJS, an .mts file an ES
+// module, a .ts file either (its package.json says which), and a block takes require and @export.
 const STRIP_CODES = new Set(['ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX', 'ERR_INVALID_TYPESCRIPT_SYNTAX']);
+const STRIPPED = 'Node runs TypeScript by removing its types, and ';
+const MODULE_FORMS = {
+  cjs: ['const x = require("…")', 'module.exports = x'],
+  esm: ['import x from "…"', 'export default x'],
+  ts: ['const x = require("…") in CommonJS, or import x from "…" in an ES module', 'module.exports = x in CommonJS, or export default x in an ES module'],
+  block: ['const x = require("…")', '@export { x }'],
+};
 const STRIP_HINTS = [
-  [/\benum\b/, 'an enum is code: use a const object, as in const Color = { Red: 0, Green: 1 } as const'],
-  [/parameter property/, 'a parameter property is code: declare the field and assign it in the constructor, as in who: string; constructor(who: string) { this.who = who }'],
-  [/import equals/, 'import x = require(…) is code: write import x from "…", or const x = require("…")'],
-  [/export assignment/, 'export = is code: write export default x, or module.exports = x'],
-  [/namespace|`module` keyword/, 'a namespace with values is code: use a module of its own (a file) or an object, as in const NS = { x: 1 }'],
-  [/angle-bracket/, 'a <T>x cast is code: write x as T'],
+  [/\benum\b/, () => STRIPPED + 'an enum is code: use a const object, as in const Color = { Red: 0, Green: 1 } as const'],
+  [/parameter property/, () => STRIPPED + 'a parameter property is code: declare the field and assign it in the constructor, as in who: string; constructor(who: string) { this.who = who }'],
+  [/import equals/, (forms) => STRIPPED + `import x = require(…) is code: write ${forms[0]}`],
+  [/export assignment/, (forms) => STRIPPED + `export = is code: write ${forms[1]}`],
+  // Node 24's message for `module M { … }`, which also names `namespace`.
+  [/`module` keyword/, () => "write namespace M for module M: Node's type stripping takes only that spelling"],
+  [/namespace/, () => STRIPPED + 'a namespace with values is code (an older Node, such as 22.13, refuses even one with only types): use a module of its own (a file) or an object, as in const NS = { x: 1 }'],
+  [/angle-bracket/, () => STRIPPED + 'a <T>x cast is code: write x as T'],
 ];
 
-function stripHint(code, message) {
+// `file` is the TypeScript file that failed, or null for a block.
+function stripHint(code, message, file) {
   // The line that says so: Node 22's message goes on with the source lines around it.
   const what = STRIP_CODES.has(code) ? String(message).split('\n').find((l) => /not supported/.test(l)) : undefined;
   const hit = what === undefined ? undefined : STRIP_HINTS.find(([re]) => re.test(what));
-  return hit ? `Node runs TypeScript by removing its types, and ${hit[1]}` : null;
+  if (!hit) return null;
+  const kind = file === null ? 'block' : /\.cts$/i.test(file) ? 'cjs' : /\.mts$/i.test(file) ? 'esm' : 'ts';
+  return hit[1](MODULE_FORMS[kind]);
 }
 
-// Node has no JSX: a .jsx or .tsx file is code it can't run (13.5). The file, from Node's
-// unknown-extension error, a syntax error's position, or what a block required.
+// The file an error from loading one is about: its position (syntaxFrame), the `file:line` Node
+// puts first on its stack, else what was required (an ES module's syntax error has no position,
+// nor has a TypeScript one on Node 22).
+function loadedFile(e, id) {
+  const first = String(e.stack || '').split('\n')[0];
+  const at = /^[A-Za-z]*Error\b/.test(first) ? null : /^(.+):\d+\r?$/.exec(first);
+  return (e.v2Frame && e.v2Frame.file) || (at && at[1]) || id;
+}
+
+// Node has no JSX: a .jsx or .tsx file is code it can't run (13.5), unless a loader registered
+// for its extension (NODE_OPTIONS=--require @babel/register) does, and then a syntax error in it
+// is the code's own. The file, from Node's unknown-extension error, or a syntax error's.
 const JSX_FILE = /\.[jt]sx$/i;
 
 function jsxHint(e, id) {
   let file = null;
   const unknown = e.code === 'ERR_UNKNOWN_FILE_EXTENSION' ? /\bfor (.+)$/m.exec(String(e.message)) : null;
   if (unknown) file = unknown[1].trim();
-  else if (e.name === 'SyntaxError') {
-    // An ES module's syntax error has no position: then the file is what was required.
-    const at = (e.v2Frame && e.v2Frame.file) || (/^(.+):\d+\r?$/.exec(String(e.stack || '').split('\n')[0]) || [])[1];
-    file = at || id;
-  }
+  else if (e.name === 'SyntaxError') file = loadedFile(e, id);
   if (!file || !JSX_FILE.test(file)) return null;
+  if (!unknown && Object.prototype.hasOwnProperty.call(Module._extensions, path.extname(file))) return null;
   return `Node has no JSX, so it can't run .jsx or .tsx files: compile ${path.basename(file)} first and import the .js your build writes (TypeScript without JSX can be a .ts file)`;
 }
 
@@ -1378,7 +1399,7 @@ function loadHint(e, id) {
   if (e === null || typeof e !== 'object' || errorHints.has(e)) return;
   let hint = null;
   try {
-    hint = stripHint(e.code, String(e.message)) || jsxHint(e, id);
+    hint = stripHint(e.code, String(e.message), loadedFile(e, id)) || jsxHint(e, id);
   } catch {} // an error whose fields throw keeps none
   if (hint) errorHints.set(e, hint);
 }

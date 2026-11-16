@@ -1,7 +1,10 @@
 // requires: js ts
 // TypeScript that is code, which Node's type stripping refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX,
 // ERR_INVALID_TYPESCRIPT_SYNTAX on early Node 22): the hint says what to write instead, in an
-// imported .ts file, one a block requires, and a @ts block (DOCS 5, INTERNALS 12.5).
+// imported .ts file, one a block requires, and a @ts block (DOCS 5, INTERNALS 12.5). For
+// import = and export =, what goes where: a .cts file is CommonJS, an .mts file an ES module, a
+// .ts file either, and a block takes require and @export. The `module` keyword, which only Node
+// 24 names: run.rs ts_module_keyword_gets_the_hint_of_its_message.
 func show(f) {
     try {
         print(f())
@@ -22,6 +25,14 @@ show(func() {
     return f
 })
 show(func() {
+    @import { f } from ts."./fixtures/import_eq.mts"
+    return f
+})
+show(func() {
+    @import { f } from ts."./fixtures/import_eq.ts"
+    return f
+})
+show(func() {
     @import { NS } from ts."./fixtures/namespace.ts"
     return NS
 })
@@ -29,7 +40,7 @@ show(func() {
     @import { b } from ts."./fixtures/angle.ts"
     return b
 })
-for f in ["./fixtures/enum.ts", "./fixtures/export_eq.cts"] {
+for f in ["./fixtures/enum.ts", "./fixtures/export_eq.cts", "./fixtures/export_eq.mts", "./fixtures/export_eq.ts"] {
     show(func() {
         return @js(f) { require(f) }
     })
@@ -46,5 +57,17 @@ show(func() {
     return @ts {
         namespace N { export const y = 2 }
         1
+    }
+})
+show(func() {
+    return @ts {
+        import fs = require("fs")
+        1
+    }
+})
+show(func() {
+    return @ts {
+        const v = 1
+        export = v
     }
 })
