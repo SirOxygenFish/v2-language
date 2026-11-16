@@ -1786,13 +1786,18 @@ mod tests {
         assert_eq!(ts_import_hint("The requested module './x.js' does not provide an export named 'y'"), None);
     }
 
+    /// A Site for a .v2 file in `dir`, outside any project (the merge of round 18's js and py work).
+    fn site_at(dir: &Path) -> Site<'_> {
+        Site { dir, file: "x.v2", root: dir, toml: false }
+    }
+
     #[test]
     fn a_yarn_plug_n_play_project_is_named_in_the_hint() {
         // Round 18: Yarn's PnP keeps packages out of node_modules, so `npm install` isn't the fix.
         let d = temp("pnp");
         std::fs::write(d.join("package.json"), "{}").unwrap();
         std::fs::create_dir_all(d.join("sub")).unwrap();
-        let npm = missing_package_hint("Cannot find module 'lodash'", &d.join("sub"), None).unwrap();
+        let npm = missing_package_hint("Cannot find module 'lodash'", &site_at(&d.join("sub")), None).unwrap();
         assert!(npm.starts_with("if 'lodash' isn't misspelled, install it with npm install lodash"), "{npm}");
         std::fs::write(d.join(".pnp.cjs"), "").unwrap();
         let want = format!(
@@ -1800,12 +1805,12 @@ mod tests {
             d.join(".pnp.cjs").display()
         );
         for dir in [d.clone(), d.join("sub")] {
-            assert_eq!(missing_package_hint("Cannot find module 'lodash'", &dir, None).as_deref(), Some(&*want));
+            assert_eq!(missing_package_hint("Cannot find module 'lodash'", &site_at(&dir), None).as_deref(), Some(&*want));
         }
         // A file of the script's own still gets its hint, and a local path its own.
         std::fs::write(d.join("helpers.js"), "").unwrap();
-        assert!(missing_package_hint("Cannot find module 'helpers'", &d, None).unwrap().starts_with("your own helpers.js"));
-        assert_eq!(missing_package_hint("Cannot find module './x.js'", &d, None).as_deref(), Some("a local file is found from the .v2 file's folder: check the path"));
+        assert!(missing_package_hint("Cannot find module 'helpers'", &site_at(&d), None).unwrap().starts_with("your own helpers.js"));
+        assert_eq!(missing_package_hint("Cannot find module './x.js'", &site_at(&d), None).as_deref(), Some("a local file is found from the .v2 file's folder: check the path"));
     }
 
     #[test]
@@ -1821,7 +1826,7 @@ mod tests {
         assert_eq!(keys, ["@lib/*", "~/*", "utils", "*"]);
         let hint = |key: &str| format!("\"{key}\" is a \"paths\" alias in {}, and Node doesn't read tsconfig paths: import by a relative path, or use package.json \"imports\" (#alias)", base.display());
         // The .v2 file's own @import, which names the whole specifier.
-        let missing = |spec: &str| missing_package_hint(&format!("Cannot find module '{spec}'"), &d.join("src"), None).unwrap();
+        let missing = |spec: &str| missing_package_hint(&format!("Cannot find module '{spec}'"), &site_at(&d.join("src")), None).unwrap();
         assert_eq!(missing("@lib/math"), hint("@lib/*"));
         assert_eq!(missing("~/x/y"), hint("~/*"));
         assert_eq!(missing("utils"), hint("utils"));
