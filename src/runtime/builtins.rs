@@ -586,7 +586,8 @@ const BAD_NAME: &str = r#"Windows doesn't allow this file name (CON, PRN, AUX, N
 /// (`GetFullPathNameW` gives `\\.\CON`: a bare `CON`, `AUX`, `PRN`, `COM1`-`COM9` or `LPT1`-`LPT9`
 /// on Windows 11, `NUL` in any folder), where `read_file("CON")` would wait for typed input and
 /// `write_file("nul")` would throw the data away. A `\\?\` or `\\.\` path is taken as written:
-/// when such a name is really there (WSL and Macs make them), the hint shows that way to reach it.
+/// when such a name is really there (WSL and Macs make them; for `dir./new.txt`, the folder
+/// `dir.`), the hint shows that way to reach it.
 fn windows_name(verb: &str, path: &str) -> Exec<()> {
     if !cfg!(windows) || path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
         return Ok(());
@@ -611,7 +612,10 @@ fn windows_name(verb: &str, path: &str) -> Exec<()> {
         "create" => "make_dir",
         _ => "remove_file",
     };
-    let hint = match verbatim(path).filter(|v| std::fs::symlink_metadata(v).is_ok()) {
+    // What must be there for `\\?\` to reach it: the path through its last part that ends in a dot
+    // or a space (the folder `dir.` of a write to `dir./new.txt`), else the device's whole path.
+    let through = if trailing.is_some() { through_last_dotted(path) } else { path };
+    let hint = match verbatim(path).filter(|_| verbatim(through).is_some_and(|t| std::fs::symlink_metadata(t).is_ok())) {
         Some(v) => {
             let mut q = String::new();
             super::value::quoted(&v, &mut q);
@@ -621,6 +625,22 @@ fn windows_name(verb: &str, path: &str) -> Exec<()> {
     };
     let _ = err.hint.set(hint.into());
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// `path` up to the end of its last part (not `.` or `..`) that ends in a dot or a space:
+/// `dir./x.` for `dir./x./new.txt` (5.10); the whole path when it has none.
+fn through_last_dotted(path: &str) -> &str {
+    let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
+    let mut end = path.len() - after_drive.len();
+    let mut last = path.len();
+    for part in after_drive.split(['/', '\\']) {
+        end += part.len();
+        if !matches!(part, "." | "..") && (part.ends_with('.') || part.ends_with(' ')) {
+            last = end;
+        }
+        end += 1;
+    }
+    &path[..last]
 }
 
 /// Windows: the device a path names, as its full path says (`\\.\CON` gives `CON`) (5.10).
@@ -684,7 +704,8 @@ fn verbatim(path: &str) -> Option<String> {
 }
 
 /// Windows: a path on a drive that isn't there (an unplugged USB drive, `x:y.txt` with no `X:`)
-/// or on a share that can't be reached: what to say instead of a folder to make (5.10).
+/// or on a mapped drive or share that can't be reached: what to say instead of a folder to make
+/// (5.10).
 fn unreachable_root(path: &str, e: &std::io::Error) -> Option<String> {
     if !cfg!(windows) {
         return None;
@@ -698,14 +719,23 @@ fn unreachable_root(path: &str, e: &std::io::Error) -> Option<String> {
     let b = p.as_bytes();
     if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
         let letter = (b[0] as char).to_ascii_uppercase();
-        return (!drive_is_there(letter)).then(|| format!("there is no drive {letter}: (is it plugged in or connected?)"));
+        if !drive_is_there(letter) {
+            return Some(format!("there is no drive {letter}: (is it plugged in or connected?)"));
+        }
+        // A mapped network drive whose computer isn't reached: GetDriveTypeW still knows it.
+        return network_error(e).then(|| format!("the drive {letter}: can't be reached (is it connected?)"));
     }
     let unc = p.strip_prefix(r"\\").filter(|r| !r.starts_with(['?', '.']))?;
     let mut parts = unc.split('\\');
     let (server, share) = (parts.next().filter(|s| !s.is_empty())?, parts.next().filter(|s| !s.is_empty())?);
-    // ERROR_BAD_NETPATH, ERROR_BAD_NET_NAME and the network's other failures.
-    matches!(e.raw_os_error(), Some(51 | 53 | 59 | 64 | 67 | 1203 | 1222 | 1231 | 1232))
-        .then(|| format!(r"the share \\{}\{} can't be reached (is that computer on and connected, and is the share's name right?)", shown_path(server), shown_path(share)))
+    network_error(e).then(|| format!(r"the share \\{}\{} can't be reached (is that computer on and connected, and is the share's name right?)", shown_path(server), shown_path(share)))
+}
+
+/// Windows: an error of the network, not of the path (5.10): ERROR_BAD_NETPATH (53),
+/// ERROR_BAD_NET_NAME (67), ERROR_DEV_NOT_EXIST (55), ERROR_CONNECTION_UNAVAIL (1201, a remembered
+/// connection that isn't made) and the network's other failures.
+fn network_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(51 | 53 | 55 | 59 | 64 | 67 | 1201 | 1203 | 1222 | 1231 | 1232))
 }
 
 /// `unreachable_root`'s IOError: no hint of a folder to make, but the escapes' one when the
@@ -742,10 +772,30 @@ fn tmp_hint(path: &str) -> Option<String> {
     if !cfg!(windows) {
         return None;
     }
+    let (tmp, rest) = unix_tmp(path, &|tmp| std::path::Path::new(tmp).is_dir())?;
+    Some(tmp_advice(tmp, rest))
+}
+
+/// The Linux temp folder `path` starts with (`/var/tmp` or `/tmp`) and the rest of it, when
+/// `there(folder)` says this drive has no such folder (5.10). It asks nothing of the OS itself,
+/// so a test can say what is there.
+fn unix_tmp<'a>(path: &'a str, there: &dyn Fn(&str) -> bool) -> Option<(&'static str, &'a str)> {
     let (tmp, rest) = ["/var/tmp", "/tmp"].into_iter().find_map(|t| Some((t, path.strip_prefix(t).filter(|r| r.is_empty() || r.starts_with('/'))?)))?;
-    if std::path::Path::new(tmp).is_dir() {
-        return None;
-    }
+    (!there(tmp)).then_some((tmp, rest))
+}
+
+/// Windows: `make_dir`'s refusal of a `/tmp` or `/var/tmp` path where this drive has no such
+/// folder (`unix_tmp`), which it would make at the top of the drive, where every user can write.
+fn tmp_refusal(path: &str, there: &dyn Fn(&str) -> bool) -> Option<ErrorValue> {
+    let (tmp, rest) = unix_tmp(path, there)?;
+    let made = tmp.replace('/', "\\");
+    let err = ErrorValue::new("IOError", format!("cannot create '{}': on Windows that makes {made} at the top of the drive, a folder other users can write to", shown_path(path)));
+    let _ = err.hint.set(tmp_advice(tmp, rest).into());
+    Some(err)
+}
+
+/// The `/tmp` hint: `getenv("TEMP")`, with the rest of the path after it.
+fn tmp_advice(tmp: &str, rest: &str) -> String {
     let example = if rest.is_empty() {
         "getenv(\"TEMP\")".to_string()
     } else {
@@ -753,7 +803,7 @@ fn tmp_hint(path: &str) -> Option<String> {
         super::value::quoted(rest, &mut q);
         format!("getenv(\"TEMP\") + {q}")
     };
-    Some(format!("{tmp} is Linux's and macOS's temp folder: on Windows use getenv(\"TEMP\"), as in {example}"))
+    format!("{tmp} is Linux's and macOS's temp folder: on Windows use getenv(\"TEMP\"), as in {example}")
 }
 
 /// A write refused because the file is read-only: how to make it writable (Windows: its
@@ -768,8 +818,10 @@ fn read_only_hint(verb: &str, path: &str, e: &std::io::Error) -> Option<String> 
         if !meta.permissions().readonly() {
             return None;
         }
-        // attrib reads a `/` as the start of a switch.
+        // attrib reads a `/` as the start of a switch, and a name that starts with `-` as an
+        // attribute to clear: `.\` before it.
         let arg = path.replace('/', "\\");
+        let arg = if arg.starts_with('-') { format!(".\\{arg}") } else { arg };
         let arg = if arg.chars().all(|c| c.is_alphanumeric() || "._-\\:".contains(c)) { arg } else { format!("\"{arg}\"") };
         Some(format!("'{}' is read-only: clear that with attrib -r {arg} (or in its Properties)", shown_path(path)))
     }
@@ -780,7 +832,9 @@ fn read_only_hint(verb: &str, path: &str, e: &std::io::Error) -> Option<String> 
         if meta.mode() & 0o200 != 0 || meta.uid() != unsafe { libc::geteuid() } {
             return None;
         }
-        let word = if path.chars().all(|c| c.is_ascii_alphanumeric() || "._/-+".contains(c)) { path.to_string() } else { format!("'{}'", path.replace('\'', "'\\''")) };
+        // chmod reads a name that starts with `-` as an option: `./` before it.
+        let path_arg = if path.starts_with('-') { format!("./{path}") } else { path.to_string() };
+        let word = if path_arg.chars().all(|c| c.is_ascii_alphanumeric() || "._/-+".contains(c)) { path_arg } else { format!("'{}'", path_arg.replace('\'', "'\\''")) };
         Some(format!("'{}' is read-only: make it writable with chmod u+w {word}", shown_path(path)))
     }
     #[cfg(not(any(windows, unix)))]
@@ -1426,24 +1480,30 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         return Err(Flow::Error(Rc::new(err)));
     }
     // Windows: `/tmp/out` would make `\tmp` at the top of the drive, where every user can write.
-    if let Some(h) = tmp_hint(&path) {
-        let err = ErrorValue::new("IOError", format!("cannot create '{}': on Windows that makes \\tmp at the top of the drive, a folder other users can write to", shown_path(&path)));
-        let _ = err.hint.set(h.into());
+    let refused = if cfg!(windows) { tmp_refusal(&path, &|tmp| std::path::Path::new(tmp).is_dir()) } else { None };
+    if let Some(err) = refused {
         return Err(Flow::Error(Rc::new(err)));
     }
     match std::fs::create_dir_all(&*path) {
         Ok(()) => Ok(Value::Null),
         // A root that can't be made (a drive or share that isn't there) is `create_dir_all`'s own
-        // "failed to create whole tree": the root's own reason instead (5.10).
-        Err(e) if e.raw_os_error().is_none() => {
+        // "failed to create whole tree": the root's own reason instead (5.10), the last ancestor's.
+        // Other errors without an OS code (a NUL in the path) are Rust's true reason, kept.
+        Err(e) if whole_tree_error(&e) => {
             let e = match std::path::Path::new(&*path).ancestors().last().map(std::fs::metadata) {
                 Some(Err(root)) => root,
-                _ => std::io::Error::other("the drive or share it is on isn't there"),
+                _ => e,
             };
             file_error("create", &path, &e)
         }
         Err(e) => file_error("create", &path, &e),
     }
+}
+
+/// `create_dir_all`'s own error for a root it can't make, `failed to create whole tree` (5.10):
+/// it has no OS code, but neither has Rust's for a NUL in the path, which is the true reason.
+fn whole_tree_error(e: &std::io::Error) -> bool {
+    e.raw_os_error().is_none() && e.to_string() == "failed to create whole tree"
 }
 
 /// `remove_file(path)`: a file, never a folder (5.10).
@@ -1892,5 +1952,65 @@ mod tests {
         assert_eq!(child_text("café\n".as_bytes()), "café\n");
         let ints = [1u8, 0, 0, 0, 2, 0, 0, 0];
         assert_eq!(child_text(&ints), String::from_utf8_lossy(&ints));
+    }
+
+    #[test]
+    fn a_unix_temp_folder_is_refused_where_the_drive_has_none() {
+        // Round 19 review (INTERNALS 5.10): the /tmp decision, told what the drive has, so no test
+        // makes or needs \tmp at the top of a real drive; /var/tmp names \var\tmp, not \tmp.
+        let none = |_: &str| false;
+        assert_eq!(unix_tmp("/tmp/work", &none), Some(("/tmp", "/work")));
+        assert_eq!(unix_tmp("/tmp", &none), Some(("/tmp", "")));
+        assert_eq!(unix_tmp("/var/tmp/x", &none), Some(("/var/tmp", "/x")));
+        assert_eq!(unix_tmp("/tmpfiles/x", &none), None);
+        assert_eq!(unix_tmp("tmp/x", &none), None);
+        // A folder the drive has is the user's own: nothing to say.
+        assert_eq!(unix_tmp("/tmp/work", &|_: &str| true), None);
+        assert_eq!(unix_tmp("/var/tmp/x", &|t: &str| t == "/tmp"), Some(("/var/tmp", "/x")));
+        assert_eq!(unix_tmp("/tmp/x", &|t: &str| t == "/var/tmp"), Some(("/tmp", "/x")));
+        assert!(tmp_refusal("/tmp/work", &|_: &str| true).is_none());
+        let refused = |path: &str| tmp_refusal(path, &none).map(|e| (e.message.to_string(), e.hint.get().map(|h| h.to_string())));
+        let temp = |tmp: &str, example: &str| Some(format!("{tmp} is Linux's and macOS's temp folder: on Windows use getenv(\"TEMP\"), as in {example}"));
+        let makes = |path: &str, folder: &str| format!("cannot create '{path}': on Windows that makes {folder} at the top of the drive, a folder other users can write to");
+        assert_eq!(refused("/tmp/work"), Some((makes("/tmp/work", r"\tmp"), temp("/tmp", "getenv(\"TEMP\") + \"/work\""))));
+        assert_eq!(refused("/var/tmp/x"), Some((makes("/var/tmp/x", r"\var\tmp"), temp("/var/tmp", "getenv(\"TEMP\") + \"/x\""))));
+        assert_eq!(refused("/tmp"), Some((makes("/tmp", r"\tmp"), temp("/tmp", "getenv(\"TEMP\")"))));
+    }
+
+    #[test]
+    fn only_create_dir_alls_own_error_is_taken_for_the_roots() {
+        // Round 19 review (INTERNALS 5.10): Rust's error for a NUL in the path has no OS code
+        // either, and is the true reason; create_dir_all's for a root it can't make is replaced.
+        let nul = std::fs::create_dir_all("a\0b").unwrap_err();
+        assert!(nul.raw_os_error().is_none() && !whole_tree_error(&nul), "{nul}");
+        // Windows: a drive that isn't there (drive_is_there is true elsewhere).
+        if let Some(letter) = ('D'..='Z').rev().find(|&l| !drive_is_there(l)) {
+            let e = std::fs::create_dir_all(format!(r"{letter}:\v2-r19-no-drive\x")).unwrap_err();
+            assert!(whole_tree_error(&e), "{e}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_mapped_drive_that_cant_be_reached_is_named() {
+        // Round 19 review (INTERNALS 5.10): a mapped network drive whose computer isn't reached
+        // is a letter GetDriveTypeW knows, so it got "there is no folder 'Z:\reports'" and a
+        // make_dir hint. A network error on a drive that is there names the drive, with no hint.
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        assert_eq!(cwd.as_bytes().get(1), Some(&b':'), "{cwd}");
+        let letter = cwd.chars().next().unwrap().to_ascii_uppercase();
+        let unreachable = format!("the drive {letter}: can't be reached (is it connected?)");
+        let paths = [format!(r"{letter}:\v2-r19-no-such\out.csv"), format!(r"\\?\{letter}:\v2-r19-no-such\out.csv"), format!("{}:/v2-r19-no-such/out.csv", letter.to_ascii_lowercase())];
+        for path in &paths {
+            for code in [53, 55, 64, 67, 1201, 1231] {
+                let e = std::io::Error::from_raw_os_error(code);
+                assert_eq!(unreachable_root(path, &e).as_deref(), Some(unreachable.as_str()), "{path} {code}");
+                let Err(Flow::Error(err)) = file_error::<()>("write", path, &e) else { panic!("{path}") };
+                assert_eq!(&*err.message, format!("cannot write '{}': {unreachable}", shown_path(path)));
+                assert!(err.hint.get().is_none(), "{:?}", err.hint.get());
+            }
+            // A folder that isn't there, on a drive that is: nothing of the drive.
+            assert_eq!(unreachable_root(path, &std::io::Error::from_raw_os_error(3)), None, "{path}");
+        }
     }
 }

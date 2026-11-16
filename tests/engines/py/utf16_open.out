@@ -1,7 +1,10 @@
 ForeignError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
-  hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding="utf-16"), or pd.read_csv(path, encoding="utf-16")
+  hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is probably UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding="utf-16"), or pd.read_csv(path, encoding="utf-16"); a binary file, such as an image, opens with open(path, "rb")
 'utf-8' codec can't decode byte 0xfe in position 0: invalid start byte
-  hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding="utf-16"), or pd.read_csv(path, encoding="utf-16")
+  hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is probably UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding="utf-16"), or pd.read_csv(path, encoding="utf-16"); a binary file, such as an image, opens with open(path, "rb")
 name
+'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
+  hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is probably UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding="utf-16"), or pd.read_csv(path, encoding="utf-16"); a binary file, such as an image, opens with open(path, "rb")
+b"\xff\xd8"
 'utf-8' codec can't decode byte 0xe9 in position 3: unexpected end of data
   hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: for a file in another encoding, name it, as in open(path, encoding="cp1252")
