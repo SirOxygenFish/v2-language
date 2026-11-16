@@ -511,6 +511,11 @@ fn worker_main() {
         "placeholder" => std::process::exit(9009),
         // A wrapper that keeps the program's input and output (`conda run`): a clean exit.
         "quiet_exit" => std::process::exit(0),
+        // One that holds the program's output until it ends: its hello comes, then the end.
+        "hello_exit" => {
+            w.hello("3.12.1");
+            std::process::exit(0);
+        }
         other => panic!("unknown worker script {other}"),
     }
 }
@@ -637,25 +642,86 @@ fn a_clean_exit_before_hello_says_the_command_must_pass_input_and_output_through
 }
 
 #[test]
+fn a_clean_exit_after_hello_says_it_ended_before_v2_could_talk_to_it() {
+    // Review of round 19, 8.4: `conda run` in capture mode writes the program's output, its hello
+    // included, only when the program has ended, so "without a word" would be untrue.
+    let _serial = crate::engines::process::tests::serial();
+    let (mut it, _) = interp();
+    let e = err_of(start(&mut it, "hello_exit", no_timeouts()));
+    assert_eq!(&*e.kind, "EngineCrashed");
+    assert!(e.message.starts_with("engine 'py' exited during startup (exit code 0); see its error output above, if any; it ended before V2 could talk to it over its standard input and output: a command that runs it through another program must pass them through"), "{}", e.message);
+    assert!(!e.message.contains("without a word"), "{}", e.message);
+}
+
+#[test]
 fn conda_run_without_no_capture_output_is_named() {
     let argv = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
     let general = "; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through";
     let python = if cfg!(windows) { "envs\\sales\\python.exe" } else { "envs/sales/bin/python" };
     let conda = format!("{general}; conda run passes them through only with --no-capture-output: add it after run, or name the environment's python ({python} in conda's folder) in [engines.py] command");
     let conda_bin = if cfg!(windows) { "C:\\miniconda3\\condabin\\conda.bat" } else { "/root/miniforge3/bin/conda" };
-    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "-n", "sales", "python"])), conda);
-    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "--name=sales", "python"])), conda);
-    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "--name", "sales", "python"])), conda);
+    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "-n", "sales", "python"]), false, false), conda);
+    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "--name=sales", "python"]), false, false), conda);
+    assert_eq!(wrapper_note("py", &argv(&[conda_bin, "run", "--name", "sales", "python"]), false, false), conda);
     // Passed through: only the general part. Not conda run: the same.
     for words in [&[conda_bin, "run", "--no-capture-output", "-n", "sales", "python"][..], &[conda_bin, "run", "--live-stream", "-n", "sales", "python"], &["/usr/bin/env", "python3"], &[conda_bin, "python"]] {
-        assert_eq!(wrapper_note("py", &argv(words)), general, "{words:?}");
+        assert_eq!(wrapper_note("py", &argv(words), false, false), general, "{words:?}");
     }
-    // mamba, micromamba; a prefix instead of a name; node in a conda environment.
+    // mamba, micromamba; a prefix instead of a name; node in a conda environment (Windows).
     let x = if cfg!(windows) { "envs\\x\\python.exe" } else { "envs/x/bin/python" };
     let mamba = format!("; mamba run passes them through only with --no-capture-output: add it after run, or name the environment's python ({x} in mamba's folder) in [engines.py] command");
-    assert!(wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"])).ends_with(&mamba));
-    assert!(wrapper_note("py", &argv(&["micromamba", "run", "-p", "/envs/x", "python"])).ends_with("; micromamba run passes them through only with --no-capture-output: add it after run, or name the environment's python in [engines.py] command"));
-    assert!(wrapper_note("js", &argv(&["conda", "run", "-n", "web", "node"])).ends_with("; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"));
+    assert!(wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"]), false, false).ends_with(&mamba));
+    assert!(wrapper_note("py", &argv(&["micromamba", "run", "-p", "/envs/x", "python"]), false, false).ends_with("; micromamba run passes them through only with --no-capture-output: add it after run, or name the environment's python in [engines.py] command"));
+    assert!(wrapper_note("js", &argv(&["conda", "run", "-n", "web", "node"]), false, false).ends_with("; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"));
+    // Its hello came (capture mode writes it when the program has ended): not "without a word".
+    let held = "; it ended before V2 could talk to it over its standard input and output: a command that runs it through another program must pass them through";
+    assert_eq!(wrapper_note("py", &argv(&["/usr/bin/env", "python3"]), false, true), held);
+    assert!(wrapper_note("py", &argv(&[conda_bin, "run", "-n", "sales", "python"]), false, true).starts_with(&format!("{held}; conda run passes them")));
+    // Review of round 19: js on Unix talks over two pipes of its own (V2_VEP_FDS), which conda
+    // run closes even with --no-capture-output: only naming the environment's node works.
+    let pipes = "; it ended without a word to V2, which talks to the program over two pipes it inherits (named in V2_VEP_FDS): a command that runs it through another program must leave them open";
+    let node = format!("{pipes}; conda run closes them, even with --no-capture-output: name the environment's node (envs/web/bin/node in conda's folder) in [engines.js] command");
+    for words in [&["/root/miniforge3/bin/conda", "run", "-n", "web", "node"][..], &["/root/miniforge3/bin/conda", "run", "--no-capture-output", "-n", "web", "node"]] {
+        assert_eq!(wrapper_note("js", &argv(words), true, false), node, "{words:?}");
+    }
+    assert_eq!(
+        wrapper_note("js", &argv(&["micromamba", "run", "-p", "/envs/web", "node"]), true, false),
+        format!("{pipes}; micromamba run closes them, even with --no-capture-output: name the environment's node in [engines.js] command")
+    );
+    assert_eq!(wrapper_note("js", &argv(&["/usr/local/bin/wrap", "node"]), true, false), pipes);
+    assert_eq!(
+        wrapper_note("js", &argv(&["/usr/local/bin/wrap", "node"]), true, true),
+        "; it ended before V2 could talk to it over two pipes it inherits (named in V2_VEP_FDS): a command that runs it through another program must leave them open"
+    );
+}
+
+#[test]
+fn doctor_names_a_conda_run_that_cant_work() {
+    // Review of round 19, 19.2: the run's advice, from the configured command's words alone.
+    // py, js, ts (7.2).
+    let engine = |at: usize, words: &[&str]| ResolvedEngine {
+        spec: builtins().into_iter().nth(at).map(Rc::new).unwrap(),
+        argv: words.iter().map(OsString::from).collect(),
+        ..clone_engine(&py())
+    };
+    let python = if cfg!(windows) { "envs\\sales\\python.exe" } else { "envs/sales/bin/python" };
+    assert_eq!(
+        conda_run_note(&engine(0, &["conda", "run", "-n", "sales", "python"])).as_deref(),
+        Some(&*format!("V2 talks to the program over its standard input and output, and conda run passes them through only with --no-capture-output: add it after run, or name the environment's python ({python} in conda's folder) in [engines.py] command"))
+    );
+    for words in [&["conda", "run", "--no-capture-output", "-n", "sales", "python"][..], &["python3"], &["/usr/bin/env", "python3"]] {
+        assert_eq!(conda_run_note(&engine(0, words)), None, "{words:?}");
+    }
+    let node = engine(1, &["conda", "run", "--no-capture-output", "-n", "web", "node"]);
+    let js = conda_run_note(&node);
+    if cfg!(unix) {
+        assert_eq!(js.as_deref(), Some("V2 talks to the program over two pipes it inherits (named in V2_VEP_FDS), and conda run closes them, even with --no-capture-output: name the environment's node (envs/web/bin/node in conda's folder) in [engines.js] command"));
+    } else {
+        assert_eq!(js, None, "passed through on Windows");
+        assert!(conda_run_note(&engine(1, &["conda", "run", "-n", "web", "node"])).unwrap().ends_with("or name the environment's node in [engines.js] command"));
+    }
+    // ts runs on js's session: js's row has the note.
+    assert_eq!(conda_run_note(&engine(2, &["conda", "run", "-n", "web", "node"])), None);
 }
 
 #[test]
