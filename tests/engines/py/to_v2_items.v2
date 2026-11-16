@@ -2,7 +2,7 @@
 // to_v2 of an object with an item it can't convert names the item, and a block that converts the
 // whole object as fits it (DOCS 9.2, INTERNALS 11.5): a set or a mapping item by item, what a hook
 // gave, a deeper item; a pandas or numpy object as text (classes here stand for them, so the test
-// needs neither; run.rs has the real ones).
+// needs neither; run.rs has the real ones). The same for a key of what the object's hook gave.
 func show(f) {
     try {
         print(f())
@@ -24,17 +24,38 @@ let hs = @py {
             return {"e": [day]}
     class Event:
         pass
-    [{day}, collections.OrderedDict(a=day), {1: day}, Box(), Wrap(), Holder(), {Event()}]
+    [{day}, collections.OrderedDict(a=day), {None: day, 1: day}, Box(), Wrap(), Holder(), {Event()}]
 }
 for h in hs {
     show(func() => to_v2(h))
 }
-// What the messages name works.
+// What the messages name works. A mapping's keys stay as they are, so to_v2 of the block's dict
+// gives them V2's form (None: "null"), as to_v2(h) would have.
 show(func() => @py(h: hs[0]) { [x.isoformat() for x in h] })
 show(func() => @py(h: hs[1]) { {k: v.isoformat() for k, v in h.items()} })
-show(func() => @py(h: hs[2]) { {str(k): v.isoformat() for k, v in h.items()} })
+show(func() => to_v2(@py(h: hs[2]) { {k: v.isoformat() for k, v in h.items()} }))
 show(func() => @py(h: hs[3]) { [x.isoformat() for x in h.tolist()] })
 show(func() => @py(h: hs[4]) { h.to_dict().isoformat() })
+// The type follows "has the type", with no article to pick ("a uuid.UUID").
+show(func() => to_v2(@py { {__import__("uuid").UUID(int=1)} }))
+// A key of what the object's to_dict() gave names the object, with a block that converts it; a
+// deeper one says what to do with each such key.
+let keyed = @py {
+    import datetime
+    day = datetime.date(2026, 1, 1)
+    class Dated:
+        def to_dict(self):
+            return {day: 1}
+    class Nested:
+        def to_dict(self):
+            return {"a": {day: 1}}
+    [Dated(), Nested()]
+}
+show(func() => to_v2(keyed[0]))
+show(func() => @py(h: keyed[0]) { {str(k): v for k, v in h.to_dict().items()} })
+show(func() => to_v2(keyed[1]))
+// A dict's own key names the dict, as before (V2's hint has the block).
+show(func() => to_v2(@py { {__import__("datetime").date(2026, 1, 1): 1} }))
 // The object itself is named as before.
 show(func() => to_v2(@py { __import__("datetime").date(2026, 1, 1) }))
 // A pandas Series of dates, and a DataFrame (no tolist), as text.
@@ -54,10 +75,26 @@ let pd = @py {
             return {"d": {0: datetime.date(2026, 1, 1)}}
         def astype(self, t):
             return self
+    # Indexed by dates: what to_dict() gives has date keys, and to_json makes them ISO text.
+    class DatedSeries:
+        def to_dict(self):
+            return {datetime.date(2026, 1, 1): 1}
+        def to_json(self, date_format):
+            return '{"2026-01-01T00:00:00.000": 1}'
+    class DatedFrame:
+        def to_dict(self):
+            return {"n": {datetime.date(2026, 1, 1): 1}}
+        def to_json(self, date_format):
+            return '{"n": {"2026-01-01T00:00:00.000": 1}}'
     Series.__module__ = "pandas.core.series"
     DataFrame.__module__ = "pandas.core.frame"
-    [Series([datetime.date(2026, 1, 1), datetime.date(2026, 1, 2)]), DataFrame()]
+    DatedSeries.__module__ = "pandas.core.series"
+    DatedFrame.__module__ = "pandas.core.frame"
+    [Series([datetime.date(2026, 1, 1), datetime.date(2026, 1, 2)]), DataFrame(), DatedSeries(), DatedFrame()]
 }
 show(func() => to_v2(pd[0]))
 show(func() => @py(h: pd[0]) { h.astype(str).tolist() })
 show(func() => to_v2(pd[1]))
+show(func() => to_v2(pd[2]))
+show(func() => @py(h: pd[2]) { __import__("json").loads(h.to_json(date_format="iso")) })
+show(func() => to_v2(pd[3]))
