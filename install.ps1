@@ -195,8 +195,10 @@
             if (-not $onPath) {
                 $env:Path = "$dir;$env:Path"
                 if ($PSCommandPath) {
-                    # Run as a file, this may be another PowerShell than the window's.
-                    Write-Host "Open a new window to use v2 (or, in this one, run: `$env:Path = `"$dir;`" + `$env:Path)"
+                    # Run as a file, this may be another PowerShell than the window's. The folder in
+                    # single quotes, each quote doubled, so a $ or a backtick in its name stays as is.
+                    $quoted = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($dir)
+                    Write-Host "Open a new window to use v2 (or, in this one, run: `$env:Path = '$quoted;' + `$env:Path)"
                 } else {
                     Write-Host "v2 works in this window now; other open windows need to be reopened first."
                 }
