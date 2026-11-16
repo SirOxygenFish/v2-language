@@ -210,15 +210,47 @@ pub fn install_hint(id: &str) -> String {
 /// preload in `NODE_OPTIONS` stops it before V2 sees a version (8.4, 19.2). Values at most 80
 /// characters.
 pub fn startup_variables(id: &str) -> Vec<(&'static str, String)> {
-    let names: &[&'static str] = match id {
-        "py" => &["PYTHONHOME", "PYTHONPATH"],
-        "js" => &["NODE_OPTIONS"],
-        _ => &[],
-    };
-    names
+    startup_names(id)
         .iter()
         .filter_map(|n| std::env::var_os(n).filter(|v| !v.is_empty()).map(|v| (*n, v.to_string_lossy().chars().take(80).collect())))
         .collect()
+}
+
+fn startup_names(id: &str) -> &'static [&'static str] {
+    match id {
+        "py" => &["PYTHONHOME", "PYTHONPATH"],
+        "js" => &["NODE_OPTIONS"],
+        _ => &[],
+    }
+}
+
+/// Of those, the ones the version probe reads too: Node checks `NODE_OPTIONS` before it answers
+/// `--version` (a bad option stops it), Python answers before it reads `PYTHONHOME` (7.8).
+pub fn probe_variables(id: &str) -> &'static [&'static str] {
+    match id {
+        "js" => &["NODE_OPTIONS"],
+        _ => &[],
+    }
+}
+
+/// What doctor runs to see that the program really starts, when a startup variable is set
+/// (19.2): `--version` answers before Python reads `PYTHONHOME`, and before Node runs a
+/// `--require` preload (8.4).
+pub fn start_args(id: &str) -> &'static [&'static str] {
+    match id {
+        "py" => &["-c", "pass"],
+        "js" => &["-e", "0"],
+        _ => &[],
+    }
+}
+
+/// `node didn't start: NODE_OPTIONS is set (--bogus), which it reads as it starts: unset it or
+/// fix it` (7.8, 19.2), for the variables `set` (each `startup_variables`' pair).
+pub fn startup_fix(id: &str, set: &[(&str, String)]) -> String {
+    let program = if id == "py" { "python" } else { "node" };
+    let vars: Vec<String> = set.iter().map(|(n, v)| format!("{n} is set ({v})")).collect();
+    let it = if set.len() == 1 { "it" } else { "them" };
+    format!("{program} didn't start: {}, which it reads as it starts: unset {it} or fix {it}", vars.join(" and "))
 }
 
 /// Which package manager a Linux uses, from `/etc/os-release`'s `ID` and `ID_LIKE` (7.8).

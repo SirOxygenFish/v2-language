@@ -1,0 +1,44 @@
+// requires: py
+// Round 18: an @import whose selector starts with a V2 module's alias (import "…" as lib) reads
+// it as an engine's tag or a block's label; the hint says what lib is (INTERNALS 13.1).
+import "./fixtures/lib.v2" as lib
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", e.hint)
+    }
+}
+show(func() {
+    @import { total } from lib.wrap
+    return total
+})
+show(func() {
+    @import { total } from lib
+    return total
+})
+show(func() {
+    @import { total } from @lib.wrap
+    return total
+})
+show(func() {
+    @import lib.wrap as w
+    return w
+})
+// Inside a block, too.
+show(func() {
+    @py {
+        @import { total } from lib.wrap
+    }
+})
+// Not an alias of this file: no hint, and a bare label keeps its own advice.
+show(func() {
+    @import { total } from nolib.wrap
+    return total
+})
+show(func() {
+    @import { total } from nolib
+    return total
+})
+print(lib.total([1, 2, 3]))
