@@ -281,6 +281,30 @@ pub(crate) fn unexpanded(text: &str) -> Option<&str> {
     None
 }
 
+/// A path from a `"…"` TOML string holding what its backslash escapes made (`\n` a line break,
+/// `\t` a tab, `\b`, `\f`, `\r`, `\e`): the hint that says so and what to write (18.5), with an
+/// example for `key` (`venv`, `py`, or any other engine's `command`).
+pub(crate) fn escape_hint(written: &str, key: &str) -> Option<String> {
+    if !written.contains(char::is_control) {
+        return None;
+    }
+    let example = match key {
+        "venv" => r"venv = 'C:\proj\.venv'",
+        "py" => r"command = ['C:\Program Files\Python311\python.exe']",
+        _ => r"command = ['C:\Program Files\nodejs\node.exe']",
+    };
+    Some(format!(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write the path with / or in single quotes, as in {example}"#))
+}
+
+/// `escape_hint` for a configured path, by the part its `v2.toml` wrote: a relative one is
+/// joined to the file's folder (18.1), whose own name isn't the user's escape. A
+/// `V2_ENGINE_<TAG>` path has no escapes.
+pub(crate) fn configured_escape_hint(path: &Path, from: &ConfigSource, key: &str) -> Option<String> {
+    let ConfigSource::Project(file) = from else { return None };
+    let written = file.parent().and_then(|base| path.strip_prefix(base).ok()).unwrap_or(path);
+    escape_hint(&written.to_string_lossy(), key)
+}
+
 /// How a TOML value is named in messages: `string "30s"`, `integer 5`, `array`.
 fn describe(v: &toml::Value) -> String {
     match v {
@@ -334,11 +358,15 @@ impl File {
     }
 
     /// A Windows drive-relative path (`C:venv`) would resolve against that drive's cwd, so it
-    /// is an error (18.1).
+    /// is an error (18.1). `"C:\bin\node.exe"` is one too, `\b` and `\n` being escapes: shown
+    /// escaped, with the hint that says so.
     fn not_drive_relative(&self, what: &str, text: &str) -> Result<(), ConfigError> {
         let p = Path::new(text);
         if matches!(p.components().next(), Some(Component::Prefix(_))) && !p.has_root() {
-            return Err(self.error(format!("{what}: '{text}' is a drive-relative path: write it relative to the file, or absolute")));
+            let shown = crate::syntax::span::shown_path(text);
+            let key = if what.ends_with("venv") { "venv" } else if what.starts_with("[engines.py") { "py" } else { "js" };
+            let hint = escape_hint(text, key).map(|h| format!("\n  hint: {h}")).unwrap_or_default();
+            return Err(self.error(format!("{what}: '{shown}' is a drive-relative path: write it relative to the file, or absolute{hint}")));
         }
         Ok(())
     }
@@ -348,6 +376,7 @@ impl File {
     fn no_home(&self, what: &str, text: &str) -> Result<(), ConfigError> {
         let tilde = text == "~" || text.starts_with("~/") || text.starts_with("~\\");
         if tilde && home_dir().is_none() {
+            let text = crate::syntax::span::shown_path(text);
             return Err(self.error(format!("{what}: '{text}' starts with ~, but {HOME_VAR} isn't set, so there is no home folder for it: write the full path")));
         }
         Ok(())
@@ -918,6 +947,15 @@ mod tests {
         }
         // A later element that isn't path-like is left alone.
         assert!(project("driverelok", "[engines.py]\ncommand = [\"python\", \"-X\", \"C:x\"]\n").is_ok());
+        // Round 19: "C:\bin\node.exe" is one too, its \b and \n being escapes: shown escaped,
+        // with the hint that says so (18.5).
+        let hint = |example: &str| format!("\n  hint: in \"…\", a backslash starts an escape (\\n is a line break, \\t a tab): write the path with / or in single quotes, as in {example}");
+        let e = project("driverelesc", "[engines.js]\ncommand = [\"C:\\bin\\node.exe\"]\n").unwrap_err().0;
+        let want = format!("config error: [engines.js] command: 'C:\\u{{8}}in\\node.exe' is a drive-relative path: write it relative to the file, or absolute{}", hint(r"command = ['C:\Program Files\nodejs\node.exe']"));
+        assert!(e.ends_with(&want), "{e}");
+        let e = project("driverelvenv", "[python]\nvenv = \"C:\\new\"\n").unwrap_err().0;
+        let want = format!("config error: [python] venv: 'C:\\new' is a drive-relative path: write it relative to the file, or absolute{}", hint(r"venv = 'C:\proj\.venv'"));
+        assert!(e.ends_with(&want), "{e}");
     }
 
     #[test]

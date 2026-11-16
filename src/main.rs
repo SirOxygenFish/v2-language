@@ -222,7 +222,10 @@ fn run(command: Command) -> i32 {
             Err(code) => code,
         },
         Command::Doctor => {
+            // The cwd with its links followed (a junction, a symlink), as a run of a script there
+            // starts from the script's real folder (18.1).
             let cwd = std::env::current_dir().unwrap_or_default();
+            let cwd = std::fs::canonicalize(&cwd).map(|p| syntax::span::strip_verbatim(&p)).unwrap_or(cwd);
             match load_config(&cwd) {
                 Ok(cfg) => doctor::doctor(std::rc::Rc::new(cfg)),
                 Err(code) => code,
