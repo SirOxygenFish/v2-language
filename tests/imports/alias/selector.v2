@@ -26,11 +26,25 @@ show(func() {
     @import lib.wrap as w
     return w
 })
-// Inside a block, too.
+// Inside a block, too, whose code can't name lib: its names come through V2.
 show(func() {
     @py {
         @import { total } from lib.wrap
     }
+})
+show(func() {
+    @py {
+        @import { total } from lib
+    }
+})
+// An alias only a function's body imports isn't this one's.
+func elsewhere() {
+    import "./fixtures/lib.v2" as inner
+    return inner.total([1])
+}
+show(func() {
+    @import { total } from inner.wrap
+    return total
 })
 // Not an alias of this file: no hint, and a bare label keeps its own advice.
 show(func() {
