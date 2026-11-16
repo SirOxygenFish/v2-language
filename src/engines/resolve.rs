@@ -631,18 +631,24 @@ impl Resolver<'_> {
                     format!("; raise [engines.{}] startup_timeout if it is only slow", spec.id)
                 } else if reason == PLACEHOLDER {
                     // `V2_ENGINE_PY=python3`, a Linux habit, where Windows' Python is `python`:
-                    // the one the search finds, named the way this one was (7.6).
+                    // the one the search finds, named the way this one was (7.6). By its name
+                    // only when that name finds it: a WindowsApps folder first on PATH has a
+                    // placeholder for `python` too (and the configured name found one), so
+                    // otherwise by its path.
                     match matches!(origin, Origin::Config(_)).then(|| self.search(spec).ok()).flatten() {
                         Some(found) => {
-                            let name = Path::new(&found.argv[0]).file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                            let program = PathBuf::from(&found.argv[0]);
+                            let stem = program.file_stem().map(|s| s.to_string_lossy().into_owned()).filter(|s| first_program(s, self.lookup).as_ref() == Some(&program));
+                            let name = stem.unwrap_or_else(|| program.display().to_string());
                             let named = match from {
                                 ConfigSource::Env(var) => format!("{var}={name}"),
                                 ConfigSource::Project(_) => {
-                                    let words: Vec<String> = std::iter::once(name).chain(found.argv[1..].iter().map(|a| a.to_string_lossy().into_owned())).map(|w| format!("\"{w}\"")).collect();
+                                    let quote = |w: String| if w.contains('\\') { format!("'{w}'") } else { format!("\"{w}\"") };
+                                    let words: Vec<String> = std::iter::once(name).chain(found.argv[1..].iter().map(|a| a.to_string_lossy().into_owned())).map(quote).collect();
                                     format!("[engines.{}] command = [{}]", spec.id, words.join(", "))
                                 }
                             };
-                            format!("; {} is installed as {}: name that one, as in {named}", spec.language, Path::new(&found.argv[0]).display())
+                            format!("; {} is installed as {}: name that one, as in {named}", spec.language, program.display())
                         }
                         None => format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id)),
                     }
@@ -1604,6 +1610,24 @@ mod tests {
         let nf = resolve_with(&env, &lookup(&[&apps], Some(&apps)), &p, &mut ProbeCache::off(), "py").unwrap_err();
         let install = format!("is not usable: Microsoft Store placeholder; install Python and name its full path, or leave command out: {}", install_hint("py"));
         assert_eq!(nf.message, format!("{start} V2_ENGINE_PY) {install}"));
+        // Round 18 review: WindowsApps, first on PATH, has a python placeholder too, so python
+        // would find it again: the message names Python by its path, never the configured name.
+        exe(&apps, "python");
+        let shown = python.display().to_string();
+        let toml_word = if shown.contains('\\') { format!("'{shown}'") } else { format!("\"{shown}\"") };
+        for configured in ["python3", "python"] {
+            let start = format!("engine 'py' command '{configured}' (set by");
+            let installed = format!("is not usable: Microsoft Store placeholder; Python is installed as {shown}: name that one, as in");
+            let env = with_command("py", &[configured], ConfigSource::Env("V2_ENGINE_PY".into()));
+            let nf = resolve_with(&env, &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
+            assert_eq!(nf.message, format!("{start} V2_ENGINE_PY) {installed} V2_ENGINE_PY={shown}"));
+            let toml = with_command("py", &[configured], project_source());
+            let nf = resolve_with(&toml, &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
+            assert_eq!(nf.message, format!("{start} C:/proj/v2.toml) {installed} [engines.py] command = [{toml_word}]"));
+        }
+        // Python first on PATH: its name finds it, past both placeholders.
+        let nf = resolve_with(&env, &lookup(&[&real, &apps], Some(&apps)), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("{start} V2_ENGINE_PY) {installed} V2_ENGINE_PY=python"));
     }
 
     #[test]
