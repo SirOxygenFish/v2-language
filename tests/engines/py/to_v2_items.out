@@ -1,0 +1,16 @@
+MarshalError: to_v2(): an item of h is a datetime.date: make plain data of it in a block first, as in @py(h) { [x.isoformat() for x in h] }
+MarshalError: to_v2(): an item of h is a datetime.date: make plain data of it in a block first, as in @py(h) { {k: v.isoformat() for k, v in h.items()} }
+MarshalError: to_v2(): an item of h is a datetime.date: make plain data of it in a block first, as in @py(h) { {str(k): v.isoformat() for k, v in h.items()} }
+MarshalError: to_v2(): an item of h is a datetime.date: make plain data of it in a block first, as in @py(h) { [x.isoformat() for x in h.tolist()] }
+MarshalError: to_v2(): h.to_dict() is a datetime.date: make plain data of it in a block first, as in @py(h) { h.to_dict().isoformat() }
+MarshalError: to_v2(): an item inside h is a datetime.date: make plain data of h in a block first, with x.isoformat() for each such item x
+MarshalError: to_v2(): an item of h is an Event: make plain data of it in a block first, as in @py(h) { [vars(x) for x in h] }
+["2026-01-01"]
+{"a": "2026-01-01"}
+{"1": "2026-01-01"}
+["2026-01-01"]
+2026-01-01
+MarshalError: to_v2(): can't convert datetime.date to V2 data: make plain data of it in a block first, as in @py(h) { h.isoformat() }
+MarshalError: to_v2(): an item of h is a datetime.date: make plain data of it in a block first, as in @py(h) { h.astype(str).tolist() }
+["2026-01-01", "2026-01-02"]
+MarshalError: to_v2(): an item of h is a datetime.date: make plain data of it in a block first, as in @py(h) { import json; json.loads(h.to_json(date_format="iso")) }

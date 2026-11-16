@@ -1,0 +1,13 @@
+ValueError: block arg 'this' is not a valid JavaScript name: pass it under another name, as in @js(this_: …)
+ValueError: block arg 'yield' is not a valid JavaScript name: pass it under another name, as in @js(yield_: …)
+ValueError: block arg 'var' is not a valid JavaScript name: pass it under another name, as in @js(var_: …)
+ValueError: block arg 'static' is not a valid JavaScript name: pass it under another name, as in @ts(static_: …)
+ValueError: block arg 'undefined' is reserved in @js blocks: pass it under another name, as in @js(undefined_: …)
+ValueError: block arg '__proto__' is reserved in @js blocks: pass it under another name, as in @js(proto_: …)
+ValueError: block arg 'NaN' is reserved in @ts blocks: pass it under another name, as in @ts(NaN_: …)
+ValueError: block arg 'ⓐ' is not a valid JavaScript name: pass it under another name, as in @js(name: …)
+[1, 2, 3]
+5
+ValueError: @import name 'this' is not a valid JavaScript name: import it under another name, as in @import { … as this_ } from …
+ValueError: @import name 'undefined' is reserved in @ts blocks: import it under another name, as in @import { … as undefined_ } from …
+8

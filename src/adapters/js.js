@@ -212,6 +212,13 @@ class Walk extends Set {
   }
 }
 
+class ValueWalk extends Walk {
+  // to_v2's walk also keeps what a node that can't convert is an item of: the hooks run on the
+  // object at level 0 (h.to_dict()...) and the container at level 0 (11.5).
+  chain = [];
+  base = undefined;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The request stack (14.2) and output (9.9)
 
@@ -1171,9 +1178,15 @@ const RESERVED = new Set(('break case catch class const continue debugger defaul
   'yield let static implements interface package private protected public await').split(' '));
 const PROVIDED = new Set(['undefined', 'NaN', 'Infinity', 'globalThis', '__proto__']);
 
-function checkName(k, what = 'block arg') {
-  if (!IDENT.test(k) || RESERVED.has(k) || PROVIDED.has(k)) throw new Fail('ValueError', `${what} '${k}' is not a valid JavaScript name`);
-  return k;
+function checkName(k, what = 'block arg', lang = 'js') {
+  // A block arg or an inner @import's alias, which the block's code reaches by name (12.2): else a
+  // ValueError that names one it can reach.
+  if (IDENT.test(k) && !RESERVED.has(k) && !PROVIDED.has(k)) return k;
+  const other = (name) => (what === 'block arg'
+    ? `pass it under another name, as in @${lang}(${name}: …)`
+    : `import it under another name, as in @import { … as ${name} } from …`);
+  if (PROVIDED.has(k)) throw new Fail('ValueError', `${what} '${k}' is reserved in @${lang} blocks: ${other(k.replace(/^_+|_+$/g, '') + '_')}`);
+  throw new Fail('ValueError', `${what} '${k}' is not a valid JavaScript name: ${other(IDENT.test(k) ? k + '_' : 'name')}`);
 }
 
 function entryUrl(spec, from) {
@@ -1419,9 +1432,9 @@ function bindImporters(unit) {
   }
 }
 
-function bindImports(ctx, imports, keeps) {
+function bindImports(ctx, imports, keeps, lang) {
   for (const e of imports) {
-    const alias = checkName(e.as, '@import name');
+    const alias = checkName(e.as, '@import name', lang);
     if (!('unit' in e)) defineData(ctx, alias, routeStub(e.route, alias));
     else if (units.has(e.unit)) defineData(ctx, alias, realTarget(e.unit, e.name));
     else {
@@ -1564,8 +1577,8 @@ function doLoad(m) {
     joinedLines(src, m);
   }
   const ctx = newContext(m.file);
-  for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k), decode(v));
-  bindImports(ctx, m.imports || [], m.kind !== 'action');
+  for (const [k, v] of Object.entries(m.args)) defineData(ctx, checkName(k, 'block arg', m.lang), decode(v));
+  bindImports(ctx, m.imports || [], m.kind !== 'action', m.lang);
   const script = compileOrExplain(src, m);
   const before = new Set(Object.getOwnPropertyNames(ctx));
   let ran;
@@ -1836,7 +1849,7 @@ function keyText(k, mapping) {
   throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(mapping)} to V2 data (key of type ${typeName(k)})`);
 }
 
-function toV2(x, depth = 0, open = new Walk()) {
+function toV2(x, depth = 0, open = new ValueWalk()) {
   // `op value`: the object as plain data, converted here (11.5). `depth` is the level the value
   // would sit at, so a container at 256 or deeper is too deep, as for the host (10.5).
   if (x === undefined || x === null || typeof x === 'boolean' || typeof x === 'number' || typeof x === 'string') return encode(x, depth, open);
@@ -1856,6 +1869,7 @@ function toV2(x, depth = 0, open = new Walk()) {
     const keys = isMap || list ? null : Object.keys(x);
     open.spend(2 * (keys ? keys.length : isMap || isSet ? x.size : x.length));
     open.add(x);
+    if (depth === 0) open.base = x;
     try {
       if (list) return Array.from(x, (v) => toV2(v, depth + 1, open));
       const pairs = [];
@@ -1882,10 +1896,12 @@ function toV2(x, depth = 0, open = new Walk()) {
       if (open.hooks >= MAX_DEPTH) throw new Fail('MarshalError', `to_v2(): value nested deeper than ${MAX_DEPTH} levels`);
       open.add(x);
       open.hooks += 1;
+      if (depth === 0) open.chain.push(hook);
       try {
         return toV2(Reflect.apply(f, x, []), depth, open);
       } finally {
         open.hooks -= 1;
+        if (depth === 0) open.chain.pop();
         open.delete(x);
       }
     }
@@ -1893,8 +1909,31 @@ function toV2(x, depth = 0, open = new Walk()) {
   // A way that works for this object: a date's ISO text, a Map's entries, a Set's items, else its
   // own fields.
   // Blocks make their values in a context of their own (14.1), where instanceof Date fails.
-  const how = util.types.isDate(x) ? 'h.toISOString()' : '({ ...h })';
-  throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data: make plain data of it in a block first, as in @js(h) { ${how} }`);
+  const form = util.types.isDate(x) ? (v) => `${v}.toISOString()` : (v) => `({ ...${v} })`;
+  if (depth === 0 && open.chain.length === 0) {
+    throw new Fail('MarshalError', `to_v2(): can't convert ${typeName(x)} to V2 data: make plain data of it in a block first, as in @js(h) { ${form('h')} }`);
+  }
+  throw new Fail('MarshalError', itemMessage(x, form, depth, open));
+}
+
+function itemMessage(x, form, depth, open) {
+  // to_v2's message for a node that can't convert and isn't the object asked for: an item of it,
+  // or what its to_dict() or tolist() gave. The block it names converts the object item by item.
+  const name = typeName(x);
+  const a = /^[aeiou]/i.test(name) ? 'an' : 'a';
+  const src = 'h' + open.chain.map((c) => `.${c}()`).join('');
+  let how;
+  if (depth === 0) {
+    how = form(src);
+  } else if (depth === 1 && open.hooks === open.chain.length) {
+    const b = open.base;
+    if (util.types.isMap(b)) how = `Object.fromEntries([...${src}].map(([k, v]) => [k, ${form('v')}]))`;
+    else if (Array.isArray(b) || util.types.isSet(b)) how = `[...${src}].map((x) => ${form('x')})`;
+    else how = `Object.fromEntries(Object.entries(${src}).map(([k, v]) => [k, ${form('v')}]))`;
+  } else {
+    return `to_v2(): an item inside h is ${a} ${name}: make plain data of h in a block first, with ${form('x')} for each such item x`;
+  }
+  return `to_v2(): ${depth ? 'an item of h' : src} is ${a} ${name}: make plain data of it in a block first, as in @js(h) { ${how} }`;
 }
 
 function isEager(obj) {
