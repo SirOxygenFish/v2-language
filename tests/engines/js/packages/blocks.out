@@ -1,0 +1,3 @@
+ForeignError | did you mean "v2-test-pkg"? if 'v2-test-pkk' isn't misspelled, install it with npm install v2-test-pkk in <here> or a folder above it, where Node looks for this file
+ForeignError | did you mean "v2-test-pkg"? if 'v2-test-pkk' isn't misspelled, install it with npm install v2-test-pkk in <here> or a folder above it, where Node looks for this file
+ForeignError | 'v2-test-pkg' is installed, but has no 'nothere': check the path after 'v2-test-pkg/'
