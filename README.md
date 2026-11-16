@@ -416,7 +416,10 @@ and V2 says so when another came first).
   npm 11), it needs `"type": "module"` there, or the extension `.mjs` (`.mts`). A function
   imported by name brings none of its own properties: for `dayjs.extend` or lodash's `_.chunk`,
   import the module itself, `@import js.dayjs as dayjs`. For an ES module imported whole, what
-  its default export holds is under `.default`: `chalk.default.red("x")`.
+  its default export holds is under `.default`: `chalk.default.red("x")`. `js.lodash` loads a
+  package the way `require()` does (a package with separate `import` and `require` builds gives
+  its `require` one), and once per run, like a Python module: a script in another folder with its
+  own copy in its `node_modules` gets the first one too, and V2 says so.
 - **Python on Windows:** `py -m pip install numpy`. If `v2 doctor` shows another Python, use its
   path, with `&` in front in PowerShell: `& "C:\Program Files\Python313\python.exe" -m pip install
   numpy`. For a virtual environment: `py -m venv .venv`, then
@@ -593,9 +596,12 @@ ends it); in a shell, `export V2_ENGINE_PY=/opt/homebrew/bin/python3`.
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,
 so `add("2", 3)` runs. Run `tsc` yourself for checking. Only TypeScript whose types can simply be
-removed runs: not `enum`, `namespace`, `constructor(public x)` parameter properties, `<T>x` casts
-(write `x as T`) or decorators. Imports between your `.ts` files name the `.ts` file
+removed runs: not decorators, and not `enum`, `namespace`, `constructor(public x)` parameter
+properties, `import x = require(…)` or `<T>x` casts, whose errors' hints say what to write
+instead (`x as T` for a cast). Imports between your `.ts` files name the `.ts` file
 (`./math.ts`, not tsc's `./math.js` or `./math`), and a type is imported with `import type`.
+Node reads no `tsconfig.json`, so a `"paths"` alias needs a relative path instead, and it has no
+JSX: compile `.tsx` and `.jsx` files first.
 
 **Does V2 leave files around?** No. Temporary files go to a private folder in your temp directory
 and are removed when V2 exits (if V2 was killed, the next script that runs a block removes

@@ -1,0 +1,50 @@
+// requires: js ts
+// TypeScript that is code, which Node's type stripping refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX,
+// ERR_INVALID_TYPESCRIPT_SYNTAX on early Node 22): the hint says what to write instead, in an
+// imported .ts file, one a block requires, and a @ts block (DOCS 5, INTERNALS 12.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.foreign_type, "|", e.hint)
+    }
+}
+show(func() {
+    @import { Color } from ts."./fixtures/enum.ts"
+    return Color
+})
+show(func() {
+    @import { P } from ts."./fixtures/param_prop.mts"
+    return P
+})
+show(func() {
+    @import { f } from ts."./fixtures/import_eq.cts"
+    return f
+})
+show(func() {
+    @import { NS } from ts."./fixtures/namespace.ts"
+    return NS
+})
+show(func() {
+    @import { b } from ts."./fixtures/angle.ts"
+    return b
+})
+for f in ["./fixtures/enum.ts", "./fixtures/export_eq.cts"] {
+    show(func() {
+        return @js(f) { require(f) }
+    })
+}
+show(func() {
+    return @ts {
+        class Q {
+            constructor(public x: number) {}
+        }
+        1
+    }
+})
+show(func() {
+    return @ts {
+        namespace N { export const y = 2 }
+        1
+    }
+})
