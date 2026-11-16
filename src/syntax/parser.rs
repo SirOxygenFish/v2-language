@@ -39,6 +39,9 @@ pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag
     })
 }
 
+/// Python's `def f(a, **kwargs)`, written as `func f(a, **kw)` or `func(**kw)` (2.4).
+const KWARGS_PARAM_HINT: &str = "V2 has no **kwargs parameter: take the options as one dict parameter, as in func f(a, opts) { … }";
+
 /// What V2 writes for Python or JavaScript written out of habit, from the tokens where a syntax
 /// error stopped (4.3): `def f(`, `var x`, `and`, `x is None`, `x => …`, `i++`, `i--`, `===`,
 /// `if x:`, `function(x) {`, `class P {`, `switch x {`.
@@ -180,8 +183,15 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         }
         // JavaScript's `[0, ...a]`.
         (_, _, Some(Op::Ellipsis)) if matches!(op(1), Some(Op::Comma | Op::LBracket)) => "... spreads a list into a call's arguments only: join lists with +, as in [0] + a".into(),
-        // Python's `f(x, **opts)`.
-        (_, _, Some(Op::StarStar)) if matches!(op(1), Some(Op::Comma | Op::LParen)) && matches!(opener, Some(Tok::Op(Op::LParen))) => KWARGS_HINT.into(),
+        // Python's `f(x, **opts)` and `def f(a, **kwargs)`; a grouping's `(**x)` gets neither.
+        (_, _, Some(Op::StarStar)) if matches!(op(1), Some(Op::Comma | Op::LParen)) && matches!(opener, Some(Tok::Op(Op::LParen))) => {
+            let before = |back: usize| open_at.and_then(|j| j.checked_sub(back)).map(|j| &toks[j].tok);
+            match (before(2), before(1)) {
+                (_, Some(Tok::Kw(Kw::Func))) | (Some(Tok::Kw(Kw::Func)), Some(Tok::Ident(_))) => KWARGS_PARAM_HINT.into(),
+                (_, Some(Tok::Ident(_) | Tok::Op(Op::RParen | Op::RBracket) | Tok::Str(_))) => KWARGS_HINT.into(),
+                _ => return None,
+            }
+        }
         (_, _, Some(Op::Plus)) if op(1) == Some(Op::Plus) => "V2 has no ++: write x += 1".into(),
         // JavaScript's `a ??= 5`, Ruby's and Perl's `elsif`, Python's and Go's `x := 1`.
         (_, _, Some(Op::Eq)) if op(1) == Some(Op::QQ) => format!("V2 has no ??=: write {0} = {0} ?? …", word(2).unwrap_or("x")),
@@ -2172,6 +2182,17 @@ if x and x {
         let hint = |src: &str| diag(src).hint.unwrap_or_else(|| panic!("no hint for {src:?}"));
         assert_eq!(hint("print(dumps(d, **opts))"), KWARGS_HINT);
         assert_eq!(hint("f(**opts)"), KWARGS_HINT);
+        // Only a call's `(`: after a name, `)`, `]` or a string.
+        for src in ["obj.run(1, **opts)", "fs[0](**opts)", "make()(**opts)", "\"x\"(**opts)", "f(g(1), **opts)"] {
+            assert_eq!(hint(src), KWARGS_HINT, "{src}");
+        }
+        // A parameter list's `(` gets the parameter's way; a grouping's, none.
+        for src in ["func f(a, **kw) {\n}", "func f(**kw) {\n}", "let g = func(**kw) => 1", "let g = func(a, **kw) { return a }", "func f(a = g(1), **kw) {\n}"] {
+            assert_eq!(hint(src), KWARGS_PARAM_HINT, "{src}");
+        }
+        for src in ["let y = (**x)", "if (**x) {\n}", "print((**x))", "let y = 2 * (**x)"] {
+            assert_eq!(diag(src).hint, None, "{src}");
+        }
         for src in ["let c = {...a, ...b}", "let c = {**a, **b}", "let c = {x: 1, ...a}"] {
             let d = diag(src);
             assert_eq!((d.message.as_str(), d.hint.as_deref()), ("dict keys are names, strings or [expr]", Some(MERGE_HINT)), "{src}");

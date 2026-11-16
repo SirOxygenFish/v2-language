@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: kwargs_param.v2:5:11: SyntaxError: expected a parameter name, found `**`
+// stderr: hint: V2 has no **kwargs parameter: take the options as one dict parameter, as in func f(a, opts) { … }
+// Python's def f(a, **kwargs) gets the parameter's way, not the call's (INTERNALS 2.4 habits).
+func f(a, **kw) {
+    return a
+}
