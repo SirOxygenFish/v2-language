@@ -1216,6 +1216,13 @@ fn a_v2_module_of_another_project_is_told_which_project_the_run_uses() {
         ("mono/scripts/rootuse.v2", "import \"./sub/rootlib.v2\" as r\nprint(r.call_root())\n"),
         ("glue/v2.toml", ""),
         ("glue/cross.v2", "import \"../mono/scripts/sub/rootlib.v2\" as r\nprint(r.call_root())\n"),
+        // The review of round 18: a module that project lacks too, and a NAME.py above that no
+        // project puts on Python's path.
+        ("mono/lib/third.v2", "@import { get } from py.zz_not_installed_anywhere\nfunc call() {\n    return get()\n}\n"),
+        ("glue/third.v2", "import \"../mono/lib/third.v2\" as t\nprint(t.call())\n"),
+        ("mono/scripts/zzabove.py", "def up():\n    return 1\n"),
+        ("mono/scripts/sub/above.v2", "@import { up } from py.zzabove\nfunc call() {\n    return up()\n}\n"),
+        ("glue/above.v2", "import \"../mono/scripts/sub/above.v2\" as a\nprint(a.call())\n"),
     ];
     let (code, stdout, stderr, home) = run_with_files(&files, &["mono/scripts/rootuse.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "mono root helper\n"), "{stderr}");
@@ -1231,6 +1238,18 @@ fn a_v2_module_of_another_project_is_told_which_project_the_run_uses() {
         canon(home.0.join("glue"))
     );
     assert!(stderr.contains("ImportError: No module named 'zzroot_helper'") && stderr.contains(&hint), "{stderr}");
+    // mono has no such module: the install line, as for any package.
+    let (code, _, stderr) = run_in_home(&home.0, &["glue/third.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("\n  hint: if 'zz_not_installed_anywhere' isn't misspelled, install it") && !stderr.contains("another project"), "{stderr}");
+    // mono/scripts isn't on Python's path in either project: the file is named, not pip-installed.
+    let (code, _, stderr) = run_in_home(&home.0, &["glue/above.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    let above = format!(
+        "\n  hint: there is a {} in a folder above, which isn't on Python's path: move it next to the .v2 file or into the project folder, or put its folder on sys.path in a @py block first\n",
+        canon(home.0.join("mono").join("scripts").join("zzabove.py"))
+    );
+    assert!(stderr.contains(&above), "{stderr}");
 }
 
 #[cfg(unix)]
