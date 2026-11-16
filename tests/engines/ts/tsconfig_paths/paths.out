@@ -1,0 +1,4 @@
+ForeignError | "@lib/*" is a "paths" alias in <here>/tsconfig.json, and Node doesn't read tsconfig paths: import by a relative path, or use package.json "imports" (#alias)
+ForeignError | "~/*" is a "paths" alias in <here>/tsconfig.json, and Node doesn't read tsconfig paths: import by a relative path, or use package.json "imports" (#alias)
+ImportError | "@lib/*" is a "paths" alias in <here>/tsconfig.json, and Node doesn't read tsconfig paths: import by a relative path, or use package.json "imports" (#alias)
+ImportError | if 'v2-no-such-package' isn't misspelled, install it with npm install v2-no-such-package in <here> or a folder above it, where Node looks for this file

@@ -1,0 +1,28 @@
+// requires: js ts
+// Node doesn't read tsconfig.json: a "paths" alias fails as a missing package, and the hint says
+// so, for a .ts file's import and the .v2 file's own (DOCS 5, INTERNALS 13.5).
+let here = @js { __dirname }
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.hint == null ? null : e.hint.replace(here, "<here>").replace("\\", "/"))
+    }
+}
+show(func() {
+    @import { tau } from ts."./paths.ts"
+    return tau
+})
+show(func() {
+    @import { y } from ts."./tilde.ts"
+    return y
+})
+show(func() {
+    @import { PI2 } from ts."@lib/math"
+    return PI2
+})
+// A package no alias matches: the install hint.
+show(func() {
+    @import { chunk } from js."v2-no-such-package"
+    return chunk
+})
