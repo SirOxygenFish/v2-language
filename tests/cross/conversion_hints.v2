@@ -81,3 +81,9 @@ show(func() => @py(jbig) { jbig })
 show(func() => to_v2(pbig))
 show(func() => to_v2(jbig))
 print(@js(s: @py(pbig) { str(pbig) }) { BigInt(s) + 1n == 2n ** 64n + 1n })
+// Round 17: int() of one can't convert it in its language (that gives the same handle back), so
+// the hint says what can be done; float() can (INTERNALS 5.10).
+show(func() => int(pbig))
+show(func() => int(jbig))
+show(func() => float(pbig))
+print(@py(h: pbig) { str(h) }, @js(h: jbig) { h.toString() })

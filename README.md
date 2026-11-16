@@ -328,8 +328,9 @@ More of V2, in short:
   **dicts**, whose keys are strings, `keys`, `values`, `get`, `remove` and `copy`. Lists and
   strings slice as `xs[1:3]`, and `x in xs`, `key in d` and `"lo" in "hello"` test membership.
 - **Syntax:** `cond ? a : b` picks a value, `a ?? b` is `b` when `a` is `null`, `x?.y` is `null`
-  when `x` is, `**` is a power; `f"${x:.2f}"` formats a number (`:.Nf` is the only format: pad in a
-  block, or with `" " * n`); in `"…"`, `\n`, `\t`, `\\`, `\"` and `\u{e9}` are escapes, and
+  when `x` is, `**` is a power; `f"${x:.2f}"` formats a number (`:.Nf` is the only format: pad with
+  `" " * n`, and for another, such as `:.3e` or `:,`, format it in a block:
+  `@py(x) { f"{x:.3e}" }`); in `"…"`, `\n`, `\t`, `\\`, `\"` and `\u{e9}` are escapes, and
   `r"C:\new"` keeps its backslashes; a `"""` at the end of a line starts a string of several lines;
   a caught error has `e.type` and `e.message`.
 - **What V2 doesn't have built in** comes from the languages: random numbers with

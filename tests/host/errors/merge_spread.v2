@@ -1,0 +1,26 @@
+// Python's and JavaScript's ways to merge two dicts or spread one into named arguments get V2's
+// ways, in the message or the hint (INTERNALS 5.3, 5.7).
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        if e.hint != null {
+            print("  hint: " + e.hint)
+        }
+    }
+}
+func f(x, key = 1) {
+    return key
+}
+let a = {x: 1}
+let b = {key: 2}
+show(func() => a + b)
+show(func() => f(1, ...b))
+// What the hints show.
+let c = a.copy()
+for k, v in b {
+    c[k] = v
+}
+print(c, a)
+print(f(1, key: b.key))

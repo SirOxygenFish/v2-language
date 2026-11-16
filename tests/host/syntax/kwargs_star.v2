@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: kwargs_star.v2:6:16: SyntaxError: expected an expression, found `**`
+// stderr: hint: V2 has no ** for named arguments: write them by name, or call it in a block, as in @py(f, opts) { f(**opts) }
+// Python's f(x, **opts) gets V2's ways (INTERNALS 2.4 habits).
+let opts = {indent: 2}
+print(dumps(1, **opts))

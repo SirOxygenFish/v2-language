@@ -170,6 +170,9 @@ fn unsupported<T>(op: &str, a: &Value, b: &Value) -> Exec<T> {
         msg.push_str(" — repeat with a whole number, as in \"ab\" * 2");
     } else if op == "+" && matches!(a, Value::List(_)) && !matches!(b, Value::List(_)) {
         msg.push_str(" — add an item with xs.push(x), or join lists with xs + [x]");
+    } else if op == "+" && matches!((a, b), (Value::Dict(_), Value::Dict(_))) {
+        msg.push_str(" — to merge two dicts, ");
+        msg.push_str(crate::syntax::lexer::MERGE_HINT);
     } else if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
         msg.push_str(" — to join text, use f\"...${x}\" or str(x); to count with text such as input() gives, convert it: int(x) or float(x)");
     } else if text_and_number(a, b) {
@@ -189,7 +192,7 @@ pub fn handle_hint(v: &Value, py: &str, js: &str) -> String {
 /// The hint for an operator with a handle operand: for an integer too big for V2's 64-bit int (a
 /// Python `int`, a JavaScript `bigint`), `to_v2` can't help, so the work stays in the block (9.1).
 fn operand_hint(a: &Value, b: &Value, example: &str) -> String {
-    let big = |v: &Value| matches!(v, Value::Handle(h) if matches!(&*h.type_name, "int" | "bigint"));
+    let big = |v: &Value| matches!(v, Value::Handle(h) if h.big_int());
     if big(a) || big(b) {
         " — this integer needs more than 64 bits, which V2's int doesn't have: keep the arithmetic in the block".into()
     } else {
