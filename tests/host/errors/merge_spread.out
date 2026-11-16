@@ -1,0 +1,5 @@
+TypeError: unsupported operand types for +: 'dict' and 'dict' — to merge two dicts, copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }
+TypeError: spread argument must be a list, got dict
+  hint: V2 has no ** for named arguments: write them by name, or call it in a block, as in @py(f, opts) { f(**opts) }
+{"x": 1, "key": 2} {"x": 1}
+2
