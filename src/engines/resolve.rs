@@ -30,6 +30,9 @@ pub struct Lookup {
     /// macOS: `xcrun` shims that open an install dialog when the Command Line Tools are
     /// missing, so `xcode-select -p` is asked first (7.6).
     pub xcrun_shims: Vec<PathBuf>,
+    /// The variables the engines' programs read as they start that are set (8.4), for a probe
+    /// that fails (7.8).
+    pub startup: Vec<(&'static str, String)>,
 }
 
 impl Lookup {
@@ -45,6 +48,7 @@ impl Lookup {
             windows_apps,
             cwd: std::env::current_dir().unwrap_or_default(),
             xcrun_shims: if cfg!(target_os = "macos") { vec![PathBuf::from("/usr/bin/python3")] } else { Vec::new() },
+            startup: ["py", "js"].into_iter().flat_map(crate::engines::spec::startup_variables).collect(),
         }
     }
 
@@ -621,6 +625,8 @@ impl Resolver<'_> {
                     format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id))
                 } else if let Some(fix) = library_fix(&path, reason) {
                     format!("\nfix: {fix}")
+                } else if let Some(fix) = probe_fix(&spec.id, &[(path.clone(), reason.to_string())], &self.lookup.startup) {
+                    format!("; {fix}")
                 } else if origin == Origin::Venv {
                     // A venv's python that doesn't run: the Python it was made with is gone (an
                     // upgrade that removed it: Windows says "No Python at …").
@@ -876,7 +882,7 @@ impl Resolver<'_> {
             None if failed => Status::Broken,
             None => Status::Missing,
         };
-        let mut message = not_found_message(spec, &skipped, newest_old, failed);
+        let mut message = not_found_message(spec, &skipped, newest_old, failed, &self.lookup.startup);
         // `env -i v2 x.v2`: nothing to search (7.5).
         if self.lookup.path.as_ref().is_none_or(|p| p.is_empty()) {
             message = message.replacen(" on PATH", " on PATH, which isn't set", 1);
@@ -938,9 +944,44 @@ pub fn library_fix(path: &Path, reason: &str) -> Option<String> {
     })
 }
 
+/// When a version probe failed (the program exited with an error, or a signal stopped it) while
+/// a variable that the probe reads is set (`NODE_OPTIONS`): that variable, not the program, is
+/// the likely cause (7.8). `set`: the startup variables that are set.
+pub fn probe_fix(id: &str, skipped: &[(PathBuf, String)], set: &[(&'static str, String)]) -> Option<String> {
+    let reads = crate::engines::spec::probe_variables(id);
+    let vars: Vec<(&str, String)> = set.iter().filter(|(n, _)| reads.contains(n)).cloned().collect();
+    let failed = skipped.iter().any(|(p, why)| why.starts_with("version probe failed (") && library_fix(p, why).is_none());
+    (failed && !vars.is_empty()).then(|| crate::engines::spec::startup_fix(id, &vars))
+}
+
+/// Doctor (19.2): with a startup variable set, whether the program really starts (`python -c
+/// pass`, `node -e 0`), since `--version` answers before Python reads `PYTHONHOME` or Node runs
+/// a preload (8.4). `None` when it starts, or when the check can't tell (it timed out, or
+/// couldn't start at all); else what ran and how it ended, `-c pass failed (exit code 1): `, and
+/// the first line that names an error.
+pub fn start_failure(prober: &dyn Prober, spec: &EngineSpec, argv: &[OsString]) -> Option<String> {
+    let args = crate::engines::spec::start_args(&spec.id);
+    if args.is_empty() {
+        return None;
+    }
+    let mut full = argv.to_vec();
+    full.extend(args.iter().map(OsString::from));
+    let (code, signal, output) = match prober.probe(&full, &Resolver::env(spec), Some(PROBE_LIMIT)) {
+        ProbeOutcome::Exited { code: Some(0), .. } | ProbeOutcome::TimedOut | ProbeOutcome::SpawnFailed(_) => return None,
+        ProbeOutcome::Killed(sig) => (None, Some(sig), String::new()),
+        ProbeOutcome::Exited { code, output } => (code, None, output),
+    };
+    // Python first prints its path configuration, Node the line of its loader that threw.
+    let lines = || output.lines().map(str::trim).filter(|l| !l.is_empty());
+    let said = lines().find(|l| l.contains("rror")).or_else(|| lines().next());
+    let said = said.map(|l| format!(": {}", l.chars().take(160).collect::<String>())).unwrap_or_default();
+    Some(format!("{} failed ({}){said}", args.join(" "), ExitInfo { code, signal }.describe()))
+}
+
 /// 7.8's message: what was found (nothing, or only versions that are too old), what was tried,
-/// what was skipped and why, how to install, how to configure.
-fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>, failed: bool) -> String {
+/// what was skipped and why, how to install, how to configure. `set`: the startup variables that
+/// are set (8.4).
+fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_old: Option<Version>, failed: bool, set: &[(&'static str, String)]) -> String {
     let tried: Vec<String> = spec.candidates.iter().map(|c| c.join(" ")).collect();
     let head = match (newest_old, spec.min_version) {
         // Node 23.0 and 23.1: newer than the minimum, but without type stripping (7.6).
@@ -960,6 +1001,10 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
         m.push_str(&format!("\nskipped: {} ({reason})", crate::syntax::span::shown_path(&path.display().to_string())));
     }
     for fix in skipped.iter().filter_map(|(path, reason)| library_fix(path, reason)) {
+        m.push_str(&format!("\nfix: {fix}"));
+    }
+    // Before the install line: NODE_OPTIONS, not Node.js, is the likely cause.
+    if let Some(fix) = probe_fix(&spec.id, skipped, set) {
         m.push_str(&format!("\nfix: {fix}"));
     }
     let id = &spec.id;
@@ -1023,6 +1068,7 @@ mod tests {
             windows_apps: apps.map(Path::to_path_buf),
             cwd: std::env::temp_dir(),
             xcrun_shims: Vec::new(),
+            startup: Vec::new(),
         }
     }
 
@@ -1211,7 +1257,7 @@ mod tests {
         let abs = temp("relabs");
         let good = exe(&abs, "node");
         let path = std::env::join_paths([PathBuf::new(), PathBuf::from("."), rel.clone(), abs.clone()]).unwrap();
-        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new() };
+        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new(), startup: Vec::new() };
         assert_eq!(find_program("node", &l), [good]);
         let _ = std::fs::remove_dir_all(&rel);
     }
@@ -1221,7 +1267,7 @@ mod tests {
         let (a, b) = (temp("first-a"), temp("first-b"));
         let (first, second) = (exe(&a, "tool"), exe(&b, "tool"));
         let path = std::env::join_paths([a, b]).unwrap();
-        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new() };
+        let l = Lookup { path: Some(path), pathext: None, windows_apps: None, cwd: std::env::current_dir().unwrap(), xcrun_shims: Vec::new(), startup: Vec::new() };
         assert_eq!(find_program("tool", &l), [first.clone(), second]);
         assert_eq!(first_program("tool", &l), Some(first));
         assert_eq!(first_program("no-such-tool", &l), None);
@@ -1343,6 +1389,62 @@ mod tests {
             assert_eq!(nf.status, Status::Broken);
             assert!(nf.message.starts_with("engine 'js' (JavaScript) was found but doesn't run (see why below)\n"), "{}", nf.message);
             assert_eq!(nf.skipped[0].1, reason);
+        }
+    }
+
+    #[test]
+    fn a_probe_stopped_by_node_options_names_it() {
+        // Round 18, 7.8: Node reads NODE_OPTIONS before it answers --version, so a failed probe
+        // with it set is that variable's doing; Python answers before it reads PYTHONHOME.
+        let d = temp("nodeopts");
+        let node = exe(&d, "node");
+        exe(&d, "python3");
+        let bad = ProbeOutcome::Exited { code: Some(9), output: "node: --bogus-flag is not allowed in NODE_OPTIONS\n".into() };
+        let p = fake(move |_| bad.clone());
+        let set = vec![("NODE_OPTIONS", "--bogus-flag".to_string()), ("PYTHONHOME", "/nope".to_string())];
+        let l = Lookup { startup: set.clone(), ..lookup(&[&d], None) };
+        let fix = "\nfix: node didn't start: NODE_OPTIONS is set (--bogus-flag), which it reads as it starts: unset it or fix it\ninstall: ";
+        let nf = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "js").unwrap_err();
+        assert!(nf.message.contains(fix), "{}", nf.message);
+        // Unset, or another kind of failure: the install advice alone.
+        let nf = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "js").unwrap_err();
+        assert!(!nf.message.contains("fix:"), "{}", nf.message);
+        let slow = fake(|_| ProbeOutcome::TimedOut);
+        assert!(!resolve_with(&Config::default(), &l, &slow, &mut ProbeCache::off(), "js").unwrap_err().message.contains("fix:"));
+        let nf = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(!nf.message.contains("fix:"), "PYTHONHOME isn't read by --version: {}", nf.message);
+        // A configured node: the same, on the message's first line, which doctor shows.
+        let cfg = with_command("js", &[&node.to_string_lossy()], ConfigSource::Env("V2_ENGINE_JS".into()));
+        let nf = resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), "js").unwrap_err();
+        assert!(nf.message.ends_with("NODE_OPTIONS; node didn't start: NODE_OPTIONS is set (--bogus-flag), which it reads as it starts: unset it or fix it"), "{}", nf.message);
+        // Doctor's fix line for one found on PATH comes from the same rule.
+        assert_eq!(probe_fix("js", &nf.skipped, &set), None, "nothing skipped");
+        let skipped = [(node.clone(), "version probe failed (exit code 9): node: --bogus-flag is not allowed in NODE_OPTIONS".to_string())];
+        assert!(probe_fix("js", &skipped, &set).is_some_and(|f| f.starts_with("node didn't start: NODE_OPTIONS is set (--bogus-flag)")));
+        assert_eq!(probe_fix("js", &skipped, &set[1..]), None);
+    }
+
+    #[test]
+    fn doctor_sees_whether_the_program_starts() {
+        // Round 18, 19.2: `--version` answers before Python reads PYTHONHOME, so doctor runs
+        // `python -c pass` (`node -e 0`) and reports the first line that names an error.
+        let python = PathBuf::from("/usr/bin/python3");
+        let broken = "Python path configuration:\n  PYTHONHOME = '/nope'\nFatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding\nPython runtime state: core initialized\n";
+        let p = fake(move |_| ProbeOutcome::Exited { code: Some(1), output: broken.into() });
+        let argvs = p.argvs.clone();
+        assert_eq!(
+            start_failure(&p, &spec("py"), &[python.clone().into_os_string()]).as_deref(),
+            Some("-c pass failed (exit code 1): Fatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding")
+        );
+        assert_eq!(argvs.borrow()[0], [python.clone().into_os_string(), "-c".into(), "pass".into()]);
+        let node = PathBuf::from("/usr/bin/node");
+        let preload = "node:internal/modules/cjs/loader:1247\n  throw err;\n  ^\n\nError: Cannot find module '/x/missing.js'\nRequire stack:\n";
+        let p = fake(move |_| ProbeOutcome::Exited { code: Some(1), output: preload.into() });
+        assert_eq!(start_failure(&p, &spec("js"), &[node.into_os_string()]).as_deref(), Some("-e 0 failed (exit code 1): Error: Cannot find module '/x/missing.js'"));
+        // It starts, or the check can't tell: nothing to report.
+        for outcome in [says(""), ProbeOutcome::TimedOut, ProbeOutcome::SpawnFailed("boom".into())] {
+            let p = fake(move |_| outcome.clone());
+            assert_eq!(start_failure(&p, &spec("py"), &[python.clone().into_os_string()]), None);
         }
     }
 

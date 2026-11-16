@@ -1,0 +1,15 @@
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
+ImportError | no block in this file is labeled 'lib'
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib directly; @import brings in names from other languages' blocks and packages
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
+EngineUnknown | unknown engine '@nolib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
+  hint: null
+ImportError | no block in this file is labeled 'nolib': a Python module is imported with py.nolib, an npm package with js.nolib
+  hint: null
+6

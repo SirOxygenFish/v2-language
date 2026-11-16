@@ -1073,7 +1073,8 @@ fn a_script_named_like_a_flag_is_shown_how_to_run() {
 #[test]
 fn a_python_that_cant_start_names_pythonhome() {
     // INTERNALS 8.4, 19.2: --version runs, but Python can't start with a PYTHONHOME that isn't
-    // there; the crash and doctor's notes name the variable.
+    // there; the crash names the variable, and doctor, which sees `python -c pass` fail (round
+    // 18), shows py broken with what Python said and the fix.
     if !needs("py", "a_python_that_cant_start_names_pythonhome") {
         return;
     }
@@ -1086,8 +1087,111 @@ fn a_python_that_cant_start_names_pythonhome() {
     assert_eq!(code, Some(1), "{stderr}");
     let named = "; PYTHONHOME is set (no-python-home), which it reads as it starts";
     assert!(stderr.contains("EngineCrashed: engine 'py' exited during startup") && stderr.contains(named), "{stderr}");
-    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &env);
-    assert!(stdout.contains("\n  py: PYTHONHOME is set (no-python-home), which Python reads as it starts\n"), "{stdout}");
+    let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &env);
+    assert_eq!((code, doctor_rows(&stdout)["py"][0].as_str()), (Some(0), "broken"), "{stdout}");
+    assert!(stdout.contains(" -c pass failed (exit code ") && stdout.contains("): Fatal Python error: "), "{stdout}");
+    let fix = "\n  py: fix: python didn't start: PYTHONHOME is set (no-python-home), which it reads as it starts: unset it or fix it\n";
+    assert!(stdout.contains(fix) && !stdout.contains("which Python reads as it starts"), "{stdout}");
+    assert!(stdout.lines().any(|l| l.starts_with("not ready: py")) && !stdout.lines().any(|l| l.starts_with("ready:") && l.contains("py")), "{stdout}");
+    // One Python starts with: ok, and the note.
+    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &[("PYTHONPATH", std::ffi::OsStr::new("."))]);
+    assert_eq!(doctor_rows(&stdout)["py"][0], "ok", "{stdout}");
+    assert!(stdout.contains("\n  py: PYTHONPATH is set (.), which Python reads as it starts\n"), "{stdout}");
+}
+
+#[test]
+fn a_node_options_that_stops_node_is_named() {
+    // Round 18, INTERNALS 7.8, 19.2: a bad option in NODE_OPTIONS stops `node --version`, and a
+    // preload that isn't there stops `node -e 0`: doctor and the run name the variable, not a
+    // reinstall of Node.js.
+    if !needs("js", "a_node_options_that_stops_node_is_named") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("j.v2"), "print(@js { 1 + 1 })\n").unwrap();
+    let fix = "fix: node didn't start: NODE_OPTIONS is set (--bogus-flag), which it reads as it starts: unset it or fix it";
+    let bogus = [("NODE_OPTIONS", std::ffi::OsStr::new("--bogus-flag"))];
+    let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &bogus);
+    let rows = doctor_rows(&stdout);
+    assert_eq!((code, rows["js"][0].as_str(), rows["ts"][0].as_str()), (Some(0), "broken", "broken"), "{stdout}");
+    assert!(stdout.contains(&format!("\n  js: {fix}\n")) && !stdout.contains("repair that Node.js"), "{stdout}");
+    assert!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), "{stdout}");
+    // The run, with no probe cached: EngineNotFound, the fix before the install line.
+    let (code, _, stderr) = run_in_home(&home.0, &["j.v2"], &bogus);
+    assert_eq!(code, Some(3), "{stderr}");
+    let at = stderr.find(&format!("\n    {fix}\n")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(stderr[at..].contains("\n    install: "), "{stderr}");
+    // A preload that isn't there: --version answers, `node -e 0` doesn't.
+    let preload = [("NODE_OPTIONS", std::ffi::OsStr::new("--require ./missing.js"))];
+    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &preload);
+    let rows = doctor_rows(&stdout);
+    assert_eq!((rows["js"][0].as_str(), rows["ts"][0].as_str()), ("broken", "broken"), "{stdout}");
+    assert!(stdout.contains(" -e 0 failed (exit code 1): Error: Cannot find module"), "{stdout}");
+    let named = "\n  js: fix: node didn't start: NODE_OPTIONS is set (--require ./missing.js), which it reads as it starts: unset it or fix it\n";
+    assert!(stdout.contains(named), "{stdout}");
+    // One that does no harm: ok, with the note.
+    let (_, stdout, _) = run_in_home(&home.0, &["doctor"], &[("NODE_OPTIONS", std::ffi::OsStr::new("--max-old-space-size=512"))]);
+    assert_eq!(doctor_rows(&stdout)["js"][0], "ok", "{stdout}");
+    assert!(stdout.contains("\n  js: NODE_OPTIONS is set (--max-old-space-size=512), which Node.js reads as it starts\n"), "{stdout}");
+}
+
+#[test]
+fn a_v2_module_of_another_project_is_told_which_project_the_run_uses() {
+    // Round 18, INTERNALS 13.5, 18.1: one project serves a run, so a .v2 file of another project
+    // (its own v2.toml) doesn't find that project's own Python modules; the hint says so, rather
+    // than asking for the v2.toml that is already there.
+    if !needs("py", "a_v2_module_of_another_project_is_told_which_project_the_run_uses") {
+        return;
+    }
+    let files = [
+        ("mono/v2.toml", ""),
+        ("mono/zzroot_helper.py", "def root_help():\n    return 'mono root helper'\n"),
+        ("mono/scripts/sub/rootlib.v2", "@import { root_help } from py.zzroot_helper\nfunc call_root() {\n    return root_help()\n}\n"),
+        ("mono/scripts/rootuse.v2", "import \"./sub/rootlib.v2\" as r\nprint(r.call_root())\n"),
+        ("glue/v2.toml", ""),
+        ("glue/cross.v2", "import \"../mono/scripts/sub/rootlib.v2\" as r\nprint(r.call_root())\n"),
+    ];
+    let (code, stdout, stderr, home) = run_with_files(&files, &["mono/scripts/rootuse.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "mono root helper\n"), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["glue/cross.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    let canon = |p: PathBuf| {
+        let c = std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        c.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(c)
+    };
+    let hint = format!(
+        "\n  hint: mono/scripts/sub/rootlib.v2 belongs to another project ({}, with its own v2.toml), but a run uses the entry script's project ({}): run it from that project, or put the module where this one finds it\n",
+        canon(home.0.join("mono")),
+        canon(home.0.join("glue"))
+    );
+    assert!(stderr.contains("ImportError: No module named 'zzroot_helper'") && stderr.contains(&hint), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_python_module_linked_into_another_folder_is_the_module_python_has() {
+    // Round 18, INTERNALS 13.5: a helpers.py that links to the module Python loaded is that
+    // module, not another of the same name, whichever folder loads it first.
+    if !needs("py", "a_python_module_linked_into_another_folder_is_the_module_python_has") {
+        return;
+    }
+    let home = TempHome::new();
+    let files = [
+        ("real/helpers.py", "def helper_name():\n    return 'real helper'\n"),
+        ("real/once.v2", "@import { helper_name } from py.helpers\nfunc who() {\n    return helper_name()\n}\n"),
+        ("app/l.v2", "import \"../real/once.v2\" as a\n@import { helper_name } from py.helpers\nprint(a.who(), helper_name())\n"),
+        ("app/r.v2", "@import { helper_name } from py.helpers\nprint(helper_name())\nimport \"../real/once.v2\" as a\nprint(a.who())\n"),
+    ];
+    for (path, text) in files {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    std::os::unix::fs::symlink(home.0.join("real/helpers.py"), home.0.join("app/helpers.py")).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["app/l.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "real helper real helper\n"), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["app/r.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "real helper\nreal helper\n"), "{stderr}");
 }
 
 #[cfg(windows)]

@@ -40,6 +40,9 @@ pub struct FileScope {
     /// Names declared inside a nested body, by name: where, that body's span and what it is
     /// (`for loop`, `function show`), for a use outside it (5.9).
     inner: HashMap<Rc<str>, Vec<Inner>>,
+    /// The V2 modules the file imports, by alias: `lib` for `import "./lib.v2" as lib`, whose
+    /// names an `@import … from lib.x` can't reach (13.1).
+    modules: HashMap<Rc<str>, Rc<str>>,
 }
 
 /// A declaration in a nested body.
@@ -57,6 +60,7 @@ impl FileScope {
         stmts(program, &mut walk);
         let mut bodies = std::mem::take(&mut walk.bodies);
         let inner = std::mem::take(&mut walk.inner);
+        let modules = std::mem::take(&mut walk.modules);
         bodies.sort_by_key(|b| b.unit_id.offset);
         let blocks = bodies.iter().filter(|b| b.directives.exports.is_some()).cloned().collect();
         let mut top = HashMap::new();
@@ -86,7 +90,7 @@ impl FileScope {
             };
             top.extend(crate::syntax::check::declarations(s).into_iter().map(|(n, at)| (n, (at, how))));
         }
-        FileScope { frame, blocks, bodies, top, waiting, top_blocks, eligible, inner }
+        FileScope { frame, blocks, bodies, top, waiting, top_blocks, eligible, inner, modules }
     }
 
     pub(crate) fn block_may_wait(&self, id: UnitId) -> bool {
@@ -110,6 +114,7 @@ struct Walk {
     /// Names used as anything but the receiver of a plain member read or method call.
     not_member: HashSet<Rc<str>>,
     inner: HashMap<Rc<str>, Vec<Inner>>,
+    modules: HashMap<Rc<str>, Rc<str>>,
 }
 
 impl Walk {
@@ -157,11 +162,13 @@ fn nested(body: &Body, what: &str, out: &mut Walk) {
 fn stmt(s: &Stmt, out: &mut Walk) {
     match &s.kind {
         StmtKind::Let(_, Some(e)) | StmtKind::Const(_, e) | StmtKind::Expr(e) | StmtKind::Throw(e) | StmtKind::Return(Some(e)) => expr(e, out),
+        StmtKind::Import { path, alias } => {
+            out.modules.insert(alias.text.clone(), path.clone());
+        }
         StmtKind::Let(_, None)
         | StmtKind::Return(None)
         | StmtKind::Break
         | StmtKind::Continue
-        | StmtKind::Import { .. }
         | StmtKind::EngineImport(_)
         | StmtKind::Extern(_) => {}
         StmtKind::Assign { target, value, .. } => {
@@ -446,11 +453,22 @@ fn star_tag(b: &EngineBlock) -> Option<&str> {
     b.directives.exports.as_ref().filter(|x| x.star.is_some()).map(|_| canonical_tag(&b.tag.text))
 }
 
+/// Where an `@import` of a module is, for its hints (13.5).
+struct Site<'a> {
+    /// The importing .v2 file's folder, and that file as messages show it.
+    dir: &'a Path,
+    file: &'a str,
+    /// The run's project root (18.1), in `dir`'s form (canonical), and whether a v2.toml is there.
+    root: &'a Path,
+    toml: bool,
+}
+
 /// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
-/// or what to install, from the folder of the importing .v2 file, `dir`.
+/// or what to install, from the folder of the importing .v2 file.
 /// `python`: the Python V2 was told to use (a venv, a command, V2_ENGINE_PY), for the exact
 /// install command; `None` for one found on PATH.
-fn missing_package_hint(message: &str, dir: &Path, python: Option<&Path>) -> Option<String> {
+fn missing_package_hint(message: &str, site: &Site, python: Option<&Path>) -> Option<String> {
+    let dir = site.dir;
     let venv_set = python.is_some();
     // A package whose `exports` offer only `import`, which `require` can't load: a block can.
     if let Some(rest) = message.split("No \"exports\" main defined in ").nth(1) {
@@ -475,13 +493,37 @@ fn missing_package_hint(message: &str, dir: &Path, python: Option<&Path>) -> Opt
         if let Some(dotted) = module_below(dir, &name) {
             return Some(format!("there is a {} in a folder below: import it as py.{dotted}", dotted.replace('.', "/") + ".py"));
         }
-        // One in a folder above, which isn't on Python's path without a v2.toml there.
-        if let Some(above) = dir.ancestors().skip(1).take(3).map(|d| d.join(format!("{name}.py"))).find(|p| p.is_file()) {
-            let folder = above.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        // A .v2 file of another project's: the entry script's project serves the whole run (18.1).
+        if let Some(own) = crate::config::find_root(dir).filter(|r| r != site.root) {
             return Some(format!(
-                "there is a {} in a folder above: a v2.toml in {folder} (it may be empty) makes that the project folder, where py.{name} is found",
-                above.display()
+                "{} belongs to another project ({}, with its own v2.toml), but a run uses the entry script's project ({}): run it from that project, or put the module where this one finds it",
+                site.file,
+                own.display(),
+                site.root.display()
             ));
+        }
+        // One in a folder above, which isn't on Python's path.
+        if let Some(above) = dir.ancestors().skip(1).take(3).map(|d| d.join(format!("{name}.py"))).find(|p| p.is_file()) {
+            let folder = above.parent().unwrap_or(dir);
+            if folder != site.root && folder.starts_with(site.root) {
+                // In a folder of the project, whose root is on the path: `py.lib.rooth`.
+                let parts: Vec<String> = folder.strip_prefix(site.root).map(|r| r.iter().map(|c| c.to_string_lossy().into_owned()).collect()).unwrap_or_default();
+                if !parts.is_empty() && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')) {
+                    return Some(format!(
+                        "there is a {} in a folder above: from the project folder, {}, it is py.{}.{name}",
+                        above.display(),
+                        site.root.display(),
+                        parts.join(".")
+                    ));
+                }
+            } else if !site.toml && site.root.starts_with(folder) {
+                // The entry script's folder or one above it: a v2.toml there makes it the root.
+                return Some(format!(
+                    "there is a {} in a folder above: a v2.toml in {} (it may be empty) makes that the project folder, where py.{name} is found",
+                    above.display(),
+                    folder.display()
+                ));
+            }
         }
         let install = match python {
             Some(p) => {
@@ -729,6 +771,10 @@ impl Interp {
         if matches!(canonical_tag(l), "py" | "js" | "ts") {
             return format!("{what} — did you mean @{l}? (from @{l} takes the names this file's @{l} blocks export)");
         }
+        // `from lib` for `import "./lib.v2" as lib`: the hint says what lib is (`alias_hint`).
+        if self.files[&file].modules.contains_key(l) {
+            return what;
+        }
         // A package written without its language: npm's when node_modules has it.
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
         let npm = dir.ancestors().any(|d| d.join("node_modules").join(&**l).is_dir());
@@ -839,6 +885,36 @@ impl Interp {
     /// A selector's engine; an unknown tag is 7.3's `EngineUnknown`.
     fn selector_key(&self, tag: &Name) -> Exec<Rc<str>> {
         self.engine_key(&tag.text).map_or_else(|| fail("EngineUnknown", self.registry.unknown_message(&tag.text)), Ok)
+    }
+
+    /// `@import { total } from lib.wrap` (or `from lib`) where the file has `import "./lib.v2" as
+    /// lib`: its first word reads as an engine's tag or a block's label, so the error's hint says
+    /// what `lib` is (13.1).
+    fn alias_hint(&self, imp: &EngineImport, f: Flow) -> Flow {
+        let Flow::Error(e) = &f else { return f };
+        let first = match &imp.selector {
+            Selector::Union { tag } | Selector::Exact { tag, .. } | Selector::Module { lang: tag, .. } => tag,
+            Selector::Label { label } => label,
+            Selector::V2 { .. } => return f,
+        };
+        let a = &first.text;
+        let about = match &*e.kind {
+            "EngineUnknown" => e.message.starts_with(&format!("unknown engine '@{a}'")),
+            "ImportError" => e.message.starts_with(&format!("no block in this file is labeled '{a}'")),
+            _ => false,
+        };
+        if let Some(path) = self.files.get(&imp.span.file).and_then(|s| s.modules.get(a)).filter(|_| about) {
+            // `lib.total` for the names asked for; `lib` itself for the whole module.
+            let what = match &imp.items {
+                ImportItems::Names(list) => list.first().map_or_else(|| a.to_string(), |i| format!("{a}.{}", i.name)),
+                ImportItems::Module(_) => a.to_string(),
+            };
+            // The path as a literal again: `"..\\lib.v2"` for a backslash.
+            let mut literal = String::new();
+            crate::runtime::value::quoted(path, &mut literal);
+            let _ = e.hint.set(format!("{a} is a V2 module (import {literal} as {a}): use {what} directly; @import brings in names from other languages' blocks and packages").into());
+        }
+        f
     }
 
     fn loaded(&self, b: &EngineBlock) -> Option<&Rc<[Export]>> {
@@ -969,7 +1045,7 @@ impl Interp {
     pub fn exec_import(&mut self, imp: &Rc<EngineImport>, env: &Env) -> Exec<()> {
         let bound = match self.import_waits(imp) {
             Some(key) => self.wait_import(imp, key)?,
-            None => self.resolve_import(imp, None)?,
+            None => self.resolve_import(imp, None).map_err(|f| self.alias_hint(imp, f))?,
         };
         for (name, value) in bound {
             declare(env, name, value, true);
@@ -1108,13 +1184,7 @@ impl Interp {
             };
             if !name.split('.').all(|seg| ident(seg) && !PY_KEYWORDS.contains(&seg)) {
                 // `py."./helper.py"`, as js takes a file: Python's names are module names.
-                let file = name.ends_with(".py") || name.contains(['/', '\\']);
-                let module = name.trim_start_matches("./").trim_start_matches(".\\").trim_end_matches(".py").replace(['/', '\\'], ".");
-                let hint = if file && !module.contains("..") && module.split('.').all(|s| !s.is_empty()) {
-                    format!(": a Python file next to the .v2 file is imported as a module, py.{module}")
-                } else {
-                    String::new()
-                };
+                let hint = if name.ends_with(".py") || name.contains(['/', '\\']) { self.py_path_hint(file, name, &ident) } else { String::new() };
                 return Err(import_error(format!("'{name}' is not a valid Python module name{hint}")));
             }
         } else if name.is_empty() {
@@ -1127,6 +1197,28 @@ impl Interp {
             return Ok(format!("js:{}", absolute_clean(&dir.join(name)).display()));
         }
         Ok(format!("{key}:{name}"))
+    }
+
+    /// `py."../src/acme/core.py"`, a file's path for a Python module (13.5): Python finds modules
+    /// by dotted name in the .v2 file's folder, the project root and its own path. A path below
+    /// one of those two folders is that name; any other folder has to be on `sys.path`.
+    fn py_path_hint(&self, file: FileId, name: &str, ident: &dyn Fn(&str) -> bool) -> String {
+        let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let target = absolute_clean(&dir.join(name.trim_end_matches(".py").replace('\\', "/")));
+        // The dotted name of `target` from `base`, when each part is a name.
+        let dotted = |base: &Path| -> Option<String> {
+            let parts: Vec<String> = target.strip_prefix(base).ok()?.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+            (!parts.is_empty() && parts.iter().all(|p| ident(p) && !PY_KEYWORDS.contains(&p.as_str()))).then(|| parts.join("."))
+        };
+        if let Some(module) = dotted(&dir) {
+            return format!(": a Python file next to the .v2 file is imported as a module, py.{module}");
+        }
+        let root = &self.registry.config().root;
+        let root = crate::runtime::module::canonical(root).unwrap_or_else(|| root.clone());
+        if let Some(module) = dotted(&root) {
+            return format!(": the project folder, {}, is on Python's path, and from there this is py.{module}", root.display());
+        }
+        ": Python finds a module by its dotted name in the .v2 file's folder, the project folder or its own path (a venv's packages): write that name, or put the file's folder on sys.path in a @py block before this @import".into()
     }
 
     /// One `module` frame (13.5): the module handle (or null), the exports of the requested
@@ -1147,10 +1239,15 @@ impl Interp {
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
         let engine = &self.sessions[s].engine;
         let python = (engine.origin != crate::engines::resolve::Origin::Path).then(|| PathBuf::from(&engine.argv[0]));
+        let (root, toml) = (self.registry.config().root.clone(), self.registry.config().file.is_some());
+        let shown = self.sm.file(file).display.clone();
         let reply = self.request(s, frame, &what, at).inspect_err(|f| {
             if let Flow::Error(e) = f {
                 let hint = match &*e.kind {
-                    "ImportError" => missing_package_hint(&e.message, &dir, python.as_deref()),
+                    "ImportError" => {
+                        let root = crate::runtime::module::canonical(&root).unwrap_or(root);
+                        missing_package_hint(&e.message, &Site { dir: &dir, file: &shown, root: &root, toml }, python.as_deref())
+                    }
                     "ForeignError" => nested_commonjs_hint(&e.message, &joined, &dir)
                         .or_else(|| ts_import_hint(&e.message))
                         .or_else(|| commonjs_hint(&e.message, &joined, &dir)),
@@ -1221,7 +1318,7 @@ impl Interp {
                 }
                 Selector::Module { lang, path } => {
                     let at = self.selector_span(&imp.selector);
-                    let target = self.selector_key(lang).map_err(|f| self.raise(f, at))?;
+                    let target = self.selector_key(lang).map_err(|f| self.raise(self.alias_hint(imp, f), at))?;
                     let ImportItems::Names(list) = &imp.items else { unreachable!("a static error in blocks") };
                     if *target != *key {
                         // Another session's module is imported when first called (13.6).
@@ -1258,7 +1355,7 @@ impl Interp {
                 }
                 sel => {
                     let ImportItems::Names(list) = &imp.items else { unreachable!("a static error in blocks") };
-                    self.check_selector(file, sel, &names_text(list))?;
+                    self.check_selector(file, sel, &names_text(list)).map_err(|f| self.alias_hint(imp, f))?;
                     for (name, alias, span) in named_items(list) {
                         let hit = self.provider(file, sel, &name, None).map_err(|f| self.raise(f, span))?;
                         match self.units.get(&hit.unit_id) {
@@ -1368,11 +1465,16 @@ mod tests {
         d
     }
 
+    /// A .v2 file in `dir` that is the entry script, with no v2.toml.
+    fn site(dir: &Path) -> Site<'_> {
+        Site { dir, file: "m.v2", root: dir, toml: false }
+    }
+
     #[test]
     fn missing_package_hints_name_the_missing_part() {
         // 13.5: from the engine's own message, what to check or what to install.
         let d = temp("plain");
-        let hint = |m: &str, dir: &Path| missing_package_hint(m, dir, None).unwrap();
+        let hint = |m: &str, dir: &Path| missing_package_hint(m, &site(dir), None).unwrap();
         assert_eq!(hint("No module named 'os.pathh'; 'os' is not a package", &d), "'os' is a module, not a package, so it has no 'pathh': check the name after 'os.'");
         assert_eq!(hint("No module named 'xml.etreee'", &d), "'xml' is there, but has no 'etreee': check the name after 'xml.'");
         let pip = "if 'numpy' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps";
@@ -1387,7 +1489,7 @@ mod tests {
         // A Python V2 was told to use (a venv in v2.toml): its own install command.
         let venv_python = proj.join(".venv").join("bin").join("python");
         assert_eq!(
-            missing_package_hint("No module named 'numpy'", &proj, Some(&venv_python)),
+            missing_package_hint("No module named 'numpy'", &site(&proj), Some(&venv_python)),
             Some(format!("if 'numpy' isn't misspelled, install it for the Python V2 uses: {} -m pip install numpy", venv_python.display()))
         );
         // A helper of the project's own in a folder below.
@@ -1426,13 +1528,48 @@ mod tests {
         assert_eq!(shadowed_hint("js.util", &js).as_deref(), Some("js.util is a package (Node's own or one from npm), not your util.js: a file of yours is imported by its path, as in js.\"./util.js\""));
         assert_eq!(shadowed_hint("js.path", &js), None, "no path.js there");
         assert_eq!(shadowed_hint("py.util", &js), None);
-        assert_eq!(missing_package_hint("something else", &d, None), None);
+        assert_eq!(missing_package_hint("something else", &site(&d), None), None);
         // A package that offers only `import` (an ES module's `exports`).
         let m = format!("No \"exports\" main defined in {}", d.join("node_modules").join("@scope").join("esm-only").join("package.json").display());
         assert_eq!(
             hint(&m, &d),
             "'@scope/esm-only' can be loaded only with import(), which a @js block can do: async function load() { return await import(\"@scope/esm-only\") }, then @export { load } and call load()"
         );
+    }
+
+    #[test]
+    fn a_module_above_is_named_for_the_runs_project() {
+        // Round 18: one project serves the run (18.1), so the hint for a NAME.py above the .v2
+        // file depends on where the run's project root is.
+        let base = temp("projects");
+        for (path, text) in [("mono/v2.toml", ""), ("mono/zzroot.py", ""), ("glue/v2.toml", ""), ("proj/v2.toml", ""), ("proj/lib/rooth.py", ""), ("other/h.py", "")] {
+            let p = base.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        for d in ["mono/scripts/sub", "proj/lib/sub/deep", "other/x"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        // A .v2 file of another project (its own v2.toml): the run uses the entry's.
+        let (mono, glue) = (base.join("mono"), base.join("glue"));
+        let sub = mono.join("scripts").join("sub");
+        let shared = Site { dir: &sub, file: "../mono/scripts/sub/rootlib.v2", root: &glue, toml: true };
+        assert_eq!(
+            missing_package_hint("No module named 'zzroot'", &shared, None).unwrap(),
+            format!("../mono/scripts/sub/rootlib.v2 belongs to another project ({}, with its own v2.toml), but a run uses the entry script's project ({}): run it from that project, or put the module where this one finds it", mono.display(), glue.display())
+        );
+        // In a folder of the run's project, below its root: the dotted name from the root.
+        let proj = base.join("proj");
+        let deep = proj.join("lib").join("sub").join("deep");
+        let inside = Site { dir: &deep, file: "lib/sub/deep/m.v2", root: &proj, toml: true };
+        assert_eq!(
+            missing_package_hint("No module named 'rooth'", &inside, None).unwrap(),
+            format!("there is a {} in a folder above: from the project folder, {}, it is py.lib.rooth", proj.join("lib").join("rooth.py").display(), proj.display())
+        );
+        // Outside the run's project, which has a v2.toml: no v2.toml there would change the run.
+        let x = base.join("other").join("x");
+        let outside = Site { dir: &x, file: "../other/x/m.v2", root: &proj, toml: true };
+        assert!(missing_package_hint("No module named 'h'", &outside, None).unwrap().starts_with("if 'h' isn't misspelled, install it"));
     }
 
     #[test]

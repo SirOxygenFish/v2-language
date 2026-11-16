@@ -96,6 +96,12 @@ impl Registry {
         r
     }
 
+    /// Doctor: whether a resolved engine's program really starts, with the startup variables set
+    /// (19.2; `resolve::start_failure`).
+    pub fn start_failure(&self, e: &ResolvedEngine) -> Option<String> {
+        super::resolve::start_failure(&*self.prober, &e.spec, &e.argv)
+    }
+
     /// A block's tag or a selector's engine: `EngineUnknown` or `EngineNotFound`, a fresh error
     /// each time so every use gets its own location (7.3, 7.8).
     pub fn resolve_tag(&self, tag: &str) -> Exec<Rc<ResolvedEngine>> {
@@ -160,7 +166,7 @@ mod tests {
 
     fn registry(path: Option<OsString>) -> (Registry, Rc<Cell<usize>>) {
         let calls = Rc::new(Cell::new(0));
-        let lookup = Lookup { path, pathext: None, windows_apps: None, cwd: std::env::temp_dir(), xcrun_shims: Vec::new() };
+        let lookup = Lookup { path, pathext: None, windows_apps: None, cwd: std::env::temp_dir(), xcrun_shims: Vec::new(), startup: Vec::new() };
         let reg = Registry::new(Rc::new(Config::default()), Box::new(Counting(calls.clone())), lookup, ProbeCache::off());
         (reg, calls)
     }
@@ -225,7 +231,7 @@ mod tests {
         #[cfg(unix)]
         std::fs::set_permissions(&python, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let calls = Rc::new(Cell::new(0));
-        let lookup = Lookup { path: Some(d.into_os_string()), pathext: None, windows_apps: None, cwd: std::env::temp_dir(), xcrun_shims: Vec::new() };
+        let lookup = Lookup { path: Some(d.into_os_string()), pathext: None, windows_apps: None, cwd: std::env::temp_dir(), xcrun_shims: Vec::new(), startup: Vec::new() };
         let reg = Registry::new(Rc::new(Config::default()), Box::new(Old(calls.clone())), lookup, ProbeCache::off());
         for _ in 0..3 {
             let Err(crate::runtime::error::Flow::Error(e)) = reg.resolve_tag("py") else { panic!("too old") };
