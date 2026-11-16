@@ -82,7 +82,12 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         Ok(found) => crate::syntax::span::strip_verbatim(&found),
         // There, but it can't be followed: a link to a file that isn't there, or the OS's
         // reason (a loop of links: "Too many levels of symbolic links"), as for FILE (19.1).
+        // A link to an anonymous pipe (/dev/stdin from a pipe, /proc/self/fd/0, <(…)) is there
+        // to the OS, which follows /proc's links, though canonicalize can't name its target.
         Err(e) if std::fs::symlink_metadata(&target).is_ok() => {
+            if std::fs::metadata(&target).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
+                return Err(format!("cannot import '{spec}': it is a pipe or a device, not a file"));
+            }
             return Err(match std::fs::read_link(&target) {
                 Ok(to) if e.kind() == std::io::ErrorKind::NotFound => {
                     format!("cannot import '{spec}': it is a symbolic link to {}, which isn't there", to.to_string_lossy())

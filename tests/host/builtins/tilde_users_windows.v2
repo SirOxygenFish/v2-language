@@ -1,0 +1,8 @@
+// platform: windows
+// Windows shells expand no ~name, so ~root is a name there, taken as written (round 17 review,
+// DOCS 3.11); ~ and ~\ are still refused.
+print(exists("~root"), exists("~root/x"))
+write_file("~root", "x")
+print(read_file("~root"), "~root" in list_dir("."), remove_file("~root"), exists("~root"))
+try { read_file("~root/x") } catch (e) { print(e.message) }
+try { make_dir("~\\x") } catch (e) { print(e.message) }

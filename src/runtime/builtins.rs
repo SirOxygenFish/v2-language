@@ -507,18 +507,16 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
     if path.is_empty() {
         return io_error(format!("cannot {verb} '': the path is empty"));
     }
-    let first = path.split(['/', '\\']).next().unwrap_or_default();
+    let mut first = path.split(['/', '\\']).next().unwrap_or_default();
     let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    // `~root`, `~user`: a login name after the `~`, which a shell turns into that user's home.
-    let user = first.strip_prefix('~').filter(|u| {
-        u.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && u.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    });
+    let user = other_home(path);
     let write = if first == "~" {
         match &path[1..] {
             "" => format!("getenv(\"{home}\")"),
             rest => format!("getenv(\"{home}\") + \"{rest}\""),
         }
     } else if let Some(user) = user {
+        first = &path[..=user.len()];
         format!("the path of {user}'s home folder (what {first} is in a shell)")
     } else if crate::config::unexpanded(first) == Some(first) {
         let name = first.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
@@ -537,6 +535,23 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': V2 doesn't expand {first} in paths", shown_path(path)));
     let _ = err.hint.set(format!("write {write}, or ./{first} for a folder that is really named {first}").into());
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// Unix: the user of a path that starts with `~user` (up to the first `/`) when there is such a
+/// user, whose home folder a shell puts there (bash asks `getpwnam` too). A name no user has
+/// (Word's `~WRL0001.tmp`, a folder `~old`) is a name; Windows shells expand no `~user` (5.10).
+#[cfg(unix)]
+fn other_home(path: &str) -> Option<&str> {
+    let name = path.split('/').next()?.strip_prefix('~').filter(|n| !n.is_empty())?;
+    let c = std::ffi::CString::new(name).ok()?;
+    // SAFETY: a NUL-terminated name; only whether an entry came back is looked at.
+    let found = unsafe { !libc::getpwnam(c.as_ptr()).is_null() };
+    found.then_some(name)
+}
+
+#[cfg(not(unix))]
+fn other_home(_path: &str) -> Option<&str> {
+    None
 }
 
 /// A command of the shell (`dir`, `cd`), not a program on PATH: what to write instead (5.10).
