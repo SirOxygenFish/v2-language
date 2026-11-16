@@ -935,6 +935,54 @@ fn spawn_error(program: &OsString, e: &std::io::Error) -> SpawnError {
     SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason }
 }
 
+/// Windows: one argument as the command line carries it, so that both kinds of program read it
+/// back as given: a C runtime's (MSVCRT's rules, also Rust's, Python's, Node's) and Git Bash's
+/// MSYS runtime (`find`, `grep`, `sh`), which globs, brace- and `~`-expands, reads `@file` and
+/// takes `'` as a quote in a word it sees unquoted (8.3). A word with none of those characters
+/// goes as it is; any other is quoted, `"` as `\"` and the backslashes before a quote, or before
+/// the closing one, doubled. MSYS reads `\\` in quotes as one backslash, where the C runtime keeps
+/// both, so such a run ends the quotes (doubled, as before a quote) and the word goes on unquoted
+/// up to its next character that needs them. Only a run of two or more right before a space or
+/// tab, a `'` or one of `* ? [ {` reaches an MSYS program halved.
+#[cfg(any(windows, test))]
+fn command_line_arg(arg: &[u16]) -> Vec<u16> {
+    let (quote, backslash) = (u16::from(b'"'), u16::from(b'\\'));
+    let ascii = |u: u16, set: &[u8]| u < 0x80 && set.contains(&(u as u8));
+    // What has a meaning outside quotes: to MSYS, and spaces to both.
+    let special = |u: u16| u <= 0x20 || u == 0x7f || ascii(u, b"\"'*?[{");
+    // A word with these is globbed too, which would read its backslashes as escapes.
+    if arg.first().is_some_and(|&u| !ascii(u, b"~@")) && arg.iter().all(|&u| !special(u) && !ascii(u, b"]}()")) {
+        return arg.to_vec();
+    }
+    let mut out = vec![quote];
+    let mut inside = true;
+    let mut i = 0;
+    while i < arg.len() {
+        let run = arg[i..].iter().take_while(|&&u| u == backslash).count();
+        let next = arg.get(i + run).copied();
+        if !inside && (run > 0 || next.is_some_and(special)) {
+            out.push(quote);
+            inside = true;
+        }
+        match next {
+            Some(q) if q == quote => out.extend(std::iter::repeat_n(backslash, 2 * run + 1)),
+            None => out.extend(std::iter::repeat_n(backslash, 2 * run)),
+            Some(c) if run >= 2 && !special(c) => {
+                out.extend(std::iter::repeat_n(backslash, 2 * run));
+                out.push(quote);
+                inside = false;
+            }
+            Some(_) => out.extend(std::iter::repeat_n(backslash, run)),
+        }
+        out.extend(next);
+        i += run + 1;
+    }
+    if inside {
+        out.push(quote);
+    }
+    out
+}
+
 impl ChildProc {
     pub fn spawn(s: &Spawn) -> Result<ChildProc, SpawnError> {
         stop_if_interrupted();
@@ -954,10 +1002,22 @@ impl ChildProc {
             return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
         }
         let mut cmd = Command::new(program);
+        // Windows: a program parses its own command line. cmd.exe and batch files keep Rust's
+        // quoting, which is cmd's; every other program gets `command_line_arg`'s (8.3).
+        #[cfg(windows)]
+        let cmd_exe = std::path::Path::new(program).file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
         match s.argv.split_last() {
             #[cfg(windows)]
             Some((last, rest)) if s.raw_tail && rest.len() > 1 => {
                 std::os::windows::process::CommandExt::raw_arg(cmd.args(&rest[1..]), last);
+            }
+            #[cfg(windows)]
+            Some(_) if !batch && !cmd_exe => {
+                use std::os::windows::ffi::{OsStrExt, OsStringExt};
+                for arg in &s.argv[1..] {
+                    let wide: Vec<u16> = arg.encode_wide().collect();
+                    std::os::windows::process::CommandExt::raw_arg(&mut cmd, OsString::from_wide(&command_line_arg(&wide)));
+                }
             }
             _ => {
                 cmd.args(&s.argv[1..]);
@@ -1634,6 +1694,97 @@ pub(crate) mod tests {
         }
         out.flush().unwrap();
         std::process::exit(0);
+    }
+
+    /// One argument back from a command line, by the C runtime's rules (MSVCRT's since 2008,
+    /// as Rust's own `args()` reads them): what `command_line_arg` must round-trip through.
+    fn c_runtime_args(line: &str) -> Vec<String> {
+        let chars: Vec<char> = line.chars().collect();
+        let (mut args, mut cur, mut started, mut quoted, mut i) = (Vec::new(), String::new(), false, false, 0);
+        while i < chars.len() {
+            let c = chars[i];
+            if (c == ' ' || c == '\t') && !quoted {
+                if started {
+                    args.push(std::mem::take(&mut cur));
+                }
+                started = false;
+                i += 1;
+                continue;
+            }
+            started = true;
+            if c == '\\' {
+                let n = chars[i..].iter().take_while(|&&c| c == '\\').count();
+                i += n;
+                if chars.get(i) == Some(&'"') {
+                    cur.extend(std::iter::repeat_n('\\', n / 2));
+                    if n % 2 == 1 {
+                        cur.push('"');
+                        i += 1;
+                    }
+                } else {
+                    cur.extend(std::iter::repeat_n('\\', n));
+                }
+            } else if c == '"' {
+                if quoted && chars.get(i + 1) == Some(&'"') {
+                    cur.push('"');
+                    i += 1;
+                } else {
+                    quoted = !quoted;
+                }
+                i += 1;
+            } else {
+                cur.push(c);
+                i += 1;
+            }
+        }
+        if started {
+            args.push(cur);
+        }
+        args
+    }
+
+    fn encoded(arg: &str) -> String {
+        String::from_utf16(&command_line_arg(&arg.encode_utf16().collect::<Vec<u16>>())).unwrap()
+    }
+
+    #[test]
+    fn command_line_args_read_back_as_given() {
+        // 8.3 (round 18): a plain word goes as it is; one MSYS would glob, expand or split is
+        // quoted; a run of backslashes before a plain character ends the quotes, as MSYS halves
+        // it in them.
+        let cases = [
+            ("--format=%s", "--format=%s"),
+            (r"a\b", r"a\b"),
+            (r"trailing\", r"trailing\"),
+            ("%PATH%", "%PATH%"),
+            ("Čeština", "Čeština"),
+            ("", r#""""#),
+            ("*.v2", r#""*.v2""#),
+            ("it's", r#""it's""#),
+            ("@data.json", r#""@data.json""#),
+            ("~", r#""~""#),
+            ("{a,b}.v2", r#""{a,b}.v2""#),
+            ("f(x)", r#""f(x)""#),
+            (r#"q"uote"#, r#""q\"uote""#),
+            (r#"a\\"b"#, r#""a\\\\\"b""#),
+            (r"two words\", r#""two words\\""#),
+            (r"\\server\share\My Docs", r#""\\\\"server"\share\My Docs""#),
+            (r"C:\a\\b c", r#""C:\a\\\\"b" c""#),
+        ];
+        for (arg, want) in cases {
+            assert_eq!(encoded(arg), want, "{arg}");
+        }
+        // Every word of these characters up to four long reads back whole through the C runtime.
+        let alphabet = ['a', '\\', '"', ' ', '\'', '*', '~', '@', '{', ')', '\t'];
+        let (mut words, mut last) = (vec![String::new()], vec![String::new()]);
+        for _ in 0..4 {
+            last = last.iter().flat_map(|w| alphabet.iter().map(move |c| format!("{w}{c}"))).collect();
+            words.extend(last.iter().cloned());
+        }
+        for w in &words {
+            let line = format!("{} {} x", encoded(w), encoded("~"));
+            assert_eq!(c_runtime_args(&line), [w.as_str(), "~", "x"], "{w:?} as {line}");
+        }
     }
 
     fn temp(name: &str) -> PathBuf {
