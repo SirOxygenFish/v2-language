@@ -1,0 +1,9 @@
+// requires: js
+// exit: 1
+// stderr: t.v2:8:15: ForeignError: Error: loot broke
+// stderr: loot.js:2, in js
+// An ES module a block requires (Node runs it with nothing of the block on the stack): its error
+// is placed at the require, not at the block's first line (round 17, INTERNALS 12.6).
+@js {
+    const x = require("./loot.js")
+}
