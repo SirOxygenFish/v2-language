@@ -342,7 +342,9 @@ In an f-string, `{name}` without the `$` is Python's spelling, and a `SyntaxErro
 (`{name} in an f-string is Python's placeholder, which V2 doesn't use`, hint
 `write ${name} for its value, or ${"{name}"} for the text {name}`), so it can't print its braces by
 mistake. Doubled braces are text as written: `f"{{name}}"` prints `{{name}}` (Python would print
-`{name}`), and an escaped `\${name}` prints `${name}`.
+`{name}`), and an escaped `\${name}` prints `${name}`. `:.Nf` is the only format: any other is a
+`SyntaxError` whose hint says what to write instead, padding with `" " * n` for a width or an
+alignment (`${x:>8}`), else the format in a block (`${x:.3e}`: `@py(x) { f"{x:.3e}" }`).
 
 Strings are indexed by character: `"héllo"[1]` is `"é"`, `"hello"[-1]` is `"o"`,
 `"hello"[1:3]` is `"el"`, and `len("héllo")` is `5`. A character is a Unicode code point, as in
@@ -586,7 +588,7 @@ bigger come from the languages you embed.
 | `abs(x)`                                | absolute value of an int or float                           |
 | `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int (so NaN and infinity are a `ValueError`), more gives a float, fewer is a `ValueError`; an int `x` comes back unchanged |
 | `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
-| `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
+| `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out; `json_parse` skips one leading byte-order mark, as `read_file` does, and JSON has no NaN or infinity, so `json_stringify` of one is a `TypeError` (its hint: store `null` instead) |
 | `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME` is refused, below) |
@@ -1066,7 +1068,8 @@ Inside a block, on its own line:
   reach a class's own members, such as `Path.cwd()`, import the module: `@import py.pathlib as m`,
   then `m.Path.cwd()`.
 - Every exported name is checked when the block loads; a missing name is an `ImportError`.
-- A name that isn't a valid V2 name (JavaScript's `$x`) can be written in quotes: `@export { "$x" }`.
+- A name that isn't a valid V2 name (JavaScript's `$x`) can be written in quotes: `@export { "$x" }`,
+  and V2 code imports it in quotes too, with a V2 name after `as`: `@import { "$x" as dx } from …`.
   Compiled blocks export functions by plain name; a quoted item there is a `SyntaxError`.
 - If your foreign code has a line that really starts with `@export` or `@import` (for example a
   Python decorator with that name, or a CSS `@import` line in a template literal or a docstring),

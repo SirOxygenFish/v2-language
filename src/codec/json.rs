@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use serde_json::{Map, Number};
 
-use crate::runtime::error::{type_error, value_error, Exec};
+use crate::runtime::error::{type_error, value_error, Exec, Flow};
 use crate::runtime::value::{float_str, quoted, DictMap, Value};
 
 /// Past this many nested brackets the codec refuses input and values (10.1).
@@ -78,8 +78,11 @@ fn scan(text: &str) -> Exec<()> {
 }
 
 /// `json_parse(text)` (5.10): integers that fit i64 → int, anything with `.`/`e`/`E` → float,
-/// duplicate keys → the last value at the first key's position; `$v2` keys are plain data.
+/// duplicate keys → the last value at the first key's position; `$v2` keys are plain data. One
+/// leading byte-order mark is skipped, as RFC 8259 allows (a file a block read with Python's
+/// `open()` keeps the one Windows tools write; `read_file` drops it).
 pub fn parse(text: &str) -> Exec<Value> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     scan(text)?;
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
@@ -208,8 +211,26 @@ enum Step {
     Key(Rc<str>),
 }
 
-fn not_json<T>(what: &str, path: &[Step]) -> Exec<T> {
-    not_json_hint(what, path, "")
+/// A value JSON has no form for, with what to do instead as the error's hint (5.10).
+#[cold]
+#[inline(never)]
+fn not_json<T>(v: &Value, path: &[Step]) -> Exec<T> {
+    let what = match v {
+        Value::Float(x) => format!("the float {}", float_str(*x)),
+        other => other.type_name().to_string(),
+    };
+    let hint = match v {
+        Value::Float(_) => "JSON has no NaN or infinity: store null instead (x != x is true for NaN), or write it with Python's json in a block, as in @py(v) { __import__(\"json\").dumps(v) }",
+        Value::Bytes(_) => "JSON holds text, not bytes: store b.hex(), or b.decode() for UTF-8 text, or base64 from a block, as in @py(b) { __import__(\"base64\").b64encode(b).decode() }",
+        Value::Func(_) => "a function isn't data: store what it returns, or leave it out",
+        // An error value, the one other kind that comes here.
+        _ => "an error isn't data: store its fields, as in {type: e.type, message: e.message}",
+    };
+    let err = not_json_hint::<T>(&what, path, "");
+    if let Err(Flow::Error(e)) = &err {
+        let _ = e.hint.set(hint.into());
+    }
+    err
 }
 
 /// A handle, which isn't JSON: `to_v2` first, or the block for a type it can't convert. Out of
@@ -256,7 +277,7 @@ fn to_json(v: &Value, path: &mut Vec<Step>, open: &mut Vec<usize>) -> Exec<serde
         Value::Int(n) => serde_json::Value::Number((*n).into()),
         Value::Float(x) => match Number::from_f64(*x) {
             Some(n) => serde_json::Value::Number(n),
-            None => return not_json(&format!("the float {}", float_str(*x)), path),
+            None => return not_json(v, path),
         },
         Value::Str(s) => serde_json::Value::String(s.to_string()),
         Value::List(l) => {
@@ -285,7 +306,7 @@ fn to_json(v: &Value, path: &mut Vec<Step>, open: &mut Vec<usize>) -> Exec<serde
             open.pop();
             serde_json::Value::Object(out)
         }
-        Value::Bytes(_) | Value::Func(_) | Value::Error(_) => return not_json(v.type_name(), path),
+        Value::Bytes(_) | Value::Func(_) | Value::Error(_) => return not_json(v, path),
         Value::Handle(h) => return handle_not_json(h, path),
     })
 }
@@ -375,5 +396,32 @@ mod tests {
         }
         let pretty = stringify(&parse(r#"{"a": [1, {}], "b": []}"#).ok().unwrap(), Some(2)).ok().unwrap();
         assert_eq!(pretty, "{\n  \"a\": [\n    1,\n    {}\n  ],\n  \"b\": []\n}");
+    }
+
+    #[test]
+    fn one_leading_byte_order_mark_is_skipped() {
+        // RFC 8259 lets a parser ignore it, and read_file drops it (5.10); columns count after it.
+        assert_eq!(parsed("\u{feff}[1]"), "<list of 1>");
+        assert_eq!(parsed("\u{feff}[1, x]"), "invalid JSON at line 1 column 5: expected value");
+        assert_eq!(parsed("\u{feff}\u{feff}[1]"), "invalid JSON at line 1 column 1: expected value");
+        assert_eq!(parsed(" \u{feff}[1]"), "invalid JSON at line 1 column 2: expected value");
+        assert_eq!(parsed("\u{feff}"), "invalid JSON: the text is empty");
+    }
+
+    #[test]
+    fn what_json_cannot_hold_says_what_to_store() {
+        // 5.10, round 17: each kind's hint, the message as it was.
+        let hint = |v: Value| match stringify(&v, None) {
+            Err(Flow::Error(e)) => (e.message.to_string(), e.hint.get().map(|h| h.to_string()).unwrap_or_default()),
+            _ => panic!("no error"),
+        };
+        let float = "JSON has no NaN or infinity: store null instead (x != x is true for NaN), or write it with Python's json in a block, as in @py(v) { __import__(\"json\").dumps(v) }";
+        for (x, shown) in [(f64::NAN, "nan"), (f64::INFINITY, "inf"), (f64::NEG_INFINITY, "-inf")] {
+            assert_eq!(hint(Value::list(vec![Value::Float(x)])), (format!("cannot convert the float {shown} to JSON at [0]"), float.to_string()));
+        }
+        let (_, h) = hint(Value::Bytes(Rc::from(&b"x"[..])));
+        assert!(h.starts_with("JSON holds text, not bytes: store b.hex(), or b.decode() for UTF-8 text"), "{h}");
+        let (_, h) = hint(Value::Error(Rc::new(crate::runtime::error::ErrorValue::new("ValueError", "bad"))));
+        assert_eq!(h, "an error isn't data: store its fields, as in {type: e.type, message: e.message}");
     }
 }

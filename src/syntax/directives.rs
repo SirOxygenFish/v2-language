@@ -379,7 +379,20 @@ impl<'a> DirParser<'a> {
                         (kind, n)
                     }
                     other => {
-                        lex_error.get_or_insert(Diag::new(format!("unexpected character {} in a directive", crate::syntax::lexer::shown_char(other).0), span(col, col + len)));
+                        let d = Diag::new(format!("unexpected character {} in a directive", crate::syntax::lexer::shown_char(other).0), span(col, col + len));
+                        // JavaScript's `$x` in an `@import { }` or `@export { }` list goes in quotes.
+                        let after_as = matches!(toks.last(), Some(DTok { kind: DK::Kw(w), .. }) if &**w == "as");
+                        let d = match toks.first().map(|t| &t.kind) {
+                            Some(DK::Import) if other == '$' && depth > 0 => d.hint(crate::syntax::lexer::quote_import_hint(rest, after_as, false)),
+                            // `@export { show as $s }`: a rename, which @export can't do.
+                            Some(DK::Export) if other == '$' && depth > 0 && after_as => d.hint(rename_hint(toks.len().checked_sub(2).map(|i| &toks[i].kind))),
+                            Some(DK::Export) if other == '$' && depth > 0 => {
+                                let name: String = rest.chars().take_while(|c| *c == '$' || *c == '_' || c.is_alphanumeric()).collect();
+                                d.hint(format!("write a name that isn't a V2 name in quotes: @export {{ {name:?} }}"))
+                            }
+                            _ => d,
+                        };
+                        lex_error.get_or_insert(d);
                         break 'lines;
                     }
                 };
@@ -456,11 +469,8 @@ impl<'a> DirParser<'a> {
         loop {
             let t = self.bump();
             let span = t.span;
-            let named = match &t.kind {
-                DK::Name(n) | DK::Kw(n) | DK::Str(n) => n.to_string(),
-                _ => "name".to_string(),
-            };
-            match t.kind.clone() {
+            let item = t.kind.clone();
+            match item.clone() {
                 DK::Star => {
                     exports.star.get_or_insert(span);
                 }
@@ -490,8 +500,7 @@ impl<'a> DirParser<'a> {
                 DK::End => return Err(Diag::new("unterminated @export list", open)),
                 // JavaScript's `export { show as pyshow }`.
                 DK::Kw(k) if &*k == "as" => {
-                    return Err(Diag::new("expected `,` or `}` in the @export list, found keyword `as`", self.span())
-                        .hint(format!("@export can't rename: export {named} and rename it where it is imported, as in @import {{ {named} as other }} from …")))
+                    return Err(Diag::new("expected `,` or `}` in the @export list, found keyword `as`", self.span()).hint(rename_hint(Some(&item))))
                 }
                 other => return Err(Diag::new(format!("expected `,` or `}}` in the @export list, found {}", describe(&other)), self.span())),
             }
@@ -636,6 +645,19 @@ impl<'a> DirParser<'a> {
             other => Err(Diag::new(format!("expected {what}, found {}", describe(&other)), t.span)),
         }
     }
+}
+
+/// JavaScript's `export { show as pyshow }`: the hint, with the item as each list writes it: a
+/// quoted name keeps its quotes (`"$x"`), and a V2 keyword, bare in @export, is quoted in @import
+/// (DOCS 6.1, 6.2).
+fn rename_hint(item: Option<&DK>) -> String {
+    let (exported, imported) = match item {
+        Some(DK::Name(n)) => (n.to_string(), n.to_string()),
+        Some(DK::Kw(n)) => (n.to_string(), format!("{:?}", &**n)),
+        Some(DK::Str(n)) => (format!("{:?}", &**n), format!("{:?}", &**n)),
+        _ => ("name".to_string(), "name".to_string()),
+    };
+    format!("@export can't rename: export {exported} and rename it where it is imported, as in @import {{ {imported} as other }} from …")
 }
 
 fn push_export(exports: &mut Exports, text: Rc<str>, span: Span) -> Result<(), Diag> {
@@ -1012,6 +1034,22 @@ mod tests {
         // The line escaped is the block's own.
         let (p, _) = run("@js {\n  const css = `\n@@import url(\"theme.css\");\n`\n}").unwrap();
         assert!(p.body.contains("\n@import url(\"theme.css\");\n"), "{:?}", p.body);
+    }
+
+    #[test]
+    fn names_that_arent_v2_names_are_quoted_in_hints() {
+        // 4.4, round 17: the rename hint keeps the item as each list writes it, so its @import
+        // works when copied, and a bare `$x` in a list gets the list's quoted form.
+        let hint = |src: &str| diag(src).hint.unwrap_or_else(|| panic!("no hint for {src:?}"));
+        let rename = |exported: &str, imported: &str| format!("@export can't rename: export {exported} and rename it where it is imported, as in @import {{ {imported} as other }} from …");
+        assert_eq!(hint("@js d {\n  const $x = 1\n  @export { \"$x\" as dx }\n}"), rename("\"$x\"", "\"$x\""));
+        assert_eq!(hint("@js d {\n  @export { from as f }\n}"), rename("from", "\"from\""));
+        assert_eq!(hint("@js d {\n  @export { show as $s }\n}"), rename("show", "show"));
+        assert_eq!(hint("@js d {\n  @export { $x }\n}"), "write a name that isn't a V2 name in quotes: @export { \"$x\" }");
+        // A block's own list binds a quoted name as it is; after `as` goes a plain name.
+        assert_eq!(hint("@js u {\n  @import { $x } from d\n}"), "write a name that isn't a V2 name in quotes: @import { \"$x\" } from …");
+        assert_eq!(hint("@py u {\n  @import { $x as dx } from d\n}"), "write a name that isn't a V2 name in quotes: @import { \"$x\" as dx } from …");
+        assert_eq!(hint("@py u {\n  @import { show as $s } from d\n}"), "after as goes a plain name, without $: as s");
     }
 
     #[test]

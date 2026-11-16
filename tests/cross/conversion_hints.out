@@ -45,3 +45,10 @@ MarshalError: to_v2(): can't convert int to V2 data (it needs more than 64 bits)
 MarshalError: to_v2(): can't convert bigint to V2 data (it needs more than 64 bits): pass it as text, as in @js(h) { h.toString() }
   hint: none
 true
+TypeError: int() can't convert handle
+  hint: this integer needs more than 64 bits, which V2's int doesn't have: keep the math in the block, or use @py(h) { str(h) } for its digits or @py(h) { float(h) }
+TypeError: int() can't convert handle
+  hint: this integer needs more than 64 bits, which V2's int doesn't have: keep the math in the block, or use @js(h) { h.toString() } for its digits or @js(h) { Number(h) }
+TypeError: float() can't convert handle
+  hint: convert it in its language, as in @py(h) { float(h) }
+18446744073709551616 18446744073709551616
