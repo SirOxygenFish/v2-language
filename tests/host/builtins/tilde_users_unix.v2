@@ -1,0 +1,15 @@
+// platform: unix
+// On Linux and macOS a path whose first part is ~ and a user that exists (~root/x, ~nobody) is
+// that user's home folder in a shell, so it is refused as ~ is (round 17, DOCS 3.11):
+// make_dir("~root/x") made ./~root/x here. bash asks getpwnam whether there is such a user, and
+// so does V2; a name no user has is taken as written (tilde_users.v2), and so is ~root\x, as the
+// name goes up to the first /.
+for p in ["~root/x", "~nobody", "~root"] {
+    try { print(exists(p)) } catch (e) { print(e.type + ": " + e.message) }
+}
+try { make_dir("~root/x") } catch (e) { print(e.message, "|", e.hint) }
+try { write_file("~nobody", "x") } catch (e) { print(e.message, "|", e.hint) }
+try { read_file("~nobody") } catch (e) { print(e.message) }
+try { list_dir("~root") } catch (e) { print(e.message) }
+try { remove_file("~nobody/notes.txt") } catch (e) { print(e.message) }
+print(exists("./~root"), exists("~root\\x"))

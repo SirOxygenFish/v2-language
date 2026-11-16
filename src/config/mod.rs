@@ -437,7 +437,8 @@ impl File {
 /// that apply, and each value's type (18.2, 18.5). A built-in `command` that `V2_ENGINE_<TAG>`
 /// replaces is not validated (18.3).
 fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(), ConfigError> {
-    let shown = path.display().to_string();
+    // A folder's name can't act on the terminal (2.1).
+    let shown = crate::syntax::span::shown_path(&path.display().to_string());
     let bytes = std::fs::read(path).map_err(|e| ConfigError(format!("{shown}: config error: cannot read the file: {}", crate::syntax::span::os_message(&e))))?;
     let text = String::from_utf8(bytes).map_err(|e| {
         let why = crate::syntax::span::not_utf8_message(e.as_bytes()).trim_start_matches("file is not valid UTF-8");

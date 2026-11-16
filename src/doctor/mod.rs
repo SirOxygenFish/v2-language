@@ -325,7 +325,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         }
     }
     match &cfg.file {
-        Some(f) => stdoutln!("config file: {}", f.display()),
+        Some(f) => stdoutln!("config file: {}", crate::syntax::span::shown_path(&f.display().to_string())),
         None => stdoutln!("config file: none"),
     }
     // What a bug report needs, then what the table means for the user's scripts.

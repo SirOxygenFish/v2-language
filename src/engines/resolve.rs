@@ -490,7 +490,7 @@ pub fn source_label(from: &ConfigSource) -> String {
 /// What "(set by …)" names: the file's full path, or the variable (7.6).
 fn set_by(from: &ConfigSource) -> String {
     match from {
-        ConfigSource::Project(p) => p.display().to_string(),
+        ConfigSource::Project(p) => crate::syntax::span::shown_path(&p.display().to_string()),
         ConfigSource::Env(var) => var.clone(),
     }
 }

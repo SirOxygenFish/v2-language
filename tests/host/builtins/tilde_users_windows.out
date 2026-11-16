@@ -1,0 +1,4 @@
+false false
+x true null false
+cannot read '~root/x': there is no folder '~root'
+cannot create '~\x': V2 doesn't expand ~ in paths
