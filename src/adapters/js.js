@@ -1060,11 +1060,14 @@ function errorMessage(e) {
 // What to do about an error the adapter raises, sent as its `hint` (9.6); not an own property,
 // which would go in e.data.
 const errorHints = new WeakMap();
+// Where in a block an error came from when its own stack doesn't say (blockRequire).
+const errorCallers = new WeakMap();
 
 function serialize(e, depth = 0) {
   // An exception, or any thrown value, as `err.error` (9.6).
   if (e instanceof Fail) return { type: e.kind, message: wellFormed(e.message), foreign_type: null, trace: [] };
   const trace = e && e.v2Frame ? [e.v2Frame, ...frames(e)] : frames(e);
+  if (e !== null && typeof e === 'object' && errorCallers.has(e)) trace.push(errorCallers.get(e));
   if (e instanceof V2Error) {
     const kind = KINDS.includes(e.type) ? e.type : 'ForeignError';
     const out = { type: kind, message: wellFormed(String(e.message)), foreign_type: kind !== e.type ? 'V2Error' : textOrNull(e.foreign_type), trace };
@@ -1193,10 +1196,29 @@ function newContext(file) {
       set(v) { Object.defineProperty(this, k, { value: v, writable: true, configurable: true, enumerable }); },
     });
   }
-  Object.assign(sb, { console, module, exports: module.exports, require: Module.createRequire(file), __filename: file, __dirname: path.dirname(file) });
+  Object.assign(sb, { console, module, exports: module.exports, require: blockRequire(file), __filename: file, __dirname: path.dirname(file) });
   const ctx = vm.createContext(sb);
   sb.global = vm.runInContext('Error.stackTraceLimit = 50; globalThis', ctx);
   return ctx;
+}
+
+// A block's require. An ES module it requires runs with nothing of the block on the stack (Node's
+// require of an ES module), so an error from its top level would be placed at the block's first
+// line: the require call is kept as the error's outermost frame (12.6).
+function blockRequire(file) {
+  const req = Module.createRequire(file);
+  const require = function require(id) {
+    try {
+      return req(id);
+    } catch (e) {
+      if (e !== null && typeof e === 'object' && !errorCallers.has(e) && !frames(e).some((f) => f.file === file)) {
+        const site = frames(new Error()).find((f) => f.file === file);
+        if (site) errorCallers.set(e, site);
+      }
+      throw e;
+    }
+  };
+  return Object.assign(require, req);
 }
 
 const EXPLAIN = [
