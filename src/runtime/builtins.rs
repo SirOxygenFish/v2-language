@@ -767,7 +767,7 @@ fn int(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
                 Err(_) => return value_error(format!("int out of range: '{s}'")),
             }
         }
-        Value::Handle(h) => return number_error("int() can't convert handle", &h.tag, true),
+        Value::Handle(h) => return number_error("int() can't convert handle", h, true),
         Value::Null => return Err(null_number("int")),
         other => return type_error(format!("int() can't convert {}", other.type_name())),
     }))
@@ -824,16 +824,25 @@ fn null_number(f: &str) -> Flow {
 }
 
 /// A handle where V2 wants a number (Python's `Decimal` or `Fraction`, a numpy array): the
-/// TypeError, with what converts it in its own language (5.10).
-pub(crate) fn number_error<T>(message: &str, tag: &str, int: bool) -> Exec<T> {
-    let conv = match (tag, int) {
-        ("js", true) => "Math.trunc(Number(h))",
-        ("js", false) => "Number(h)",
-        (_, true) => "int(h)",
-        (_, false) => "float(h)",
+/// TypeError, with what converts it in its own language (5.10). For `int()` of an integer beyond
+/// 64 bits that conversion gives the same handle back, so the hint says what can be done instead.
+pub(crate) fn number_error<T>(message: &str, h: &crate::engines::handles::HandleRef, int: bool) -> Exec<T> {
+    let tag = &*h.tag;
+    let js = matches!(tag, "js" | "ts");
+    let hint = if int && h.big_int() {
+        let (digits, float) = if js { ("h.toString()", "Number(h)") } else { ("str(h)", "float(h)") };
+        format!("this integer needs more than 64 bits, which V2's int doesn't have: keep the math in the block, or use @{tag}(h) {{ {digits} }} for its digits or @{tag}(h) {{ {float} }}")
+    } else {
+        let conv = match (js, int) {
+            (true, true) => "Math.trunc(Number(h))",
+            (true, false) => "Number(h)",
+            (false, true) => "int(h)",
+            (false, false) => "float(h)",
+        };
+        format!("convert it in its language, as in @{tag}(h) {{ {conv} }}")
     };
     let err = ErrorValue::new("TypeError", message);
-    let _ = err.hint.set(format!("convert it in its language, as in @{tag}(h) {{ {conv} }}").into());
+    let _ = err.hint.set(hint.into());
     Err(Flow::Error(Rc::new(err)))
 }
 
@@ -847,7 +856,7 @@ fn float(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             Ok(x) => x,
             Err(_) => return Err(number_text(format!("invalid float: '{s}'"), s.trim(), false)),
         },
-        Value::Handle(h) => return number_error("float() can't convert handle", &h.tag, false),
+        Value::Handle(h) => return number_error("float() can't convert handle", h, false),
         Value::Null => return Err(null_number("float")),
         other => return type_error(format!("float() can't convert {}", other.type_name())),
     }))
