@@ -2,13 +2,16 @@ ValueError: block arg 'None' is not a valid Python name: pass it under another n
 ValueError: block arg '__name__' is reserved in @py blocks: pass it under another name, as in @py(name_: …)
 ValueError: block arg '__builtins__' is reserved in @py blocks: pass it under another name, as in @py(builtins_: …)
 ValueError: block arg '__' is reserved in @py blocks: pass it under another name, as in @py(name: …)
-ValueError: block arg 'ﬁle' is read by Python as 'file': pass it under that name, as in @py(file: ﬁle)
-ValueError: block arg 'ｘ' is read by Python as 'x': pass it under that name, as in @py(x: ｘ)
-ValueError: block arg 'Ⅸ' is read by Python as 'IX': pass it under that name, as in @py(IX: Ⅸ)
+ValueError: block arg 'ﬁle' (U+FB01) is read by Python as 'file' (U+0066 U+0069): pass it under that name, as in @py(file: ﬁle)
+ValueError: block arg 'ｘ' (U+FF58) is read by Python as 'x' (U+0078): pass it under that name, as in @py(x: ｘ)
+ValueError: block arg 'Ⅸ' (U+2168) is read by Python as 'IX' (U+0049 U+0058): pass it under that name, as in @py(IX: Ⅸ)
 ValueError: block arg 'ⓐ' is not a valid Python name: pass it under another name, as in @py(a: …)
-[1, "x", 5, 7, 9]
+ValueError: block arg 'µ' (U+00B5) is read by Python as 'μ' (U+03BC): pass it under that name, as in @py(μ: µ)
+ValueError: block arg 'K' (U+212A) is read by Python as 'K' (U+004B): pass it under that name, as in @py(K: K)
+ValueError: block arg 'µµ' (U+00B5) is read by Python as 'μμ' (U+03BC): pass it under that name, as in @py(μμ: µµ)
+[1, "x", 5, 7, 9, 1.0]
 3
 ValueError: @import name 'pass' is not a valid Python name: import it under another name, as in @import { … as pass_ } from …
 ValueError: @import name '__name__' is reserved in @py blocks: import it under another name, as in @import { … as name_ } from …
-ValueError: @import name 'ﬁle' is read by Python as 'file': import it under that name, as in @import { … as file } from …
+ValueError: @import name 'ﬁle' (U+FB01) is read by Python as 'file' (U+0066 U+0069): import it under that name, as in @import { … as file } from …
 8

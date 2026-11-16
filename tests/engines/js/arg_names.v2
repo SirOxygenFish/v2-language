@@ -1,7 +1,9 @@
 // requires: js ts
 // A block arg or an inner @import's alias JavaScript can't use is refused with a name it can
-// (DOCS 4.4, INTERNALS 12.2): a reserved word, a name the block has already, a letter JavaScript
-// doesn't take. JavaScript reads names as written, with no NFKC form.
+// (DOCS 4.4, INTERNALS 12.2): a keyword, a name the block has already, a letter JavaScript
+// doesn't take. JavaScript reads names as written, with no NFKC form. A word only strict code
+// refuses (yield, static) is a name in the scripts blocks run as, so it is "reserved in @js
+// blocks", not "not a valid JavaScript name".
 func show(f) {
     try {
         print(f())
@@ -32,6 +34,10 @@ show(func() => @js {
 })
 show(func() => @ts {
     @import { twice as undefined } from v2
+    1
+})
+show(func() => @js {
+    @import { twice as yield } from v2
     1
 })
 show(func() => @js {

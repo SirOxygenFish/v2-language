@@ -1,10 +1,10 @@
-MarshalError: to_v2(): an item of h is a Date: make plain data of it in a block first, as in @js(h) { [...h].map((x) => x.toISOString()) }
-MarshalError: to_v2(): an item of h is a Date: make plain data of it in a block first, as in @js(h) { Object.fromEntries([...h].map(([k, v]) => [k, v.toISOString()])) }
-MarshalError: to_v2(): an item of h is a Date: make plain data of it in a block first, as in @js(h) { [...h.tolist()].map((x) => x.toISOString()) }
-MarshalError: to_v2(): h.to_dict() is a Date: make plain data of it in a block first, as in @js(h) { h.to_dict().toISOString() }
-MarshalError: to_v2(): an item of h is a Date: make plain data of it in a block first, as in @js(h) { Object.fromEntries(Object.entries(h.to_dict()).map(([k, v]) => [k, v.toISOString()])) }
-MarshalError: to_v2(): an item inside h is a Date: make plain data of h in a block first, with x.toISOString() for each such item x
-MarshalError: to_v2(): an item of h is an Event: make plain data of it in a block first, as in @js(h) { [...h].map((x) => ({ ...x })) }
+MarshalError: to_v2(): an item of h has the type Date: make plain data of it in a block first, as in @js(h) { [...h].map((x) => x.toISOString()) }
+MarshalError: to_v2(): an item of h has the type Date: make plain data of it in a block first, as in @js(h) { Object.fromEntries([...h].map(([k, v]) => [k, v.toISOString()])) }
+MarshalError: to_v2(): an item of h has the type Date: make plain data of it in a block first, as in @js(h) { [...h.tolist()].map((x) => x.toISOString()) }
+MarshalError: to_v2(): h.to_dict() has the type Date: make plain data of it in a block first, as in @js(h) { h.to_dict().toISOString() }
+MarshalError: to_v2(): an item of h has the type Date: make plain data of it in a block first, as in @js(h) { Object.fromEntries(Object.entries(h.to_dict()).map(([k, v]) => [k, v.toISOString()])) }
+MarshalError: to_v2(): an item inside h has the type Date: make plain data of h in a block first, with x.toISOString() for each such item x
+MarshalError: to_v2(): an item of h has the type Event: make plain data of it in a block first, as in @js(h) { [...h].map((x) => ({ ...x })) }
 ["1970-01-01T00:00:00.000Z"]
 {"a": "1970-01-01T00:00:00.000Z"}
 ["1970-01-01T00:00:00.000Z"]
@@ -12,3 +12,4 @@ MarshalError: to_v2(): an item of h is an Event: make plain data of it in a bloc
 {"a": "1970-01-01T00:00:00.000Z"}
 [{"n": 1}]
 MarshalError: to_v2(): can't convert Date to V2 data: make plain data of it in a block first, as in @js(h) { h.toISOString() }
+MarshalError: to_v2(): an item of h has the type URL: make plain data of it in a block first, as in @js(h) { [...h].map((x) => ({ ...x })) }
