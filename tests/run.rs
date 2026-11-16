@@ -134,7 +134,8 @@ impl Drop for TempHome {
 }
 
 /// `v2` with an isolated environment: fresh HOME/USERPROFILE, rustup/cargo homes kept, and no
-/// inherited `V2_ENGINE_*` overrides.
+/// inherited `V2_ENGINE_*` overrides, nor a developer's activated venv (`VIRTUAL_ENV`, which
+/// doctor's notes and an ImportError's hint read): a test that wants one sets it.
 fn v2_command(home: &Path) -> Command {
     let real_home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
@@ -147,6 +148,7 @@ fn v2_command(home: &Path) -> Command {
             cmd.env_remove(&key);
         }
     }
+    cmd.env_remove("VIRTUAL_ENV");
     cmd.env("HOME", home).env("USERPROFILE", home).env("RUSTUP_HOME", rustup).env("CARGO_HOME", cargo);
     cmd
 }
@@ -4862,6 +4864,58 @@ fn an_activated_venv_whose_python_is_gone_is_named_by_doctor_and_the_hint() {
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains(&format!("hint: {problem}")), "{stderr}");
     assert!(!stderr.contains("pip") && !stderr.contains("which V2 isn't using"), "{stderr}");
+}
+
+#[test]
+fn an_activated_venv_gets_its_own_install_line_until_its_python_stops_running() {
+    // Round 19 review (P1, P2; INTERNALS 7.6, 7.7, 13.5): an activated venv (VIRTUAL_ENV, its
+    // bin first on PATH) is the Python V2 uses, so a missing package gets that venv's own install
+    // line. Once its python no longer runs (on Windows, the copied launcher of a venv whose home
+    // is gone says "No Python at", exit 103), the search finds another Python, and doctor and the
+    // hint say what is wrong with the venv, though the first run cached its python as usable.
+    if !needs("py", "an_activated_venv_gets_its_own_install_line_until_its_python_stops_running") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    let proj = home.0.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let venv = proj.join(".venv");
+    let made = Command::new(&python).args(["-m", "venv", "--without-pip"]).arg(&venv).output().expect("run python -m venv");
+    assert!(made.status.success(), "python -m venv: {}", String::from_utf8_lossy(&made.stderr));
+    let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
+    let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+    let env = [("VIRTUAL_ENV", venv.as_os_str()), ("PATH", path.as_os_str())];
+    std::fs::write(proj.join("m.v2"), "@import py.nosuch_r19_pkg as p\nprint(p.x)\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["proj/m.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("hint: if 'nosuch_r19_pkg' isn't misspelled, install it for the Python V2 uses") && stderr.contains(&bin.display().to_string()), "{stderr}");
+    assert!(!stderr.contains("which V2 isn't using"), "{stderr}");
+    // Its python stops running: on Windows, pyvenv.cfg's home names a Python that is gone;
+    // elsewhere, a program that fails as that launcher does (the links to the system's Python
+    // are removed first, never written through).
+    if cfg!(windows) {
+        let cfg = venv.join("pyvenv.cfg");
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let gone: String = text.lines().map(|l| if l.trim_start().starts_with("home") { "home = C:\\nonexistent_r19\\Python311\n".to_string() } else { format!("{l}\n") }).collect();
+        std::fs::write(&cfg, gone).unwrap();
+    } else {
+        for name in ["python3", "python"] {
+            let p = bin.join(name);
+            let _ = std::fs::remove_file(&p);
+            std::fs::write(&p, "#!/bin/sh\necho \"No Python at '/nonexistent_r19/python3'\" >&2\nexit 103\n").unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+    }
+    let problem = format!("the activated venv {} (VIRTUAL_ENV) has a python that doesn't run (No Python at '", venv.display());
+    let (code, _, stderr) = run_in_home(&home.0, &["proj/m.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("hint: {problem}")) && stderr.contains("so V2 can't use it: make the venv again, "), "{stderr}");
+    assert!(!stderr.contains("pip") && !stderr.contains("which V2 isn't using"), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &env);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains(&format!("\n  py: {problem}")), "{stdout}");
 }
 
 #[test]
