@@ -75,8 +75,9 @@ fn other_message(file: &str, path: &Path, rest: &[&str], command: &str, e: &std:
 
 /// The line for a link on FILE's way that leads nowhere or in a loop, and what fixes it.
 fn link_line(file: &str, path: &Path, link: &crate::runtime::module::LinkProblem) -> String {
-    let name = if link.at == path { "it".to_string() } else { format!("'{}'", crate::runtime::module::written_prefix(file, &link.at)) };
-    format!("{}: {}", link.problem(&name), link.fix())
+    let written = crate::runtime::module::written_prefix(file, &link.at);
+    let name = if link.at == path { "it".to_string() } else { format!("'{written}'") };
+    format!("{}: {}", link.problem(&name), link.fix(&written))
 }
 
 fn folder_message(file: &str, path: &Path, command: &str) -> Vec<String> {
