@@ -701,26 +701,45 @@ fn npm_hint(name: &str, dir: &Path, call: Option<&str>) -> String {
     // folder next to the .v2 file: the script's own code, never `npm install lib`.
     let first = name.split('/').next().unwrap_or(name);
     let folder = !first.is_empty() && dir.join(first).is_dir();
+    // Yarn Plug'n'Play keeps packages where only Yarn's loader finds them, with no node_modules.
+    let pnp = dir.ancestors().flat_map(|d| [d.join(".pnp.cjs"), d.join(".pnp.js")]).find(|p| p.is_file()).map(|p| {
+        format!("this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install", p.display())
+    });
+    let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    // The did-you-mean names what is written: `js.lodash` for an @import, `"lodash"` in a block.
+    let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| if call.is_some() { format!("did you mean \"{n}\"? ") } else { format!("did you mean {}? ", written(n)) });
+    // A name that may be the script's own or an npm package's: the package it nearly spells, or,
+    // for the package of that name, Yarn's fix or the install line (the second review of round 19:
+    // never `npm install` a typo).
+    let or_package = || match (&near, &pnp) {
+        (Some(near), _) => format!("; {}", near.trim_end()),
+        (None, Some(pnp)) => format!("; or, for the npm package {package}: {pnp}"),
+        (None, None) => format!("; or, for the npm package {package}, npm install {package} in {}", dir.display()),
+    };
     if with_ext {
-        // `chart.js` may be an npm package's own name: its install line too, unless the first
-        // part is a folder of the script's own.
-        let npm = if folder { String::new() } else { format!("; or, for the npm package {package}, npm install {package} in {}", dir.display()) };
+        // `chart.js` may be an npm package's own name: that too, unless the first part is a folder
+        // of the script's own.
+        let npm = if folder { String::new() } else { or_package() };
         return format!("a file of your own is {loaded} by its path from the .v2 file's folder, as in {}: check its name ({unnamed}){npm}", by_path(&format!("./{name}")));
     }
     if folder {
         let example = if name.contains('/') { format!("./{name}") } else { format!("./{name}/…") };
-        return format!("{first} is a folder of your own, whose files are {loaded} by their paths from the .v2 file's folder, as in {} ({unnamed})", by_path(&example));
+        // `require("config")` beside a config folder of data (node-config's own layout, Cypress's,
+        // Prisma's): the npm package too, unless the folder holds code of the script's own (a
+        // package.json, or a .js or .ts file in it), or the name came from import(), whose message
+        // names only the package part (the second review of round 19).
+        let code = |f: &Path| {
+            f.join("package.json").is_file()
+                || std::fs::read_dir(f).into_iter().flatten().flatten().any(|e| {
+                    Path::new(&e.file_name()).extension().and_then(|x| x.to_str()).is_some_and(|x| OWN_EXTS.contains(&x.to_ascii_lowercase().as_str()))
+                })
+        };
+        let npm = if name == first && call != Some("import") && !code(&dir.join(first)) { or_package() } else { String::new() };
+        return format!("{first} is a folder of your own, whose files are {loaded} by their paths from the .v2 file's folder, as in {} ({unnamed}){npm}", by_path(&example));
     }
-    // Yarn Plug'n'Play keeps packages where only Yarn's loader finds them, with no node_modules.
-    if let Some(pnp) = dir.ancestors().flat_map(|d| [d.join(".pnp.cjs"), d.join(".pnp.js")]).find(|p| p.is_file()) {
-        return format!(
-            "this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install",
-            pnp.display()
-        );
+    if let Some(pnp) = pnp {
+        return pnp;
     }
-    let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    // The did-you-mean names what is written: `js.lodash` for an @import, `"lodash"` in a block.
-    let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| if call.is_some() { format!("did you mean \"{n}\"? ") } else { format!("did you mean js.{n}? ") });
     // Node looks in node_modules from the importing .v2 file's folder up, which for a shared
     // module isn't the project's folder.
     format!(
@@ -2239,6 +2258,29 @@ mod tests {
             format!("a file of your own is loaded by its path from the .v2 file's folder, as in require(\"./chart.js\"): check its name (\"chart.js\", without ./, names an npm package); or, for the npm package chart.js, npm install chart.js in {}", d.display())
         );
         assert_eq!(require("lib/x.js"), "a file of your own is loaded by its path from the .v2 file's folder, as in require(\"./lib/x.js\"): check its name (\"lib/x.js\", without ./, names an npm package)");
+        // The second review of round 19: a folder of data named alone (node-config's config/) may
+        // be the npm package's own layout: its install line too; never for import(), whose message
+        // names only the package part, nor for a folder with code in it (lib/math.ts above).
+        std::fs::create_dir_all(d.join("config")).unwrap();
+        std::fs::write(d.join("config").join("default.json"), "{}").unwrap();
+        let config = format!("; or, for the npm package config, npm install config in {}", d.display());
+        assert_eq!(require("config"), format!("config is a folder of your own, whose files are loaded by their paths from the .v2 file's folder, as in require(\"./config/…\") (\"config\", without ./, names an npm package){config}"));
+        assert!(import("config").ends_with(&config), "{}", import("config"));
+        assert!(!dynamic("config").contains("npm install"), "{}", dynamic("config"));
+        assert!(!require("config/default").contains("npm install"), "{}", require("config/default"));
+        assert!(!import("lib").contains("npm install"), "{}", import("lib"));
+        // A name with an extension that nearly spells an installed package: that one, never an
+        // install of the typo; in a Yarn PnP project, Yarn's fix instead of npm install.
+        std::fs::create_dir_all(d.join("node_modules").join("bignumber.js")).unwrap();
+        let own = "a file of your own is loaded by its path from the .v2 file's folder, as in require(\"./bignumer.js\"): check its name (\"bignumer.js\", without ./, names an npm package)";
+        assert_eq!(require("bignumer.js"), format!("{own}; did you mean \"bignumber.js\"?"));
+        assert!(import("bignumer.js").ends_with("names an npm package); did you mean js.\"bignumber.js\"?"), "{}", import("bignumer.js"));
+        std::fs::write(d.join(".pnp.cjs"), "").unwrap();
+        assert!(
+            require("chart.js").ends_with(&format!("; or, for the npm package chart.js: this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install", d.join(".pnp.cjs").display())),
+            "{}",
+            require("chart.js")
+        );
     }
 
     #[test]

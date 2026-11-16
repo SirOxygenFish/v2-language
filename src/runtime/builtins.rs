@@ -719,11 +719,7 @@ fn unreachable_root(path: &str, e: &std::io::Error) -> Option<String> {
     let b = p.as_bytes();
     if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
         let letter = (b[0] as char).to_ascii_uppercase();
-        if !drive_is_there(letter) {
-            return Some(format!("there is no drive {letter}: (is it plugged in or connected?)"));
-        }
-        // A mapped network drive whose computer isn't reached: GetDriveTypeW still knows it.
-        return network_error(e).then(|| format!("the drive {letter}: can't be reached (is it connected?)"));
+        return drive_problem(letter, drive_type(letter), e);
     }
     let unc = p.strip_prefix(r"\\").filter(|r| !r.starts_with(['?', '.']))?;
     let mut parts = unc.split('\\');
@@ -750,19 +746,37 @@ fn root_error<T>(verb: &str, path: &str, why: String) -> Exec<T> {
     Err(Flow::Error(Rc::new(err)))
 }
 
-/// Windows: whether there is a drive `letter:` (`GetDriveTypeW` isn't `DRIVE_NO_ROOT_DIR`); it
-/// doesn't touch the drive, so a network drive that is slow to answer doesn't hold it up.
+/// `GetDriveTypeW`'s `DRIVE_NO_ROOT_DIR` (no such drive) and `DRIVE_REMOTE` (a network drive).
+const NO_DRIVE: u32 = 1;
+const REMOTE_DRIVE: u32 = 4;
+
+/// What is wrong with the drive `letter:` of a path the OS failed on with `e`, from its type
+/// (`drive_type`): there is none, or it is a mapped network drive whose computer isn't reached
+/// (`GetDriveTypeW` still knows its letter). A network error on a local drive comes from
+/// something on the path (a link to a share), not the drive: `None` (the second review of round
+/// 19).
+fn drive_problem(letter: char, kind: u32, e: &std::io::Error) -> Option<String> {
+    match kind {
+        NO_DRIVE => Some(format!("there is no drive {letter}: (is it plugged in or connected?)")),
+        REMOTE_DRIVE if network_error(e) => Some(format!("the drive {letter}: can't be reached (is it connected?)")),
+        _ => None,
+    }
+}
+
+/// Windows: the type of the drive `letter:` (`GetDriveTypeW`); it doesn't touch the drive, so a
+/// network drive that is slow to answer doesn't hold it up.
 #[cfg(windows)]
-fn drive_is_there(letter: char) -> bool {
+fn drive_type(letter: char) -> u32 {
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
     let root: Vec<u16> = format!(r"{letter}:\").encode_utf16().chain([0]).collect();
     // SAFETY: a NUL-terminated root path.
-    unsafe { GetDriveTypeW(root.as_ptr()) != 1 }
+    unsafe { GetDriveTypeW(root.as_ptr()) }
 }
 
+/// Elsewhere every letter is a local drive (`DRIVE_FIXED`): nothing to say about it.
 #[cfg(not(windows))]
-fn drive_is_there(_letter: char) -> bool {
-    true
+fn drive_type(_letter: char) -> u32 {
+    3
 }
 
 /// Windows: `/tmp/x.txt` or `/var/tmp/x.txt` where this drive has no such folder: Linux's and
@@ -1983,8 +1997,8 @@ mod tests {
         // either, and is the true reason; create_dir_all's for a root it can't make is replaced.
         let nul = std::fs::create_dir_all("a\0b").unwrap_err();
         assert!(nul.raw_os_error().is_none() && !whole_tree_error(&nul), "{nul}");
-        // Windows: a drive that isn't there (drive_is_there is true elsewhere).
-        if let Some(letter) = ('D'..='Z').rev().find(|&l| !drive_is_there(l)) {
+        // Windows: a drive that isn't there (every letter is a local drive elsewhere).
+        if let Some(letter) = ('D'..='Z').rev().find(|&l| drive_type(l) == NO_DRIVE) {
             let e = std::fs::create_dir_all(format!(r"{letter}:\v2-r19-no-drive\x")).unwrap_err();
             assert!(whole_tree_error(&e), "{e}");
         }
@@ -1996,21 +2010,23 @@ mod tests {
         // Round 19 review (INTERNALS 5.10): a mapped network drive whose computer isn't reached
         // is a letter GetDriveTypeW knows, so it got "there is no folder 'Z:\reports'" and a
         // make_dir hint. A network error on a drive that is there names the drive, with no hint.
+        // Only a network drive (DRIVE_REMOTE) is named so (the second review: a network error on
+        // a local drive comes from a link to a share on the path, not from the drive).
+        for code in [53, 55, 64, 67, 1201, 1231] {
+            let e = std::io::Error::from_raw_os_error(code);
+            assert_eq!(drive_problem('Z', REMOTE_DRIVE, &e).as_deref(), Some("the drive Z: can't be reached (is it connected?)"), "{code}");
+            assert_eq!(drive_problem('C', 3, &e), None, "a local drive, {code}");
+        }
+        assert_eq!(drive_problem('Z', REMOTE_DRIVE, &std::io::Error::from_raw_os_error(3)), None, "a folder that isn't there");
+        assert_eq!(drive_problem('Q', NO_DRIVE, &std::io::Error::from_raw_os_error(3)).as_deref(), Some("there is no drive Q: (is it plugged in or connected?)"));
+        // The current drive is a local one: a network error on a path there isn't the drive's.
         let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
         assert_eq!(cwd.as_bytes().get(1), Some(&b':'), "{cwd}");
         let letter = cwd.chars().next().unwrap().to_ascii_uppercase();
-        let unreachable = format!("the drive {letter}: can't be reached (is it connected?)");
-        let paths = [format!(r"{letter}:\v2-r19-no-such\out.csv"), format!(r"\\?\{letter}:\v2-r19-no-such\out.csv"), format!("{}:/v2-r19-no-such/out.csv", letter.to_ascii_lowercase())];
-        for path in &paths {
-            for code in [53, 55, 64, 67, 1201, 1231] {
-                let e = std::io::Error::from_raw_os_error(code);
-                assert_eq!(unreachable_root(path, &e).as_deref(), Some(unreachable.as_str()), "{path} {code}");
-                let Err(Flow::Error(err)) = file_error::<()>("write", path, &e) else { panic!("{path}") };
-                assert_eq!(&*err.message, format!("cannot write '{}': {unreachable}", shown_path(path)));
-                assert!(err.hint.get().is_none(), "{:?}", err.hint.get());
+        if drive_type(letter) != REMOTE_DRIVE {
+            for path in [format!(r"{letter}:\v2-r19-no-such\out.csv"), format!(r"\\?\{letter}:\v2-r19-no-such\out.csv")] {
+                assert_eq!(unreachable_root(&path, &std::io::Error::from_raw_os_error(1231)), None, "{path}");
             }
-            // A folder that isn't there, on a drive that is: nothing of the drive.
-            assert_eq!(unreachable_root(path, &std::io::Error::from_raw_os_error(3)), None, "{path}");
         }
     }
 }

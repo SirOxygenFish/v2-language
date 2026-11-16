@@ -149,6 +149,18 @@ fn v2_command(home: &Path) -> Command {
         }
     }
     cmd.env_remove("VIRTUAL_ENV");
+    // An activated venv's bin (Scripts) folder on the developer's PATH changes which Python the
+    // runs find, and so their hints: left out (the second review of round 19). A test that wants
+    // one sets PATH itself.
+    if let Some(path) = std::env::var_os("PATH") {
+        let all: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        let kept: Vec<&PathBuf> = all.iter().filter(|d| !d.parent().is_some_and(|p| p.join("pyvenv.cfg").is_file())).collect();
+        if kept.len() < all.len() {
+            if let Ok(joined) = std::env::join_paths(kept) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
     cmd.env("HOME", home).env("USERPROFILE", home).env("RUSTUP_HOME", rustup).env("CARGO_HOME", cargo);
     cmd
 }
@@ -505,7 +517,13 @@ fn first_run_mistakes_say_what_to_do_next() {
         std::os::unix::fs::symlink("/nonexistent/real.v2", home.0.join("dangling.v2")).unwrap();
         let (code, _, stderr) = run_in_home(&home.0, &["dangling.v2"], &[]);
         assert_eq!(code, Some(2), "{stderr}");
-        assert!(stderr.contains("\n'dangling.v2' is a symbolic link to /nonexistent/real.v2, which isn't there"), "{stderr}");
+        assert!(stderr.contains("\n'dangling.v2' is a link to /nonexistent/real.v2, which isn't there: remove the link (rm dangling.v2), or make /nonexistent/real.v2\n"), "{stderr}");
+        // A relative target is from the link's own folder, shown absolute (the second review).
+        std::os::unix::fs::symlink("gone.v2", home.0.join("sub").join("rel.v2")).unwrap();
+        let (code, _, stderr) = run_in_home(&home.0, &["sub/rel.v2"], &[]);
+        assert_eq!(code, Some(2), "{stderr}");
+        let gone = format!("{sub}/gone.v2");
+        assert!(stderr.contains(&format!("\n'rel.v2' is a link to {gone}, which isn't there: remove the link (rm sub/rel.v2), or make {gone}\n")), "{stderr}");
     }
 }
 
@@ -5327,22 +5345,30 @@ fn imports_of_pipes_devices_and_broken_links_are_import_errors() {
     std::os::unix::fs::symlink("loop.v2", home.0.join("loop.v2")).unwrap();
     std::os::unix::fs::symlink("gone.v2", home.0.join("dangling.v2")).unwrap();
     let names = ["fifo", "zero", "loop", "dangling", "nope"];
-    let main: String = names.iter().map(|n| format!("try {{ import \"./{n}.v2\" as m }} catch (e) {{ print(e.type + \": \" + e.message) }}\n")).collect();
+    let main: String = names.iter().map(|n| format!("try {{ import \"./{n}.v2\" as m }} catch (e) {{ print(e.type + \": \" + e.message + \" | \" + str(e.hint)) }}\n")).collect();
     std::fs::write(home.0.join("main.v2"), main).unwrap();
     std::fs::write(home.0.join("uncaught.v2"), "import \"./zero.v2\" as z\n").unwrap();
+    // A link that leads nowhere or in a loop gets what fixes it, as one on the way does; where a
+    // link to nothing points is absolute (the second review of round 19).
+    let real = std::fs::canonicalize(&home.0).unwrap().to_string_lossy().into_owned();
+    let gone = format!("{real}/gone.v2");
     let want = [
-        "ImportError: cannot import './fifo.v2': it is a pipe or a device, not a file",
-        "ImportError: cannot import './zero.v2': it is a pipe or a device, not a file",
-        "ImportError: cannot import './loop.v2': it is a link in a loop",
-        "ImportError: cannot import './dangling.v2': it is a symbolic link to gone.v2, which isn't there",
-        "ImportError: cannot find module './nope.v2' (looked for nope.v2)",
+        ("ImportError: cannot import './fifo.v2': it is a pipe or a device, not a file".to_string(), None),
+        ("ImportError: cannot import './zero.v2': it is a pipe or a device, not a file".to_string(), None),
+        ("ImportError: cannot import './loop.v2': it is a link in a loop".to_string(), Some("remove the link (rm loop.v2), or point it somewhere else".to_string())),
+        (format!("ImportError: cannot import './dangling.v2': it is a link to {gone}, which isn't there"), Some(format!("remove the link (rm dangling.v2), or make {gone}"))),
+        ("ImportError: cannot find module './nope.v2' (looked for nope.v2)".to_string(), None),
     ];
     let (code, stdout, stderr) = run_capped(&home.0, &["main.v2"], &[]);
-    assert_eq!((code, stdout), (Some(0), want.join("\n") + "\n"), "{stderr}");
+    let lines: Vec<String> = want.iter().map(|(m, h)| format!("{m} | {}", h.as_deref().unwrap_or("null"))).collect();
+    assert_eq!((code, stdout), (Some(0), lines.join("\n") + "\n"), "{stderr}");
     let (code, stdout, stderr) = run_capped(&home.0, &["check", "main.v2"], &[]);
     assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 5 errors\n"), "{stderr}");
-    for (i, w) in want.iter().enumerate() {
+    for (i, (w, hint)) in want.iter().enumerate() {
         assert!(stderr.contains(&format!("main.v2:{}:7: {w}\n", i + 1)), "{w}: {stderr}");
+        if let Some(hint) = hint {
+            assert!(stderr.contains(&format!("hint: {hint}\n")), "{hint}: {stderr}");
+        }
     }
     let (code, _, stderr) = run_capped(&home.0, &["uncaught.v2"], &[]);
     assert_eq!(code, Some(1), "{stderr}");
