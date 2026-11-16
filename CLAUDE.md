@@ -33,13 +33,14 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 17 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds: round 18 next. Rounds run as workflows:
+  Rounds 1 to 18 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds: round 19 next. Rounds run as workflows:
   two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
   implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
-  the reviews' issues. A worktree may start from main, not v2-reboot: give agents the base commit
-  and have them check it. (Round 17's prompts: scratchpad/newcomer/prompt-*-r17.md, made by
-  scratchpad/make17.py and setup_round17.py; its distro v2new24q, where
+  the reviews' issues, then mine on the second reviews'. A worktree may start from main, not
+  v2-reboot: give agents the base commit and have them check it. (Round 19's prompts:
+  scratchpad/newcomer/prompt-*-r19.md, made by scratchpad/make19.py and setup_round19.py; its
+  distro v2new24s, where
   paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
