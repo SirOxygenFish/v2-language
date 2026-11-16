@@ -1,0 +1,40 @@
+// requires: js ts
+// A block arg or an inner @import's alias JavaScript can't use is refused with a name it can
+// (DOCS 4.4, INTERNALS 12.2): a reserved word, a name the block has already, a letter JavaScript
+// doesn't take. JavaScript reads names as written, with no NFKC form.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+func twice(x) {
+    return x * 2
+}
+show(func() => @js(this: 1) { this })
+show(func() => @js(yield: 1) { 1 })
+show(func() => @js(var: 1) { 1 })
+show(func() => @ts(static: 1) { 1 })
+show(func() => @js(undefined: 1) { undefined })
+show(func() => @js(__proto__: 1) { 1 })
+show(func() => @ts(NaN: 1) { 1 })
+let ⓐ = 1
+show(func() => @js(ⓐ) { 1 })
+// What the messages name works.
+show(func() => @js(this_: 1, undefined_: 2, proto_: 3) { [this_, undefined_, proto_] })
+let ﬁle = 5
+show(func() => @js(ﬁle) { ﬁle })
+// The same for an alias.
+show(func() => @js {
+    @import { twice as this } from v2
+    1
+})
+show(func() => @ts {
+    @import { twice as undefined } from v2
+    1
+})
+show(func() => @js {
+    @import { twice as this_ } from v2
+    this_(4)
+})

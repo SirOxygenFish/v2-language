@@ -127,3 +127,17 @@ func run() {
     }
 }
 run()
+// Round 17: a thread pool's map over a V2 function gets the thread rule and what to do instead.
+func score(x) {
+    return x * 10
+}
+try {
+    @py {
+        @import { score } from v2
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(2) as pool:
+            list(pool.map(score, [1, 2]))
+    }
+} catch (e) {
+    print(e.type, e.lang, e.message)
+}

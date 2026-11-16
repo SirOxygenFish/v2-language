@@ -1,0 +1,14 @@
+ValueError: block arg 'None' is not a valid Python name: pass it under another name, as in @py(None_: …)
+ValueError: block arg '__name__' is reserved in @py blocks: pass it under another name, as in @py(name_: …)
+ValueError: block arg '__builtins__' is reserved in @py blocks: pass it under another name, as in @py(builtins_: …)
+ValueError: block arg '__' is reserved in @py blocks: pass it under another name, as in @py(name: …)
+ValueError: block arg 'ﬁle' is read by Python as 'file': pass it under that name, as in @py(file: ﬁle)
+ValueError: block arg 'ｘ' is read by Python as 'x': pass it under that name, as in @py(x: ｘ)
+ValueError: block arg 'Ⅸ' is read by Python as 'IX': pass it under that name, as in @py(IX: Ⅸ)
+ValueError: block arg 'ⓐ' is not a valid Python name: pass it under another name, as in @py(a: …)
+[1, "x", 5, 7, 9]
+3
+ValueError: @import name 'pass' is not a valid Python name: import it under another name, as in @import { … as pass_ } from …
+ValueError: @import name '__name__' is reserved in @py blocks: import it under another name, as in @import { … as name_ } from …
+ValueError: @import name 'ﬁle' is read by Python as 'file': import it under that name, as in @import { … as file } from …
+8
