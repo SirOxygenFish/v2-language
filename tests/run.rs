@@ -1430,6 +1430,65 @@ print(go())
 }
 
 #[test]
+fn to_v2_of_pandas_and_numpy_dates_names_a_block_that_converts_them() {
+    // INTERNALS 11.5, round 17: a datetime Series, a DataFrame and a datetime64 array fail on an
+    // item, and the block the message names converts the whole object. The real pandas and numpy
+    // (engines/py/to_v2_items.v2 has stand-ins), so it skips where they aren't installed.
+    let test = "to_v2_of_pandas_and_numpy_dates_names_a_block_that_converts_them";
+    if !needs("py", test) {
+        return;
+    }
+    let src = r#"func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let have = @py {
+    import importlib.util
+    all(importlib.util.find_spec(m) is not None for m in ("pandas", "numpy"))
+}
+if have {
+    let dates = @py {
+        import pandas as pd
+        pd.to_datetime(pd.Series(["2026-01-01", "2026-01-02"]))
+    }
+    show(func() => to_v2(dates))
+    show(func() => @py(h: dates) { h.astype(str).tolist() })
+    let frame = @py(dates) {
+        import pandas as pd
+        pd.DataFrame({"d": dates, "n": [1.5, 2]})
+    }
+    show(func() => to_v2(frame))
+    show(func() => @py(h: frame) { import json; json.loads(h.to_json(date_format="iso")) })
+    let days = @py { __import__("numpy").array(["2026-01-01"], dtype="datetime64[D]") }
+    show(func() => to_v2(days))
+    show(func() => @py(h: days) { h.astype(str).tolist() })
+} else {
+    print("no pandas")
+}
+"#;
+    let (code, stdout, stderr, _home) = run_with_files(&[("dates.v2", src)], &["dates.v2"]);
+    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    if stdout == "no pandas\n" {
+        let _ = writeln!(std::io::stderr(), "SKIP {test} (pandas or numpy not installed)");
+        return;
+    }
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 6, "{stdout}");
+    // pandas names its Timestamp pandas.Timestamp from 3.0, pandas._libs.tslibs.timestamps.Timestamp before.
+    let series = ": make plain data of it in a block first, as in @py(h) { h.astype(str).tolist() }";
+    assert!(lines[0].starts_with("MarshalError: to_v2(): an item of h is a pandas.") && lines[0].ends_with(&format!("Timestamp{series}")), "{stdout}");
+    assert_eq!(lines[1], r#"["2026-01-01", "2026-01-02"]"#);
+    let frame = r#"Timestamp: make plain data of it in a block first, as in @py(h) { import json; json.loads(h.to_json(date_format="iso")) }"#;
+    assert!(lines[2].starts_with("MarshalError: to_v2(): an item of h is a pandas.") && lines[2].ends_with(frame), "{stdout}");
+    assert!(lines[3].starts_with(r#"{"d": {"0": "2026-01-01T00:00:00"#) && lines[3].ends_with(r#""n": {"0": 1.5, "1": 2.0}}"#), "{stdout}");
+    assert_eq!(lines[4], format!("MarshalError: to_v2(): an item of h is a datetime.date{series}"));
+    assert_eq!(lines[5], r#"["2026-01-01"]"#);
+}
+
+#[test]
 fn a_program_that_catches_a_failing_stdout_ends_well() {
     // INTERNALS 6.5: what a failed write couldn't write goes with its IOError, so a program that
     // catches it has handled that output: exit 0, nothing said at the end.

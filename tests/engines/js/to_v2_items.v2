@@ -1,0 +1,32 @@
+// requires: js
+// to_v2 of an object with an item it can't convert names the item, and a block that converts the
+// whole object as fits it (DOCS 9.2, INTERNALS 11.5): a Set, a Map or an object item by item,
+// what a hook gave, a deeper item.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let hs = @js {
+    const day = new Date(0);
+    class Box { tolist() { return [day]; } }
+    class Wrap { to_dict() { return day; } }
+    class Fields { to_dict() { return { a: day }; } }
+    class Holder { to_dict() { return { e: [day] }; } }
+    class Event { constructor() { this.n = 1; } }
+    [new Set([day]), new Map([["a", day]]), new Box(), new Wrap(), new Fields(), new Holder(), new Set([new Event()])]
+}
+for h in hs {
+    show(func() => to_v2(h))
+}
+// What the messages name works.
+show(func() => @js(h: hs[0]) { [...h].map((x) => x.toISOString()) })
+show(func() => @js(h: hs[1]) { Object.fromEntries([...h].map(([k, v]) => [k, v.toISOString()])) })
+show(func() => @js(h: hs[2]) { [...h.tolist()].map((x) => x.toISOString()) })
+show(func() => @js(h: hs[3]) { h.to_dict().toISOString() })
+show(func() => @js(h: hs[4]) { Object.fromEntries(Object.entries(h.to_dict()).map(([k, v]) => [k, v.toISOString()])) })
+show(func() => @js(h: hs[6]) { [...h].map((x) => ({ ...x })) })
+// The object itself is named as before.
+show(func() => to_v2(@js { new Date(0) }))

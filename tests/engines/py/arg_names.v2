@@ -1,0 +1,47 @@
+// requires: py
+// A block arg or an inner @import's alias the block's code can't reach is refused with a name it
+// can (DOCS 4.4, INTERNALS 12.2): a keyword, a name Python reserves, a letter Python doesn't take,
+// and a name whose NFKC form, the one Python reads in code, differs.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+func twice(x) {
+    return x * 2
+}
+show(func() => @py(None: 1) { 1 })
+show(func() => @py(__name__: "x") { __name__ })
+show(func() => @py(__builtins__: 1) { 1 })
+show(func() => @py(__: 1) { 1 })
+let ﬁle = 5
+show(func() => @py(ﬁle) { ﬁle })
+let ｘ = 7
+show(func() => @py(ｘ) { ｘ })
+let Ⅸ = 9
+show(func() => @py(Ⅸ) { 1 })
+let ⓐ = 1
+show(func() => @py(ⓐ) { 1 })
+// What the messages name works, and an NFKC-normal name passes, accents and all.
+show(func() => @py(None_: 1, name_: "x", file: ﬁle, x: ｘ, IX: Ⅸ) { [None_, name_, file, x, IX] })
+let café = 3
+show(func() => @py(café) { café })
+// The same for an alias.
+show(func() => @py {
+    @import { twice as pass } from v2
+    1
+})
+show(func() => @py {
+    @import { twice as __name__ } from v2
+    1
+})
+show(func() => @py {
+    @import { twice as ﬁle } from v2
+    1
+})
+show(func() => @py {
+    @import { twice as file } from v2
+    file(4)
+})

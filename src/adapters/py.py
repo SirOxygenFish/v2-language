@@ -194,6 +194,10 @@ if __name__ == "__main__":
 
         cost = 0
         hooks = 0  # to_v2 hooks open on the way down (11.5)
+        # to_v2's object, the hooks run on it (h.to_dict()...), and the container at level 0:
+        # what a node that can't convert is an item of (11.5).
+        top = base = None
+        chain = ()
 
         def spend(self, n):
             self.cost += n
@@ -977,7 +981,7 @@ if __name__ == "__main__":
         if not stack or stack[-1][0] != "request":
             raise V2Error("Error", "V2 function '%s' called outside an active V2 call: Python called it while V2 wasn't waiting on Python (a thread, a timer or a finalizer after its call returned); call V2 from the code V2 called, and return to V2 when done" % name)
         if threading.get_ident() != DISPATCH:
-            raise V2Error("Error", "V2 function '%s' called from another thread" % name)
+            raise V2Error("Error", "V2 function '%s' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results" % name)
         if _send_owner[0] == DISPATCH:  # a finalizer that runs while a frame is being sent
             raise V2Error("Error", "V2 function '%s' called outside an active V2 call" % name)
         try:
@@ -1046,10 +1050,34 @@ if __name__ == "__main__":
         return None
 
     def check_name(k, what="block arg"):
-        if not k.isidentifier() or keyword.iskeyword(k) or (k.startswith("__") and k.endswith("__")):
-            more = ": pass it under another name, as in @py(%s_: …)" % k if keyword.iskeyword(k) and what == "block arg" else ""
-            raise Fail("ValueError", "%s '%s' is not a valid Python name%s" % (what, k, more))
-        return k
+        """A block arg or an inner @import's alias, which the block's code reaches by name (12.2):
+        else a ValueError that names one it can reach."""
+        n = k
+        if not k.isascii():
+            import unicodedata  # only for a non-ASCII name, so startup stays lean
+
+            n = unicodedata.normalize("NFKC", k)  # the name Python reads in the block's code
+        dunder = n.startswith("__") and n.endswith("__")
+        if n == k and k.isidentifier() and not keyword.iskeyword(k) and not dunder:
+            return k
+        arg = what == "block arg"
+
+        def other(name):
+            if arg:
+                return "pass it under another name, as in @py(%s: …)" % name
+            return "import it under another name, as in @import { … as %s } from …" % name
+
+        if not (k.isidentifier() and n.isidentifier()):
+            # A letter V2 takes and Python doesn't (ⓐ, which Python's NFKC form makes a).
+            fit = n.isidentifier() and not keyword.iskeyword(n) and not dunder
+            raise Fail("ValueError", "%s '%s' is not a valid Python name: %s" % (what, k, other(n if fit else "name")))
+        if keyword.iskeyword(n):
+            raise Fail("ValueError", "%s '%s' is not a valid Python name: %s" % (what, k, other(n + "_")))
+        if dunder:  # __name__, __file__, __builtins__: the adapter's, or Python's
+            s = n.strip("_") + "_"
+            raise Fail("ValueError", "%s '%s' is reserved in @py blocks: %s" % (what, k, other(s if s[1:] and s.isidentifier() else "name")))
+        how = "pass it under that name, as in @py(%s: %s)" % (n, k) if arg else "import it under that name, as in @import { … as %s } from …" % n
+        raise Fail("ValueError", "%s '%s' is read by Python as '%s': %s" % (what, k, n, how))
 
     _absent = object()
 
@@ -1436,7 +1464,9 @@ if __name__ == "__main__":
     def to_v2(x, depth=0, path=None):
         """`op value`: the object as plain data, converted here (11.5). `depth` is the level the
         value would sit at, so a container at 256 or deeper is too deep, as for the host (10.5)."""
-        path = path if path is not None else Walk()
+        if path is None:
+            path = Walk()
+            path.top = x
         t = type(x)
         if x is None or t is bool:
             return x
@@ -1463,6 +1493,8 @@ if __name__ == "__main__":
                 raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
             path.spend(2 * len(x))
             path.add(id(x))
+            if depth == 0:
+                path.base = x
             try:
                 if not mapping:
                     return [to_v2(v, depth + 1, path) for v in x]
@@ -1491,21 +1523,53 @@ if __name__ == "__main__":
                     raise Fail("MarshalError", "value too large to send to V2 (%d items, more than %d MiB)" % (size, LIMIT >> 20))
                 path.add(id(x))
                 path.hooks += 1
+                chain = path.chain
+                if depth == 0:
+                    path.chain = chain + (hook,)
                 try:
                     return to_v2(f(), depth, path)
                 finally:
                     path.hooks -= 1
+                    path.chain = chain
                     path.discard(id(x))
         # A way that works for this object: its ISO text, its items, its fields, else its text.
         if callable(getattr(x, "isoformat", None)):
-            how = "h.isoformat()"
+            form = "%s.isoformat()"
         elif hasattr(x, "__iter__"):
-            how = "list(h)"
+            form = "list(%s)"
         elif hasattr(x, "__dict__"):
-            how = "vars(h)"
+            form = "vars(%s)"
         else:
-            how = "str(h)"
-        raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data: make plain data of it in a block first, as in @py(h) { %s }" % (type_name(x), how))
+            form = "str(%s)"
+        if depth == 0 and not path.chain:
+            raise Fail("MarshalError", "to_v2(): can't convert %s to V2 data: make plain data of it in a block first, as in @py(h) { %s }" % (type_name(x), form % "h"))
+        raise Fail("MarshalError", item_message(x, form, depth, path))
+
+    def item_message(x, form, depth, path):
+        """to_v2's message for a node that can't convert and isn't the object asked for: an item
+        of it, or what its to_dict() or tolist() gave. The block it names converts the object, as
+        fits its kind: a pandas or numpy object as text, a container item by item (11.5)."""
+        top, name = path.top, type_name(x)
+        a = "an" if name[:1] in "aeiouAEIOU" else "a"
+        src = "h" + "".join(".%s()" % c for c in path.chain)
+        what = "an item of h" if depth else src
+        mod = getattr(type(top), "__module__", None)
+        if isinstance(mod, str) and mod.split(".")[0] in ("pandas", "numpy") and callable(getattr(top, "astype", None)):
+            if callable(getattr(top, "tolist", None)):  # a Series, an Index, an array
+                how = "h.astype(str).tolist()"
+            else:  # a DataFrame: its numbers stay numbers
+                how = 'import json; json.loads(h.to_json(date_format="iso"))'
+        elif depth == 0:
+            how = form % src
+        elif depth == 1 and path.hooks == len(path.chain):
+            if isinstance(path.base, collections.abc.Mapping):
+                key = "k" if all(isinstance(k, str) for k in path.base) else "str(k)"
+                how = "{%s: %s for k, v in %s.items()}" % (key, form % "v", src)
+            else:
+                how = "[%s for x in %s]" % (form % "x", src)
+        else:
+            return "to_v2(): an item inside h is %s %s: make plain data of h in a block first, with %s for each such item x" % (a, name, form % "x")
+        return "to_v2(): %s is %s %s: make plain data of it in a block first, as in @py(h) { %s }" % (what, a, name, how)
 
     def do_op(m):
         op = m.get("op")
