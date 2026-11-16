@@ -18,7 +18,7 @@ use crate::codec::json;
 use crate::engines::process::{self, stop_if_interrupted};
 use crate::engines::resolve::{first_program, is_drive_relative, Lookup};
 use crate::syntax::ast::BinOp;
-use crate::syntax::span::{os_message, Span};
+use crate::syntax::span::{os_message, shown_path, Span};
 
 pub type BuiltinFn = fn(&mut Interp, Vec<Value>, Span) -> Exec<Value>;
 
@@ -130,8 +130,71 @@ fn drain(w: &mut dyn Write, buf: &mut Vec<u8>) -> std::io::Result<()> {
             Err(e) => break Err(e),
         }
     };
+    if let Some(&b) = buf[..done].last() {
+        LAST_BYTE.store(b, std::sync::atomic::Ordering::Relaxed);
+    }
     buf.drain(..done);
     r
+}
+
+/// The last byte V2 wrote to stdout or stderr, and to stderr alone (0: none yet), so a report of
+/// its own starts on a line of its own (2.4).
+static LAST_BYTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static LAST_ERR_BYTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Note what a write to stderr ended with (`stderr!`, `print(stderr: true)`).
+pub fn wrote_stderr(text: &[u8]) {
+    if let Some(&b) = text.last() {
+        LAST_BYTE.store(b, std::sync::atomic::Ordering::Relaxed);
+        LAST_ERR_BYTE.store(b, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Before a report of V2's own on stderr (an uncaught error, 2.4): a line break when the program
+/// left the line it goes on unfinished, as `print("x", end: "")` does. That line is stderr's, or
+/// with stdout and stderr one terminal, pipe or file (`2>&1`) the line either wrote last. Call it
+/// after `Out` is flushed.
+pub fn start_line() {
+    let unfinished = |b: u8| b != 0 && b != b'\n';
+    let (any, err) = (LAST_BYTE.load(std::sync::atomic::Ordering::Relaxed), LAST_ERR_BYTE.load(std::sync::atomic::Ordering::Relaxed));
+    if (unfinished(any) || unfinished(err)) && unfinished(if same_stream() { any } else { err }) {
+        stderr!("\n");
+    }
+}
+
+/// Whether stdout and stderr are the same terminal, pipe or file: on Unix the same device and
+/// inode; on Windows both consoles, one kernel object (`2>&1`), or one file opened twice.
+fn same_stream() -> bool {
+    #[cfg(unix)]
+    {
+        let id = |fd| {
+            // SAFETY: fstat fills a zeroed struct for any descriptor, open or not.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev, st.st_ino))
+        };
+        id(1).is_some_and(|a| id(2) == Some(a))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::CompareObjectHandles;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        use windows_sys::Win32::System::Console::GetConsoleMode;
+        let (out, err) = (std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle());
+        let mut mode = 0;
+        // SAFETY: the standard handles stay open for the process; each call only reads them and
+        // fills its out-parameter.
+        unsafe {
+            if (GetConsoleMode(out, &mut mode) != 0 && GetConsoleMode(err, &mut mode) != 0) || CompareObjectHandles(out, err) != 0 {
+                return true;
+            }
+            let id = |h| {
+                let mut i: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+                (GetFileInformationByHandle(h, &mut i) != 0).then_some((i.dwVolumeSerialNumber, i.nFileIndexHigh, i.nFileIndexLow))
+            };
+            id(out).is_some_and(|a| id(err) == Some(a))
+        }
+    }
 }
 
 /// The interrupt path (6.5): write what the program printed straight to the descriptor (the
@@ -375,22 +438,6 @@ fn io_error<T>(message: String) -> Exec<T> {
     fail("IOError", message)
 }
 
-/// A path as messages show it: control characters escaped, so the line break that `"C:\new"`
-/// holds can't split the message (5.10).
-fn shown_path(path: &str) -> String {
-    let mut out = String::new();
-    for c in path.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// A file builtin's OS failure (5.10): `cannot read 'x': <why>`, a folder said as such, and for
 /// a path holding a control character the hint that `\n` and `\t` in `"…"` are escapes.
 fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
@@ -424,6 +471,9 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
             .set(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write Windows paths with / or \\, as in "notes/new.txt""#.into());
     } else if let Some(h) = hint {
         let _ = err.hint.set(h.into());
+    } else if cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)) {
+        // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: the OS says only that a process uses it.
+        let _ = err.hint.set("another program has it open (Excel keeps an open file locked): close it there, or use another file name".into());
     } else if verb == "remove" && p.is_dir() {
         let _ = err.hint.set("a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into());
     } else if cfg!(windows) && matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr") {
@@ -447,10 +497,10 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     Err(Flow::Error(Rc::new(err)))
 }
 
-/// A path whose first part a shell would have expanded (`~`, `$HOME`, `%USERPROFILE%`): V2 takes
-/// paths as written, so `make_dir("~/out")` would quietly make a folder named `~` here, and a
-/// later `rm -rf ~` would take the home folder. Refused with what to write; `./~` is a folder
-/// that is really named so (5.10).
+/// A path whose first part a shell would have expanded (`~`, `~root`, `$HOME`, `%USERPROFILE%`):
+/// V2 takes paths as written, so `make_dir("~/out")` would quietly make a folder named `~` here,
+/// and a later `rm -rf ~` would take the home folder. Refused with what to write; `./~` is a
+/// folder that is really named so (5.10).
 fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
     // Every file builtin starts here: after an interrupt nothing is read or written (6.5).
     stop_if_interrupted();
@@ -459,11 +509,17 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
     }
     let first = path.split(['/', '\\']).next().unwrap_or_default();
     let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    // `~root`, `~user`: a login name after the `~`, which a shell turns into that user's home.
+    let user = first.strip_prefix('~').filter(|u| {
+        u.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && u.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    });
     let write = if first == "~" {
         match &path[1..] {
             "" => format!("getenv(\"{home}\")"),
             rest => format!("getenv(\"{home}\") + \"{rest}\""),
         }
+    } else if let Some(user) = user {
+        format!("the path of {user}'s home folder (what {first} is in a shell)")
     } else if crate::config::unexpanded(first) == Some(first) {
         let name = first.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
         format!("getenv(\"{name}\") in its place")
@@ -867,7 +923,11 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     shell_shorthand("read", &path)?;
     let binary = bool_arg(&args[1], "read_file", "binary")?;
     let bytes = match read_path(&path) {
-        Ok(b) => b,
+        Ok(Some(b)) => b,
+        // More than a str or bytes holds: a huge file, or a device that never ends (/dev/zero).
+        Ok(None) => {
+            return io_error(format!("cannot read '{}': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block", shown_path(&path)));
+        }
         Err(e) => {
             // A relative path starts in the folder v2 runs in; the file may be next to the script.
             let p = std::path::Path::new(&*path);
@@ -900,16 +960,24 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     }
 }
 
-/// Unix: standard input by any of its names is V2's own stream, as for input(): what input()
-/// holds comes first, then the rest from where the descriptor is (after what the shell read, for
-/// a file). Opened again, a pipe would lose the one and a file would start over (5.10).
-fn read_path(path: &str) -> std::io::Result<Vec<u8>> {
+/// The bytes at `path`, or `None` past `process::read_cap()` (1 GiB), read no further, so a
+/// device that never ends can't use up the memory (5.10). Unix: standard input by any of its
+/// names is V2's own stream, as for input(): what input() holds comes first, then the rest from
+/// where the descriptor is (after what the shell read, for a file). Opened again, a pipe would
+/// lose the one and a file would start over.
+fn read_path(path: &str) -> std::io::Result<Option<Vec<u8>>> {
+    let cap = process::read_cap();
+    let mut buf = Vec::new();
     if cfg!(unix) && matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0") {
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buf)?;
-        return Ok(buf);
+        return Ok(process::read_capped(std::io::stdin().lock(), cap, 0, &mut buf)?.then_some(buf));
     }
-    std::fs::read(path)
+    let file = std::fs::File::open(path)?;
+    // A regular file says its size: one too big is refused before it is read.
+    let size = file.metadata().ok().filter(std::fs::Metadata::is_file).map_or(0, |m| m.len());
+    if size > cap as u64 {
+        return Ok(None);
+    }
+    Ok(process::read_capped(file, cap, size as usize, &mut buf)?.then_some(buf))
 }
 
 /// `write_file(path, data, append: false)`: a str as UTF-8 or bytes as is; creates or
@@ -943,15 +1011,7 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             it.out.write_bytes(bytes)?;
             return Ok(Value::Null);
         }
-        "/dev/stderr" | "/dev/fd/2" | "/proc/self/fd/2" if cfg!(unix) => {
-            it.out.flush_or_stop();
-            stop_if_interrupted();
-            let mut err = std::io::stderr().lock();
-            return match err.write_all(bytes).and_then(|_| err.flush()) {
-                Ok(()) => Ok(Value::Null),
-                Err(e) => io_error(format!("cannot write to stderr: {}", os_message(&e))),
-            };
-        }
+        "/dev/stderr" | "/dev/fd/2" | "/proc/self/fd/2" if cfg!(unix) => return to_stderr(it, bytes),
         _ => {}
     }
     let r = if append {
@@ -994,9 +1054,9 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         match name.into_string() {
             Ok(name) => names.push(name),
             Err(bad) => {
-                let shown = bad.to_string_lossy();
+                let shown = shown_path(&bad.to_string_lossy());
                 // A name that can't be renamed (an upload, a share): a block lists the folder as bytes.
-                let err = ErrorValue::new("IOError", format!("cannot list '{path}': the name '{shown}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it"));
+                let err = ErrorValue::new("IOError", format!("cannot list '{}': the name '{shown}' is not valid UTF-8 (\u{FFFD} marks what isn't), and V2's strings are: rename it", shown_path(&path)));
                 let _ = err.hint.set("to list such names as they are, keep them as bytes in a @py block: @py(d) { import os; os.listdir(os.fsencode(d)) }, and open one there with os.path.join(os.fsencode(d), name)".into());
                 return Err(Flow::Error(Rc::new(err)));
             }
@@ -1178,6 +1238,10 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             return Err(Flow::Error(Rc::new(err)));
         }
     };
+    // Past what a str holds: an endless program (`yes`), or a zip bomb unpacked to stdout.
+    if c.too_much {
+        return io_error(format!("exec: '{}' wrote more than 1 GiB of output: send it to a file in the command, or read it in pieces in a block", shown_path(name)));
+    }
     let code = match (c.status.code, c.status.signal) {
         (_, Some(signal)) => 128 + signal as i64,
         (Some(code), None) if cfg!(windows) => code as u32 as i64,
@@ -1382,7 +1446,7 @@ pub fn bool_arg(v: &Value, func: &str, param: &str) -> Exec<bool> {
 fn print(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let sep = str_arg(&args[1], "print", "sep")?;
     let end = str_arg(&args[2], "print", "end")?;
-    let to_stderr = bool_arg(&args[3], "print", "stderr")?;
+    let on_stderr = bool_arg(&args[3], "print", "stderr")?;
     let Value::List(values) = &args[0] else { unreachable!("the rest parameter is a list") };
     let values = values.borrow().clone();
     let mut text = String::new();
@@ -1393,15 +1457,24 @@ fn print(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
         text.push_str(&it.str_of(v, at)?);
     }
     text.push_str(&end);
-    if !to_stderr {
+    if !on_stderr {
         it.out.write_str(&text)?;
         return Ok(Value::Null);
     }
+    to_stderr(it, text.as_bytes())
+}
+
+/// `print(stderr: true)` and `write_file("/dev/stderr", …)`: one write to the host's stderr
+/// after `Out` is flushed, so on one stream the text keeps program order (5.10).
+fn to_stderr(it: &mut Interp, bytes: &[u8]) -> Exec<Value> {
     it.out.flush_or_stop();
     stop_if_interrupted();
     let mut err = std::io::stderr().lock();
-    match err.write_all(text.as_bytes()).and_then(|_| err.flush()) {
-        Ok(()) => Ok(Value::Null),
+    match err.write_all(bytes).and_then(|_| err.flush()) {
+        Ok(()) => {
+            wrote_stderr(bytes);
+            Ok(Value::Null)
+        }
         Err(e) => io_error(format!("cannot write to stderr: {}", os_message(&e))),
     }
 }

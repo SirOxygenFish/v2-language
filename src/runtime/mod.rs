@@ -88,11 +88,14 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     };
     let flushed = lost(&mut interp.out);
     if let Some(m) = &flushed {
+        builtins::start_line();
         stderrln!("v2: {m}");
     }
     let code = match result {
         Ok(()) => 0,
         Err(Flow::Error(e)) => {
+            // On a line of its own, after `print("x", end: "")` too (2.4).
+            builtins::start_line();
             stderr!("{}", render_error(&interp.sm, &e));
             note();
             // No usable toolchain is exit 3 (6.5, 19.1).
@@ -112,6 +115,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     interp.shutdown_sessions();
     let late = lost(&mut interp.out);
     if let (None, Some(m)) = (&flushed, &late) {
+        builtins::start_line();
         stderrln!("v2: {m}");
     }
     match code {

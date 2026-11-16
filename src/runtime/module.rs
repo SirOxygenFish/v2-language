@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::syntax::ast::*;
-use crate::syntax::span::{absolute_clean, display_path, FileId, LoadError, SourceMap, Span};
+use crate::syntax::span::{absolute_clean, display_path, os_message, shown_path, FileId, LoadError, SourceMap, Span};
 use crate::syntax::{check, lexer, parser, Diag};
 
 /// A static diagnostic of a module file, kept until an `import` of it runs (6.1 step 2).
@@ -65,20 +65,43 @@ pub fn resolve(sm: &SourceMap, importer: FileId, spec: &str) -> PathBuf {
     base.join(spec)
 }
 
-/// The file `import "spec"` in `importer` loads, canonical, or the `ImportError` message (6.4).
-/// A drive-relative Windows path (`C:m.v2`) is neither relative to the file nor absolute.
+/// The file `import "spec"` in `importer` loads, canonical, or the `ImportError` message (6.4),
+/// with control characters escaped (2.1). A drive-relative Windows path (`C:m.v2`) is neither
+/// relative to the file nor absolute.
 pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
+    locate_raw(sm, importer, spec).map_err(|m| shown_path(&m))
+}
+
+fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
     let p = Path::new(spec);
     if matches!(p.components().next(), Some(std::path::Component::Prefix(_))) && !p.has_root() {
         return Err(format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"));
     }
     let target = resolve(sm, importer, spec);
-    let found = canonical(&target).ok_or_else(|| {
-        // `import "./util" as util` for util.v2.
-        let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
-        let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
-        format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target))
-    })?;
+    let found = match std::fs::canonicalize(&target) {
+        Ok(found) => crate::syntax::span::strip_verbatim(&found),
+        // There, but it can't be followed: a link to a file that isn't there, or the OS's
+        // reason (a loop of links: "Too many levels of symbolic links"), as for FILE (19.1).
+        Err(e) if std::fs::symlink_metadata(&target).is_ok() => {
+            return Err(match std::fs::read_link(&target) {
+                Ok(to) if e.kind() == std::io::ErrorKind::NotFound => {
+                    format!("cannot import '{spec}': it is a symbolic link to {}, which isn't there", to.to_string_lossy())
+                }
+                _ => format!("cannot import '{spec}': {}", os_message(&e)),
+            });
+        }
+        Err(_) => {
+            // `import "./util" as util` for util.v2.
+            let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+            let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
+            return Err(format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target)));
+        }
+    };
+    // A pipe or a device (a FIFO, a link to /dev/zero) would never end being read; the entry
+    // FILE is refused the same way (19.1).
+    if std::fs::metadata(&found).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
+        return Err(format!("cannot import '{spec}': it is a pipe or a device, not a file"));
+    }
     // A folder: one of its .v2 files is what to write (Windows would say "Access is denied").
     if found.is_dir() {
         let mut names: Vec<String> = std::fs::read_dir(&found)
