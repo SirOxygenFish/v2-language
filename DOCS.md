@@ -1172,7 +1172,7 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 | -------------------------------------- | ----------------------------------------------------------- |
 | name not exported                      | `'sprad' is not exported by 'stats' — did you mean 'spread'?`, or, with no close name, `… (did the block @export it?)` |
 | no block has that label                | `no block in this file is labeled 'stat' — did you mean 'stats'?`, or, with no close label, `…: a Python module is imported with py.stat, an npm package with js.stat` |
-| the selector starts with a V2 module's name (`import "./lib.v2" as lib`) | the hint says so: `lib is a V2 module (import "./lib.v2" as lib): use lib.total directly; …` |
+| the selector starts with a V2 module's name (`import "./lib.v2" as lib`) | the hint says so: `lib is a V2 module (import "./lib.v2" as lib): use lib.total directly; …`, or in a block, `…: a block gets its names through V2, as in let total = lib.total, then @import { total } from v2 in the block` |
 | the block has no `@export`             | `block 'stats' exports nothing: add @export { mean } inside it` |
 | block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
 | block not loaded yet when a block calls `x` | `block 'stats' has not run yet — 'x' can't be called before it loads` |
