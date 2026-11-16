@@ -303,6 +303,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         notes.push(format!("temp: {problem}"));
         not_ready.push("blocks".into());
     }
+    // A program's path, as every note, is shown with its control characters escaped (2.1): a
+    // project folder named with ESC can't drive the terminal.
+    for row in rows.iter_mut().skip(1) {
+        row[2] = crate::syntax::span::shown_path(&row[2]);
+    }
     // COMMAND goes last, so a long path (a venv deep in a project) runs on past the row instead of
     // pushing the other columns apart.
     const ORDER: [usize; 5] = [0, 1, 3, 4, 2];
@@ -321,7 +326,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
     if !notes.is_empty() {
         stdoutln!("notes:");
         for n in &notes {
-            stdoutln!("  {n}");
+            stdoutln!("  {}", crate::syntax::span::shown_path(n));
         }
     }
     match &cfg.file {

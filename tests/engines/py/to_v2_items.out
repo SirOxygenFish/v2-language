@@ -1,13 +1,13 @@
 MarshalError: to_v2(): an item of h has the type datetime.date: make plain data of it in a block first, as in @py(h) { [x.isoformat() for x in h] }
 MarshalError: to_v2(): an item of h has the type datetime.date: make plain data of it in a block first, as in @py(h) { {k: v.isoformat() for k, v in h.items()} }
-MarshalError: to_v2(): an item of h has the type datetime.date: make plain data of it in a block first, as in @py(h) { {k: v.isoformat() for k, v in h.items()} }
+MarshalError: to_v2(): an item of h has the type datetime.date: make plain data of it in a block first, as in @py(h) { {str(k): v.isoformat() for k, v in h.items()} }
 MarshalError: to_v2(): an item of h has the type datetime.date: make plain data of it in a block first, as in @py(h) { [x.isoformat() for x in h.tolist()] }
 MarshalError: to_v2(): h.to_dict() has the type datetime.date: make plain data of it in a block first, as in @py(h) { h.to_dict().isoformat() }
 MarshalError: to_v2(): an item inside h has the type datetime.date: make plain data of h in a block first, with x.isoformat() for each such item x
 MarshalError: to_v2(): an item of h has the type Event: make plain data of it in a block first, as in @py(h) { [vars(x) for x in h] }
 ["2026-01-01"]
 {"a": "2026-01-01"}
-{"null": "2026-01-01", "1": "2026-01-01"}
+{"None": "2026-01-01", "1": "2026-01-01"}
 ["2026-01-01"]
 2026-01-01
 MarshalError: to_v2(): an item of h has the type uuid.UUID: make plain data of it in a block first, as in @py(h) { [str(x) for x in h] }

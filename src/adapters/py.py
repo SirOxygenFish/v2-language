@@ -1601,8 +1601,13 @@ if __name__ == "__main__":
             how = form % src
         elif depth == 1 and path.hooks == len(path.chain):
             if isinstance(path.base, collections.abc.Mapping):
-                # The keys stay: to_v2 of the block's dict gives them V2's form (None: "null").
-                how = "{k: %s for k, v in %s.items()}" % (form % "v", src)
+                # A block's dict comes back as data only with str keys: other keys become their
+                # text (an int's is V2's too), else the block's value would be a handle.
+                try:
+                    keys = "k" if all(isinstance(k, str) for k in path.base) else "str(k)"
+                except Exception:
+                    keys = "str(k)"
+                how = "{%s: %s for k, v in %s.items()}" % (keys, form % "v", src)
             else:
                 how = "[%s for x in %s]" % (form % "x", src)
         else:
