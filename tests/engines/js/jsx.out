@@ -1,0 +1,12 @@
+ImportError | './fixtures/typed.tsx' is a .tsx file, which V2 can't import: Node has no JSX, so it can't run .jsx or .tsx files
+  hint: compile it first and import the .js your build writes (TypeScript without JSX can be a .ts file)
+ImportError | './fixtures/comp.jsx' is a .jsx file, which V2 can't import: Node has no JSX, so it can't run .jsx or .tsx files
+  hint: compile it first and import the .js your build writes (TypeScript without JSX can be a .ts file)
+ForeignError | Unexpected token '<'
+  hint: Node has no JSX, so it can't run .jsx or .tsx files: compile comp.jsx first and import the .js your build writes (TypeScript without JSX can be a .ts file)
+ForeignError | Unexpected token '<'
+  hint: Node has no JSX, so it can't run .jsx or .tsx files: compile comp.jsx first and import the .js your build writes (TypeScript without JSX can be a .ts file)
+ForeignError | Unknown file extension ".tsx"
+  hint: Node has no JSX, so it can't run .jsx or .tsx files: compile typed.tsx first and import the .js your build writes (TypeScript without JSX can be a .ts file)
+ForeignError | Unexpected token '*'
+  hint: null

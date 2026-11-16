@@ -107,6 +107,8 @@ pub struct Reply {
     pub missing: Vec<Rc<str>>,
     /// A module's public names, when it lacks a name asked for: for the did-you-mean (9.4).
     pub names: Vec<Rc<str>>,
+    /// The hint the worker gives that error (9.4), such as a dual package's (13.5).
+    pub hint: Option<Rc<str>>,
 }
 
 /// Most `cause` levels an `err` is read to (9.6).
@@ -691,12 +693,12 @@ impl Interp {
                     let flow = self.protocol_violation(s, &what, &line);
                     return Err(self.raise(flow, at));
                 }
-                Frame::Ret { value, exports, missing, names, .. } => {
+                Frame::Ret { value, exports, missing, names, hint, .. } => {
                     let reply = self.wire(s).decode(&value).and_then(|value| {
                         let (exports, missing) = self.export_lists(s, exports.as_ref(), missing.as_ref())?;
                         // Only for a message: anything but a list of strings counts as none.
                         let names = names.as_ref().and_then(Json::as_array).map(|l| l.iter().filter_map(Json::as_str).map(Rc::from).collect()).unwrap_or_default();
-                        Ok(Reply { value, exports, missing, names })
+                        Ok(Reply { value, exports, missing, names, hint: hint.as_deref().map(Rc::from) })
                     });
                     return match (reply, unwritten) {
                         (Ok(_), Some(flow)) => {
