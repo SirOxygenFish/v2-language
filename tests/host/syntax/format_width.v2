@@ -1,3 +1,4 @@
 // exit: 1
-// stderr: format_width.v2:3:12: SyntaxError: the only format in ${…} is :.Nf, with N up to 99
+// stderr: format_width.v2:4:12: SyntaxError: the only format in ${…} is :.Nf, with N up to 99
+// stderr: hint: pad with " " * n, as in let s = str(x), then " " * (5 - len(s)) + s for 5 wide
 print(f"${x:>10}")

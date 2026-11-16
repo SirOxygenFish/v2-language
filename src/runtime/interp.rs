@@ -1316,7 +1316,12 @@ impl Interp {
                 Arg::Spread(x) => match self.eval(x, env)? {
                     Value::List(l) => pos.extend(l.borrow().iter().cloned()),
                     other => {
-                        return self.fail_at("TypeError", format!("spread argument must be a list, got {}", other.type_name()), x.span)
+                        let err = self.fail_at("TypeError", format!("spread argument must be a list, got {}", other.type_name()), x.span);
+                        // JavaScript's `f(...opts)` for named arguments.
+                        if let (Value::Dict(_), Err(Flow::Error(e))) = (&other, &err) {
+                            let _ = e.hint.set(crate::syntax::lexer::KWARGS_HINT.into());
+                        }
+                        return err;
                     }
                 },
             }
@@ -1348,7 +1353,7 @@ impl Interp {
                                 Value::Float(x) => x,
                                 Value::Handle(h) => {
                                     let msg = format!("the :.{n}f format needs a number, got handle");
-                                    return super::builtins::number_error(&msg, &h.tag, false).map_err(|f| self.raise(f, expr.span));
+                                    return super::builtins::number_error(&msg, &h, false).map_err(|f| self.raise(f, expr.span));
                                 }
                                 other => {
                                     let msg = format!("the :.{n}f format needs a number, got {}", other.type_name());

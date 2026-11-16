@@ -1,0 +1,11 @@
+// exit: 1
+// stderr: import_dollar.v2:10:11: SyntaxError: unexpected character '$'
+// stderr: hint: write a name that isn't a V2 name in quotes, with a V2 name after as: @import { "$x" as dx } from …
+// JavaScript's $x in a V2 @import list goes in quotes, with a V2 name after as (DOCS 6.2;
+// INTERNALS 3.2).
+@js dollar {
+    const $x = () => "dollar"
+    @export { "$x" }
+}
+@import { $x as dx } from dollar
+print(dx())

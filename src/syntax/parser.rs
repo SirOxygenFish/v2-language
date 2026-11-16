@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use super::ast::*;
 use super::directives;
-use super::lexer::{LABEL_HINT, ONLY_FIXED, PAD_HINT};
+use super::lexer::{format_hint, KWARGS_HINT, LABEL_HINT, MERGE_HINT, ONLY_FIXED};
 use super::span::{SourceMap, Span};
 use super::token::{BraceKind, FPartTok, Kw, Op, Tok, Token};
 use super::Diag;
@@ -180,6 +180,8 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         }
         // JavaScript's `[0, ...a]`.
         (_, _, Some(Op::Ellipsis)) if matches!(op(1), Some(Op::Comma | Op::LBracket)) => "... spreads a list into a call's arguments only: join lists with +, as in [0] + a".into(),
+        // Python's `f(x, **opts)`.
+        (_, _, Some(Op::StarStar)) if matches!(op(1), Some(Op::Comma | Op::LParen)) && matches!(opener, Some(Tok::Op(Op::LParen))) => KWARGS_HINT.into(),
         (_, _, Some(Op::Plus)) if op(1) == Some(Op::Plus) => "V2 has no ++: write x += 1".into(),
         // JavaScript's `a ??= 5`, Ruby's and Perl's `elsif`, Python's and Go's `x := 1`.
         (_, _, Some(Op::Eq)) if op(1) == Some(Op::QQ) => format!("V2 has no ??=: write {0} = {0} ?? …", word(2).unwrap_or("x")),
@@ -1781,6 +1783,8 @@ impl<'a> Parser<'a> {
                 Tok::Int(n) => {
                     return Err(Diag::new("dict keys are names, strings or [expr]", t.span).hint(format!("dict keys are strings: write \"{n}\": or [str({n})]:")))
                 }
+                // JavaScript's `{...a, ...b}`, Python's `{**a, **b}`: a merge.
+                Tok::Op(Op::Ellipsis | Op::StarStar) => return Err(Diag::new("dict keys are names, strings or [expr]", t.span).hint(MERGE_HINT)),
                 _ => return Err(Diag::new("dict keys are names, strings or [expr]", t.span)),
             };
             if statement && entries.is_empty() && !self.at_op(Op::Colon) {
@@ -1813,7 +1817,12 @@ impl<'a> Parser<'a> {
                     let expr = sub.expr()?;
                     self.peak = self.peak.max(sub.peak);
                     if matches!(sub.peek(), Tok::Op(Op::Colon)) {
-                        return Err(Diag::new(ONLY_FIXED, sub.span()).hint(PAD_HINT));
+                        // The hint fits the format as written: from the `:` to the closing `}`.
+                        let colon = sub.span();
+                        let text = &self.sm.file(span.file).text;
+                        let spec = text.get(colon.hi as usize..close.lo as usize).unwrap_or_default();
+                        let written = text.get(expr.span.lo as usize..expr.span.hi as usize).unwrap_or_default();
+                        return Err(Diag::new(ONLY_FIXED, colon).hint(format_hint(spec, written)));
                     }
                     if !matches!(sub.peek(), Tok::RBrace) || sub.pos + 1 != sub.toks.len() {
                         return Err(Diag::new(format!("expected `}}` to close the ${{…}}, found {}", sub.peek()), sub.span()));
@@ -2155,6 +2164,26 @@ if x and x {
         assert_eq!(diag("@import py.os.path").hint.as_deref(), Some("@import py.os.path as path"));
         // An error with nothing of the kind keeps no hint.
         assert_eq!(diag("let = 1").hint, None);
+    }
+
+    #[test]
+    fn named_argument_spreads_and_dict_merges_get_v2s_ways() {
+        // 2.4 habits, 4.5, round 17: Python's f(**opts), JavaScript's {...a} and Python's {**a}.
+        let hint = |src: &str| diag(src).hint.unwrap_or_else(|| panic!("no hint for {src:?}"));
+        assert_eq!(hint("print(dumps(d, **opts))"), KWARGS_HINT);
+        assert_eq!(hint("f(**opts)"), KWARGS_HINT);
+        for src in ["let c = {...a, ...b}", "let c = {**a, **b}", "let c = {x: 1, ...a}"] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("dict keys are names, strings or [expr]", Some(MERGE_HINT)), "{src}");
+        }
+        // A `**` that isn't an argument gets none.
+        assert_eq!(diag("let r = [**o]").hint, None);
+        // A format left after the expression (3.5): the hint fits the format, and passes the
+        // expression in.
+        let d = diag("print(f\"${d.rate:%}\")");
+        assert_eq!((d.message.as_str(), d.hint.as_deref()), (ONLY_FIXED, Some("format it in a block, as in @py(x: d.rate) { f\"{x:%}\" }")));
+        assert_eq!(hint("print(f\"${n:,}\")"), "format it in a block, as in @py(n) { f\"{n:,}\" }");
+        assert_eq!(hint("print(f\"${name:>8}\")"), super::super::lexer::PAD_HINT);
     }
 
     #[test]

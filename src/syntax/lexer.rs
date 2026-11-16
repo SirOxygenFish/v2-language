@@ -14,6 +14,84 @@ use super::Diag;
 pub const ONLY_FIXED: &str = "the only format in ${…} is :.Nf, with N up to 99";
 /// What to write for `${x:>5}` and other formats V2 doesn't have.
 pub const PAD_HINT: &str = "pad with \" \" * n, as in let s = str(x), then \" \" * (5 - len(s)) + s for 5 wide";
+/// Python's `f(**opts)`, and `...` given a dict in a call (4.3, 5.7).
+pub const KWARGS_HINT: &str = "V2 has no ** for named arguments: write them by name, or call it in a block, as in @py(f, opts) { f(**opts) }";
+/// Python's `{**a, **b}` and `a | b`, JavaScript's `{...a, ...b}`, and `a + b` of two dicts (4.5, 5.3).
+pub const MERGE_HINT: &str = "copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }";
+
+/// The hint for a format V2 doesn't have (`spec` is what follows the `:`, `expr` the expression
+/// before it as written): a width or an alignment, with `.Nf` or nothing more, can be padded;
+/// `.Nf` with spaces around it is written without them; anything else (`.3e`, `,`, `%`, `+`) is
+/// formatted in a block with the format as written, the expression passed in (3.5).
+pub fn format_hint(spec: &str, expr: &str) -> String {
+    let b = spec.as_bytes();
+    let align = |c: Option<&u8>| matches!(c, Some(b'<' | b'>' | b'^' | b'='));
+    // [[fill]align][0][width][.precision][f|d|s]; the fill is any one character.
+    let fill = spec.chars().next().map_or(0, char::len_utf8);
+    let mut i = if align(b.get(fill)) {
+        fill + 1
+    } else if align(b.first()) {
+        1
+    } else {
+        0
+    };
+    let aligned = i > 0;
+    let width_at = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let width = i > width_at;
+    if b.get(i) == Some(&b'.') && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if matches!(b.get(i), Some(b'f' | b'd' | b's')) {
+        i += 1;
+    }
+    if (aligned || width) && i == b.len() {
+        return PAD_HINT.into();
+    }
+    let expr = expr.trim();
+    let trimmed = spec.trim();
+    let fixed = trimmed.strip_prefix('.').and_then(|r| r.strip_suffix('f')).is_some_and(|d| (1..=2).contains(&d.len()) && d.bytes().all(|c| c.is_ascii_digit()));
+    if fixed && trimmed != spec {
+        return format!("write the format without spaces: ${{{expr}:{trimmed}}}");
+    }
+    // A name goes in as itself; another short expression as the block arg x.
+    let (arg, x) = if is_plain_name(expr) {
+        (expr.to_string(), expr)
+    } else if !expr.is_empty() && expr.chars().count() <= 40 && !expr.contains('\n') {
+        (format!("x: {expr}"), "x")
+    } else {
+        ("x".to_string(), "x")
+    };
+    format!("format it in a block, as in @py({arg}) {{ f\"{{{x}:{spec}}}\" }}")
+}
+
+/// For a name that isn't a V2 name (`$x`, JavaScript's) at the start of `rest`, in an `@import`
+/// list: the list's quoted form (DOCS 6.2). V2 code (`v2`) binds a quoted name only with a V2
+/// name after `as`: the one written, else the name without its `$`; a block's own list binds it
+/// as it is. After `as` goes the importer's own name, a plain one.
+pub fn quote_import_hint(rest: &str, after_as: bool, v2: bool) -> String {
+    let word = |s: &str| -> String { s.chars().take_while(|c| *c == '$' || is_ident_continue(*c)).collect() };
+    let name = word(rest);
+    let bare = Some(name.replace('$', "")).filter(|b| is_plain_name(b));
+    if after_as {
+        return format!("after as goes a plain name, without $: as {}", bare.as_deref().unwrap_or("other"));
+    }
+    let after = rest[name.len()..].trim_start_matches([' ', '\t']);
+    let written = after.strip_prefix("as").filter(|r| r.starts_with([' ', '\t'])).map(|r| word(r.trim_start_matches([' ', '\t'])));
+    match written.filter(|a| is_plain_name(a)) {
+        Some(alias) if !v2 => format!("write a name that isn't a V2 name in quotes: @import {{ {name:?} as {alias} }} from …"),
+        None if !v2 => format!("write a name that isn't a V2 name in quotes: @import {{ {name:?} }} from …"),
+        alias => {
+            let alias = alias.or(bare).unwrap_or_else(|| "other".into());
+            format!("write a name that isn't a V2 name in quotes, with a V2 name after as: @import {{ {name:?} as {alias} }} from …")
+        }
+    }
+}
 
 /// Past this many nested `${…}`, lexing stops with `nested too deeply` (4.1).
 const MAX_INTERP_DEPTH: u32 = 256;
@@ -273,6 +351,8 @@ impl<'a> Lexer<'a> {
                 '#' if self.pos == 0 && self.src[self.pos..].starts_with("#!") => {
                     return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint("V2 doesn't read #! lines: delete it, and run the script with v2 FILE"))
                 }
+                // `${x:#x}`: Python's alternate form, in a format.
+                '#' if self.in_format(self.pos) => return Err(self.format_error(self.span_here(1), self.pos)),
                 '#' => {
                     return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint("comments start with //"))
                 }
@@ -334,12 +414,36 @@ impl<'a> Lexer<'a> {
     }
 
     /// Right after a `:` at the top level of an interpolation, with only what a format holds
-    /// between them.
+    /// between them (a fill character first, when an alignment follows it: `${x:*^10}`).
     fn in_format(&self, pos: usize) -> bool {
         let Some(open) = self.src[..pos].rfind("${") else { return false };
         let text = &self.src[open..pos];
         let top = matches!(self.stack.last(), Some((Open::Interp, _)));
-        top && !text.contains('?') && text.rfind(':').is_some_and(|c| text[c + 1..].bytes().all(|b| b.is_ascii_digit() || b",.+-_<>^=#".contains(&b)))
+        top && !text.contains('?')
+            && text.rfind(':').is_some_and(|c| {
+                let spec = &text[c + 1..];
+                let mut after = self.src[open + c + 1..].chars();
+                let fill = match (after.next(), after.next()) {
+                    (Some(f), Some('<' | '>' | '^' | '=')) if spec.len() >= f.len_utf8() => f.len_utf8(),
+                    _ => 0,
+                };
+                spec[fill..].bytes().all(|b| b.is_ascii_digit() || b" ,.+-_<>^=#".contains(&b))
+            })
+    }
+
+    /// The format error at `pos` in a `${…}` (3.5), its hint by what follows the `:`.
+    fn format_error(&self, span: Span, pos: usize) -> Diag {
+        Diag::new(ONLY_FIXED, span).hint(self.format_hint_at(pos))
+    }
+
+    /// `format_hint` for the format whose `:` is the last one before `pos` in this `${…}`: up to
+    /// the `}` (or the line's end), with the expression before it.
+    fn format_hint_at(&self, pos: usize) -> String {
+        let open = self.src[..pos].rfind("${").map_or(0, |o| o + 2);
+        let colon = self.src[open..pos].rfind(':').map_or(pos, |c| open + c);
+        let rest = &self.src[colon + 1..];
+        let spec = &rest[..rest.find(['}', '\n', '"', '\'']).unwrap_or(rest.len())];
+        format_hint(spec, &self.src[open..colon])
     }
 
     /// `:.Nf}` right at the top level of an interpolation (3.5).
@@ -510,8 +614,18 @@ impl<'a> Lexer<'a> {
         let r = self.rest();
         for bad in ["<<", ">>", "&", "|", "^", "~"] {
             if r.starts_with(bad) && !r.starts_with("&&") && !r.starts_with("||") {
+                // `${x:^10}`: an alignment (or a fill character) in a format.
+                if self.in_format(self.pos) {
+                    return Err(self.format_error(self.span_here(1), self.pos));
+                }
                 let d = Diag::new("V2 has no bitwise operators", self.span_here(bad.chars().count()));
-                return Err(if bad == "^" { d.hint("V2 writes a power as 2 ** 3") } else { d });
+                return Err(match bad {
+                    "^" => d.hint("V2 writes a power as 2 ** 3"),
+                    // Python's `a | b` and `a |= b` of two dicts.
+                    "|" if r.starts_with("|=") => d.hint("to add one dict's keys to another, set them: for k, v in b { a[k] = v }"),
+                    "|" => d.hint(format!("to merge two dicts, {MERGE_HINT}")),
+                    _ => d,
+                });
             }
         }
         for &(text, op) in OPS {
@@ -529,11 +643,27 @@ impl<'a> Lexer<'a> {
         if c == '`' && line.starts_with("```") && line[3..].chars().all(|c| c.is_ascii_alphanumeric()) {
             hint = Some("```v2 and ``` mark an example in a Markdown file: copy only the lines between them");
         }
+        // `${x:#x}`, `${x:£>8}`: a format's own character.
+        if self.in_format(self.pos) {
+            return Err(self.format_error(self.span_here(1), self.pos));
+        }
         let d = Diag::new(format!("unexpected character {shown}"), self.span_here(1));
+        // `@import { $x as dx } from …`: JavaScript's `$x` goes in quotes there.
+        if c == '$' && self.in_import_list() {
+            let after_as = matches!(self.toks.last().map(|t| &t.tok), Some(Tok::Kw(Kw::As)));
+            return Err(d.hint(quote_import_hint(self.rest(), after_as, true)));
+        }
         Err(match hint {
             Some(h) => d.hint(h),
             None => d,
         })
+    }
+
+    /// Inside the `{ }` of a V2-level `@import { … }`.
+    fn in_import_list(&self) -> bool {
+        let Some(&(Open::Dict, open)) = self.stack.last() else { return false };
+        let brace = self.toks.iter().rposition(|t| t.span.lo == open.lo && matches!(t.tok, Tok::LBrace(_)));
+        brace.and_then(|j| j.checked_sub(1)).is_some_and(|j| matches!(self.toks[j].tok, Tok::DirImport))
     }
 
     // -- words: identifiers, keywords, string prefixes ----------------------------------------
@@ -633,7 +763,7 @@ impl<'a> Lexer<'a> {
                 return Err(Diag::new("V2 has only decimal and 0x hex integer literals", span));
             }
             if self.in_format(m.pos) {
-                return Err(Diag::new(ONLY_FIXED, span).hint(PAD_HINT));
+                return Err(self.format_error(span, m.pos));
             }
             return Err(Diag::new("a number can't be followed directly by a letter", span));
         }
@@ -1801,6 +1931,70 @@ let n = names
         let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), "print(2 ^ 3)");
         assert_eq!(lex(&sm, id).unwrap_err().hint.as_deref(), Some("V2 writes a power as 2 ** 3"));
         assert_eq!(kinds("a && b || c"), "a && b || c EOF");
+    }
+
+    fn diag(src: &str) -> Diag {
+        let mut sm = SourceMap::new();
+        let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+        lex(&sm, id).unwrap_err()
+    }
+
+    #[test]
+    fn a_format_gets_the_hint_that_fits_it() {
+        // 3.5, round 17: a width or an alignment is padded; another format is done in a block,
+        // as written, with the expression passed in.
+        for spec in [">8", "<5", "8.3f", "10", "^10", "*^10", "£>8", "<<5", "05.2f", "=10", " >5", ">10s", "5d"] {
+            assert_eq!(format_hint(spec, "x"), PAD_HINT, "{spec}");
+        }
+        let long = "xs[0] + xs[1] + xs[2] + xs[3] + xs[4] + xs[5]";
+        for (spec, expr, hint) in [
+            (".3e", "loss", "format it in a block, as in @py(loss) { f\"{loss:.3e}\" }"),
+            (",", " n ", "format it in a block, as in @py(n) { f\"{n:,}\" }"),
+            (".2%", "d.rate", "format it in a block, as in @py(x: d.rate) { f\"{x:.2%}\" }"),
+            ("+.2f", "x", "format it in a block, as in @py(x) { f\"{x:+.2f}\" }"),
+            (">8.2e", "x", "format it in a block, as in @py(x) { f\"{x:>8.2e}\" }"),
+            (".100f", "x", "format it in a block, as in @py(x) { f\"{x:.100f}\" }"),
+            ("x", long, "format it in a block, as in @py(x) { f\"{x:x}\" }"),
+            (".2f ", "x", "write the format without spaces: ${x:.2f}"),
+        ] {
+            assert_eq!(format_hint(spec, expr), hint, "{spec}");
+        }
+        // The lexer's own: a letter after a number, an alignment, a fill or `#` in a format.
+        for (src, hint) in [
+            ("print(f\"${x:.3e}\")", "format it in a block, as in @py(x) { f\"{x:.3e}\" }"),
+            ("print(f\"${x:^10}\")", PAD_HINT),
+            ("print(f\"${x:*^10}\")", PAD_HINT),
+            ("print(f\"${x:~^10}\")", PAD_HINT),
+            ("print(f\"${x:#x}\")", "format it in a block, as in @py(x) { f\"{x:#x}\" }"),
+            ("print(f\"${x: .2f}\")", "write the format without spaces: ${x:.2f}"),
+        ] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), (ONLY_FIXED, Some(hint)), "{src}");
+        }
+        // Outside a format, they are what they are elsewhere.
+        assert_eq!(diag("print(f\"${x ^ 2}\")").message, "V2 has no bitwise operators");
+        assert_eq!(diag("print(f\"${a ? b : ^c}\")").message, "V2 has no bitwise operators");
+        assert_eq!(diag("print(f\"${x # y}\")").message, "unexpected character '#'");
+    }
+
+    #[test]
+    fn dict_merges_and_dollar_names_get_v2s_ways() {
+        // 3.2, round 17: Python's `a | b` of two dicts, and JavaScript's `$x` in an @import list.
+        assert_eq!(diag("let c = a | b").hint.as_deref(), Some("to merge two dicts, copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }"));
+        assert_eq!(diag("a |= b").hint.as_deref(), Some("to add one dict's keys to another, set them: for k, v in b { a[k] = v }"));
+        let quote = "write a name that isn't a V2 name in quotes, with a V2 name after as: @import";
+        for (src, hint) in [
+            ("@import { $x as dx } from d", format!("{quote} {{ \"$x\" as dx }} from …")),
+            ("@import { $x } from d", format!("{quote} {{ \"$x\" as x }} from …")),
+            ("@import { a,\n    $ } from d", format!("{quote} {{ \"$\" as other }} from …")),
+            ("@import { show as $s } from d", "after as goes a plain name, without $: as s".to_string()),
+        ] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.hint.as_deref()), ("unexpected character '$'", Some(hint.as_str())), "{src}");
+        }
+        // Elsewhere a `$` has no such hint.
+        assert_eq!(diag("let $x = 1").hint, None);
+        assert_eq!(diag("let d = {$x: 1}").hint, None);
     }
 
     #[test]

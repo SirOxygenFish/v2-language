@@ -19,8 +19,17 @@ ValueError: invalid JSON at line 1 column 3: trailing characters
 ValueError: JSON at line 2 column 3 holds an integer beyond V2's 64-bit range (the JSON itself is fine): parse it in a @py block, as in @py(text) { import json; json.loads(text) }, or have the number written as a string
 ValueError: invalid JSON at line 1 column 1001: nested deeper than 1000 levels
 TypeError: cannot convert bytes to JSON at [1]
+  hint: JSON holds text, not bytes: store b.hex(), or b.decode() for UTF-8 text, or base64 from a block, as in @py(b) { __import__("base64").b64encode(b).decode() }
 TypeError: cannot convert func to JSON at ["k"]
+  hint: a function isn't data: store what it returns, or leave it out
 TypeError: cannot convert the float nan to JSON
+  hint: JSON has no NaN or infinity: store null instead (x != x is true for NaN), or write it with Python's json in a block, as in @py(v) { __import__("json").dumps(v) }
 ValueError: cannot convert a cyclic list to JSON
 ValueError: json_stringify() argument 'indent' must be >= 0, got -1
 TypeError: json_parse() argument 'text' must be a str, got int
+{"lr": 0.01}
+ValueError: invalid JSON at line 1 column 1: expected value
+TypeError: cannot convert the float -inf to JSON at [0]
+  hint: JSON has no NaN or infinity: store null instead (x != x is true for NaN), or write it with Python's json in a block, as in @py(v) { __import__("json").dumps(v) }
+TypeError: cannot convert error to JSON at ["e"]
+  hint: an error isn't data: store its fields, as in {type: e.type, message: e.message}

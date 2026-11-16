@@ -13,6 +13,9 @@ func show(f) {
         f()
     } catch (e) {
         print(e.type + ": " + e.message)
+        if e.hint != null {
+            print("  hint: " + e.hint)
+        }
     }
 }
 show(func() => json_parse("{\"a\": 1,}"))
@@ -28,3 +31,9 @@ cyc.push(cyc)
 show(func() => json_stringify(cyc))
 show(func() => json_stringify(1, indent: -1))
 show(func() => json_parse(5))
+// One leading byte-order mark is skipped, as read_file skips it: text a block read from a file
+// that Windows tools wrote keeps it. Only one.
+print(json_parse("\u{feff}{\"lr\": 0.01}"))
+show(func() => json_parse("\u{feff}\u{feff}[1]"))
+show(func() => json_stringify([float("-inf")]))
+show(func() => json_stringify({e: error("ValueError", "bad")}))
