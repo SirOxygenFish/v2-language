@@ -181,6 +181,13 @@ fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
 /// UTF-8 mode (8.4), so `open()` reads UTF-8 where a plain Windows Python reads the ANSI code page.
 fn foreign_hint(kind: &str, message: &str, lang: &str) -> Option<&'static str> {
     match (lang, kind) {
+        // Byte 0xff or 0xfe first: UTF-16's byte order mark (Excel's Unicode Text, PowerShell's
+        // Export-Csv -Encoding Unicode), which cp1252 would read as garbage.
+        ("py", "UnicodeDecodeError")
+            if message.starts_with("'utf-8' codec can't decode byte 0xff in position 0:") || message.starts_with("'utf-8' codec can't decode byte 0xfe in position 0:") =>
+        {
+            Some("blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding=\"utf-16\"), or pd.read_csv(path, encoding=\"utf-16\")")
+        }
         ("py", "UnicodeDecodeError") if message.starts_with("'utf-8' codec can't decode") => {
             Some("blocks run Python in UTF-8 mode, so open() reads UTF-8: for a file in another encoding, name it, as in open(path, encoding=\"cp1252\")")
         }
