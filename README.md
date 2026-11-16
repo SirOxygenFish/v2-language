@@ -131,10 +131,11 @@ v2 --version
 v2 doctor
 ```
 
-`v2 doctor` shows whether Python and Node.js were found, with the command that installs whatever
-is missing. Its last lines sum it up, for example `ready: py, js, ts`. The install scripts put only
-`v2` on your computer; to read the whole language's guide offline, DOCS.md is in the release
-archive, next to `v2`.
+`v2 doctor` shows whether Python and Node.js were found, with the command or the link that installs
+whatever is missing (for Node.js on Linux it is a link, as distributions' own packages are often too
+old: [Troubleshooting](#troubleshooting) has the steps). Its last lines sum it up, for example
+`ready: py, js, ts`. The install scripts put only `v2` on your computer; to read the whole
+language's guide offline, DOCS.md is in the release archive, next to `v2`.
 
 ## Quickstart
 
@@ -292,6 +293,8 @@ ForeignError ZeroDivisionError division by zero
 | `s.strip()`, `s.trim()`                   | `s.trim()`                                      |
 | `a // b`, `Math.floor(a / b)`             | `div(a, b)` (`//` starts a comment)             |
 | `f(x, key=1)`                             | `f(x, key: 1)` (a V2 word works as the name too: `df.agg(func: "sum")`) |
+| `f(**opts)`, `f(...opts)` with a dict     | named arguments come by name; for a dict of them, call it in a block: `@py(f, opts) { f(**opts) }` (`...xs` spreads a list only) |
+| `{**a, **b}`, `{...a, ...b}`              | `let c = a.copy()`, then `for k, v in b { c[k] = v }` |
 | `for k, v in d.items():`                  | `for k, v in d`, for a dict or a handle with `items()` such as a pandas Series (V2 never unpacks pairs: over a list, two variables are the index and the item) |
 | `try: … except E as e:`, `catch (e) { }`  | `try { ... } catch (e) { ... }`                 |
 | `raise ValueError("bad")`, `throw new Error("bad")` | `throw error("ValueError", "bad")`, or `throw "bad"` |
@@ -591,13 +594,19 @@ them); caches live in
 
 **Is a `.v2` file safe to run?** Like any script, it runs with your rights, every block in every
 language: only run scripts you trust ([docs, chapter 16](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#16-security-and-trust)).
+A run trusts some files near the script as much: the nearest `v2.toml` in its folder or a folder
+above (it can name the programs that run the blocks), `.py` files in the script's folder and the
+project folder, and the `node_modules` and `package.json` Node finds there and in the folders
+above. So don't keep or run scripts under a folder that other users can write to, such as `/tmp`.
 
 **Is it fast?** V2's own code is a small interpreter, fine for gluing things together. Heavy
 loops belong in a Python or JavaScript block (and, later, in C or Rust blocks). Each call from one
 language to another takes about a tenth of a millisecond: pass a whole list to one call rather than
-calling once per item. Each line a block prints crosses over to V2 too (a Python block prints
-about a hundred thousand lines a second): for a lot of output, build the text in the block and
-print it once, or return it.
+calling once per item. Each run of a `@js` block without `@export` also makes a new JavaScript
+realm, about 0.4 ms (a `@py` one takes about 0.06 ms): in a loop, export a function from a `@js`
+block and call it, or pass the whole list in once, `@js(xs) { xs.map(x => x * 2) }`. Each line
+a block prints crosses over to V2 too (a Python block prints about a hundred thousand lines a
+second): for a lot of output, build the text in the block and print it once, or return it.
 
 **Can blocks use async JavaScript?** Yes: a function that returns a Promise (an `async` function),
 or a block whose value is a Promise, is awaited, and you get its result; a rejection is an error you

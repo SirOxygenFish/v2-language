@@ -1,0 +1,13 @@
+// json_parse and json_stringify nest 1,000 levels deep at most; deeper is a ValueError (DOCS
+// 3.11, INTERNALS 5.10, 10.1).
+print(type(json_parse("[" * 1000 + "]" * 1000)))
+try { json_parse("[" * 1001 + "]" * 1001) } catch (e) { print(e.type, e.message) }
+let deep = []
+for i in 0..999 { deep = [deep] }
+print(len(json_stringify(deep)))
+deep = [deep]
+try { json_stringify(deep) } catch (e) { print(e.type, e.message) }
+let wide = {}
+for i in 0..999 { wide = {a: wide} }
+print(len(json_stringify(wide)))
+try { json_stringify({a: wide}) } catch (e) { print(e.type, e.message) }

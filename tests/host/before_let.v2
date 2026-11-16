@@ -1,0 +1,31 @@
+// Until a name's let runs in a body, the name means what it means outside: an outer scope's
+// variable or V2's builtin of that name; only without one is it a NameError (DOCS 3.3,
+// INTERNALS 5.6).
+print(len([1, 2]))
+let len = 3
+print(len)
+
+let x = "file"
+func f() {
+    let before = x
+    let x = "f"
+    return [before, x]
+}
+print(f())
+for i in 0..1 {
+    print(x)
+    let x = "loop"
+    print(x)
+}
+
+// No outer name: a NameError, in a function and at the file's top level.
+func g() {
+    try { print(step) } catch (e) { print(e.type, e.message) }
+    let step = 2
+}
+g()
+func reads_total() { return total }
+try { print(reads_total()) } catch (e) { print(e.type, e.message) }
+try { print(total) } catch (e) { print(e.type, e.message) }
+let total = 1
+print(reads_total())
