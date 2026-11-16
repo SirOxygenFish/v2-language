@@ -30,3 +30,5 @@ show(func() => @js(h: hs[4]) { Object.fromEntries(Object.entries(h.to_dict()).ma
 show(func() => @js(h: hs[6]) { [...h].map((x) => ({ ...x })) })
 // The object itself is named as before.
 show(func() => to_v2(@js { new Date(0) }))
+// The type follows "has the type", with no article to pick ("a URL").
+show(func() => to_v2(@js { new Set([new URL("https://example.com/")]) }))

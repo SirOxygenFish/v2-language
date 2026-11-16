@@ -155,7 +155,8 @@ fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
     if message.starts_with("value too large to send") {
         return Some("write it to a file and pass the file's path, or send it in parts");
     }
-    // A pandas Series indexed by dates, a dict keyed by tuples: V2's keys are strings.
+    // A dict keyed by dates or tuples: V2's keys are strings. (Python's message for a key of what
+    // the object's to_dict() gave, a pandas Series indexed by dates, names its own block, 11.5.)
     if message.starts_with("to_v2(): can't convert") && message.contains("(key of type ") {
         return Some(match lang {
             "py" => "make its keys strings in the block, as in @py(h) { {str(k): v for k, v in h.items()} }",

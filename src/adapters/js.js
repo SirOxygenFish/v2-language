@@ -1173,9 +1173,12 @@ const NODE_NAMES = new Set(NODE_GLOBALS);
 const NODE_ENUMERABLE = new Set(NODE_GLOBALS.filter((k) => Object.prototype.propertyIsEnumerable.call(globalThis, k)));
 
 const IDENT = /^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u;
-const RESERVED = new Set(('break case catch class const continue debugger default delete do else enum export extends false finally ' +
-  'for function if import in instanceof new null return super switch this throw true try typeof var void while with ' +
-  'yield let static implements interface package private protected public await').split(' '));
+const KEYWORDS = ('break case catch class const continue debugger default delete do else enum export extends false finally ' +
+  'for function if import in instanceof new null return super switch this throw true try typeof var void while with').split(' ');
+// Words only strict code (or a module) refuses: names in the sloppy scripts blocks run as, but V2
+// keeps them out of block args and aliases all the same (12.2).
+const STRICT = new Set(['yield', 'let', 'static', 'implements', 'interface', 'package', 'private', 'protected', 'public', 'await']);
+const RESERVED = new Set([...KEYWORDS, ...STRICT]);
 const PROVIDED = new Set(['undefined', 'NaN', 'Infinity', 'globalThis', '__proto__']);
 
 function checkName(k, what = 'block arg', lang = 'js') {
@@ -1185,7 +1188,7 @@ function checkName(k, what = 'block arg', lang = 'js') {
   const other = (name) => (what === 'block arg'
     ? `pass it under another name, as in @${lang}(${name}: …)`
     : `import it under another name, as in @import { … as ${name} } from …`);
-  if (PROVIDED.has(k)) throw new Fail('ValueError', `${what} '${k}' is reserved in @${lang} blocks: ${other(k.replace(/^_+|_+$/g, '') + '_')}`);
+  if (PROVIDED.has(k) || STRICT.has(k)) throw new Fail('ValueError', `${what} '${k}' is reserved in @${lang} blocks: ${other(k.replace(/^_+|_+$/g, '') + '_')}`);
   throw new Fail('ValueError', `${what} '${k}' is not a valid JavaScript name: ${other(IDENT.test(k) ? k + '_' : 'name')}`);
 }
 
@@ -1919,8 +1922,8 @@ function toV2(x, depth = 0, open = new ValueWalk()) {
 function itemMessage(x, form, depth, open) {
   // to_v2's message for a node that can't convert and isn't the object asked for: an item of it,
   // or what its to_dict() or tolist() gave. The block it names converts the object item by item.
+  // "has the type X": no article to pick for X (a URL, an Event).
   const name = typeName(x);
-  const a = /^[aeiou]/i.test(name) ? 'an' : 'a';
   const src = 'h' + open.chain.map((c) => `.${c}()`).join('');
   let how;
   if (depth === 0) {
@@ -1931,9 +1934,9 @@ function itemMessage(x, form, depth, open) {
     else if (Array.isArray(b) || util.types.isSet(b)) how = `[...${src}].map((x) => ${form('x')})`;
     else how = `Object.fromEntries(Object.entries(${src}).map(([k, v]) => [k, ${form('v')}]))`;
   } else {
-    return `to_v2(): an item inside h is ${a} ${name}: make plain data of h in a block first, with ${form('x')} for each such item x`;
+    return `to_v2(): an item inside h has the type ${name}: make plain data of h in a block first, with ${form('x')} for each such item x`;
   }
-  return `to_v2(): ${depth ? 'an item of h' : src} is ${a} ${name}: make plain data of it in a block first, as in @js(h) { ${how} }`;
+  return `to_v2(): ${depth ? 'an item of h' : src} has the type ${name}: make plain data of it in a block first, as in @js(h) { ${how} }`;
 }
 
 function isEager(obj) {
