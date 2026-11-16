@@ -1963,7 +1963,7 @@ that isn't there.
   project you don't trust.
 - A run trusts some files near the script as much as the script itself: the nearest `v2.toml` in
   the script's folder or a folder above it (it can name the programs that run the blocks;
-  `v2 doctor`'s `config file:` line names it), the `.py` files Python imports from the script's
+  `v2 doctor`'s `config file:` line names it), the modules Python imports from the script's
   folder, the folders of the `.v2` files it imports and the project root, and the `node_modules`
   and `package.json` that Node finds in those folders and the ones above. V2 doesn't check who
   owns them, so don't keep or run scripts under a folder other users can write to, such as `/tmp`.
