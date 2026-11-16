@@ -119,28 +119,32 @@ pub fn read_hint(e: &std::io::Error) -> Option<&'static str> {
 }
 
 /// A file's identity, the same however a path reaches it: the volume's serial number and the
-/// file's index on Windows, the device and inode elsewhere. Two canonical paths can name one file
-/// (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`), so a module is looked up by
-/// it too (6.4).
-pub fn file_identity(path: &Path) -> Option<(u64, u64)> {
+/// file's 128-bit ID on Windows (`FILE_ID_INFO`; the older 64-bit index isn't unique on ReFS, a
+/// Dev Drive's file system), the device and inode elsewhere. Two canonical paths can name one
+/// file (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`), so a module is looked up
+/// by it too (6.4). An ID of all zeros or all ones (some network redirectors give one) is none.
+pub fn file_identity(path: &Path) -> Option<(u64, u128)> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS};
+        use windows_sys::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO};
         // No access to the data: another program's lock (no sharing) doesn't stop it.
         let f = std::fs::OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path).ok()?;
-        // SAFETY: a zeroed struct for an open handle, which `f` keeps open during the call.
-        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        // SAFETY: a zeroed struct of the size given, for an open handle that `f` keeps open
+        // during the call.
+        let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<FILE_ID_INFO>() as u32;
+        if unsafe { GetFileInformationByHandleEx(f.as_raw_handle(), FileIdInfo, (&mut info as *mut FILE_ID_INFO).cast(), size) } == 0 {
             return None;
         }
-        Some((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+        let id = u128::from_le_bytes(info.FileId.Identifier);
+        (id != 0 && id != u128::MAX).then_some((info.VolumeSerialNumber, id))
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+        std::fs::metadata(path).ok().map(|m| (m.dev(), u128::from(m.ino())))
     }
 }
 
@@ -149,7 +153,7 @@ pub struct SourceMap {
     files: Vec<SourceFile>,
     by_path: HashMap<PathBuf, FileId>,
     /// Loaded files by `file_identity`.
-    by_identity: HashMap<(u64, u64), FileId>,
+    by_identity: HashMap<(u64, u128), FileId>,
 }
 
 impl SourceMap {
@@ -204,7 +208,11 @@ impl SourceMap {
         };
         let id = self.add(canonical, display, &text);
         if let Some(key) = identity {
-            self.by_identity.entry(key).or_insert(id);
+            // A file loaded before keeps the ID while its path still has it; a deleted one's
+            // is this file's now.
+            if !self.by_identity.get(&key).is_some_and(|&old| self.still_has(old, key)) {
+                self.by_identity.insert(key, id);
+            }
         }
         Ok(id)
     }
@@ -214,7 +222,15 @@ impl SourceMap {
         if self.by_identity.is_empty() || self.by_path.contains_key(path) {
             return None;
         }
-        file_identity(path).and_then(|key| self.by_identity.get(&key).copied())
+        let key = file_identity(path)?;
+        self.by_identity.get(&key).copied().filter(|&id| self.still_has(id, key))
+    }
+
+    /// Whether the loaded file `id`'s own path still has the identity `key`. File systems give a
+    /// deleted file's ID to the next new file (ext4 its inode at once, FAT the directory slot),
+    /// so an ID alone could name another file (6.4).
+    fn still_has(&self, id: FileId, key: (u64, u128)) -> bool {
+        file_identity(&self.file(id).path) == Some(key)
     }
 
     /// Add in-memory source (tests, and files already read). The text is normalized.
@@ -404,5 +420,33 @@ mod tests {
         assert_eq!(m.line_col(id, 5), (2, 2));
         assert_eq!(m.line_text(id, 2), "\u{e9}x");
         assert_eq!(m.line_text(id, 3), "");
+    }
+
+    #[test]
+    fn a_file_id_names_a_loaded_file_only_while_its_path_still_has_it() {
+        // 6.4 (round 19): another path of a loaded file (a hard link here, a share in use) is that
+        // file; but once the loaded path no longer has its ID (moved away here; deleted, as ext4
+        // then gives the inode to the next new file), a path with that ID is another file.
+        let d = std::env::temp_dir().join(format!("v2ident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let canon = |p: &Path| strip_verbatim(&std::fs::canonicalize(p).unwrap());
+        let (one, two, hard) = (d.join("one.v2"), d.join("two.v2"), d.join("hard.v2"));
+        std::fs::write(&one, "let x = 1\n").unwrap();
+        let mut m = SourceMap::new();
+        let first = m.load(&one).ok().unwrap();
+        std::fs::hard_link(&one, &hard).unwrap();
+        assert_eq!(m.same_file(&canon(&hard)), Some(first));
+        std::fs::remove_file(&hard).unwrap();
+        let id = file_identity(&one);
+        std::fs::rename(&one, &two).unwrap();
+        assert!(id.is_some() && file_identity(&two) == id, "a moved file keeps its ID");
+        assert_eq!(m.same_file(&canon(&two)), None);
+        // Loaded, it holds that ID: a path of it is it.
+        let second = m.load(&two).ok().unwrap();
+        assert_ne!(second, first);
+        std::fs::hard_link(&two, &hard).unwrap();
+        assert_eq!(m.same_file(&canon(&hard)), Some(second));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

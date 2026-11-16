@@ -583,10 +583,10 @@ print(util.slug("Hello World"))    // hello-world
   `helper.py`) is an `ImportError` that says how to use it instead. So is a pipe or a device
   (`cannot import './m.v2': it is a pipe or a device, not a file`, also for a link to
   `/dev/zero`, and for `/dev/stdin` from a pipe), and a link that leads nowhere or in a loop (the
-  file, or a folder on the way, a Windows junction too) says that, in a run and in `v2 check`; a
-  file V2 may not read gives the system's reason (`Access is denied`). A path whose letters
-  differ from the file's name only in case (`./Util.v2` for `util.v2`) works on Windows and
-  macOS, with a note, since Linux won't find it.
+  file, or a folder on the way, a Windows junction too) says that and what fixes it, in a run and
+  in `v2 check`; a file V2 may not read gives the system's reason (`Access is denied`). A path
+  whose letters differ from the file's name only in case (`./Util.v2` for `util.v2`) works on
+  Windows and macOS, with a note, since Linux won't find it.
 - A module runs once, the first time it is imported; later imports reuse it, also when they reach
   it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`).
 - `util` is a dict of the module's exported names, taken when the module finishes running.
