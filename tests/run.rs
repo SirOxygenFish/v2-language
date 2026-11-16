@@ -3541,7 +3541,7 @@ fn a_read_only_file_says_how_to_make_it_writable() {
     // a file on every OS, as rm does (DOCS 3.11, INTERNALS 5.10).
     let home = TempHome::new();
     std::fs::create_dir_all(home.0.join("sub")).unwrap();
-    for name in ["ro.txt", "sub/my ro.txt"] {
+    for name in ["ro.txt", "sub/my ro.txt", "-ro.txt"] {
         let p = home.0.join(name);
         std::fs::write(&p, "orig").unwrap();
         let mut perms = std::fs::metadata(&p).unwrap().permissions();
@@ -3550,7 +3550,7 @@ fn a_read_only_file_says_how_to_make_it_writable() {
     }
     let src = "func hint(f) {\n    try {\n        f()\n        print(\"written\")\n    } catch (e) {\n        print(e.message)\n        print(e.hint)\n    }\n}\n\
                hint(func() => write_file(\"ro.txt\", \"changed\"))\nhint(func() => write_file(\"ro.txt\", \"more\", append: true))\n\
-               hint(func() => write_file(\"sub/my ro.txt\", \"changed\"))\n\
+               hint(func() => write_file(\"sub/my ro.txt\", \"changed\"))\nhint(func() => write_file(\"-ro.txt\", \"changed\"))\n\
                remove_file(\"ro.txt\")\nremove_file(\"sub/my ro.txt\")\nprint(exists(\"ro.txt\"), exists(\"sub/my ro.txt\"))\n";
     std::fs::write(home.0.join("r.v2"), src).unwrap();
     // root may write any file: then there is nothing to say, but remove_file still removes them.
@@ -3569,10 +3569,21 @@ fn a_read_only_file_says_how_to_make_it_writable() {
         ("make it writable with chmod u+w ro.txt", "make it writable with chmod u+w 'sub/my ro.txt'")
     };
     let denied = |name: &str| lines.iter().any(|l| l.starts_with(&format!("cannot write '{name}': ")));
-    assert!(denied("ro.txt") && denied("sub/my ro.txt"), "{stdout}");
+    assert!(denied("ro.txt") && denied("sub/my ro.txt") && denied("-ro.txt"), "{stdout}");
     assert_eq!(lines[1], format!("'ro.txt' is read-only: {ro}"), "{stdout}");
     assert_eq!(lines[3], format!("'ro.txt' is read-only: {ro}"), "{stdout}");
     assert_eq!(lines[5], format!("'sub/my ro.txt' is read-only: {sub}"), "{stdout}");
+    // Round 19 review: a name that starts with `-`, which chmod and attrib would read as an
+    // option, gets ./ (.\ for attrib) before it; the command as shown makes it writable.
+    let (dash, argv) = if cfg!(windows) {
+        ("clear that with attrib -r .\\-ro.txt (or in its Properties)", ["attrib", "-r", ".\\-ro.txt"])
+    } else {
+        ("make it writable with chmod u+w ./-ro.txt", ["chmod", "u+w", "./-ro.txt"])
+    };
+    assert_eq!(lines[7], format!("'-ro.txt' is read-only: {dash}"), "{stdout}");
+    let ran = Command::new(argv[0]).args(&argv[1..]).current_dir(&home.0).output().unwrap();
+    assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stdout));
+    assert!(!std::fs::metadata(home.0.join("-ro.txt")).unwrap().permissions().readonly());
 }
 
 #[test]
@@ -3807,6 +3818,32 @@ fn names_windows_would_read_as_another_are_refused() {
     assert_eq!(lines[want.len() + 1..], ["ok space content", "[\"data.txt\", \"notes.txt \", \"w.v2\"]"], "{stdout}");
     assert_eq!(std::fs::read_to_string(home.0.join("data.txt")).unwrap(), "keep me");
     std::fs::remove_file(format!(r"\\?\{}\notes.txt ", home.0.display())).unwrap();
+    // Round 19 review: a write or make_dir into a folder whose name ends in a dot, which WSL
+    // made, gets the \\?\ hint too (the folder through the refused part is there), and the
+    // call it shows works; with no such folder, "choose another name".
+    std::fs::create_dir(format!(r"\\?\{}\dir.", home.0.display())).unwrap();
+    let src = format!("{SHOW}show(func() => write_file(\"dir./new.txt\", \"n\"))\nshow(func() => make_dir(\"dir./sub\"))\nshow(func() => write_file(\"report./new.txt\", \"n\"))\n");
+    std::fs::write(home.0.join("d.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["d.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 6, "{stdout}");
+    let dot_in = |verb: &str, path: &str, part: &str| format!("cannot {verb} '{path}': a Windows file name can't end in a dot or a space ('{part}.' would be '{part}')");
+    let want = [dot_in("write", "dir./new.txt", "dir"), dot_in("create", "dir./sub", "dir"), dot_in("write", "report./new.txt", "report"), refused.to_string()];
+    assert_eq!([lines[0], lines[2], lines[4], lines[5]], want.each_ref().map(String::as_str), "{stdout}");
+    let call = |line: &str, builtin: &str, end: &str| {
+        let start = start.replace("read_file(", &format!("{builtin}("));
+        let literal = line.strip_prefix(&start).and_then(|r| r.strip_suffix(')')).unwrap_or_else(|| panic!("{line}")).to_string();
+        let shown: String = serde_json::from_str(&literal).unwrap();
+        assert!(shown.starts_with(r"\\?\") && shown.ends_with(end), "{shown}");
+        literal
+    };
+    let (w, m) = (call(lines[1], "write_file", r"\dir.\new.txt"), call(lines[3], "make_dir", r"\dir.\sub"));
+    std::fs::write(home.0.join("h.v2"), format!("write_file({w}, \"n\")\nmake_dir({m})\nprint(read_file({w}))\n")).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["h.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "n\n"), "{stderr}");
+    assert!(Path::new(&format!(r"\\?\{}\dir.\sub", home.0.display())).is_dir());
+    std::fs::remove_dir_all(format!(r"\\?\{}\dir.", home.0.display())).unwrap();
 }
 
 #[cfg(windows)]
@@ -3867,20 +3904,45 @@ fn a_drive_or_share_that_isnt_there_is_named() {
     assert_eq!(lines[want.len()..], rest, "{stdout}");
 }
 
+/// Folders a test could make outside its temp folder if what it tests is broken (`\tmp` at the
+/// top of the drive): when dropped, after a failed assertion too, each one that wasn't there
+/// when it was made is removed with what is in it; nothing that was there is touched.
+#[cfg(windows)]
+struct Leftovers(Vec<PathBuf>);
+
+#[cfg(windows)]
+impl Leftovers {
+    fn new(paths: &[PathBuf]) -> Leftovers {
+        Leftovers(paths.iter().filter(|p| std::fs::symlink_metadata(p).is_err()).cloned().collect())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn tmp_on_windows_points_to_temp() {
     // INTERNALS 5.10 (round 19): /tmp is Linux's and macOS's; make_dir("/tmp") would make \tmp
     // at the top of the drive, which every user can write to. The hint says getenv("TEMP").
+    // The decision itself is a unit test (builtins.rs), which never looks at a real drive: this
+    // one runs only where the drive has neither folder, and removes what a broken build makes.
     let home = TempHome::new();
     let drive = home.0.to_string_lossy()[..2].to_string();
     if Path::new(&format!(r"{drive}\tmp")).exists() || Path::new(&format!(r"{drive}\var\tmp")).exists() {
-        let _ = writeln!(std::io::stderr(), "SKIP tmp_on_windows_points_to_temp ({drive}\\tmp is there)");
+        let _ = writeln!(std::io::stderr(), "SKIP tmp_on_windows_points_to_temp ({drive}\\tmp or {drive}\\var\\tmp is there)");
         return;
     }
+    let _left = Leftovers::new(&[format!(r"{drive}\tmp"), format!(r"{drive}\var\tmp"), format!(r"{drive}\var")].map(PathBuf::from));
     let src = format!(
         "{SHOW}show(func() => write_file(\"/tmp/x.txt\", \"x\"))\nshow(func() => read_file(\"/var/tmp/x.txt\"))\nshow(func() => list_dir(\"/tmp\"))\n\
-         show(func() => make_dir(\"/tmp/work\"))\nprint(exists(\"/tmp\"))\n"
+         show(func() => make_dir(\"/tmp/work\"))\nshow(func() => make_dir(\"/var/tmp/x\"))\nprint(exists(\"/tmp\"), exists(\"/var/tmp\"))\n"
     );
     std::fs::write(home.0.join("t.v2"), src).unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["t.v2"], &[]);
@@ -3892,7 +3954,38 @@ fn tmp_on_windows_points_to_temp() {
     assert_eq!(lines[3], temp("/var/tmp", "getenv(\"TEMP\") + \"/x.txt\""), "{stdout}");
     assert_eq!(lines[5], temp("/tmp", "getenv(\"TEMP\")"), "{stdout}");
     assert_eq!(lines[6], "cannot create '/tmp/work': on Windows that makes \\tmp at the top of the drive, a folder other users can write to", "{stdout}");
-    assert_eq!(lines[7..], [temp("/tmp", "getenv(\"TEMP\") + \"/work\""), "false".into()], "{stdout}");
+    assert_eq!(lines[7], temp("/tmp", "getenv(\"TEMP\") + \"/work\""), "{stdout}");
+    // Round 19 review: /var/tmp names the folder it would make, \var\tmp.
+    assert_eq!(lines[8], "cannot create '/var/tmp/x': on Windows that makes \\var\\tmp at the top of the drive, a folder other users can write to", "{stdout}");
+    assert_eq!(lines[9..], [temp("/var/tmp", "getenv(\"TEMP\") + \"/x\""), "false false".into()], "{stdout}");
+}
+
+#[test]
+fn make_dir_with_a_nul_gives_the_true_reason() {
+    // Round 19 review (INTERNALS 5.10): make_dir took every error without an OS code for
+    // create_dir_all's "failed to create whole tree", so a NUL in the path said "the drive or
+    // share it is on isn't there" (an absolute path, on Linux too) or "The system cannot find
+    // the path specified" (a relative one). It says Rust's reason, as write_file does.
+    let home = TempHome::new();
+    let rust = std::fs::create_dir_all("a\0b").unwrap_err();
+    assert_eq!((rust.kind(), rust.raw_os_error()), (std::io::ErrorKind::InvalidInput, None), "{rust}");
+    let reason = rust.to_string().trim_end_matches('.').to_string();
+    let abs = home.0.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        "func why(f) {{\n    try {{\n        f()\n        print(\"no error\")\n    }} catch (e) {{\n        print(e.message)\n    }}\n}}\n\
+         why(func() => make_dir(\"a\\0b\"))\nwhy(func() => make_dir(\"{abs}/a\\0b\"))\nwhy(func() => make_dir(\"{abs}/new/a\\0b\"))\nwhy(func() => write_file(\"a\\0b\", \"x\"))\n"
+    );
+    std::fs::write(home.0.join("n.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["n.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let want = [
+        format!("cannot create 'a\\u{{0}}b': {reason}"),
+        format!("cannot create '{abs}/a\\u{{0}}b': {reason}"),
+        format!("cannot create '{abs}/new/a\\u{{0}}b': {reason}"),
+        format!("cannot write 'a\\u{{0}}b': {reason}"),
+    ];
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 1, "only n.v2 is there");
 }
 
 #[cfg(any(windows, target_os = "linux"))]
