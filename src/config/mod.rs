@@ -656,6 +656,48 @@ mod tests {
     }
 
     #[test]
+    fn only_a_regular_file_named_v2_toml_counts() {
+        // 18.1, DOCS 14: a folder named v2.toml (off Windows also a broken link, a link loop, a
+        // pipe or a link to a device) is passed over, and the search goes on to the parent's
+        // file; a link to a regular file counts.
+        let d = temp("notafile");
+        std::fs::write(d.join("v2.toml"), "[engines.py]\ncall_timeout = 7\n").unwrap();
+        let used = |start: &Path| {
+            let cfg = load_from(start, vars(&[])).unwrap();
+            let timeout = cfg.engines.get("py").and_then(|e| e.call_timeout.as_ref()).map(|t| t.value);
+            (cfg.root, cfg.file, timeout)
+        };
+        let parent = (d.clone(), Some(d.join("v2.toml")), Some(7.0));
+        let folder = d.join("folder");
+        std::fs::create_dir_all(folder.join("v2.toml")).unwrap();
+        assert_eq!(used(&folder), parent, "a folder named v2.toml");
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let child = |name: &str| {
+                let c = d.join(name);
+                std::fs::create_dir_all(&c).unwrap();
+                c
+            };
+            let broken = child("broken");
+            std::os::unix::fs::symlink("../missing/v2.toml", broken.join("v2.toml")).unwrap();
+            let looped = child("loop");
+            std::os::unix::fs::symlink("v2.toml", looped.join("v2.toml")).unwrap();
+            let device = child("device");
+            std::os::unix::fs::symlink("/dev/null", device.join("v2.toml")).unwrap();
+            let pipe = child("pipe");
+            let path = std::ffi::CString::new(pipe.join("v2.toml").as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+            for c in [&broken, &looped, &device, &pipe] {
+                assert_eq!(used(c), parent, "{}", c.display());
+            }
+            let linked = child("linked");
+            std::os::unix::fs::symlink("../v2.toml", linked.join("v2.toml")).unwrap();
+            assert_eq!(used(&linked), (linked.clone(), Some(linked.join("v2.toml")), Some(7.0)), "a link to a file");
+        }
+    }
+
+    #[test]
     fn errors_name_the_file_and_the_problem() {
         let e = project("syntax", "[engines.py\ncommand = 1\n").unwrap_err().0;
         assert!(e.contains("v2.toml:1:") && e.contains(": config error: "), "{e}");

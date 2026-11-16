@@ -1,0 +1,9 @@
+2
+3
+["file", "f"]
+file
+loop
+NameError 'step' is used before it is declared: its declaration comes later
+NameError 'total' is used before its let on line 30
+NameError 'total' is used before its let on line 30
+1

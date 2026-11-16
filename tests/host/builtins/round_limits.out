@@ -1,0 +1,9 @@
+9200000000000000000 -9200000000000000000 9223372036854774784
+1e19 ValueError cannot convert 1e19 to int
+-9.3e18 ValueError cannot convert -9.3e18 to int
+9.223372036854776e18 ValueError cannot convert 9.223372036854776e18 to int
+1e300 ValueError cannot convert 1e300 to int
+nan ValueError cannot convert nan to int
+inf ValueError cannot convert inf to int
+1e300 -1e300 1e19 float nan
+4 int 2.5 float
