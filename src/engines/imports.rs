@@ -411,11 +411,11 @@ fn shadowed_hint(text: &str, dir: &Path) -> Option<String> {
 }
 
 /// The extensions of a JavaScript or TypeScript file of your own.
-const OWN_EXTS: [&str; 6] = ["js", "mjs", "cjs", "ts", "mts", "cts"];
+const OWN_EXTS: [&str; 8] = ["js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx"];
 
-/// `ts` for a TypeScript file's name, else `js`.
+/// `ts` for a TypeScript file's name (`.tsx` too), else `js`.
 fn file_lang(file: &str) -> &'static str {
-    if Path::new(file).extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().ends_with("ts")) {
+    if Path::new(file).extension().is_some_and(|e| matches!(e.to_string_lossy().to_ascii_lowercase().as_str(), "ts" | "mts" | "cts" | "tsx")) {
         "ts"
     } else {
         "js"
@@ -509,8 +509,13 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&Path>) -> Op
             });
         }
         // A helper of the project's own in a folder below: `py.stages.clean` for stages/clean.py.
-        if let Some(dotted) = module_below(dir, &name) {
-            return Some(format!("there is a {} in a folder below: import it as py.{dotted}", dotted.replace('.', "/") + ".py"));
+        if let Some((file, dotted)) = module_below(dir, &name) {
+            return Some(match dotted {
+                Ok(dotted) => format!("there is a {file} in a folder below: import it as py.{dotted}"),
+                Err(folder) => format!(
+                    "there is a {file} in a folder below, but {folder} isn't a Python name, so no py. name reaches it: rename the folder, or put it on sys.path in a @py block first"
+                ),
+            });
         }
         // A .v2 file of another project's that has the module: the entry script's project serves
         // the whole run (18.1).
@@ -537,7 +542,10 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&Path>) -> Op
                     folder.display()
                 ));
             }
-            if folder != site.root {
+            // Above the run's project, for a .v2 file in it: likely another module than the one
+            // meant, so the install line below (review of round 18).
+            let above_project = site.root.starts_with(folder) && dir.starts_with(site.root);
+            if folder != site.root && !above_project {
                 return Some(format!(
                     "there is a {} in a folder above, which isn't on Python's path: move it next to the .v2 file or into the project folder, or put its folder on sys.path in a @py block first",
                     above.display()
@@ -641,35 +649,46 @@ fn project_has(root: &Path, name: &str) -> bool {
     std::iter::once(venv.join("Lib").join("site-packages")).chain(unix).any(|sp| std::fs::read_dir(sp).into_iter().flatten().flatten().any(entry))
 }
 
-/// `stages.clean` when `dir`'s folders, up to three levels down, hold `stages/clean.py` (the
-/// nearest first). Hidden folders, virtual environments and node_modules aren't looked in.
-fn module_below(dir: &Path, name: &str) -> Option<String> {
-    let mut level: Vec<(PathBuf, String)> = vec![(dir.to_path_buf(), String::new())];
+/// `stages/clean.py` and `Ok("stages.clean")` when `dir`'s folders, up to three levels down,
+/// hold that file (the nearest first), or `Err("2024")`, the first folder whose name is no
+/// Python name, when only such a path has one. Hidden folders, virtual environments and
+/// node_modules aren't looked in.
+fn module_below(dir: &Path, name: &str) -> Option<(String, Result<String, String>)> {
+    let mut level: Vec<(PathBuf, Vec<String>)> = vec![(dir.to_path_buf(), Vec::new())];
     let mut seen = 0;
+    let mut unnamed = None;
     for _ in 0..3 {
         let mut next = Vec::new();
-        for (folder, dotted) in level {
+        for (folder, parts) in level {
             for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
                 seen += 1;
                 if seen > 5000 {
-                    return None;
+                    return unnamed;
                 }
                 let Ok(sub) = entry.file_name().into_string() else { continue };
                 let skip = sub.starts_with('.') || matches!(sub.as_str(), "node_modules" | "venv" | "__pycache__" | "site-packages");
-                if skip || !entry.file_type().is_ok_and(|t| t.is_dir()) || !sub.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                if skip || !entry.file_type().is_ok_and(|t| t.is_dir()) {
                     continue;
                 }
-                let path = if dotted.is_empty() { sub.clone() } else { format!("{dotted}.{sub}") };
+                let mut parts = parts.clone();
+                parts.push(sub);
                 if entry.path().join(format!("{name}.py")).is_file() {
-                    return Some(format!("{path}.{name}"));
+                    let file = format!("{}/{name}.py", parts.join("/"));
+                    // As module_unit checks a dotted name: an identifier that isn't a keyword.
+                    match parts.iter().find(|p| !py_part(p)) {
+                        None => return Some((file, Ok(format!("{}.{name}", parts.join("."))))),
+                        Some(bad) => {
+                            unnamed = unnamed.or_else(|| Some((file, Err(bad.clone()))));
+                        }
+                    }
                 }
-                next.push((entry.path(), path));
+                next.push((entry.path(), parts));
             }
         }
         next.sort();
         level = next;
     }
-    None
+    unnamed
 }
 
 /// A local file that uses `import`/`export` in a folder whose package.json says `"type":
@@ -1106,7 +1125,7 @@ impl Interp {
             let hint = if block {
                 // A block's code reaches V2's names only through `from v2` (13.7).
                 let name = first.as_deref().unwrap_or("name");
-                format!("{module}: a block gets its names through V2, as in let {name} = {a}.{name}, then @import {{ {name} }} from v2 in the block")
+                format!("{module}: a block gets its names through V2, as in let {name} = {a}.{name} at the file's top level, then @import {{ {name} }} from v2 in the block")
             } else {
                 let what = first.map_or_else(|| a.to_string(), |n| format!("{a}.{n}"));
                 format!("{module}: use {what} directly; @import brings in names from other languages' blocks and packages")
@@ -1695,6 +1714,23 @@ mod tests {
         std::fs::write(proj.join("stages").join("deep").join("clean.py"), "").unwrap();
         assert_eq!(hint("No module named 'clean'", &proj), "there is a stages/deep/clean.py in a folder below: import it as py.stages.deep.clean");
         assert_eq!(hint("No module named 'clean'", &proj.join("stages")), "there is a deep/clean.py in a folder below: import it as py.deep.clean");
+        // Review of round 18: a folder that is no Python name (`2024`, `class`, `my-lib`) gives no
+        // py. name, which module_unit would refuse; one that is wins over it.
+        for folder in ["2024", "class", "my-lib"] {
+            std::fs::create_dir_all(proj.join(folder)).unwrap();
+            std::fs::write(proj.join(folder).join("cleanzz.py"), "").unwrap();
+            assert_eq!(
+                hint("No module named 'cleanzz'", &proj),
+                format!("there is a {folder}/cleanzz.py in a folder below, but {folder} isn't a Python name, so no py. name reaches it: rename the folder, or put it on sys.path in a @py block first")
+            );
+            std::fs::remove_dir_all(proj.join(folder)).unwrap();
+        }
+        std::fs::create_dir_all(proj.join("2024")).unwrap();
+        std::fs::write(proj.join("2024").join("cleanzz.py"), "").unwrap();
+        std::fs::create_dir_all(proj.join("stages").join("deep").join("old")).unwrap();
+        std::fs::write(proj.join("stages").join("deep").join("old").join("cleanzz.py"), "").unwrap();
+        assert_eq!(hint("No module named 'cleanzz'", &proj), "there is a stages/deep/old/cleanzz.py in a folder below: import it as py.stages.deep.old.cleanzz");
+        std::fs::remove_dir_all(proj.join("2024")).unwrap();
         // One in a folder above the .v2 file's.
         std::fs::write(proj.join("rooth.py"), "").unwrap();
         let sub = proj.join("stages").join("deep");
@@ -1713,6 +1749,14 @@ mod tests {
         // The script's own file, named like a package: never npm install it.
         std::fs::write(js.join("helpers.js"), "").unwrap();
         let own = "your own helpers.js is imported by its path from the .v2 file's folder: @import { … } from js.\"./helpers.js\" (js.helpers, without ./, names an npm package)";
+        // Round 18: a .jsx or .tsx file of the script's own, named bare, is no npm package either.
+        std::fs::write(d.join("comp.jsx"), "").unwrap();
+        std::fs::write(d.join("view.tsx"), "").unwrap();
+        assert_eq!(
+            missing_package_hint("Cannot find module 'comp.jsx'", &site_at(&d), None).as_deref(),
+            Some("your own comp.jsx is imported by its path from the .v2 file's folder: @import { … } from js.\"./comp.jsx\" (js.\"comp.jsx\", without ./, names an npm package)")
+        );
+        assert!(missing_package_hint("Cannot find module 'view.tsx'", &site_at(&d), None).unwrap().contains("from ts.\"./view.tsx\""));
         assert_eq!(hint("Cannot find module 'helpers'", &js), own);
         // What was written: `js."helpers.js"`, quoted.
         assert_eq!(hint("Cannot find module 'helpers.js'", &js), own.replace("js.helpers,", "js.\"helpers.js\","));
@@ -1784,6 +1828,11 @@ mod tests {
             let site = Site { dir: &proj.join(folder).join("sub"), file: "m.v2", root: &proj, toml: true };
             assert_eq!(missing_package_hint(&format!("No module named '{module}'"), &site, None).unwrap(), off_path(&file));
         }
+        // Above the root of the project the .v2 file is in: the install line, as for any other.
+        std::fs::write(base.join("zzabove.py"), "").unwrap();
+        let lib_dir = proj.join("lib");
+        let in_project = Site { dir: &lib_dir, file: "lib/m.v2", root: &proj, toml: true };
+        assert!(missing_package_hint("No module named 'zzabove'", &in_project, None).unwrap().starts_with("if 'zzabove' isn't misspelled, install it"));
         // Another project's module that isn't there either: the install line, not that project.
         let lib = mono.join("lib");
         std::fs::create_dir_all(&lib).unwrap();

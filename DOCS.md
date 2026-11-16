@@ -656,8 +656,8 @@ if r.code == 0 { print(r.stdout.trim()) } else { print(r.stderr, stderr: true) }
 
 `argv` is a non-empty list of strings, each one argument as written, also on Windows for Git Bash's
 programs (`find`, `grep`, `sh`), which would otherwise expand `*.v2`, `{a,b}` and `~` and drop
-quotes themselves (they do halve a run of two or more backslashes right before a space, a tab, a
-`'` or one of `* ? [ {`); a program name without a path separator is searched on
+quotes themselves (they do halve a run of two or more backslashes right before a space, a tab or
+another control character, a `'` or one of `* ? [ {`); a program name without a path separator is searched on
 `PATH` like engine commands, never in the current folder (as on Linux and macOS): a program there is
 run by its path, `exec(["./build.bat"])` (a `.bat` or `.cmd` whose path holds a `%` is refused, as
 cmd.exe would read it as a variable: keep it in a folder without one). A script runs through its
@@ -1010,7 +1010,7 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   whose hint says what to write instead (a const object for an `enum`, `x as T` for a cast,
   `const x = require("…")` in a `.cts` file and `import x from "…"` in an `.mts` one), in a block
   and in a `.ts` file alike; or use `@js`. Node 24 refuses `module M { … }` for its keyword: write
-  `namespace M`.
+  `namespace M`, which takes types only (one with values is code, as above).
 - Node doesn't read `tsconfig.json`: to it a `"paths"` alias (`@/lib`, `~/utils`) is a package
   that isn't installed, and the error's hint says so. Import by a relative path, or name the
   alias in `package.json` `"imports"` (`"#lib/*": "./lib/*"`).
@@ -1172,7 +1172,7 @@ ImportError: Import of 'mean' from '@py' is ambiguous (exported by blocks 'stats
 | -------------------------------------- | ----------------------------------------------------------- |
 | name not exported                      | `'sprad' is not exported by 'stats' — did you mean 'spread'?`, or, with no close name, `… (did the block @export it?)` |
 | no block has that label                | `no block in this file is labeled 'stat' — did you mean 'stats'?`, or, with no close label, `…: a Python module is imported with py.stat, an npm package with js.stat` |
-| the selector starts with a V2 module's name (`import "./lib.v2" as lib`) | the hint says so: `lib is a V2 module (import "./lib.v2" as lib): use lib.total directly; …`, or in a block, `…: a block gets its names through V2, as in let total = lib.total, then @import { total } from v2 in the block` |
+| the selector starts with a V2 module's name (`import "./lib.v2" as lib`) | the hint says so: `lib is a V2 module (import "./lib.v2" as lib): use lib.total directly; …`, or in a block, `…: a block gets its names through V2, as in let total = lib.total at the file's top level, then @import { total } from v2 in the block` |
 | the block has no `@export`             | `block 'stats' exports nothing: add @export { mean } inside it` |
 | block not loaded yet (V2 code)         | `block 'stats' has not run yet — move this @import below it` |
 | block not loaded yet when a block calls `x` | `block 'stats' has not run yet — 'x' can't be called before it loads` |

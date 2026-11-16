@@ -7,9 +7,9 @@ EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engi
 EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib directly; @import brings in names from other languages' blocks and packages
 EngineUnknown | unknown engine '@lib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
-  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): a block gets its names through V2, as in let total = lib.total, then @import { total } from v2 in the block
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): a block gets its names through V2, as in let total = lib.total at the file's top level, then @import { total } from v2 in the block
 ImportError | no block in this file is labeled 'lib'
-  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): a block gets its names through V2, as in let total = lib.total, then @import { total } from v2 in the block
+  hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): a block gets its names through V2, as in let total = lib.total at the file's top level, then @import { total } from v2 in the block
 EngineUnknown | unknown engine '@inner' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)
   hint: null
 EngineUnknown | unknown engine '@nolib' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)

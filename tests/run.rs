@@ -3499,7 +3499,9 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
          hint(func() => exec([{mp}]))\nhint(func() => make_dir({mn}))\nprint(exists({mr}))\nprint(read_file({w}))\n\
          hint(func() => write_file(\"what?.txt\", \"x\"))\nhint(func() => read_file(\"a|b.txt\"))\nhint(func() => make_dir(\"aux\"))\n\
          hint(func() => list_dir(\"nul\"))\nhint(func() => write_file(\"sub./x.txt\", \"x\"))\nhint(func() => read_file(\"missing.txt\"))\n\
-         hint(func() => write_file(\"sub/aux/x.txt\", \"x\"))\nhint(func() => list_dir(\"./con\"))\n",
+         hint(func() => write_file(\"sub/aux/x.txt\", \"x\"))\nhint(func() => list_dir(\"./con\"))\n\
+         hint(func() => make_dir(\"./aux\"))\nhint(func() => read_file(\"aux/missing.txt\"))\n\
+         try {{\n    read_file(\"aux/missing.txt\")\n}} catch (e) {{\n    print(\"no folder\" in e.message)\n}}\n",
         m = q(&format!("{msys}/data.txt")),
         mo = q(&format!("{msys}/out.txt")),
         md = q(&msys),
@@ -3526,6 +3528,9 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
     assert!(device(std::path::Path::new("aux")), "a bare aux is a device");
     let in_sub = if device(&home.0.join("sub").join("aux")) { refused.to_string() } else { "make the folder first, with make_dir(\"sub/aux\")".to_string() };
     let dot_con = if device(&home.0.join("con")) { refused } else { "null" };
+    // Round 18 review: Windows 11 reads aux/x.txt as a file in a folder aux, which ./aux makes:
+    // no device hint and no "there is no folder 'aux'" for a file missing from it.
+    let dot_aux = device(&home.0.join("aux"));
     let want = [
         format!("{spelling}{}", q(&format!("{windows}/data.txt"))),
         format!("{spelling}{}", q(&format!("{windows}/out.txt"))),
@@ -3544,8 +3549,14 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
         "null".into(),
         in_sub,
         dot_con.into(),
+        if dot_aux { refused } else { "no error" }.into(),
+        if dot_aux { refused } else { "null" }.into(),
+        "false".into(),
     ];
-    assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
+    let got: Vec<_> = stdout.lines().collect();
+    // Where ./aux is the device too (Windows 10), what its message says isn't checked.
+    let checked = if dot_aux { want.len() - 1 } else { want.len() };
+    assert_eq!(got[..checked.min(got.len())], want[..checked], "{stdout}");
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -4246,6 +4257,33 @@ try {
 }
 
 #[test]
+fn a_nested_typescript_file_gets_its_own_module_form() {
+    // INTERNALS 12.5 (round 18 review): import = and export = are written as the file that
+    // failed takes them: an .mts or .cts file that a .ts file imports gets its own form where
+    // Node names that file (24); Node 22 names none, and the imported .ts file's form is left.
+    if !needs("ts", "a_nested_typescript_file_gets_its_own_module_form") {
+        return;
+    }
+    let stripped = "Node runs TypeScript by removing its types, and ";
+    let cases = [
+        ("outer_m.ts", "export { f } from \"./inner.mts\";\n", "inner.mts", "import fs = require(\"fs\");\nexport const f = 1;\n", "import x = require(…) is code: write import x from \"…\""),
+        ("outer_c.ts", "import inner from \"./inner.cts\";\nexport const f = inner.g;\n", "inner.cts", "const g = 2;\nexport = { g };\n", "export = is code: write module.exports = x"),
+    ];
+    for (outer, outer_src, inner, inner_src, form) in cases {
+        let main = format!("@import {{ f }} from ts.\"./{outer}\"\nprint(f)\n");
+        let (code, stdout, stderr, _home) = run_with_files(&[("main.v2", &*main), (outer, outer_src), (inner, inner_src)], &["main.v2"]);
+        assert_eq!(code, Some(1), "{stdout}{stderr}");
+        let hint = stderr.lines().find_map(|l| l.trim().strip_prefix("hint: ")).unwrap_or_else(|| panic!("{stderr}"));
+        // Where a frame names the inner file, the hint is that file's; else the .ts file's.
+        if stderr.contains(&format!("{inner}:")) {
+            assert_eq!(hint, format!("{stripped}{form}"), "{stderr}");
+        } else {
+            assert!(hint.starts_with(stripped) && hint.contains("in CommonJS, or"), "{stderr}");
+        }
+    }
+}
+
+#[test]
 fn ts_module_keyword_gets_the_hint_of_its_message() {
     // INTERNALS 12.5: Node 24 refuses `module M` for its keyword, and Node 22.13 as a namespace,
     // as it does a namespace with only types, which Node 24 runs. Each message gets its own hint.
@@ -4271,6 +4309,12 @@ show(func() {
 })
 show(func() {
     return @ts {
+        module V { export const x = 1 }
+        V.x
+    }
+})
+show(func() {
+    return @ts {
         namespace N { export type T = number }
         2
     }
@@ -4279,11 +4323,12 @@ show(func() {
     let mk = "module M { export type T = number }\nexport const x = 1;\n";
     let (code, stdout, stderr, _home) = run_with_files(&[("main.v2", main), ("mk.ts", mk)], &["main.v2"]);
     assert_eq!(code, Some(0), "{stderr}");
-    let module = "write namespace M for module M: Node's type stripping takes only that spelling";
+    let module = "write namespace M for module M: Node's type stripping takes only that spelling, and only for a namespace of types (one with values is code: use a module of its own (a file) or an object, as in const NS = { x: 1 })";
     let namespace = "Node runs TypeScript by removing its types, and a namespace with values is code (an older Node, such as 22.13, refuses even one with only types): use a module of its own (a file) or an object, as in const NS = { x: 1 }";
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 3, "{stdout}");
-    for line in &lines[..2] {
+    assert_eq!(lines.len(), 4, "{stdout}");
+    // Round 18 review: a module with values is refused either way, and the hint says so first.
+    for line in &lines[..3] {
         let (message, hint) = line.split_once(" => ").unwrap_or_else(|| panic!("{stdout}"));
         if message.contains("`module` keyword is not supported") {
             assert_eq!(hint, module, "{stdout}");
@@ -4292,8 +4337,8 @@ show(func() {
             assert_eq!(hint, namespace, "{stdout}");
         }
     }
-    let refused = lines[2].contains("namespace declaration is not supported") && lines[2].ends_with(&format!(" => {namespace}"));
-    assert!(lines[2] == "2" || refused, "{stdout}");
+    let refused = lines[3].contains("namespace declaration is not supported") && lines[3].ends_with(&format!(" => {namespace}"));
+    assert!(lines[3] == "2" || refused, "{stdout}");
 }
 
 /// The Python that blocks run on here (a block's `sys.executable`), for tests that make their own
