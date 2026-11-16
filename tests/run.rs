@@ -995,11 +995,13 @@ if exists(git + "/printf.exe") {
     let found = exec([git + "/find.exe", ".", "-maxdepth", "1", "-name", "*.v2"])
     print(found.code, len(found.stdout.trim().lines()))
 }
-let bat = exec(["./show.bat", "*.v2", "@data.json", "it's", "{a,b}.v2", "~", "two words", r"a\b"]).stdout
-print(bat.trim())
+print(exec(["./show.bat"] + cases).stdout.trim())
 "#;
     let json = serde_json::to_string(&cases).unwrap();
-    let bat = "@echo off\r\necho [%~1][%~2][%~3][%~4][%~5][%~6][%~7]\r\necho %1 %2\r\n";
+    // The batch file hands its %* to v2, as npm.cmd hands it to node (said in ASCII: echo's code
+    // page isn't UTF-8), then shows each argument as it got it (%1) and as %~1 reads it.
+    let bat = format!("@echo off\r\n\"{BIN}\" same.v2 %*\r\n:next\r\nif [%1]==[] goto :eof\r\necho %1 [%~1]\r\nshift\r\ngoto next\r\n");
+    let same = "print(args() == json_parse(read_file(\"cases.json\")) ? \"same\" : json_stringify(args()))\n";
     let files = [
         ("main.v2", main),
         ("child.v2", "print(json_stringify(args()))\n"),
@@ -1007,7 +1009,8 @@ print(bat.trim())
         ("a.v2", ""),
         ("b.v2", ""),
         ("data.json", "{\"id\": 1}\n"),
-        ("show.bat", bat),
+        ("show.bat", bat.as_str()),
+        ("same.v2", same),
     ];
     let (code, stdout, stderr, _home) = run_with_files(&files, &["main.v2", BIN, &git.to_string_lossy()]);
     assert_eq!(code, Some(0), "{stderr}");
@@ -1018,13 +1021,46 @@ print(bat.trim())
     if git.join("printf.exe").is_file() {
         assert_eq!(lines.next(), Some("printf ok"), "{stdout}");
         assert_eq!(lines.next(), Some("sh ok"), "{stdout}");
-        // find's own pattern, not the shell's: a.v2, b.v2, child.v2 and main.v2, not "paths must
-        // precede expression".
-        assert_eq!(lines.next(), Some("0 4"), "{stdout}");
+        // find's own pattern, not the shell's: a.v2, b.v2, child.v2, main.v2 and same.v2, not
+        // "paths must precede expression".
+        assert_eq!(lines.next(), Some("0 5"), "{stdout}");
     } else {
         let _ = writeln!(std::io::stderr(), "SKIP the MSYS part of exec_arguments_reach_msys_programs_and_c_runtimes_as_given (no Git for Windows)");
     }
-    assert_eq!(lines.collect::<Vec<_>>(), ["[*.v2][@data.json][it's][{a,b}.v2][~][two words][a\\b]", "*.v2 @data.json"], "{stdout}");
+    // The batch file: Rust's quoting for cmd.exe. A word of letters, digits and # $ * + - . / : ?
+    // @ \ _ (or other than ASCII) goes as it is, any other in quotes with " as "", %PATH% stays
+    // unexpanded, and the backslashes before a quote or the closing one are doubled.
+    assert_eq!(lines.next(), Some("same"), "{stdout}");
+    let shown = [
+        r#""q""uote" [q""uote]"#,
+        r#""it's" [it's]"#,
+        "*.v2 [*.v2]",
+        "@data.json [@data.json]",
+        r#""{a,b}.v2" [{a,b}.v2]"#,
+        r#""~" [~]"#,
+        r"a\b [a\b]",
+        r#""a\\\\""b" [a\\\\""b]"#,
+        r#""trailing\\" [trailing\\]"#,
+        r#""" []"#,
+        r#""two words" [two words]"#,
+        "\"a\ttab\" [a\ttab]",
+        "Čeština [Čeština]",
+        r#""%PATH%" [%PATH%]"#,
+        r#""\\server\share\My Docs" [\\server\share\My Docs]"#,
+        r#""C:\some dir\\" [C:\some dir\\]"#,
+        "-name [-name]",
+        "*.json [*.json]",
+    ];
+    let got: Vec<&str> = lines.collect();
+    assert_eq!(got.len(), shown.len(), "{stdout}");
+    for (got, want) in got.iter().zip(shown) {
+        // echo writes in the console's code page, which may have no Č: one character for each.
+        if want.is_ascii() {
+            assert_eq!(*got, want, "{stdout}");
+        } else {
+            assert_eq!(got.chars().count(), want.chars().count(), "{stdout}");
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3443,7 +3479,8 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
          hint(func() => read_file({m}))\nhint(func() => write_file({mo}, \"x\"))\nhint(func() => list_dir({md}))\nhint(func() => remove_file({m}))\n\
          hint(func() => exec([{mp}]))\nhint(func() => make_dir({mn}))\nprint(exists({mr}))\nprint(read_file({w}))\n\
          hint(func() => write_file(\"what?.txt\", \"x\"))\nhint(func() => read_file(\"a|b.txt\"))\nhint(func() => make_dir(\"aux\"))\n\
-         hint(func() => list_dir(\"nul\"))\nhint(func() => write_file(\"sub./x.txt\", \"x\"))\nhint(func() => read_file(\"missing.txt\"))\n",
+         hint(func() => list_dir(\"nul\"))\nhint(func() => write_file(\"sub./x.txt\", \"x\"))\nhint(func() => read_file(\"missing.txt\"))\n\
+         hint(func() => write_file(\"sub/aux/x.txt\", \"x\"))\nhint(func() => list_dir(\"./con\"))\n",
         m = q(&format!("{msys}/data.txt")),
         mo = q(&format!("{msys}/out.txt")),
         md = q(&msys),
@@ -3456,6 +3493,20 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
     let (code, stdout, stderr) = run_in_home(&home.0, &["h.v2"], &[]);
     assert_eq!(code, Some(0), "{stderr}");
     let refused = "Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > \" | ? *): choose another name";
+    // Round 18 review: a device name is one only where Windows makes the path a device: on
+    // Windows 11 a bare `aux`, but `sub\aux` and `.\con` are folders (Windows 10: devices).
+    let device = |p: &std::path::Path| {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = [0u16; 1024];
+        // SAFETY: a NUL-terminated path and a buffer of the length given.
+        let n = unsafe { GetFullPathNameW(wide.as_ptr(), buf.len() as u32, buf.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+        String::from_utf16_lossy(&buf[..n.min(buf.len())]).starts_with(r"\\.\")
+    };
+    assert!(device(std::path::Path::new("aux")), "a bare aux is a device");
+    let in_sub = if device(&home.0.join("sub").join("aux")) { refused.to_string() } else { "make the folder first, with make_dir(\"sub/aux\")".to_string() };
+    let dot_con = if device(&home.0.join("con")) { refused } else { "null" };
     let want = [
         format!("{spelling}{}", q(&format!("{windows}/data.txt"))),
         format!("{spelling}{}", q(&format!("{windows}/out.txt"))),
@@ -3472,6 +3523,8 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
         refused.into(),
         refused.into(),
         "null".into(),
+        in_sub,
+        dot_con.into(),
     ];
     assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
 }

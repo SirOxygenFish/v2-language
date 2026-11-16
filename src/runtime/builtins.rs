@@ -519,24 +519,30 @@ fn msys_hint(path: &str) -> Option<String> {
 }
 
 /// Windows: a part of `path` that Windows refuses as a file name: a device (`CON`, `PRN`, `AUX`,
-/// `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`; Windows 10 also with an extension, as `con.txt`), one
-/// that ends in a dot or a space, or one holding `< > " | ? *` (5.10). A `\\?\` or `\\.\` path
-/// is taken as written.
+/// `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, when the path through that part is one: on Windows 11 a
+/// bare name, and `NUL` in any folder; Windows 10 also in a folder or with an extension, as
+/// `sub\aux` or `con.txt`), one that ends in a dot or a space, or one holding `< > " | ? *`
+/// (5.10). A `\\?\` or `\\.\` path is taken as written.
 fn bad_windows_name(path: &str) -> bool {
     if !cfg!(windows) || path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
         return false;
     }
     let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
+    // Where the part being looked at ends in `path`: the device check takes the path up to it.
+    let mut end = path.len() - after_drive.len();
     after_drive.split(['/', '\\']).any(|part| {
+        end += part.len();
+        let through = &path[..end];
+        end += 1;
         let stem = part.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
         let device_name = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
             || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-        (device_name && windows_device(part)) || (!matches!(part, "." | "..") && (part.ends_with('.') || part.ends_with(' '))) || part.contains(['<', '>', '"', '|', '?', '*'])
+        (device_name && windows_device(through)) || (!matches!(part, "." | "..") && (part.ends_with('.') || part.ends_with(' '))) || part.contains(['<', '>', '"', '|', '?', '*'])
     })
 }
 
-/// Whether Windows takes `name` for a device, as its full path says (`\\.\CON`): Windows 11
-/// takes `con.txt` for a file.
+/// Whether Windows takes the path `name` for a device, as its full path says (`\\.\CON`):
+/// Windows 11 takes `con.txt` and `sub\aux` for a file.
 #[cfg(windows)]
 fn windows_device(name: &str) -> bool {
     use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
