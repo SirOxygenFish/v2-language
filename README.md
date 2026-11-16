@@ -446,6 +446,9 @@ folder upward, as Node does).
   ```
 
   (Activating it, `source .venv/bin/activate`, before running `v2` works too.)
+- **uv:** `uv add numpy` in your project (or `uv venv`, then `uv pip install numpy`), and the same
+  `v2.toml` (`[python]`, then `venv = ".venv"`); or run `uv run v2 main.v2`. uv's venvs have no
+  pip: install with `uv add` or `uv pip install`.
 - **conda (Anaconda, Miniconda):** run `v2` where the environment is activated
   (`conda activate sales`): V2 finds its `python` first on `PATH`, as for an activated virtual
   environment. Or name that Python in `v2.toml`, without `venv`, which is for virtual
@@ -596,6 +599,11 @@ The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
 program's path does the same while it is set: in PowerShell, for that window,
 `$env:V2_ENGINE_PY = "C:\Program Files\Python313\python.exe"` (and `Remove-Item Env:V2_ENGINE_PY`
 ends it); in a shell, `export V2_ENGINE_PY=/opt/homebrew/bin/python3`.
+
+V2 doesn't read `.python-version`, `.nvmrc` or `.tool-versions`. A version manager's shim on PATH
+(pyenv, asdf, fnm) picks the version for the folder you run `v2` from, not the script's folder:
+run `v2` from the project folder, or pin the program in `v2.toml`; `v2 doctor`'s COMMAND column
+shows the shim, and VERSION the version it picks there.
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,
 so `add("2", 3)` runs. Run `tsc` yourself for checking. Only TypeScript whose types can simply be

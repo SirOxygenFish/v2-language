@@ -154,6 +154,13 @@ impl Checker {
     }
 }
 
+/// py found by the search (7.6) while the activated venv's python links to nothing or is missing,
+/// which the search can't see: doctor says so, as a broken `[python] venv` would be (19.2).
+fn activated_venv_note(id: &str) -> Option<String> {
+    let venv = std::env::var_os("VIRTUAL_ENV").filter(|v| id == "py" && !v.is_empty())?;
+    crate::engines::resolve::activated_venv_problem(Path::new(&venv)).map(|problem| format!("py: {problem}"))
+}
+
 fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -232,6 +239,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 }
                 rows.push([id.clone(), "ok".into(), e.shown(), version, e.origin.label()]);
                 skipped(&e.skipped, &mut notes);
+                notes.extend(activated_venv_note(&id).filter(|_| e.origin == crate::engines::resolve::Origin::Path));
                 for (name, value) in vars {
                     notes.push(format!("{id}: {name} is set ({value}), which {} reads as it starts", if id == "py" { "Python" } else { "Node.js" }));
                 }
@@ -299,6 +307,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let others: Vec<(std::path::PathBuf, String)> =
                     nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
                 skipped(&others, &mut notes);
+                notes.extend(activated_venv_note(&id).filter(|_| nf.command.is_none()));
                 // A program that can't load a library: the package that has it (7.8). One that
                 // stopped at a NODE_OPTIONS its probe reads: that variable. Any other that doesn't
                 // run: repair it, or install one, as for a missing engine.

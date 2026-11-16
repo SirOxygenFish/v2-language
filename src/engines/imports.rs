@@ -482,13 +482,59 @@ struct Site<'a> {
     toml: bool,
 }
 
+/// Whom an `ImportError`'s install line is for (13.5).
+enum PipFor {
+    /// The Python V2 was told to use (a venv, a command, V2_ENGINE_PY): its argv.
+    Told(Vec<std::ffi::OsString>),
+    /// One found on PATH while the activated venv (VIRTUAL_ENV) has no python that runs: that
+    /// venv, and what is wrong with it (`resolve::activated_venv_problem`).
+    Passed(PathBuf, String),
+}
+
+/// What the install line of an engine's `ImportError` is for: the Python V2 was told to use, or,
+/// for one found on PATH, the activated venv the search couldn't use, if any.
+fn pip_for(origin: &crate::engines::resolve::Origin, argv: &[std::ffi::OsString]) -> Option<PipFor> {
+    if *origin != crate::engines::resolve::Origin::Path {
+        return Some(PipFor::Told(argv.to_vec()));
+    }
+    let venv = PathBuf::from(std::env::var_os("VIRTUAL_ENV").filter(|v| !v.is_empty())?);
+    let problem = crate::engines::resolve::activated_venv_problem(&venv)?;
+    Some(PipFor::Passed(venv, problem))
+}
+
+/// After "install it for the Python V2 uses": a command that works for `argv`, the Python V2 was
+/// told to use. Its own pip (the whole command, each word quoted as a shell needs it: `pyenv exec
+/// python -m pip install x`); `uv add x` for a command that runs uv (`uv run python`); for a venv
+/// uv made, which has no pip, `uv add x` in its project, else `uv pip install --python DIR x`; for
+/// another venv without pip, `-m ensurepip` first.
+fn install_line(argv: &[std::ffi::OsString], name: &str) -> String {
+    let words: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let program = Path::new(words.first().map_or("", String::as_str));
+    let uv = program.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("uv"));
+    if uv && words.get(1).is_some_and(|w| w == "run") {
+        return format!(": uv add {name}");
+    }
+    let quoted: Vec<String> = words.iter().map(|w| crate::cli::shell_word(w)).collect();
+    // PowerShell runs a quoted path only after `&`.
+    let amp = if cfg!(windows) && quoted.first().is_some_and(|w| w.starts_with('"')) { "& " } else { "" };
+    let run = format!("{amp}{}", quoted.join(" "));
+    match crate::engines::resolve::venv_of(program).filter(|_| words.len() == 1) {
+        Some(venv) if crate::engines::resolve::made_by_uv(&venv) => match crate::engines::resolve::uv_project(&venv) {
+            Some(project) => format!(": uv add {name} in {}", project.display()),
+            None => format!(": uv pip install --python {} {name}", crate::cli::shell_word(&venv.display().to_string())),
+        },
+        Some(venv) if !crate::engines::resolve::venv_has_pip(&venv) => format!(", whose venv has no pip: {run} -m ensurepip, then {run} -m pip install {name}"),
+        _ => format!(": {run} -m pip install {name}"),
+    }
+}
+
 /// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
 /// or what to install, from the folder of the importing .v2 file.
 /// `python`: the Python V2 was told to use (a venv, a command, V2_ENGINE_PY), for the exact
-/// install command; `None` for one found on PATH.
-fn missing_package_hint(message: &str, site: &Site, python: Option<&Path>) -> Option<String> {
+/// install command, or the activated venv V2 couldn't use; `None` for one found on PATH.
+fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> Option<String> {
     let dir = site.dir;
-    let venv_set = python.is_some();
+    let venv_set = matches!(python, Some(PipFor::Told(_)));
     // A package whose `exports` offer only `import`, which `require` can't load: a block can.
     if let Some(rest) = message.split("No \"exports\" main defined in ").nth(1) {
         let parts: Vec<String> = Path::new(rest.trim()).iter().map(|c| c.to_string_lossy().into_owned()).collect();
@@ -553,17 +599,9 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&Path>) -> Op
             }
         }
         let install = match python {
-            Some(p) => {
-                let shown = p.display().to_string();
-                let run = if !shown.contains(' ') {
-                    shown
-                } else if cfg!(windows) {
-                    format!("& \"{shown}\"")
-                } else {
-                    format!("\"{shown}\"")
-                };
-                format!("if '{name}' isn't misspelled, install it for the Python V2 uses: {run} -m pip install {name}")
-            }
+            Some(PipFor::Told(argv)) => format!("if '{name}' isn't misspelled, install it for the Python V2 uses{}", install_line(argv, &name)),
+            // Not another Python's pip: the activated venv, which V2 couldn't use, is the one meant.
+            Some(PipFor::Passed(_, problem)) => problem.clone(),
             None => format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps"),
         };
         // A virtual environment made in the project (the file's folder or up to three above it),
@@ -571,13 +609,17 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&Path>) -> Op
         let venv = (!venv_set)
             .then(|| dir.ancestors().take(4).flat_map(|d| [d.join(".venv"), d.join("venv")]).find(|v| v.join("pyvenv.cfg").is_file()))
             .flatten();
-        return Some(match venv {
-            Some(v) => format!(
-                "there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \"{}\"; or {install}",
+        let same = |a: &Path, b: &Path| a == b || std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a));
+        return Some(match (venv, python) {
+            // That one is the activated venv V2 couldn't use: what is wrong with it.
+            (Some(v), Some(PipFor::Passed(active, _))) if same(&v, active) => install,
+            (Some(v), _) => format!(
+                "there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \"{}\"; {} {install}",
                 v.display(),
-                v.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                v.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                if matches!(python, Some(PipFor::Passed(..))) { "and" } else { "or" }
             ),
-            None => install,
+            (None, _) => install,
         });
     }
     let name = quoted("Cannot find module '")?;
@@ -1448,7 +1490,7 @@ impl Interp {
         let what = format!("@import from '{}'", self.selector_text(sel));
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
         let engine = &self.sessions[s].engine;
-        let python = (engine.origin != crate::engines::resolve::Origin::Path).then(|| PathBuf::from(&engine.argv[0]));
+        let python = pip_for(&engine.origin, &engine.argv);
         let (root, toml) = (self.registry.config().root.clone(), self.registry.config().file.is_some());
         let shown = self.sm.file(file).display.clone();
         let reply = self.request(s, frame, &what, at).inspect_err(|f| {
@@ -1456,7 +1498,7 @@ impl Interp {
                 let hint = match &*e.kind {
                     "ImportError" => {
                         let root = crate::runtime::module::canonical(&root).unwrap_or(root);
-                        missing_package_hint(&e.message, &Site { dir: &dir, file: &shown, root: &root, toml }, python.as_deref())
+                        missing_package_hint(&e.message, &Site { dir: &dir, file: &shown, root: &root, toml }, python.as_ref())
                     }
                     "ForeignError" => nested_commonjs_hint(&e.message, &joined, &dir)
                         .or_else(|| ts_import_hint(&e.message))
@@ -1706,7 +1748,7 @@ mod tests {
         // A Python V2 was told to use (a venv in v2.toml): its own install command.
         let venv_python = proj.join(".venv").join("bin").join("python");
         assert_eq!(
-            missing_package_hint("No module named 'numpy'", &site(&proj), Some(&venv_python)),
+            missing_package_hint("No module named 'numpy'", &site(&proj), Some(&PipFor::Told(vec![venv_python.clone().into_os_string()]))),
             Some(format!("if 'numpy' isn't misspelled, install it for the Python V2 uses: {} -m pip install numpy", venv_python.display()))
         );
         // A helper of the project's own in a folder below.
@@ -1776,6 +1818,66 @@ mod tests {
         assert_eq!(
             hint(&m, &d),
             "'@scope/esm-only' can be loaded only with import(), which a @js block can do: async function load() { return await import(\"@scope/esm-only\") }, then @export { load } and call load()"
+        );
+    }
+
+    #[test]
+    fn the_install_line_is_a_command_that_works_for_that_python() {
+        // Round 19 (L1, L2): for a Python V2 was told to use, a command that works there.
+        let d = temp("pipfor");
+        let told = |argv: &[&Path]| PipFor::Told(argv.iter().map(|p| p.as_os_str().to_os_string()).collect());
+        let hint = |p: &PipFor| missing_package_hint("No module named 'tabulate'", &site(&d), Some(p)).unwrap();
+        let head = "if 'tabulate' isn't misspelled, install it for the Python V2 uses";
+        // A command with arguments: all of it, each word quoted as a shell needs it.
+        let (exec, python) = (Path::new("exec"), Path::new("python"));
+        let pyenv = d.join("pyenv");
+        assert_eq!(hint(&told(&[&pyenv, exec, python])), format!("{head}: {} exec python -m pip install tabulate", pyenv.display()));
+        let spaced = d.join("my tools").join("pyenv");
+        let amp = if cfg!(windows) { "& " } else { "" };
+        assert_eq!(hint(&told(&[&spaced, exec, python])), format!("{head}: {amp}\"{}\" exec python -m pip install tabulate", spaced.display()));
+        // One that runs uv (uv run python): uv add.
+        assert_eq!(hint(&told(&[&d.join("uv"), Path::new("run"), python])), format!("{head}: uv add tabulate"));
+        // A venv uv made, which has no pip: uv pip install --python, or uv add in its uv project.
+        let venv = d.join(".venv");
+        let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
+        let venv_python = bin.join(if cfg!(windows) { "python.exe" } else { "python" });
+        std::fs::write(venv.join("pyvenv.cfg"), "uv = 0.13.8\nversion_info = 3.13.18\n").unwrap();
+        assert_eq!(hint(&told(&[&venv_python])), format!("{head}: uv pip install --python {} tabulate", venv.display()));
+        std::fs::write(d.join("pyproject.toml"), "").unwrap();
+        std::fs::write(d.join("uv.lock"), "").unwrap();
+        assert_eq!(hint(&told(&[&venv_python])), format!("{head}: uv add tabulate in {}", d.display()));
+        // Another venv without pip (python -m venv --without-pip): ensurepip first.
+        std::fs::write(venv.join("pyvenv.cfg"), "home = x\nversion = 3.13.18\n").unwrap();
+        let site_packages = if cfg!(windows) { venv.join("Lib").join("site-packages") } else { venv.join("lib").join("python3.13").join("site-packages") };
+        std::fs::create_dir_all(&site_packages).unwrap();
+        let py = venv_python.display();
+        assert_eq!(hint(&told(&[&venv_python])), format!("{head}, whose venv has no pip: {py} -m ensurepip, then {py} -m pip install tabulate"));
+        std::fs::create_dir_all(site_packages.join("pip")).unwrap();
+        assert_eq!(hint(&told(&[&venv_python])), format!("{head}: {py} -m pip install tabulate"));
+    }
+
+    #[test]
+    fn an_activated_venv_v2_cant_use_is_named_instead_of_pip() {
+        // Round 19 (L4): VIRTUAL_ENV names a venv whose python is gone, so V2 found another
+        // Python on PATH: the hint says what is wrong with the venv, never to pip install into
+        // the other Python, nor that the venv is one "V2 isn't using".
+        let d = temp("passed");
+        let venv = d.join(".venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
+        let problem = crate::engines::resolve::activated_venv_problem(&venv).unwrap();
+        let passed = PipFor::Passed(venv.clone(), problem.clone());
+        let hint = |dir: &Path| missing_package_hint("No module named 'requests'", &site(dir), Some(&passed)).unwrap();
+        assert_eq!(hint(&d), problem, "run in the venv's own folder");
+        assert_eq!(hint(&temp("passed-elsewhere")), problem);
+        // Another venv nearby: that one, and the activated one's problem.
+        let other = temp("passed-other");
+        std::fs::create_dir_all(other.join(".venv")).unwrap();
+        std::fs::write(other.join(".venv").join("pyvenv.cfg"), "home = x\n").unwrap();
+        assert_eq!(
+            hint(&other),
+            format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; and {problem}", other.join(".venv").display())
         );
     }
 

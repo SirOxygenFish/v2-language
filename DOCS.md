@@ -1236,6 +1236,9 @@ npm install lodash                    # creates node_modules/ in the project roo
 venv = ".venv"
 ```
 
+With uv, `uv add pandas` in your project (or `uv venv`, then `uv pip install pandas`) makes the
+same `.venv` for that `v2.toml`, and `uv run v2 main.v2` works without one; uv's venvs have no pip.
+
 Python looks in the `.v2` file's folder, the project root, then its normal module path (your
 `PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). The
 project root, the venv and the `v2.toml` are the script's you run: a `.v2` file imported from
@@ -1940,6 +1943,11 @@ that may hang, use the language's own timeout, which you can retry: `urlopen(url
 
 `V2_ENGINE_PY` wins over `[python] venv`. Setting both `[python] venv` and `[engines.py] command`
 in `v2.toml` is a configuration error: keep one.
+
+`venv` names a virtual environment, a folder with a `pyvenv.cfg` (as `python -m venv` and `uv venv`
+make); name another Python's program in `[engines.py] command` instead ([chapter 5](#5-engines)
+has conda's way). A venv whose python now runs another Python than the one it was made with
+(after an upgrade) can't find its packages, so V2 stops with what to do: make it again.
 
 `@ts` blocks run on the js engine, so they are configured in `[engines.js]`: an `[engines.ts]`
 table, or `V2_ENGINE_TS`, is a configuration error. So is an unknown section or key, or a key that
