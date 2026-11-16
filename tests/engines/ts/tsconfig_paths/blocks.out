@@ -3,7 +3,10 @@ ForeignError | "@lib/*" is a "paths" alias in <here>/tsconfig.json, and Node doe
 ForeignError | "~/*" is a "paths" alias in <here>/tsconfig.json, and Node doesn't read tsconfig paths: import by a relative path, or use package.json "imports" (#alias)
 ForeignError | your own paths.ts is loaded by its path from the .v2 file's folder: require("./paths.ts") ("paths", without ./, names an npm package)
 ForeignError | your own paths.ts is loaded by its path from the .v2 file's folder: import("./paths.ts") ("paths", without ./, names an npm package)
-ForeignError | a file of your own is loaded by its path from the .v2 file's folder, as in require("./nothere.js"): check its name ("nothere.js", without ./, names an npm package)
+ForeignError | a file of your own is loaded by its path from the .v2 file's folder, as in require("./nothere.js"): check its name ("nothere.js", without ./, names an npm package); or, for the npm package nothere.js, npm install nothere.js in <here>
+ForeignError | your own lib/math.ts is loaded by its path from the .v2 file's folder: require("./lib/math.ts") ("lib/math", without ./, names an npm package)
+ForeignError | lib is a folder of your own, whose files are loaded by their paths from the .v2 file's folder, as in import("./lib/…") ("lib", without ./, names an npm package)
+ForeignError | lib is a folder of your own, whose files are loaded by their paths from the .v2 file's folder, as in require("./lib/nothere") ("lib/nothere", without ./, names an npm package)
 ForeignError | if 'v2-no-such-package' isn't misspelled, install it with npm install v2-no-such-package in <here> or a folder above it, where Node looks for this file
 ForeignError | if 'v2-no-such-package' isn't misspelled, install it with npm install v2-no-such-package in <here> or a folder above it, where Node looks for this file
 ForeignError | null

@@ -26,3 +26,8 @@ show(func() {
     @import { chunk } from js."v2-no-such-package"
     return chunk
 })
+// Its own lib/math.ts, named with its folder as "baseUrl" allows TypeScript: by that path.
+show(func() {
+    @import { PI2 } from js."lib/math"
+    return PI2
+})

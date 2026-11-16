@@ -974,7 +974,9 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
   `python.exe` is skipped). Override with `[engines.py] command`.
 - If `[python] venv` is set, that virtual environment's Python and packages are used
   ([14](#14-project-file-v2toml)). A conda environment isn't one: run `v2` where it is activated,
-  or name its `python` in `[engines.py] command`.
+  or name its `python` in `[engines.py] command`. A `conda run` command there needs
+  `--no-capture-output` after `run`, as V2 talks to Python over its input and output; doctor
+  and the error say so.
 - Where Python modules are found: [chapter 7](#7-importing-foreign-packages).
 - Named arguments become Python keyword arguments: `plot(xs, color: "red")`.
 - If a Python function returns a coroutine, V2 waits for it (see [8.4](#84-rules) for the one
