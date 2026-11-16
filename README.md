@@ -404,7 +404,8 @@ or in the project folder (where the `v2.toml` of the script you run is), is `py.
 modules, such as `json` or `numbers`: one Python serves the whole run, with one module per name,
 and V2 says so when another came first). One project serves the run, too: a `.v2` file imported
 from another project uses your script's `v2.toml`, venv and project folder, and only its own
-folder is added for its `.py` files.
+folder is added for its `.py` files (npm packages are still found from each `.v2` file's own
+folder upward, as Node does).
 
 - **npm:** in your project folder, `npm install lodash` (in a Windows PowerShell that blocks
   `npm`, `npm.cmd install lodash`; in WSL, check that `type -P npm` names Linux's npm, as the
