@@ -17,6 +17,11 @@ show(func() => @ts { require("~/utils") })
 show(func() => @js { require("paths") })
 show(func() => @js { import("paths") })
 show(func() => @js { require("nothere.js") })
+// Its own lib/math.ts, named with its folder as "baseUrl" allows TypeScript: by that path. lib is
+// a folder of its own, never npm install lib (an import() names only that part).
+show(func() => @ts { require("lib/math") })
+show(func() => @js { import("lib/math") })
+show(func() => @js { require("lib/nothere") })
 // A package no alias matches: the install line.
 show(func() => @js { require("v2-no-such-package") })
 show(func() => @js { import("v2-no-such-package") })

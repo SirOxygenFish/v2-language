@@ -267,6 +267,8 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 for (name, value) in vars {
                     notes.push(format!("{id}: {name} is set ({value}), which {} reads as it starts", if id == "py" { "Python" } else { "Node.js" }));
                 }
+                // A configured `conda run` that answers --version but can't run a worker (8.4).
+                notes.extend(crate::engines::session::conda_run_note(&e).map(|note| format!("{id}: {note}")));
                 ready.push(id);
             }
             Err(nf) => {

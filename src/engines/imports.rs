@@ -656,49 +656,78 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> 
         }
         return Some("a local file is found from the .v2 file's folder: check the path".to_string());
     }
+    Some(npm_hint(&name, dir, None))
+}
+
+/// The hint of a bare specifier `name` Node didn't find (13.5), from the importing .v2 file's
+/// folder `dir`, where Node starts looking: an installed package without that subpath, a
+/// tsconfig `paths` alias, a file or folder of the script's own (by its path, never `npm
+/// install`), Yarn PnP, else the install line. `call`: `require` or `import` for a block's own
+/// call, in its words; `None` for an `@import`.
+fn npm_hint(name: &str, dir: &Path, call: Option<&str>) -> String {
     // The package is the first part of the specifier (`@scope/name` for a scoped one).
     let mut parts = name.splitn(3, '/');
     let package = match (parts.next(), parts.next()) {
         (Some(scope), Some(rest)) if scope.starts_with('@') => format!("{scope}/{rest}"),
         (Some(first), _) => first.to_string(),
-        _ => name.clone(),
+        _ => name.to_string(),
     };
     let modules: Vec<PathBuf> = dir.ancestors().map(|d| d.join("node_modules")).filter(|m| m.is_dir()).collect();
     if package != name && modules.iter().any(|m| m.join(&package).is_dir()) {
         let rest = name[package.len()..].trim_start_matches('/');
-        return Some(format!("'{package}' is installed, but has no '{rest}': check the path after '{package}/'"));
+        return format!("'{package}' is installed, but has no '{rest}': check the path after '{package}/'");
     }
     // `@/lib`: an alias of the nearest tsconfig.json, which only TypeScript's own tools read.
-    if let Some(hint) = alias_hint(&name, dir) {
-        return Some(hint);
+    if let Some(hint) = alias_hint(name, dir) {
+        return hint;
     }
-    // `js.helpers` for the script's own helpers.js: a file is imported by its path, and
-    // `npm install helpers` would fetch whatever package has that name.
-    let with_ext = Path::new(&name).extension().and_then(|e| e.to_str()).is_some_and(|e| OWN_EXTS.contains(&e.to_ascii_lowercase().as_str()));
-    let own = if with_ext { vec![dir.join(&name)] } else { OWN_EXTS.iter().map(|e| dir.join(format!("{name}.{e}"))).collect() };
-    let lang = file_lang;
-    if let Some(file) = own.iter().find(|p| p.is_file()).and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()) {
-        return Some(format!("your own {file} is imported by its path from the .v2 file's folder: @import {{ … }} from {}.\"./{file}\" ({}, without ./, names an npm package)", lang(&file), written(&name)));
+    // A file of the script's own by its path, as the hint writes it: `require("./x.js")` in a
+    // block, `js."./x.js"` for an @import; and the specifier as it was given.
+    let by_path = |path: &str| match call {
+        Some(call) => format!("{call}(\"{path}\")"),
+        None => format!("{}.\"{path}\"", file_lang(path)),
+    };
+    let (loaded, statement) = if call.is_some() { ("loaded", "") } else { ("imported", "@import { … } from ") };
+    let unnamed = format!("{}, without ./, names an npm package", if call.is_some() { format!("\"{name}\"") } else { written(name) });
+    // `js.helpers` for the script's own helpers.js, `lib/math` for lib/math.ts: a file is imported
+    // by its path (its folders kept), and `npm install helpers` would fetch whatever package has
+    // that name.
+    let with_ext = Path::new(name).extension().and_then(|e| e.to_str()).is_some_and(|e| OWN_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    let own: Vec<String> = if with_ext { vec![name.to_string()] } else { OWN_EXTS.iter().map(|e| format!("{name}.{e}")).collect() };
+    if let Some(file) = own.iter().find(|f| dir.join(f).is_file()) {
+        return format!("your own {file} is {loaded} by its path from the .v2 file's folder: {statement}{} ({unnamed})", by_path(&format!("./{file}")));
     }
+    // `lib/…` (`lib` alone from an import(), whose message names the package part) where lib is a
+    // folder next to the .v2 file: the script's own code, never `npm install lib`.
+    let first = name.split('/').next().unwrap_or(name);
+    let folder = !first.is_empty() && dir.join(first).is_dir();
     if with_ext {
-        return Some(format!("a file of your own is imported by its path from the .v2 file's folder, as in {}.\"./{name}\": check its name ({}, without ./, names an npm package)", lang(&name), written(&name)));
+        // `chart.js` may be an npm package's own name: its install line too, unless the first
+        // part is a folder of the script's own.
+        let npm = if folder { String::new() } else { format!("; or, for the npm package {package}, npm install {package} in {}", dir.display()) };
+        return format!("a file of your own is {loaded} by its path from the .v2 file's folder, as in {}: check its name ({unnamed}){npm}", by_path(&format!("./{name}")));
+    }
+    if folder {
+        let example = if name.contains('/') { format!("./{name}") } else { format!("./{name}/…") };
+        return format!("{first} is a folder of your own, whose files are {loaded} by their paths from the .v2 file's folder, as in {} ({unnamed})", by_path(&example));
     }
     // Yarn Plug'n'Play keeps packages where only Yarn's loader finds them, with no node_modules.
     if let Some(pnp) = dir.ancestors().flat_map(|d| [d.join(".pnp.cjs"), d.join(".pnp.js")]).find(|p| p.is_file()) {
-        return Some(format!(
+        return format!(
             "this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install",
             pnp.display()
-        ));
+        );
     }
     let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| format!("did you mean js.{n}? "));
+    // The did-you-mean names what is written: `js.lodash` for an @import, `"lodash"` in a block.
+    let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| if call.is_some() { format!("did you mean \"{n}\"? ") } else { format!("did you mean js.{n}? ") });
     // Node looks in node_modules from the importing .v2 file's folder up, which for a shared
     // module isn't the project's folder.
-    Some(format!(
+    format!(
         "{}if '{package}' isn't misspelled, install it with npm install {package} in {} or a folder above it, where Node looks for this file",
         near.unwrap_or_default(),
         dir.display()
-    ))
+    )
 }
 
 /// Whether the project at `root` has the Python module `name` (13.5): a `name.py` or `name`
@@ -897,10 +926,10 @@ fn imported_alias_hint(message: &str) -> Option<String> {
 
 /// A block's own `require()` (`MODULE_NOT_FOUND`, the .v2 file first on its `Require stack`) or
 /// `import()` (`ERR_MODULE_NOT_FOUND`, `imported from` the .v2 file) of a bare specifier that Node
-/// didn't find (13.5): the hints an `@import` of it gets, from the .v2 file's folder, where a
-/// block's `require` looks, in the block's words: a `paths` alias of tsconfig.json, a file of the
-/// script's own (by its path, as in `require("./helpers.js")`), Yarn PnP, `npm install`. `code`:
-/// the error's (its data).
+/// didn't find (13.5): the hints an `@import` of it gets (`npm_hint`), from the .v2 file's folder,
+/// where a block's `require` looks, in the block's words: an installed package without that
+/// subpath, a `paths` alias of tsconfig.json, a file or folder of the script's own (by its path,
+/// as in `require("./lib/helpers.js")`), Yarn PnP, `npm install`. `code`: the error's (its data).
 pub(crate) fn block_module_hint(message: &str, code: &str) -> Option<String> {
     let (spec, importer, call) = match code {
         "MODULE_NOT_FOUND" => {
@@ -919,26 +948,8 @@ pub(crate) fn block_module_hint(message: &str, code: &str) -> Option<String> {
     if !block || spec.is_empty() || spec.starts_with(['.', '/', '\\']) || spec.contains(':') {
         return None;
     }
-    let dir = importer.parent()?;
-    if let Some(hint) = alias_hint(spec, dir) {
-        return Some(hint);
-    }
-    let with_ext = Path::new(spec).extension().and_then(|e| e.to_str()).is_some_and(|e| OWN_EXTS.contains(&e.to_ascii_lowercase().as_str()));
-    let own = if with_ext { vec![dir.join(spec)] } else { OWN_EXTS.iter().map(|e| dir.join(format!("{spec}.{e}"))).collect() };
-    if let Some(file) = own.iter().find(|p| p.is_file()).and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()) {
-        return Some(format!("your own {file} is loaded by its path from the .v2 file's folder: {call}(\"./{file}\") (\"{spec}\", without ./, names an npm package)"));
-    }
-    if with_ext {
-        return Some(format!("a file of your own is loaded by its path from the .v2 file's folder, as in {call}(\"./{spec}\"): check its name (\"{spec}\", without ./, names an npm package)"));
-    }
-    // The rest as for an @import (only its Python branches read the project's root).
-    let site = Site { dir, file: "", root: dir, toml: false };
-    let hint = missing_package_hint(&format!("Cannot find module '{spec}'"), &site, None)?;
-    // Its did-you-mean names an @import's selector, `js.lodash`.
-    Some(match hint.strip_prefix("did you mean js.").and_then(|r| r.split_once("? ")) {
-        Some((near, rest)) => format!("did you mean \"{near}\"? {rest}"),
-        None => hint,
-    })
+    // As for an @import, in the block's words.
+    Some(npm_hint(spec, importer.parent()?, Some(call)))
 }
 
 /// Whether the `paths` key `key` (`@lib/*`, `~/*`, `utils`) can match a specifier that is
@@ -1872,7 +1883,12 @@ mod tests {
         assert_eq!(hint("Cannot find module 'helpers'", &js), own);
         // What was written: `js."helpers.js"`, quoted.
         assert_eq!(hint("Cannot find module 'helpers.js'", &js), own.replace("js.helpers,", "js.\"helpers.js\","));
-        assert_eq!(hint("Cannot find module 'util.ts'", &js), "a file of your own is imported by its path from the .v2 file's folder, as in ts.\"./util.ts\": check its name (js.\"util.ts\", without ./, names an npm package)");
+        // Review of round 19: a name with such an extension may be an npm package's own
+        // (chart.js), so its install line follows.
+        assert_eq!(
+            hint("Cannot find module 'util.ts'", &js),
+            format!("a file of your own is imported by its path from the .v2 file's folder, as in ts.\"./util.ts\": check its name (js.\"util.ts\", without ./, names an npm package); or, for the npm package util.ts, npm install util.ts in {}", js.display())
+        );
         // A local path without its extension, when the file is there.
         std::fs::write(js.join("money.ts"), "").unwrap();
         assert_eq!(hint("Cannot find module './money'", &js), "did you mean ts.\"./money.ts\"? a file is named with its extension");
@@ -2190,6 +2206,61 @@ mod tests {
         std::fs::write(d.join("helpers.js"), "").unwrap();
         assert!(missing_package_hint("Cannot find module 'helpers'", &site_at(&d), None).unwrap().starts_with("your own helpers.js"));
         assert_eq!(missing_package_hint("Cannot find module './x.js'", &site_at(&d), None).as_deref(), Some("a local file is found from the .v2 file's folder: check the path"));
+    }
+
+    #[test]
+    fn a_file_or_folder_of_the_scripts_own_keeps_its_folders_in_the_hint() {
+        // Review of round 19: `lib/math` for lib/math.ts is the script's own file, named with its
+        // folders, and `lib/…` for a folder lib of its own is never `npm install lib`; a name
+        // with an extension that isn't there may be an npm package's own (chart.js).
+        let d = temp("own-folders");
+        std::fs::create_dir_all(d.join("lib")).unwrap();
+        std::fs::write(d.join("lib").join("math.ts"), "").unwrap();
+        let import = |spec: &str| missing_package_hint(&format!("Cannot find module '{spec}'"), &site_at(&d), None).unwrap();
+        assert_eq!(import("lib/math"), "your own lib/math.ts is imported by its path from the .v2 file's folder: @import { … } from ts.\"./lib/math.ts\" (js.\"lib/math\", without ./, names an npm package)");
+        assert_eq!(import("lib/math.ts"), "your own lib/math.ts is imported by its path from the .v2 file's folder: @import { … } from ts.\"./lib/math.ts\" (js.\"lib/math.ts\", without ./, names an npm package)");
+        assert_eq!(import("lib/mathh"), "lib is a folder of your own, whose files are imported by their paths from the .v2 file's folder, as in js.\"./lib/mathh\" (js.\"lib/mathh\", without ./, names an npm package)");
+        assert_eq!(import("lib"), "lib is a folder of your own, whose files are imported by their paths from the .v2 file's folder, as in js.\"./lib/…\" (js.lib, without ./, names an npm package)");
+        assert_eq!(import("lib/x.js"), "a file of your own is imported by its path from the .v2 file's folder, as in js.\"./lib/x.js\": check its name (js.\"lib/x.js\", without ./, names an npm package)");
+        assert_eq!(
+            import("chart.js"),
+            format!("a file of your own is imported by its path from the .v2 file's folder, as in js.\"./chart.js\": check its name (js.\"chart.js\", without ./, names an npm package); or, for the npm package chart.js, npm install chart.js in {}", d.display())
+        );
+        assert!(import("libb/math").starts_with("if 'libb' isn't misspelled, install it with npm install libb in "), "no folder libb");
+        // A block's require() names the whole specifier; its import() only the package part.
+        let v2 = d.join("main.v2");
+        let require = |spec: &str| block_module_hint(&format!("Cannot find module '{spec}'\nRequire stack:\n- {}", v2.display()), "MODULE_NOT_FOUND").unwrap();
+        let dynamic = |package: &str| block_module_hint(&format!("Cannot find package '{package}' imported from {}", v2.display()), "ERR_MODULE_NOT_FOUND").unwrap();
+        assert_eq!(require("lib/math"), "your own lib/math.ts is loaded by its path from the .v2 file's folder: require(\"./lib/math.ts\") (\"lib/math\", without ./, names an npm package)");
+        assert_eq!(require("lib/mathh"), "lib is a folder of your own, whose files are loaded by their paths from the .v2 file's folder, as in require(\"./lib/mathh\") (\"lib/mathh\", without ./, names an npm package)");
+        assert_eq!(dynamic("lib"), "lib is a folder of your own, whose files are loaded by their paths from the .v2 file's folder, as in import(\"./lib/…\") (\"lib\", without ./, names an npm package)");
+        assert_eq!(
+            require("chart.js"),
+            format!("a file of your own is loaded by its path from the .v2 file's folder, as in require(\"./chart.js\"): check its name (\"chart.js\", without ./, names an npm package); or, for the npm package chart.js, npm install chart.js in {}", d.display())
+        );
+        assert_eq!(require("lib/x.js"), "a file of your own is loaded by its path from the .v2 file's folder, as in require(\"./lib/x.js\"): check its name (\"lib/x.js\", without ./, names an npm package)");
+    }
+
+    #[test]
+    fn a_blocks_own_require_gets_the_installed_package_near_names_and_yarn_in_its_words() {
+        // Review of round 19, 13.5: the hints an @import gets, with the block's did-you-mean.
+        let d = temp("block-npm");
+        std::fs::create_dir_all(d.join("node_modules").join("lodash")).unwrap();
+        let v2 = d.join("main.v2");
+        let require = |spec: &str| block_module_hint(&format!("Cannot find module '{spec}'\nRequire stack:\n- {}", v2.display()), "MODULE_NOT_FOUND");
+        let place = format!("{} or a folder above it, where Node looks for this file", d.display());
+        assert_eq!(require("lodsh").unwrap(), format!("did you mean \"lodash\"? if 'lodsh' isn't misspelled, install it with npm install lodsh in {place}"));
+        assert_eq!(require("lodash/chunck").unwrap(), "'lodash' is installed, but has no 'chunck': check the path after 'lodash/'");
+        let dynamic = block_module_hint(&format!("Cannot find package 'lodsh' imported from {}", v2.display()), "ERR_MODULE_NOT_FOUND").unwrap();
+        assert!(dynamic.starts_with("did you mean \"lodash\"? if 'lodsh'"), "{dynamic}");
+        std::fs::write(d.join(".pnp.cjs"), "").unwrap();
+        assert_eq!(
+            require("lodsh").unwrap(),
+            format!("this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install", d.join(".pnp.cjs").display())
+        );
+        // Not a block's (a module it required is first on the stack), and relative paths: none.
+        assert_eq!(block_module_hint(&format!("Cannot find module 'lodsh'\nRequire stack:\n- {}", d.join("x.js").display()), "MODULE_NOT_FOUND"), None);
+        assert_eq!(require("./x.js"), None);
     }
 
     #[test]
