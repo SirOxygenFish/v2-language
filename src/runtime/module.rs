@@ -65,18 +65,21 @@ pub fn resolve(sm: &SourceMap, importer: FileId, spec: &str) -> PathBuf {
     base.join(spec)
 }
 
-/// The file `import "spec"` in `importer` loads, canonical, or the `ImportError` message (6.4),
-/// with control characters escaped (2.1). A drive-relative Windows path (`C:m.v2`) is neither
-/// relative to the file nor absolute.
-pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
+/// Why `import "spec"` loads no file: the `ImportError`'s message and its hint (6.4).
+pub type ImportFailure = (String, Option<String>);
+
+/// The file `import "spec"` in `importer` loads, canonical, or the `ImportError`'s message and
+/// hint (6.4), with control characters escaped (2.1). A drive-relative Windows path (`C:m.v2`) is
+/// neither relative to the file nor absolute.
+pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, ImportFailure> {
     locate_noted(sm, importer, spec).map(|(path, _)| path)
 }
 
 /// `locate`, and the note for a spelling that differs from the file's name on disk only in case
 /// (`case_note`). A file already loaded under another canonical path (`SourceMap::same_file`) is
 /// that one.
-pub fn locate_noted(sm: &SourceMap, importer: FileId, spec: &str) -> Result<(PathBuf, Option<String>), String> {
-    let found = locate_raw(sm, importer, spec).map_err(|m| shown_path(&m))?;
+pub fn locate_noted(sm: &SourceMap, importer: FileId, spec: &str) -> Result<(PathBuf, Option<String>), ImportFailure> {
+    let found = locate_raw(sm, importer, spec).map_err(|(m, hint)| (shown_path(&m), hint.map(|h| shown_path(&h))))?;
     let note = case_note(&resolve(sm, importer, spec), spec, &found);
     match sm.same_file(&found) {
         Some(id) => Ok((sm.file(id).path.clone(), note)),
@@ -138,7 +141,8 @@ pub fn case_note(target: &Path, spec: &str, found: &Path) -> Option<String> {
 pub struct LinkProblem {
     /// The path up to and including the link, spelled as the path was.
     pub at: PathBuf,
-    /// What a link that leads nowhere names (`None` when it can't be read); `None` for a loop.
+    /// What a link that leads nowhere names, absolute (`link_target`; `None` when it can't be
+    /// read); `None` for a loop.
     target: Option<PathBuf>,
     looped: bool,
     /// A link to a folder (a junction, a directory symlink): Windows removes it with rmdir.
@@ -151,25 +155,45 @@ impl LinkProblem {
     pub fn problem(&self, name: &str) -> String {
         match (&self.target, self.looped) {
             (_, true) => format!("{name} is a link in a loop"),
-            (Some(to), false) => format!("{name} is a link to {}, which isn't there", crate::syntax::span::strip_verbatim(to).display()),
+            (Some(to), false) => format!("{name} is a link to {}, which isn't there", to.display()),
             (None, false) => format!("{name} is a link to something that isn't there"),
         }
     }
 
     /// What fixes it, for a message that ends with what to do: `remove the link (rmdir
-    /// brokenjunc), or make C:\x\gone` (`del` for a file's link on Windows, `rm` elsewhere).
-    pub fn fix(&self) -> String {
-        let remove = match (cfg!(windows), self.dir) {
-            (true, true) => "rmdir",
-            (true, false) => "del",
-            (false, _) => "rm",
-        };
-        let link = crate::cli::shell_word(&self.at.to_string_lossy());
+    /// sub\brokenjunc), or make C:\x\gone`, with `link` the link as typed from the current folder
+    /// (as written, or as messages show it; `remove_command`).
+    pub fn fix(&self, link: &str) -> String {
+        let remove = remove_command(link, self.dir, std::env::var_os("MSYSTEM").is_some());
         match (&self.target, self.looped) {
-            (Some(to), false) => format!("remove the link ({remove} {link}), or make {}", crate::syntax::span::strip_verbatim(to).display()),
-            _ => format!("remove the link ({remove} {link}), or point it somewhere else"),
+            (Some(to), false) => format!("remove the link ({remove}), or make {}", to.display()),
+            _ => format!("remove the link ({remove}), or point it somewhere else"),
         }
     }
+}
+
+/// The command that removes the link `link`: on Windows `rmdir`, or `del` for a file's link, with
+/// `\`, as cmd takes `/` for a switch; in Git Bash (`git_bash`: `MSYSTEM` is set), whose bash
+/// drops a `\` and whose rmdir refuses a junction, `rm` with `/`; elsewhere `rm`.
+fn remove_command(link: &str, dir: bool, git_bash: bool) -> String {
+    let (remove, link) = match (cfg!(windows), git_bash, dir) {
+        (true, false, true) => ("rmdir", link.replace('/', "\\")),
+        (true, false, false) => ("del", link.replace('/', "\\")),
+        (true, true, _) => ("rm", link.replace('\\', "/")),
+        (false, ..) => ("rm", link.to_string()),
+    };
+    format!("{remove} {}", crate::cli::shell_word(&link))
+}
+
+/// Where the link `at` points, absolute: a relative target (`ln -s ../shared lib`) is relative to
+/// the link's own folder, so `make gone` would make the wrong folder (DOCS 3.10).
+fn link_target(at: &Path, to: &Path) -> PathBuf {
+    let to = crate::syntax::span::strip_verbatim(to);
+    if to.is_absolute() {
+        return to;
+    }
+    let folder = at.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    absolute_clean(&canonical(folder).unwrap_or_else(|| folder.to_path_buf()).join(to))
 }
 
 /// The start of `path` as written that is the path `at`, one of its beginnings (`a/link` of
@@ -212,7 +236,7 @@ pub fn link_problem(path: &Path) -> Option<LinkProblem> {
         match std::fs::metadata(&at) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Some(LinkProblem { target: std::fs::read_link(&at).ok(), at, looped: false, dir });
+                return Some(LinkProblem { target: std::fs::read_link(&at).ok().map(|to| link_target(&at, &to)), at, looped: false, dir });
             }
             Err(e) if is_link_loop(&e) => return Some(LinkProblem { at, target: None, looped: true, dir }),
             Err(_) => return None,
@@ -227,16 +251,17 @@ pub fn link_problem(path: &Path) -> Option<LinkProblem> {
 /// that would fail, nor Windows' "Access is denied".
 pub fn link_error(verb: &str, path: &str) -> Option<crate::runtime::error::ErrorValue> {
     let link = link_problem(Path::new(path))?;
-    let name = if link.at == Path::new(path) { "it".to_string() } else { format!("'{}'", written_prefix(path, &link.at)) };
+    let written = written_prefix(path, &link.at);
+    let name = if link.at == Path::new(path) { "it".to_string() } else { format!("'{written}'") };
     let err = crate::runtime::error::ErrorValue::new("IOError", shown_path(&format!("cannot {verb} '{path}': {}", link.problem(&name))));
-    let _ = err.hint.set(shown_path(&link.fix()).into());
+    let _ = err.hint.set(shown_path(&link.fix(&written)).into());
     Some(err)
 }
 
-fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
+fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, ImportFailure> {
     let p = Path::new(spec);
     if matches!(p.components().next(), Some(std::path::Component::Prefix(_))) && !p.has_root() {
-        return Err(format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"));
+        return Err((format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"), None));
     }
     let target = resolve(sm, importer, spec);
     let found = match std::fs::canonicalize(&target) {
@@ -247,36 +272,38 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         // to the OS, which follows /proc's links, though canonicalize can't name its target.
         Err(e) if std::fs::symlink_metadata(&target).is_ok() => {
             if std::fs::metadata(&target).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
-                return Err(format!("cannot import '{spec}': it is a pipe or a device, not a file"));
+                return Err((format!("cannot import '{spec}': it is a pipe or a device, not a file"), None));
             }
-            return Err(match std::fs::read_link(&target) {
+            let message = match std::fs::read_link(&target) {
                 Ok(to) if e.kind() == std::io::ErrorKind::NotFound => {
                     format!("cannot import '{spec}': it is a symbolic link to {}, which isn't there", crate::syntax::span::strip_verbatim(&to).to_string_lossy())
                 }
                 _ if is_link_loop(&e) => format!("cannot import '{spec}': it is a link in a loop"),
                 _ => format!("cannot import '{spec}': {}", os_message(&e)),
-            });
+            };
+            return Err((message, None));
         }
         Err(e) => {
             // A link on the way that leads nowhere or in a loop, a junction too (DOCS 3.10).
             if let Some(link) = link_problem(&target) {
-                return Err(format!("cannot import '{spec}': {}", link.problem(&format!("'{}'", shown(&link.at)))));
+                let at = shown(&link.at);
+                return Err((format!("cannot import '{spec}': {}", link.problem(&format!("'{at}'"))), Some(link.fix(&at))));
             }
             // There, in a folder V2 may not read (a deny inherited from it): the OS's reason.
             let lstat = std::fs::symlink_metadata(&target).err();
             if e.kind() == std::io::ErrorKind::PermissionDenied || lstat.is_some_and(|l| l.kind() == std::io::ErrorKind::PermissionDenied) {
-                return Err(format!("cannot import '{spec}': {}", os_message(&e)));
+                return Err((format!("cannot import '{spec}': {}", os_message(&e)), None));
             }
             // `import "./util" as util` for util.v2.
             let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
             let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
-            return Err(format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target)));
+            return Err((format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target)), None));
         }
     };
     // A pipe or a device (a FIFO, a link to /dev/zero) would never end being read; the entry
     // FILE is refused the same way (19.1).
     if std::fs::metadata(&found).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
-        return Err(format!("cannot import '{spec}': it is a pipe or a device, not a file"));
+        return Err((format!("cannot import '{spec}': it is a pipe or a device, not a file"), None));
     }
     // A folder: one of its .v2 files is what to write (Windows would say "Access is denied").
     if found.is_dir() {
@@ -293,7 +320,7 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         let plain = stem.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && stem.chars().all(|c| c.is_alphanumeric() || c == '_');
         let alias = if plain && file != "FILE.v2" { stem } else { "m" };
         let joined = format!("{}/{file}", spec.trim_end_matches(['/', '\\']));
-        return Err(format!("cannot import '{spec}': it is a folder, and import loads a .v2 file, as in import \"{joined}\" as {alias}"));
+        return Err((format!("cannot import '{spec}': it is a folder, and import loads a .v2 file, as in import \"{joined}\" as {alias}"), None));
     }
     // `import` loads V2 files: another language's file, or data, is used another way.
     let ext = found.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
@@ -315,7 +342,7 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
         }
         _ => format!("read a data file with read_file(f\"${{script_dir()}}/{}\")", rel.replace('\\', "/")),
     };
-    Err(format!("cannot import '{spec}': import loads .v2 files; {next}"))
+    Err((format!("cannot import '{spec}': import loads .v2 files; {next}"), None))
 }
 
 /// `fs::canonicalize` without the `\\?\` prefix, or `None` when the file is missing.
@@ -565,16 +592,56 @@ mod tests {
         let broken = link_problem(&d.join("broken").join("lib.v2")).expect("the broken link");
         assert_eq!(broken.at, d.join("broken"));
         assert_eq!(broken.problem("'broken'"), format!("'broken' is a link to {}, which isn't there", d.join("gone").display()));
-        let remove = if cfg!(windows) { "rmdir" } else { "rm" };
-        let shown = |p: &Path| crate::cli::shell_word(&p.to_string_lossy());
-        assert_eq!(broken.fix(), format!("remove the link ({remove} {}), or make {}", shown(&d.join("broken")), d.join("gone").display()));
+        // The link as given, in the command the shell needs (`remove_command`).
+        let remove = remove_command("broken", true, std::env::var_os("MSYSTEM").is_some());
+        assert_eq!(broken.fix("broken"), format!("remove the link ({remove}), or make {}", d.join("gone").display()));
         let looped = link_problem(&d.join("loop1").join("x").join("y.v2")).expect("the loop");
         assert_eq!((looped.at.clone(), looped.problem("it")), (d.join("loop1"), "it is a link in a loop".to_string()));
-        assert!(looped.fix().ends_with("), or point it somewhere else"), "{}", looped.fix());
+        assert!(looped.fix("loop1").ends_with(" loop1), or point it somewhere else"), "{}", looped.fix("loop1"));
         // A link that leads somewhere, and a path that simply isn't there, have none.
         assert!(link_problem(&d.join("fine").join("nope.v2")).is_none());
         assert!(link_problem(&d.join("nope").join("x.v2")).is_none());
         assert_eq!(written_prefix("a/broken/x.txt", Path::new("a").join("broken").as_path()), "a/broken");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_command_that_removes_a_link_suits_the_shell() {
+        // 19.1, 5.10 (round 19): cmd takes `sub/broken` for a switch ("Invalid switch"), Git
+        // Bash's bash drops a `\` and its rmdir refuses a junction, where rm removes it.
+        if cfg!(windows) {
+            assert_eq!(remove_command("sub/broken", true, false), r"rmdir sub\broken");
+            assert_eq!(remove_command("./sub/link.v2", false, false), r"del .\sub\link.v2");
+            assert_eq!(remove_command(r"sub\broken", true, true), "rm sub/broken");
+            assert_eq!(remove_command(r"C:\My Files\broken", true, false), r#"rmdir "C:\My Files\broken""#);
+            assert_eq!(remove_command(r"C:\My Files\broken", false, true), r#"rm "C:/My Files/broken""#);
+        } else {
+            for git_bash in [false, true] {
+                assert_eq!(remove_command("sub/broken", false, git_bash), "rm sub/broken");
+            }
+        }
+    }
+
+    #[test]
+    fn a_relative_link_target_is_from_the_links_folder() {
+        // DOCS 3.10 (round 19): `ln -s ../gone sub/broken` points at gone next to sub, not in the
+        // current folder; an absolute target is as it is. (No folder here exists.)
+        let base = std::env::temp_dir().join(format!("v2-no-such-{}", std::process::id()));
+        assert_eq!(link_target(&base.join("sub").join("broken"), Path::new("../gone")), absolute_clean(&base.join("gone")));
+        assert_eq!(link_target(&base.join("sub").join("broken"), Path::new("gone")), absolute_clean(&base.join("sub").join("gone")));
+        assert_eq!(link_target(&base.join("broken"), &base.join("abs")), base.join("abs"));
+        #[cfg(unix)]
+        {
+            // A real one: its folder as it really is.
+            let d = std::env::temp_dir().join(format!("v2rellink-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("sub")).unwrap();
+            std::os::unix::fs::symlink("gone", d.join("sub").join("broken")).unwrap();
+            let link = link_problem(&d.join("sub").join("broken").join("main.v2")).expect("the broken link");
+            let gone = canonical(&d.join("sub")).unwrap().join("gone");
+            assert_eq!(link.problem("'sub/broken'"), format!("'sub/broken' is a link to {}, which isn't there", gone.display()));
+            assert_eq!(link.fix("sub/broken"), format!("remove the link (rm sub/broken), or make {}", gone.display()));
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 }

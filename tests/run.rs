@@ -5374,43 +5374,81 @@ fn real_path(p: &Path) -> String {
 fn links_on_the_way_that_lead_nowhere_or_in_a_loop_say_so() {
     // DOCS 3.10, 6.4, 19.1, 5.10 (round 19): a folder on a path that is a link (a junction on
     // Windows, the one link a non-administrator can make) to nothing, or in a loop, is named in a
-    // run, in v2 check, for FILE and in the file builtins, with what fixes it: not "cannot find
-    // module", "there is no folder", Windows' words, or a make_dir hint that would fail.
+    // run, in v2 check, for FILE and in the file builtins, with what fixes it (an import's hint
+    // too): not "cannot find module", "there is no folder", Windows' words, or a make_dir hint
+    // that would fail. The link is named as written, in the command the shell needs: on Windows
+    // rmdir with \ (cmd takes sub/broken for a switch), in Git Bash (MSYSTEM is set) rm with /.
     let home = TempHome::new();
     let d = &home.0;
-    std::fs::create_dir_all(d.join("gone")).unwrap();
-    dir_link(&d.join("broken"), &d.join("gone"));
-    std::fs::remove_dir(d.join("gone")).unwrap();
+    std::fs::create_dir_all(d.join("sub").join("gone")).unwrap();
+    dir_link(&d.join("sub").join("broken"), &d.join("sub").join("gone"));
+    std::fs::remove_dir(d.join("sub").join("gone")).unwrap();
     dir_link(&d.join("loop1"), &d.join("loop2"));
     dir_link(&d.join("loop2"), &d.join("loop1"));
-    let main = "try { import \"./broken/lib.v2\" as a } catch (e) { print(e.message) }\n\
-                try { import \"./loop1/lib.v2\" as b } catch (e) { print(e.message) }\n\
-                for p in [\"broken/new.txt\", \"loop1/x.txt\"] {\n    try { write_file(p, \"x\") } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n\
-                try { make_dir(\"broken\") } catch (e) { print(e.message + \" | \" + e.hint) }\n";
+    let main = "try { import \"./sub/broken/lib.v2\" as a } catch (e) { print(e.message + \" | \" + e.hint) }\n\
+                try { import \"./loop1/lib.v2\" as b } catch (e) { print(e.message + \" | \" + e.hint) }\n\
+                for p in [\"sub/broken/new.txt\", \"loop1/x.txt\"] {\n    try { write_file(p, \"x\") } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n\
+                try { make_dir(\"sub/broken\") } catch (e) { print(e.message + \" | \" + e.hint) }\n";
     std::fs::write(d.join("main.v2"), main).unwrap();
-    let gone = d.join("gone").display().to_string();
-    let rm = if cfg!(windows) { "rmdir" } else { "rm" };
+    // With MSYSTEM set or not, whatever shell runs the tests: (code, stdout, stderr).
+    let run = |args: &[&str], msystem: Option<&str>| {
+        let mut cmd = v2_command(d);
+        cmd.args(args).current_dir(d).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        match msystem {
+            Some(v) => cmd.env("MSYSTEM", v),
+            None => cmd.env_remove("MSYSTEM"),
+        };
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+        let text = |b: &[u8]| normalize(&String::from_utf8_lossy(b));
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    let gone = d.join("sub").join("gone").display().to_string();
     let to_gone = format!("is a link to {gone}, which isn't there");
-    let fix = format!("remove the link ({rm} broken), or make {gone}");
-    let in_loop = format!("'loop1' is a link in a loop | remove the link ({rm} loop1), or point it somewhere else");
-    let want = [
-        format!("cannot import './broken/lib.v2': 'broken' {to_gone}"),
-        "cannot import './loop1/lib.v2': 'loop1' is a link in a loop".to_string(),
-        format!("cannot write 'broken/new.txt': 'broken' {to_gone} | {fix}"),
-        format!("cannot write 'loop1/x.txt': {in_loop}"),
-        format!("cannot create 'broken': it {to_gone} | {fix}"),
-    ];
-    let (code, stdout, stderr) = run_in_home(d, &["main.v2"], &[]);
-    assert_eq!((code, stdout), (Some(0), want.join("\n") + "\n"), "{stderr}");
-    let (code, stdout, stderr) = run_in_home(d, &["check", "main.v2"], &[]);
-    assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 2 errors\n"), "{stderr}");
-    for (line, w) in want[..2].iter().enumerate() {
-        assert!(stderr.contains(&format!("main.v2:{}:7: ImportError: {w}\n", line + 1)), "{stderr}");
+    for msystem in [None, Some("MINGW64")] {
+        let (broken, loop1) = match (cfg!(windows), msystem) {
+            (true, None) => (r"rmdir sub\broken", "rmdir loop1"),
+            _ => ("rm sub/broken", "rm loop1"),
+        };
+        let fix = format!("remove the link ({broken}), or make {gone}");
+        let in_loop = format!("'loop1' is a link in a loop | remove the link ({loop1}), or point it somewhere else");
+        let want = [
+            format!("cannot import './sub/broken/lib.v2': 'sub/broken' {to_gone} | {fix}"),
+            format!("cannot import './loop1/lib.v2': {in_loop}"),
+            format!("cannot write 'sub/broken/new.txt': 'sub/broken' {to_gone} | {fix}"),
+            format!("cannot write 'loop1/x.txt': {in_loop}"),
+            format!("cannot create 'sub/broken': it {to_gone} | {fix}"),
+        ];
+        let (code, stdout, stderr) = run(&["main.v2"], msystem);
+        assert_eq!((code, stdout), (Some(0), want.join("\n") + "\n"), "{stderr}");
+        let (code, stdout, stderr) = run(&["check", "main.v2"], msystem);
+        assert_eq!((code, stdout.as_str()), (Some(1), "check main.v2: 1 file, 2 errors\n"), "{stderr}");
+        for (line, w) in want[..2].iter().enumerate() {
+            let (message, hint) = w.split_once(" | ").unwrap();
+            assert!(stderr.contains(&format!("main.v2:{}:7: ImportError: {message}\n", line + 1)), "{stderr}");
+            assert!(stderr.contains(&format!("\n  hint: {hint}\n")), "{stderr}");
+        }
+        let lines = [("sub/broken/main.v2", format!("'sub/broken' {to_gone}: {fix}")), ("loop1/main.v2", in_loop.replace(" |", ":"))];
+        for (file, line) in lines {
+            let (code, _, stderr) = run(&[file], msystem);
+            assert_eq!((code, stderr), (Some(2), format!("v2: cannot find '{file}'\n{line}\n")));
+        }
     }
-    let lines = [("broken/main.v2", format!("'broken' {to_gone}: {fix}")), ("loop1/main.v2", in_loop.replace(" |", ":"))];
-    for (file, line) in lines {
-        let (code, _, stderr) = run_in_home(d, &[file], &[]);
-        assert_eq!((code, stderr), (Some(2), format!("v2: cannot find '{file}'\n{line}\n")));
+    // A relative symbolic link's target is from the link's folder, not the current one.
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(d.join("rel")).unwrap();
+        std::os::unix::fs::symlink("gone", d.join("rel").join("broken")).unwrap();
+        let rel = "try { import \"./rel/broken/lib.v2\" as a } catch (e) { print(e.message + \" | \" + e.hint) }\n\
+                   try { write_file(\"rel/broken/x.txt\", \"x\") } catch (e) { print(e.message + \" | \" + e.hint) }\n";
+        std::fs::write(d.join("rel.v2"), rel).unwrap();
+        let gone = format!("{}/gone", real_path(&d.join("rel")));
+        let problem = format!("'rel/broken' is a link to {gone}, which isn't there");
+        let fix = format!("remove the link (rm rel/broken), or make {gone}");
+        let want = format!("cannot import './rel/broken/lib.v2': {problem} | {fix}\ncannot write 'rel/broken/x.txt': {problem} | {fix}\n");
+        let (code, stdout, stderr) = run(&["rel.v2"], None);
+        assert_eq!((code, stdout), (Some(0), want), "{stderr}");
+        let (code, _, stderr) = run(&["rel/broken/main.v2"], None);
+        assert_eq!((code, stderr), (Some(2), format!("v2: cannot find 'rel/broken/main.v2'\n{problem}: {fix}\n")));
     }
 }
 
@@ -5614,6 +5652,22 @@ fn a_module_reached_through_a_share_and_its_drive_path_is_one_module() {
         let (code, stdout, stderr) = run_in_home(&home.0, &[&format!(r"{unc}\pymix.v2")], &[]);
         assert_eq!((code, stdout.as_str()), (Some(0), "hi hi\n"), "{stderr}");
     }
+}
+
+#[test]
+fn a_new_file_that_got_a_deleted_modules_id_is_another_module() {
+    // 6.4 (round 19): a module is looked up by its file's ID only while the loaded path still has
+    // that ID. ext4 gives a deleted file's inode to the next new file, so two.v2, written after
+    // one.v2 was imported and deleted, got one.v2's ID and its import returned one.v2's module.
+    let home = TempHome::new();
+    let main = "let d = script_dir() + \"/gen\"\nmake_dir(d)\n\
+                write_file(d + \"/one.v2\", \"print(\\\"one.v2 loading\\\")\\nlet x = 1\\n\")\n\
+                import \"./gen/one.v2\" as a\nprint(\"a.x =\", a.x)\nremove_file(d + \"/one.v2\")\n\
+                write_file(d + \"/two.v2\", \"print(\\\"two.v2 loading\\\")\\nlet x = 2\\n\")\n\
+                import \"./gen/two.v2\" as b\nprint(\"b.x =\", b.x)\n";
+    std::fs::write(home.0.join("main.v2"), main).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["main.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "one.v2 loading\na.x = 1\ntwo.v2 loading\nb.x = 2\n"), "{stderr}");
 }
 
 #[test]

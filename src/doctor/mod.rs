@@ -126,8 +126,8 @@ impl Checker {
                     }
                     p
                 }
-                Err(msg) => {
-                    self.import_error(msg, at);
+                Err((msg, hint)) => {
+                    self.import_error_hint(msg, hint.as_deref(), at);
                     continue;
                 }
             };
