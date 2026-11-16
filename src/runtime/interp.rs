@@ -329,7 +329,14 @@ impl Interp {
                 }
                 p
             }
-            Err(msg) => return self.fail_at("ImportError", msg, at),
+            // With what fixes it, for a link on the way that leads nowhere.
+            Err((msg, hint)) => {
+                let e = ErrorValue::new("ImportError", msg);
+                if let Some(h) = hint {
+                    let _ = e.hint.set(h.into());
+                }
+                return Err(self.raise(Flow::Error(Rc::new(e)), at));
+            }
         };
         match self.modules.get(&path) {
             Some(ModuleState::Done(ns)) => return Ok(ns.clone()),
