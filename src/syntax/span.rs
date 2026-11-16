@@ -82,9 +82,12 @@ pub enum LoadError {
 }
 
 /// The message for a file that isn't UTF-8 (2.1). A UTF-16 file (a byte-order mark first) is
-/// named as such: Windows PowerShell 5's `>` and `Out-File` write UTF-16.
+/// named as such: Windows PowerShell 5's `>` and `Out-File` write UTF-16. UTF-32's marks are
+/// looked for first, as the little-endian one starts with UTF-16's.
 pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bomless_utf16(bytes) {
+    if bytes.starts_with(&[0xFF, 0xFE, 0, 0]) || bytes.starts_with(&[0, 0, 0xFE, 0xFF]) {
+        "file is not valid UTF-8: it is UTF-32 (what Out-File -Encoding utf32 writes); save it as UTF-8"
+    } else if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bomless_utf16(bytes) {
         "file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
         "file is not valid UTF-8: it looks like a binary file, not a V2 script"

@@ -1,5 +1,5 @@
 unsupported operand types for +: 'null' and 'str'
-  hint: getenv(…) gave null: that environment variable isn't set: pass a default, as in getenv("HOME", "/root")
+  hint: getenv("NO_SUCH_V2_VAR_X") gave null: that environment variable isn't set: pass a default, as in getenv("NO_SUCH_V2_VAR_X", "…")
 unsupported operand types for +: 'null' and 'str'
   hint: get() gave null: the key or index isn't there: pass a default, as in d.get(k, 0)
 unsupported operand types for +: 'null' and 'str'
@@ -9,7 +9,7 @@ unsupported operand types for +: 'null' and 'int'
 unsupported operand types for +: 'null' and 'int'
   hint: 'r' is null: it was set from a block, whose value is its last line: that line isn't an expression
 unsupported operand types for +: 'null' and 'str'
-  hint: 'home' is null: it was set from getenv(…), and that variable isn't set: pass a default, as in getenv("HOME", "/root")
+  hint: 'home' is null: it was set from getenv("NO_SUCH_V2_VAR_X"), and that environment variable isn't set: pass a default, as in getenv("NO_SUCH_V2_VAR_X", "…")
 a
 unsupported operand types for +: 'null' and 'int'
   hint: print() gives null: it does its work and has no value to use

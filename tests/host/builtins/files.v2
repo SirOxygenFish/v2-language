@@ -29,6 +29,11 @@ print(len(read_file(path)), read_file(path).encode().hex(), len(read_file(path, 
 // UTF-16 says so, a folder says so, and a path's control character shows escaped.
 write_file(path, b"\xff\xfeh\x00i\x00")
 show(func() => read_file(path))
+// UTF-32 says so, with its own encoding: its little-endian mark starts with UTF-16's (round 19).
+write_file(path, b"\xff\xfe\x00\x00h\x00\x00\x00")
+show(func() => read_file(path))
+write_file(path, b"\x00\x00\xfe\xff\x00\x00\x00h")
+show(func() => read_file(path))
 show(func() => read_file(home))
 try { read_file(home + "\new.txt") } catch (e) { print(e.type, e.message.replace(home, "~").split("': ")[0]) }
 // Invisible characters show inside containers.
