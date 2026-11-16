@@ -1,0 +1,5 @@
+// exit: 1
+// stderr: format_places.v2:5:17: SyntaxError: the only format in ${…} is :.Nf, with N up to 99
+// stderr: hint: pad with " " * n, as in let s = f"${price:.2f}", then " " * (5 - len(s)) + s for 5 wide
+// A width with places pads the number as :.Nf writes it (INTERNALS 3.5).
+print(f"${price:8.2f}")
