@@ -1,0 +1,63 @@
+// requires: py
+// to_v2 of an object with an item it can't convert names the item, and a block that converts the
+// whole object as fits it (DOCS 9.2, INTERNALS 11.5): a set or a mapping item by item, what a hook
+// gave, a deeper item; a pandas or numpy object as text (classes here stand for them, so the test
+// needs neither; run.rs has the real ones).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}
+let hs = @py {
+    import datetime, collections
+    day = datetime.date(2026, 1, 1)
+    class Box:
+        def tolist(self):
+            return [day]
+    class Wrap:
+        def to_dict(self):
+            return day
+    class Holder:
+        def to_dict(self):
+            return {"e": [day]}
+    class Event:
+        pass
+    [{day}, collections.OrderedDict(a=day), {1: day}, Box(), Wrap(), Holder(), {Event()}]
+}
+for h in hs {
+    show(func() => to_v2(h))
+}
+// What the messages name works.
+show(func() => @py(h: hs[0]) { [x.isoformat() for x in h] })
+show(func() => @py(h: hs[1]) { {k: v.isoformat() for k, v in h.items()} })
+show(func() => @py(h: hs[2]) { {str(k): v.isoformat() for k, v in h.items()} })
+show(func() => @py(h: hs[3]) { [x.isoformat() for x in h.tolist()] })
+show(func() => @py(h: hs[4]) { h.to_dict().isoformat() })
+// The object itself is named as before.
+show(func() => to_v2(@py { __import__("datetime").date(2026, 1, 1) }))
+// A pandas Series of dates, and a DataFrame (no tolist), as text.
+let pd = @py {
+    import datetime
+    class Series:
+        def __init__(self, items):
+            self.items_ = items
+        def to_dict(self):
+            return dict(enumerate(self.items_))
+        def tolist(self):
+            return list(self.items_)
+        def astype(self, t):
+            return Series([t(x) for x in self.items_])
+    class DataFrame:
+        def to_dict(self):
+            return {"d": {0: datetime.date(2026, 1, 1)}}
+        def astype(self, t):
+            return self
+    Series.__module__ = "pandas.core.series"
+    DataFrame.__module__ = "pandas.core.frame"
+    [Series([datetime.date(2026, 1, 1), datetime.date(2026, 1, 2)]), DataFrame()]
+}
+show(func() => to_v2(pd[0]))
+show(func() => @py(h: pd[0]) { h.astype(str).tolist() })
+show(func() => to_v2(pd[1]))
