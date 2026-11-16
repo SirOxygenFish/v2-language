@@ -446,6 +446,10 @@ fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
 
 /// `file_error`, with a hint of the caller's when the path itself needs none.
 fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<String>) -> Exec<T> {
+    if let Some(why) = unreachable_root(path, e) {
+        return root_error(verb, path, why);
+    }
+    let hint = hint.or_else(|| tmp_hint(path)).or_else(|| read_only_hint(verb, path, e));
     // A file where a folder goes, or the other way round: Windows says "Access is denied", "The
     // directory name is invalid" or "Cannot create a file when that file already exists".
     let p = std::path::Path::new(path);
@@ -482,14 +486,14 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     } else if let Some(h) = msys_hint(path).filter(|_| e.kind() == std::io::ErrorKind::NotFound) {
         let _ = err.hint.set(h.into());
     } else if bad_windows_name(path) {
-        let _ = err.hint.set(r#"Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > " | ? *): choose another name"#.into());
+        let _ = err.hint.set(format!("{BAD_NAME}: choose another name").into());
     } else if tilde && !p.exists() {
         // A shell expands them, V2 doesn't (5.10); `$env:X\…` fails as a bad name, not as missing.
         let write = if path == "~" { format!("getenv(\"{home}\")") } else { format!("getenv(\"{home}\") + \"{}\"", &path[1..]) };
         let _ = err.hint.set(format!("V2 doesn't expand ~ in paths: write {write}").into());
     } else if let Some(var) = crate::config::unexpanded(path).filter(|_| !p.exists()) {
         let name = var.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
-        let _ = err.hint.set(format!("V2 doesn't expand {var} in paths: write getenv(\"{name}\") in its place").into());
+        let _ = err.hint.set(format!("V2 doesn't expand {var} in paths: write getenv(\"{}\") in its place", home_var(name)).into());
     } else if let Some(d) = no_folder.filter(|_| verb == "write") {
         let mut folder = String::new();
         super::value::quoted(&d.to_string_lossy(), &mut folder);
@@ -572,6 +576,229 @@ fn windows_device(_name: &str) -> bool {
     false
 }
 
+/// What Windows refuses as a file name, for the hints that say so (5.10).
+const BAD_NAME: &str = r#"Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > " | ? *)"#;
+
+/// Windows: a path that would reach something other than what it names, refused before the OS
+/// sees it (5.10). A part (not `.` or `..`) that ends in a dot or a space, which Windows drops
+/// (`remove_file("data.txt.")` would delete `data.txt`), and a path that Windows makes a device
+/// (`GetFullPathNameW` gives `\\.\CON`: a bare `CON`, `AUX`, `PRN`, `COM1`-`COM9` or `LPT1`-`LPT9`
+/// on Windows 11, `NUL` in any folder), where `read_file("CON")` would wait for typed input and
+/// `write_file("nul")` would throw the data away. A `\\?\` or `\\.\` path is taken as written:
+/// when such a name is really there (WSL and Macs make them), the hint shows that way to reach it.
+fn windows_name(verb: &str, path: &str) -> Exec<()> {
+    if !cfg!(windows) || path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
+        return Ok(());
+    }
+    let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
+    let trailing = after_drive.split(['/', '\\']).find(|part| !matches!(*part, "." | "..") && (part.ends_with('.') || part.ends_with(' ')));
+    let why = match (trailing, device_name(path)) {
+        (Some(part), _) => {
+            let kept = part.trim_end_matches(['.', ' ']);
+            let would = if kept.is_empty() { String::new() } else { format!(" ('{}' would be '{}')", shown_path(part), shown_path(kept)) };
+            format!("a Windows file name can't end in a dot or a space{would}")
+        }
+        (None, Some(device)) => format!("{} is the name of a device on Windows", shown_path(&device)),
+        (None, None) => return Ok(()),
+    };
+    let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
+    let builtin = match verb {
+        "read" => "read_file",
+        "write" => "write_file",
+        "check" => "exists",
+        "list" => "list_dir",
+        "create" => "make_dir",
+        _ => "remove_file",
+    };
+    let hint = match verbatim(path).filter(|v| std::fs::symlink_metadata(v).is_ok()) {
+        Some(v) => {
+            let mut q = String::new();
+            super::value::quoted(&v, &mut q);
+            format!(r"{BAD_NAME}, but one of that name is there (WSL and Macs can make one): reach it by its full path with \\?\ in front, as in {builtin}({q})")
+        }
+        None => format!("{BAD_NAME}: choose another name"),
+    };
+    let _ = err.hint.set(hint.into());
+    Err(Flow::Error(Rc::new(err)))
+}
+
+/// Windows: the device a path names, as its full path says (`\\.\CON` gives `CON`) (5.10).
+#[cfg(windows)]
+fn device_name(path: &str) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
+    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let mut buf = [0u16; 1024];
+    // SAFETY: a NUL-terminated name and a buffer of the length given.
+    let n = unsafe { GetFullPathNameW(wide.as_ptr(), buf.len() as u32, buf.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+    // 0 is a failure, and a length that doesn't fit is the size it would need.
+    let full = String::from_utf16_lossy(buf.get(..n).filter(|_| n > 0 && n < buf.len())?);
+    full.strip_prefix(r"\\.\").map(str::to_string)
+}
+
+#[cfg(not(windows))]
+fn device_name(_path: &str) -> Option<String> {
+    None
+}
+
+/// Windows: `path` made absolute with `.` and `..` taken out by its text and `\\?\` in front, so
+/// that nothing is dropped from its parts (`notes.txt ` keeps its space); `None` for a path
+/// relative to another drive's folder (`D:notes.txt`) (5.10).
+fn verbatim(path: &str) -> Option<String> {
+    let given = path.replace('/', "\\");
+    let b = given.as_bytes();
+    let abs = if given.starts_with(r"\\") || (b.get(1) == Some(&b':') && b.get(2) == Some(&b'\\')) {
+        given
+    } else if b.get(1) == Some(&b':') {
+        return None;
+    } else {
+        let cwd = std::env::current_dir().ok()?.to_str()?.to_string();
+        if cwd.starts_with(r"\\") {
+            return None;
+        }
+        match given.strip_prefix('\\') {
+            // `\x`: at the top of the current drive.
+            Some(rest) => format!(r"{}\{rest}", cwd.get(..2)?),
+            None => format!(r"{}\{given}", cwd.trim_end_matches('\\')),
+        }
+    };
+    let (root, rest) = match abs.strip_prefix(r"\\") {
+        Some(unc) => {
+            let mut it = unc.splitn(3, '\\');
+            let (server, share) = (it.next()?, it.next()?);
+            (format!(r"\\?\UNC\{server}\{share}"), it.next().unwrap_or_default().to_string())
+        }
+        None => (format!(r"\\?\{}", abs.get(..2)?), abs.get(3..).unwrap_or_default().to_string()),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    Some(format!(r"{root}\{}", parts.join(r"\")))
+}
+
+/// Windows: a path on a drive that isn't there (an unplugged USB drive, `x:y.txt` with no `X:`)
+/// or on a share that can't be reached: what to say instead of a folder to make (5.10).
+fn unreachable_root(path: &str, e: &std::io::Error) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let p = path.replace('/', "\\");
+    let p = match (p.strip_prefix(r"\\?\UNC\"), p.strip_prefix(r"\\?\")) {
+        (Some(unc), _) => format!(r"\\{unc}"),
+        (None, Some(rest)) => rest.to_string(),
+        (None, None) => p,
+    };
+    let b = p.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        let letter = (b[0] as char).to_ascii_uppercase();
+        return (!drive_is_there(letter)).then(|| format!("there is no drive {letter}: (is it plugged in or connected?)"));
+    }
+    let unc = p.strip_prefix(r"\\").filter(|r| !r.starts_with(['?', '.']))?;
+    let mut parts = unc.split('\\');
+    let (server, share) = (parts.next().filter(|s| !s.is_empty())?, parts.next().filter(|s| !s.is_empty())?);
+    // ERROR_BAD_NETPATH, ERROR_BAD_NET_NAME and the network's other failures.
+    matches!(e.raw_os_error(), Some(51 | 53 | 59 | 64 | 67 | 1203 | 1222 | 1231 | 1232))
+        .then(|| format!(r"the share \\{}\{} can't be reached (is that computer on and connected, and is the share's name right?)", shown_path(server), shown_path(share)))
+}
+
+/// `unreachable_root`'s IOError: no hint of a folder to make, but the escapes' one when the
+/// path holds a control character (`"Q:\temp"`).
+fn root_error<T>(verb: &str, path: &str, why: String) -> Exec<T> {
+    let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
+    if path.chars().any(char::is_control) {
+        let _ = err
+            .hint
+            .set(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write Windows paths with / or \\, as in "notes/new.txt""#.into());
+    }
+    Err(Flow::Error(Rc::new(err)))
+}
+
+/// Windows: whether there is a drive `letter:` (`GetDriveTypeW` isn't `DRIVE_NO_ROOT_DIR`); it
+/// doesn't touch the drive, so a network drive that is slow to answer doesn't hold it up.
+#[cfg(windows)]
+fn drive_is_there(letter: char) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    let root: Vec<u16> = format!(r"{letter}:\").encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-terminated root path.
+    unsafe { GetDriveTypeW(root.as_ptr()) != 1 }
+}
+
+#[cfg(not(windows))]
+fn drive_is_there(_letter: char) -> bool {
+    true
+}
+
+/// Windows: `/tmp/x.txt` or `/var/tmp/x.txt` where this drive has no such folder: Linux's and
+/// macOS's temp folders, which `make_dir` would make at the top of the drive, where every user
+/// can write: the temp folder to use instead (5.10).
+fn tmp_hint(path: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let (tmp, rest) = ["/var/tmp", "/tmp"].into_iter().find_map(|t| Some((t, path.strip_prefix(t).filter(|r| r.is_empty() || r.starts_with('/'))?)))?;
+    if std::path::Path::new(tmp).is_dir() {
+        return None;
+    }
+    let example = if rest.is_empty() {
+        "getenv(\"TEMP\")".to_string()
+    } else {
+        let mut q = String::new();
+        super::value::quoted(rest, &mut q);
+        format!("getenv(\"TEMP\") + {q}")
+    };
+    Some(format!("{tmp} is Linux's and macOS's temp folder: on Windows use getenv(\"TEMP\"), as in {example}"))
+}
+
+/// A write refused because the file is read-only: how to make it writable (Windows: its
+/// read-only attribute; elsewhere the owner's write permission, for a file of this user) (5.10).
+fn read_only_hint(verb: &str, path: &str, e: &std::io::Error) -> Option<String> {
+    if verb != "write" || e.kind() != std::io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file)?;
+    #[cfg(windows)]
+    {
+        if !meta.permissions().readonly() {
+            return None;
+        }
+        // attrib reads a `/` as the start of a switch.
+        let arg = path.replace('/', "\\");
+        let arg = if arg.chars().all(|c| c.is_alphanumeric() || "._-\\:".contains(c)) { arg } else { format!("\"{arg}\"") };
+        Some(format!("'{}' is read-only: clear that with attrib -r {arg} (or in its Properties)", shown_path(path)))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: a plain query.
+        if meta.mode() & 0o200 != 0 || meta.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+        let word = if path.chars().all(|c| c.is_ascii_alphanumeric() || "._/-+".contains(c)) { path.to_string() } else { format!("'{}'", path.replace('\'', "'\\''")) };
+        Some(format!("'{}' is read-only: make it writable with chmod u+w {word}", shown_path(path)))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// The variable to name for `$HOME` in a path: on Windows, where `HOME` isn't set (PowerShell's
+/// `$HOME` is its own, cmd has none), `USERPROFILE`, as for `~` (5.10).
+fn home_var(name: &str) -> &str {
+    if cfg!(windows) && name.eq_ignore_ascii_case("HOME") && std::env::var_os("HOME").is_none() {
+        "USERPROFILE"
+    } else {
+        name
+    }
+}
+
 /// A path whose first part a shell would have expanded (`~`, `~root`, `$HOME`, `%USERPROFILE%`):
 /// V2 takes paths as written, so `make_dir("~/out")` would quietly make a folder named `~` here,
 /// and a later `rm -rf ~` would take the home folder. Refused with what to write; `./~` is a
@@ -595,7 +822,7 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
         format!("the path of {user}'s home folder (what {first} is in a shell)")
     } else if crate::config::unexpanded(first) == Some(first) {
         let name = first.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
-        format!("getenv(\"{name}\") in its place")
+        format!("getenv(\"{}\") in its place", home_var(name))
     } else {
         // `notes 12:30.txt` on Windows: a `:` after the drive names a hidden stream of the file
         // before it, so the write would seem to work and leave that file empty.
@@ -605,7 +832,7 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
             let _ = err.hint.set("use another character, as in 12-30 for a time".into());
             return Err(Flow::Error(Rc::new(err)));
         }
-        return Ok(());
+        return windows_name(verb, path);
     };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': V2 doesn't expand {first} in paths", shown_path(path)));
     let _ = err.hint.set(format!("write {write}, or ./{first} for a folder that is really named {first}").into());
@@ -752,9 +979,12 @@ fn code_page_way() -> String {
 }
 
 /// What text that isn't UTF-8 probably is (5.10). `start`: `bytes` begin a file or stream, where
-/// UTF-16's byte order mark would be.
+/// UTF-32's or UTF-16's byte order mark would be (UTF-32's first: little-endian, it starts with
+/// UTF-16's).
 fn not_utf8_kind(bytes: &[u8], start: bool) -> &'static str {
-    if start && (bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF])) {
+    if start && (bytes.starts_with(&[0xFF, 0xFE, 0, 0]) || bytes.starts_with(&[0, 0, 0xFE, 0xFF])) {
+        "it is UTF-32 (what Out-File -Encoding utf32 writes)"
+    } else if start && (bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF])) {
         "it is UTF-16 (what Windows PowerShell's > and Out-File write)"
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
         "it looks like binary data"
@@ -1066,6 +1296,7 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             let fix = match kind {
                 k if k.ends_with("binary data") => "read it with binary: true",
                 k if k.starts_with("it is UTF-16") => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"utf-16\").read() }",
+                k if k.starts_with("it is UTF-32") => "save it as UTF-8, or read it in a @py block: @py(path) { open(path, encoding=\"utf-32\").read() }",
                 _ => "",
             };
             let fix = if fix.is_empty() { format!("save it as UTF-8, or read it in a @py block with {}", code_page_way()) } else { fix.to_string() };
@@ -1193,8 +1424,23 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         let _ = err.hint.set(h.into());
         return Err(Flow::Error(Rc::new(err)));
     }
+    // Windows: `/tmp/out` would make `\tmp` at the top of the drive, where every user can write.
+    if let Some(h) = tmp_hint(&path) {
+        let err = ErrorValue::new("IOError", format!("cannot create '{}': on Windows that makes \\tmp at the top of the drive, a folder other users can write to", shown_path(&path)));
+        let _ = err.hint.set(h.into());
+        return Err(Flow::Error(Rc::new(err)));
+    }
     match std::fs::create_dir_all(&*path) {
         Ok(()) => Ok(Value::Null),
+        // A root that can't be made (a drive or share that isn't there) is `create_dir_all`'s own
+        // "failed to create whole tree": the root's own reason instead (5.10).
+        Err(e) if e.raw_os_error().is_none() => {
+            let e = match std::path::Path::new(&*path).ancestors().last().map(std::fs::metadata) {
+                Some(Err(root)) => root,
+                _ => std::io::Error::other("the drive or share it is on isn't there"),
+            };
+            file_error("create", &path, &e)
+        }
         Err(e) => file_error("create", &path, &e),
     }
 }
