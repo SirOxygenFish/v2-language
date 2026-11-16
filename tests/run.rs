@@ -4122,6 +4122,108 @@ fn js_packages_are_found_through_node_path() {
     assert!(code == Some(1) && stderr.contains("Cannot find module 'npmod'"), "{stderr}");
 }
 
+#[test]
+fn jsx_files_run_through_a_loader_from_node_options() {
+    // DOCS 7, INTERNALS 13.5: a .jsx or .tsx file goes to Node like any other, so a loader that
+    // NODE_OPTIONS registers (--require @babel/register) runs it, for an @import and a block's
+    // require alike, and a syntax error it leaves gets no JSX hint. Without one: the hint.
+    if !needs("js", "jsx_files_run_through_a_loader_from_node_options") {
+        return;
+    }
+    let hook = r#"const fs = require('fs');
+for (const ext of ['.jsx', '.tsx']) {
+  require.extensions[ext] = (m, file) => m._compile(fs.readFileSync(file, 'utf8').replace(/<b>(\w+)<\/b>/g, '"$1"').replace(/: number/g, ''), file);
+}
+"#;
+    let main = r#"print(@js { require("./comp.jsx")() })
+@import js."./comp.jsx" as comp
+print(comp())
+@import { typed } from ts."./typed.tsx"
+print(typed(2))
+try {
+    print(@js { require("./bad.jsx") })
+} catch (e) {
+    print(e.type, "|", e.hint)
+}
+"#;
+    let home = TempHome::new();
+    for (path, text) in [
+        ("hook.cjs", hook),
+        ("comp.jsx", "module.exports = () => <b>hi</b>;\n"),
+        ("typed.tsx", "exports.typed = (n: number) => n * 2;\n"),
+        ("bad.jsx", "module.exports = <i>x</i>;\n"),
+        ("main.v2", main),
+    ] {
+        std::fs::write(home.0.join(path), text).unwrap();
+    }
+    let run = |node_options: Option<&str>| {
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("main.v2").current_dir(&home.0).env_remove("NODE_OPTIONS");
+        if let Some(o) = node_options {
+            cmd.env("NODE_OPTIONS", o);
+        }
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let (code, stdout, stderr) = run(Some("--require ./hook.cjs"));
+    assert_eq!((code, stdout.as_str()), (Some(0), "hi\nhi\n4\nForeignError | null\n"), "{stderr}");
+    let (code, stdout, stderr) = run(None);
+    let hint = "hint: Node has no JSX, so it can't run .jsx or .tsx files: compile comp.jsx first";
+    assert!(code == Some(1) && stdout.is_empty() && stderr.contains(hint), "{stdout}{stderr}");
+}
+
+#[test]
+fn ts_module_keyword_gets_the_hint_of_its_message() {
+    // INTERNALS 12.5: Node 24 refuses `module M` for its keyword, and Node 22.13 as a namespace,
+    // as it does a namespace with only types, which Node 24 runs. Each message gets its own hint.
+    if !needs("ts", "ts_module_keyword_gets_the_hint_of_its_message") {
+        return;
+    }
+    let main = r#"func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.message, "=>", e.hint)
+    }
+}
+show(func() {
+    return @ts {
+        module M { export type T = number }
+        1
+    }
+})
+show(func() {
+    @import { x } from ts."./mk.ts"
+    return x
+})
+show(func() {
+    return @ts {
+        namespace N { export type T = number }
+        2
+    }
+})
+"#;
+    let mk = "module M { export type T = number }\nexport const x = 1;\n";
+    let (code, stdout, stderr, _home) = run_with_files(&[("main.v2", main), ("mk.ts", mk)], &["main.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let module = "write namespace M for module M: Node's type stripping takes only that spelling";
+    let namespace = "Node runs TypeScript by removing its types, and a namespace with values is code (an older Node, such as 22.13, refuses even one with only types): use a module of its own (a file) or an object, as in const NS = { x: 1 }";
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{stdout}");
+    for line in &lines[..2] {
+        let (message, hint) = line.split_once(" => ").unwrap_or_else(|| panic!("{stdout}"));
+        if message.contains("`module` keyword is not supported") {
+            assert_eq!(hint, module, "{stdout}");
+        } else {
+            assert!(message.contains("namespace declaration is not supported"), "{stdout}");
+            assert_eq!(hint, namespace, "{stdout}");
+        }
+    }
+    let refused = lines[2].contains("namespace declaration is not supported") && lines[2].ends_with(&format!(" => {namespace}"));
+    assert!(lines[2] == "2" || refused, "{stdout}");
+}
+
 /// The Python that blocks run on here (a block's `sys.executable`), for tests that make their own
 /// venv or engine command.
 fn block_python() -> String {

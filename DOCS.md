@@ -1002,11 +1002,14 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - Runs on the same Node worker as `@js`, with the types stripped first by Node's built-in type
   stripping. Settings go in `[engines.js]`; `ts` has none of its own.
 - Types are **not checked** — run `tsc` yourself if you want checking.
-- Stripping only removes type syntax. `enum`, a `namespace` with values, constructor parameter
-  properties (`constructor(private x: T)`), `import x = require(…)`, `export =` and `<T>x` casts
-  are code, and raise a `ForeignError` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on early Node 22
-  releases `ERR_INVALID_TYPESCRIPT_SYNTAX`) whose hint says what to write instead (a const object
-  for an `enum`, `x as T` for a cast), in a block and in a `.ts` file alike; or use `@js`.
+- Stripping only removes type syntax. `enum`, a `namespace` with values (on an older Node, such
+  as 22.13, any `namespace`), constructor parameter properties (`constructor(private x: T)`),
+  `import x = require(…)`, `export =` and `<T>x` casts are code, and raise a `ForeignError`
+  (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, on early Node 22 releases `ERR_INVALID_TYPESCRIPT_SYNTAX`)
+  whose hint says what to write instead (a const object for an `enum`, `x as T` for a cast,
+  `const x = require("…")` in a `.cts` file and `import x from "…"` in an `.mts` one), in a block
+  and in a `.ts` file alike; or use `@js`. Node 24 refuses `module M { … }` for its keyword: write
+  `namespace M`.
 - Node doesn't read `tsconfig.json`: to it a `"paths"` alias (`@/lib`, `~/utils`) is a package
   that isn't installed, and the error's hint says so. Import by a relative path, or name the
   alias in `package.json` `"imports"` (`"#lib/*": "./lib/*"`).
@@ -1200,7 +1203,8 @@ print(chunk([1, 2, 3, 4, 5], 2))    // [[1, 2], [3, 4], [5]]
   `.ts` files name them with `.ts` (`./math.ts`, not tsc's `./math.js` or `./math`), and a type
   or interface is imported with `import type`; the hint of either error says so. A type is gone
   when the file runs, so V2 can't import one either. Node has no JSX: a `.jsx` or `.tsx` file is
-  compiled first, and you import the `.js` your build writes.
+  compiled first, and you import the `.js` your build writes, unless a loader set through
+  `NODE_OPTIONS` runs it (`NODE_OPTIONS="--require @babel/register"`).
 - A JavaScript default export is imported by name: `@import { "default" as dayjs } from js.dayjs`.
 - **Whole module as a handle:** `@import py.numpy as np` gives you the module itself. If a
   JavaScript package *is* a function (`module.exports = function …`), the handle can be called

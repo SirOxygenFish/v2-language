@@ -1,9 +1,15 @@
 SyntaxError | Node runs TypeScript by removing its types, and an enum is code: use a const object, as in const Color = { Red: 0, Green: 1 } as const
 SyntaxError | Node runs TypeScript by removing its types, and a parameter property is code: declare the field and assign it in the constructor, as in who: string; constructor(who: string) { this.who = who }
-SyntaxError | Node runs TypeScript by removing its types, and import x = require(…) is code: write import x from "…", or const x = require("…")
-SyntaxError | Node runs TypeScript by removing its types, and a namespace with values is code: use a module of its own (a file) or an object, as in const NS = { x: 1 }
+SyntaxError | Node runs TypeScript by removing its types, and import x = require(…) is code: write const x = require("…")
+SyntaxError | Node runs TypeScript by removing its types, and import x = require(…) is code: write import x from "…"
+SyntaxError | Node runs TypeScript by removing its types, and import x = require(…) is code: write const x = require("…") in CommonJS, or import x from "…" in an ES module
+SyntaxError | Node runs TypeScript by removing its types, and a namespace with values is code (an older Node, such as 22.13, refuses even one with only types): use a module of its own (a file) or an object, as in const NS = { x: 1 }
 SyntaxError | Node runs TypeScript by removing its types, and a <T>x cast is code: write x as T
 SyntaxError | Node runs TypeScript by removing its types, and an enum is code: use a const object, as in const Color = { Red: 0, Green: 1 } as const
-SyntaxError | Node runs TypeScript by removing its types, and export = is code: write export default x, or module.exports = x
+SyntaxError | Node runs TypeScript by removing its types, and export = is code: write module.exports = x
+SyntaxError | Node runs TypeScript by removing its types, and export = is code: write export default x
+SyntaxError | Node runs TypeScript by removing its types, and export = is code: write module.exports = x in CommonJS, or export default x in an ES module
 SyntaxError | Node runs TypeScript by removing its types, and a parameter property is code: declare the field and assign it in the constructor, as in who: string; constructor(who: string) { this.who = who }
-SyntaxError | Node runs TypeScript by removing its types, and a namespace with values is code: use a module of its own (a file) or an object, as in const NS = { x: 1 }
+SyntaxError | Node runs TypeScript by removing its types, and a namespace with values is code (an older Node, such as 22.13, refuses even one with only types): use a module of its own (a file) or an object, as in const NS = { x: 1 }
+SyntaxError | Node runs TypeScript by removing its types, and import x = require(…) is code: write const x = require("…")
+SyntaxError | Node runs TypeScript by removing its types, and export = is code: write @export { x }
