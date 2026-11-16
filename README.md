@@ -617,7 +617,8 @@ A run trusts some files near the script as much: the nearest `v2.toml` in its fo
 above (it can name the programs that run the blocks), the modules Python imports from the
 script's folder and the project folder, and the `node_modules` and `package.json` Node finds
 there and in the folders above. So don't keep or run scripts under a folder that other users can
-write to, such as `/tmp`.
+write to, such as `/tmp`, or on Windows `C:\Users\Public` and folders made directly under `C:\`
+(such as `C:\work`), which every user can write to by default: keep projects under your user folder.
 
 **Is it fast?** V2's own code is a small interpreter, fine for gluing things together. Heavy
 loops belong in a Python or JavaScript block (and, later, in C or Rust blocks). Each call from one
