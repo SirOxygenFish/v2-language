@@ -1,0 +1,24 @@
+// requires: js ts
+// A block's own require() and import() of a package Node doesn't find get the hints an @import
+// of it gets, from the .v2 file's folder, in the block's words (DOCS 5, 7; INTERNALS 13.5):
+// a tsconfig "paths" alias first, then a file of the script's own, then npm install.
+let here = @js { __dirname }
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.hint == null ? null : e.hint.replace(here, "<here>").replace("\\", "/"))
+    }
+}
+show(func() => @ts { require("@lib/math") })
+show(func() => @js { import("@lib/math") })
+show(func() => @ts { require("~/utils") })
+// The script's own paths.ts, named like a package: by its path, never npm install.
+show(func() => @js { require("paths") })
+show(func() => @js { import("paths") })
+show(func() => @js { require("nothere.js") })
+// A package no alias matches: the install line.
+show(func() => @js { require("v2-no-such-package") })
+show(func() => @js { import("v2-no-such-package") })
+// A relative path that isn't there: Node's message says it.
+show(func() => @js { require("./nothere.js") })
