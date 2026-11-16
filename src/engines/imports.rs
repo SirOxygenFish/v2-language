@@ -489,24 +489,30 @@ enum PipFor {
     /// One found on PATH while the activated venv (VIRTUAL_ENV) has no python that runs: that
     /// venv, and what is wrong with it (`resolve::activated_venv_problem`).
     Passed(PathBuf, String),
+    /// One found on PATH in a venv (an activated one): its argv, and that venv, which V2 uses.
+    OnPath(Vec<std::ffi::OsString>, PathBuf),
 }
 
-/// What the install line of an engine's `ImportError` is for: the Python V2 was told to use, or,
-/// for one found on PATH, the activated venv the search couldn't use, if any.
-fn pip_for(origin: &crate::engines::resolve::Origin, argv: &[std::ffi::OsString]) -> Option<PipFor> {
-    if *origin != crate::engines::resolve::Origin::Path {
-        return Some(PipFor::Told(argv.to_vec()));
+/// What the install line of an engine's `ImportError` is for: the Python V2 was told to use; for
+/// one found on PATH, the activated venv (`active`, VIRTUAL_ENV's value) when the search couldn't
+/// use its python, else the venv that Python is in, if any.
+fn pip_for(engine: &crate::engines::resolve::ResolvedEngine, active: Option<PathBuf>) -> Option<PipFor> {
+    if engine.origin != crate::engines::resolve::Origin::Path {
+        return Some(PipFor::Told(engine.argv.clone()));
     }
-    let venv = PathBuf::from(std::env::var_os("VIRTUAL_ENV").filter(|v| !v.is_empty())?);
-    let problem = crate::engines::resolve::activated_venv_problem(&venv)?;
-    Some(PipFor::Passed(venv, problem))
+    let passed = active.and_then(|venv| crate::engines::resolve::activated_venv_problem(&venv, &engine.skipped).map(|problem| PipFor::Passed(venv, problem)));
+    passed.or_else(|| {
+        let venv = crate::engines::resolve::venv_of(Path::new(engine.argv.first()?))?;
+        Some(PipFor::OnPath(engine.argv.clone(), venv))
+    })
 }
 
 /// After "install it for the Python V2 uses": a command that works for `argv`, the Python V2 was
 /// told to use. Its own pip (the whole command, each word quoted as a shell needs it: `pyenv exec
 /// python -m pip install x`); `uv add x` for a command that runs uv (`uv run python`); for a venv
 /// uv made, which has no pip, `uv add x` in its project, else `uv pip install --python DIR x`; for
-/// another venv without pip, `-m ensurepip` first.
+/// another venv without pip, `-m ensurepip` first, or, when its Python has no ensurepip (Debian
+/// and Ubuntu without python3-venv), the venv made again.
 fn install_line(argv: &[std::ffi::OsString], name: &str) -> String {
     let words: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let program = Path::new(words.first().map_or("", String::as_str));
@@ -523,15 +529,31 @@ fn install_line(argv: &[std::ffi::OsString], name: &str) -> String {
             Some(project) => format!(": uv add {name} in {}", project.display()),
             None => format!(": uv pip install --python {} {name}", crate::cli::shell_word(&venv.display().to_string())),
         },
+        Some(venv) if !crate::engines::resolve::venv_has_pip(&venv) && !crate::engines::resolve::base_has_ensurepip(&venv) => no_ensurepip_line(&venv, &run, name),
         Some(venv) if !crate::engines::resolve::venv_has_pip(&venv) => format!(", whose venv has no pip: {run} -m ensurepip, then {run} -m pip install {name}"),
         _ => format!(": {run} -m pip install {name}"),
     }
 }
 
+/// `install_line` for a venv without pip whose Python has no ensurepip to add it: Debian and
+/// Ubuntu leave it out without python3-venv, and `python3 -m venv` then stops after making a venv
+/// without pip. That package, then the venv made again. `run`: its python, as pasted.
+fn no_ensurepip_line(venv: &Path, run: &str, name: &str) -> String {
+    let dir = crate::cli::shell_word(&venv.display().to_string());
+    let (python, first) = if cfg!(windows) {
+        ("py", ": ".to_string())
+    } else {
+        let sudo = crate::engines::spec::this_linux().1;
+        ("python3", format!(" (on Debian and Ubuntu: {}): then ", crate::engines::spec::package_line(crate::engines::spec::Family::Apt, sudo, "python3-venv", "python3", None)))
+    };
+    format!(", whose venv has no pip, and its Python has no ensurepip to add it{first}make the venv again, {python} -m venv --clear {dir}, and install its packages, as in {run} -m pip install {name}")
+}
+
 /// The hint of a module that wasn't found (13.5), from the engine's own message: what to check,
 /// or what to install, from the folder of the importing .v2 file.
 /// `python`: the Python V2 was told to use (a venv, a command, V2_ENGINE_PY), for the exact
-/// install command, or the activated venv V2 couldn't use; `None` for one found on PATH.
+/// install command, the activated venv V2 couldn't use, or the venv of one found on PATH; `None`
+/// for another found on PATH.
 fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> Option<String> {
     let dir = site.dir;
     let venv_set = matches!(python, Some(PipFor::Told(_)));
@@ -599,7 +621,7 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> 
             }
         }
         let install = match python {
-            Some(PipFor::Told(argv)) => format!("if '{name}' isn't misspelled, install it for the Python V2 uses{}", install_line(argv, &name)),
+            Some(PipFor::Told(argv) | PipFor::OnPath(argv, _)) => format!("if '{name}' isn't misspelled, install it for the Python V2 uses{}", install_line(argv, &name)),
             // Not another Python's pip: the activated venv, which V2 couldn't use, is the one meant.
             Some(PipFor::Passed(_, problem)) => problem.clone(),
             None => format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps"),
@@ -613,6 +635,8 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> 
         return Some(match (venv, python) {
             // That one is the activated venv V2 couldn't use: what is wrong with it.
             (Some(v), Some(PipFor::Passed(active, _))) if same(&v, active) => install,
+            // That one is the venv of the Python V2 uses (found on PATH): its own install line.
+            (Some(v), Some(PipFor::OnPath(_, used))) if same(&v, used) => install,
             (Some(v), _) => format!(
                 "there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \"{}\"; {} {install}",
                 v.display(),
@@ -1536,7 +1560,7 @@ impl Interp {
         let what = format!("@import from '{}'", self.selector_text(sel));
         let dir = self.sm.file(file).path.parent().map(Path::to_path_buf).unwrap_or_default();
         let engine = &self.sessions[s].engine;
-        let python = pip_for(&engine.origin, &engine.argv);
+        let python = pip_for(engine, std::env::var_os("VIRTUAL_ENV").filter(|v| !v.is_empty()).map(PathBuf::from));
         let (root, toml) = (self.registry.config().root.clone(), self.registry.config().file.is_some());
         let shown = self.sm.file(file).display.clone();
         let reply = self.request(s, frame, &what, at).inspect_err(|f| {
@@ -1912,7 +1936,7 @@ mod tests {
         let venv = d.join(".venv");
         std::fs::create_dir_all(&venv).unwrap();
         std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
-        let problem = crate::engines::resolve::activated_venv_problem(&venv).unwrap();
+        let problem = crate::engines::resolve::activated_venv_problem(&venv, &[]).unwrap();
         let passed = PipFor::Passed(venv.clone(), problem.clone());
         let hint = |dir: &Path| missing_package_hint("No module named 'requests'", &site(dir), Some(&passed)).unwrap();
         assert_eq!(hint(&d), problem, "run in the venv's own folder");
@@ -1925,6 +1949,102 @@ mod tests {
             hint(&other),
             format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; and {problem}", other.join(".venv").display())
         );
+    }
+
+    /// A venv `dir/name` with this pyvenv.cfg, and where its python goes.
+    fn venv_at(dir: &Path, name: &str, cfg: &str) -> (PathBuf, PathBuf) {
+        let venv = dir.join(name);
+        let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), cfg).unwrap();
+        (venv, bin.join(if cfg!(windows) { "python.exe" } else { "python3" }))
+    }
+
+    #[test]
+    fn a_venv_v2_found_on_path_gets_its_own_install_line() {
+        // Round 19 review (P2): an activated venv whose python V2 found on PATH is the one V2 uses:
+        // its own install line, never "which V2 isn't using", run from its own folder too.
+        let d = temp("onpath");
+        let (venv, python) = venv_at(&d, ".venv", "home = x\n");
+        let on_path = PipFor::OnPath(vec![python.clone().into_os_string()], venv.clone());
+        let hint = |dir: &Path| missing_package_hint("No module named 'requests'", &site(dir), Some(&on_path)).unwrap();
+        let install = format!("if 'requests' isn't misspelled, install it for the Python V2 uses: {} -m pip install requests", python.display());
+        assert_eq!(hint(&d), install);
+        assert_eq!(hint(&temp("onpath-elsewhere")), install);
+        // Another venv nearby is one V2 isn't using: named, then the install line.
+        let other = temp("onpath-other");
+        venv_at(&other, ".venv", "home = x\n");
+        assert_eq!(
+            hint(&other),
+            format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; or {install}", other.join(".venv").display())
+        );
+    }
+
+    #[test]
+    fn pip_for_picks_whom_the_install_line_is_for() {
+        // 13.5: the Python V2 was told to use; for one found on PATH, the activated venv it
+        // couldn't use (P1: its python is among the skipped hits, its probe failed), else the
+        // venv that python is in (P2), else nobody.
+        let d = temp("pipfor-engine");
+        let (venv, python) = venv_at(&d, ".venv", "home = x\n");
+        std::fs::write(&python, "").unwrap();
+        let spec = Rc::new(crate::engines::spec::builtins().into_iter().find(|s| &*s.id == "py").unwrap());
+        let engine = |origin: crate::engines::resolve::Origin, program: &Path, skipped: Vec<(PathBuf, String)>| crate::engines::resolve::ResolvedEngine {
+            spec: spec.clone(),
+            origin,
+            argv: vec![program.as_os_str().to_os_string()],
+            version: None,
+            skipped,
+        };
+        use crate::engines::resolve::Origin;
+        let system = d.join("python3");
+        let told = engine(Origin::Venv, &python, Vec::new());
+        assert!(matches!(pip_for(&told, None), Some(PipFor::Told(argv)) if argv == told.argv));
+        assert!(matches!(pip_for(&engine(Origin::Path, &python, Vec::new()), None), Some(PipFor::OnPath(_, v)) if v == venv));
+        assert!(pip_for(&engine(Origin::Path, &system, Vec::new()), None).is_none());
+        // VIRTUAL_ENV names that venv and its python runs: it is the one used.
+        assert!(matches!(pip_for(&engine(Origin::Path, &python, Vec::new()), Some(venv.clone())), Some(PipFor::OnPath(..))));
+        // Its python's probe failed, so the search found another: what is wrong with it.
+        let failed = vec![(python.clone(), "version probe failed (exit code 103): No Python at 'C:\\gone\\python.exe'".to_string())];
+        let passed = pip_for(&engine(Origin::Path, &system, failed.clone()), Some(venv.clone()));
+        assert!(matches!(&passed, Some(PipFor::Passed(v, problem)) if *v == venv && problem.contains("has a python that doesn't run (No Python at 'C:\\gone\\python.exe')")), "{:?}", passed.map(|_| ()));
+    }
+
+    #[test]
+    fn a_venv_whose_python_has_no_ensurepip_is_made_again() {
+        // Round 19 review (P3): on Debian and Ubuntu without python3-venv, python3 -m venv stops
+        // after making a venv without pip, and its Python has no ensurepip (<home>/../lib/
+        // python3.X/ensurepip, Windows <home>\Lib\ensurepip) to add one: the package, then the
+        // venv made again, never -m ensurepip.
+        let d = temp("noensurepip");
+        let (home, stdlib) = if cfg!(windows) { (d.join("base"), d.join("base").join("Lib")) } else { (d.join("base").join("bin"), d.join("base").join("lib").join("python3.12")) };
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&stdlib).unwrap();
+        std::fs::write(stdlib.join("os.py"), "").unwrap();
+        let (venv, python) = venv_at(&d, ".venv", &format!("home = {}\nversion = 3.12.3\n", home.display()));
+        std::fs::create_dir_all(if cfg!(windows) { venv.join("Lib").join("site-packages") } else { venv.join("lib").join("python3.12").join("site-packages") }).unwrap();
+        let hint = || missing_package_hint("No module named 'tabulate'", &site(&d), Some(&PipFor::Told(vec![python.clone().into_os_string()]))).unwrap();
+        let head = "if 'tabulate' isn't misspelled, install it for the Python V2 uses";
+        #[cfg(unix)]
+        let first = format!(" (on Debian and Ubuntu: {}): then ", if unsafe { libc::geteuid() } == 0 { "apt update && apt install python3-venv" } else { "sudo apt install python3-venv" });
+        #[cfg(not(unix))]
+        let first = ": ".to_string();
+        let py = if cfg!(windows) { "py" } else { "python3" };
+        let (v, p) = (venv.display(), python.display());
+        let remake = format!("{head}, whose venv has no pip, and its Python has no ensurepip to add it{first}make the venv again, {py} -m venv --clear {v}, and install its packages, as in {p} -m pip install tabulate");
+        assert_eq!(hint(), remake);
+        if cfg!(unix) {
+            // No version in pyvenv.cfg: the python3.X folders there.
+            std::fs::write(venv.join("pyvenv.cfg"), format!("home = {}\n", home.display())).unwrap();
+            assert_eq!(hint(), remake);
+        }
+        // Its Python has ensurepip: that first.
+        std::fs::create_dir_all(stdlib.join("ensurepip")).unwrap();
+        let ensurepip = format!("{head}, whose venv has no pip: {p} -m ensurepip, then {p} -m pip install tabulate");
+        assert_eq!(hint(), ensurepip);
+        // No standard library where home says (V2 can't tell): ensurepip, as before.
+        std::fs::remove_dir_all(&stdlib).unwrap();
+        assert_eq!(hint(), ensurepip);
     }
 
     #[test]
