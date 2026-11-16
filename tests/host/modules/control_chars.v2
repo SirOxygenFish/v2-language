@@ -1,0 +1,7 @@
+// exit: 1
+// stderr: control_chars.v2:7:1: ImportError: cannot find module './nl\nx.v2' (looked for nl\nx.v2)
+// An import path with control characters shows them escaped, in e.message and in the uncaught
+// header, so a name can't split the message or act on the terminal (round 17, INTERNALS 2.1).
+try { import "./x\u{1b}[2Jy.v2" as m } catch (e) { print(e.message) }
+try { import "./tab\there.v2" as m } catch (e) { print(e.message) }
+import "./nl\nx.v2" as q

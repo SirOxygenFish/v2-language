@@ -20,7 +20,9 @@ macro_rules! stderr {
     ($($t:tt)*) => {{
         use std::io::Write as _;
         $crate::engines::process::stop_if_interrupted();
-        let _ = write!(std::io::stderr().lock(), $($t)*);
+        let text = format!($($t)*);
+        let _ = std::io::stderr().lock().write_all(text.as_bytes());
+        $crate::runtime::builtins::wrote_stderr(text.as_bytes());
     }};
 }
 macro_rules! stderrln {
@@ -28,6 +30,7 @@ macro_rules! stderrln {
         use std::io::Write as _;
         $crate::engines::process::stop_if_interrupted();
         let _ = writeln!(std::io::stderr().lock(), $($t)*);
+        $crate::runtime::builtins::wrote_stderr(b"\n");
     }};
 }
 
@@ -99,7 +102,7 @@ fn main() {
     // A file V2 couldn't name in its messages and paths: said so, not "no such file" (19.1).
     let file = raw.get(usize::from(raw.first().is_some_and(|w| w == "check")));
     if let Some(file) = file.filter(|f| f.to_str().is_none()) {
-        stderrln!("v2: the file name '{}' is not valid UTF-8, which V2 needs", file.to_string_lossy());
+        stderrln!("v2: the file name '{}' is not valid UTF-8, which V2 needs", syntax::span::shown_path(&file.to_string_lossy()));
         exit(EXIT_USAGE);
     }
     let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -113,7 +116,7 @@ fn main() {
     let command = match cli::parse(&args) {
         Ok(c) => c,
         Err(cli::UsageError(msg)) => {
-            stderrln!("v2: {msg}");
+            stderrln!("v2: {}", syntax::span::shown_path(&msg));
             // `v2 -dash.v2`: a script whose name starts with -, which PowerShell even splits
             // before its dot (`-dash` `.v2`) (19.1).
             // `v2 check -dash.v2` the same way, split or not.
@@ -123,7 +126,7 @@ fn main() {
                 let first = &args[at];
                 let split = args.get(at + 1).filter(|n| n.starts_with('.')).map(|n| format!("{first}{n}"));
                 let named = [Some(first.clone()), split, Some(format!("{first}.v2"))].into_iter().flatten().find(|f| std::path::Path::new(f).is_file());
-                if let Some(file) = named {
+                if let Some(file) = named.map(|f| syntax::span::shown_path(&f)) {
                     if check {
                         stderrln!("to check the file {file}, write: v2 check ./{file}");
                     } else {

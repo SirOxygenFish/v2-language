@@ -540,7 +540,10 @@ main.v2:4:9: ValueError: port out of range: 99999
   at main.v2:10
 ```
 
-The location is where the error was first thrown; rethrowing with `throw e` keeps it.
+The location is where the error was first thrown; rethrowing with `throw e` keeps it. The report
+starts on a line of its own, also after `print("x", end: "")`. Control characters in a file's
+name print escaped there and in every message (`\n`, `\u{1b}`), as `e.file` holds it, so a name
+can't split a line or act on the terminal.
 
 ### 3.10 Modules
 
@@ -559,7 +562,9 @@ print(util.slug("Hello World"))    // hello-world
 ```
 
 - Paths are relative to the importing file and end in `.v2`. Another kind of file (`data.csv`,
-  `helper.py`) is an `ImportError` that says how to use it instead.
+  `helper.py`) is an `ImportError` that says how to use it instead. So is a pipe or a device
+  (`cannot import './m.v2': it is a pipe or a device, not a file`, also for a link to
+  `/dev/zero`), and a link that leads nowhere or in a loop says that, in a run and in `v2 check`.
 - A module runs once, the first time it is imported; later imports reuse it.
 - `util` is a dict of the module's exported names, taken when the module finishes running.
   Reassigning a module variable later does not change what importers see — export a function
@@ -587,7 +592,7 @@ bigger come from the languages you embed.
 | `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int (so NaN and infinity are a `ValueError`), more gives a float, fewer is a `ValueError`; an int `x` comes back unchanged |
 | `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out                      |
-| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it |
+| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it, and so is one that holds more than 1 GiB (`/dev/zero` too), which would rather be read in pieces in a block |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME` is refused, below) |
 | `list_dir(path)`                        | sorted list of the names in a folder                        |
@@ -617,11 +622,12 @@ contents in place, not all at once: for a file another program reads, write a ne
 it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
 wrote, and `read_file("/dev/stdin")` reads the rest of standard input, after what `input()` read. The file
-functions raise `IOError` when they fail (`exists` just returns `false`). Paths are taken as
+functions raise `IOError` when they fail (`exists` just returns `false`); on Windows, for a file
+another program keeps open (as Excel does), its hint says to close it there. Paths are taken as
 written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path that starts with one is an
 `IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
-in paths`, `./~` for a folder really named so): build such a path with `getenv` (the error's hint
-says so). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
+in paths`, `./~` for a folder really named so), and so is another user's home folder, `~root/x`:
+build such a path with `getenv` (the error's hint says so). An empty path is an `IOError` too (`exists("")` is `false`). `getenv` and `args()` turn invalid UTF-8 into U+FFFD instead of failing.
 
 `exec` runs a program directly, without a shell, so its arguments reach it exactly as given:
 
@@ -637,7 +643,8 @@ cmd.exe would read it as a variable: keep it in a folder without one). A script 
 program: `exec(["python3", "tool.py"])` (`python` on Windows), or for PowerShell
 `exec(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "build.ps1"])`. A `str` or `bytes`
 `input` becomes the program's standard input (with `null` it is empty). The result is a dict
-`{code, stdout, stderr}`, both outputs captured whole and decoded as UTF-8 (invalid bytes become
+`{code, stdout, stderr}`, both outputs captured whole (up to 1 GiB each: past that, as for
+`exec(["yes"])`, the program is stopped and `exec` raises `IOError`) and decoded as UTF-8 (invalid bytes become
 U+FFFD; UTF-16 output, with a byte order mark or, on Windows, as `cmd /u` and `wsl --list` write it,
 is read as UTF-16; on Windows, other output that isn't UTF-8 is read in the console's code page
 first, as `cmd` and other console programs write it). A non-zero

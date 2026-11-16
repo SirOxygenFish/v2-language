@@ -24,7 +24,7 @@ use crate::engines::registry::Registry;
 use crate::engines::session::Session;
 use crate::engines::units::{Line, UnitState};
 use crate::syntax::ast::*;
-use crate::syntax::span::{FileId, SourceMap, Span};
+use crate::syntax::span::{shown_path, FileId, SourceMap, Span};
 
 /// Past this many nested calls a call raises `RecursionError` (5.9).
 const MAX_CALLS: usize = 10_000;
@@ -325,7 +325,7 @@ impl Interp {
                         crate::syntax::span::LoadError::Io(m) => m,
                         crate::syntax::span::LoadError::NotUtf8 { message, .. } => message.into(),
                     };
-                    return self.fail_at("ImportError", format!("cannot import '{spec}': {msg}"), at);
+                    return self.fail_at("ImportError", shown_path(&format!("cannot import '{spec}': {msg}")), at);
                 }
             },
         };
@@ -333,7 +333,7 @@ impl Interp {
             Parsed::Ok { file, program } => (file, program),
             Parsed::Failed(diags) => {
                 let d = &diags[0];
-                let msg = format!("cannot import '{spec}': {}:{}:{}: SyntaxError: {}", d.display, d.line, d.col, d.message);
+                let msg = format!("cannot import '{}': {}:{}:{}: SyntaxError: {}", shown_path(spec), d.display, d.line, d.col, d.message);
                 let data = diags
                     .iter()
                     .map(|d| {
