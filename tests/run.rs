@@ -599,6 +599,40 @@ fn a_utf16_file_says_to_save_it_as_utf8() {
 }
 
 #[test]
+fn a_utf32_file_is_named_utf32() {
+    // Round 19: Out-File -Encoding utf32 writes UTF-32, whose little-endian byte-order mark
+    // starts with UTF-16's: a script, v2 check, an import and a v2.toml say UTF-32 (INTERNALS
+    // 2.1, 18.5).
+    let utf32 = |text: &str, le: bool| -> Vec<u8> {
+        let mut bytes = if le { vec![0xFF, 0xFE, 0, 0] } else { vec![0, 0, 0xFE, 0xFF] };
+        bytes.extend(text.chars().flat_map(|c| if le { (c as u32).to_le_bytes() } else { (c as u32).to_be_bytes() }));
+        bytes
+    };
+    let said = "SyntaxError: file is not valid UTF-8: it is UTF-32 (what Out-File -Encoding utf32 writes); save it as UTF-8\n";
+    for le in [true, false] {
+        let home = TempHome::new();
+        std::fs::write(home.0.join("u32.v2"), utf32("print(\"héllo\")\n", le)).unwrap();
+        for args in [&["u32.v2"][..], &["check", "u32.v2"]] {
+            let (code, _, stderr) = run_in_home(&home.0, args, &[]);
+            assert_eq!(code, Some(1), "{le} {args:?}: {stderr}");
+            // At the first bad byte: the mark's 0xFF, or big-endian its 0xFE after two NULs.
+            let at = if le { "u32.v2:1:1: " } else { "u32.v2:1:3: " };
+            assert!(stderr.starts_with(&format!("{at}{said}")), "{le} {args:?}: {stderr}");
+        }
+        std::fs::write(home.0.join("main.v2"), "import \"./lib32.v2\" as l\n").unwrap();
+        std::fs::write(home.0.join("lib32.v2"), utf32("let x = 1\n", le)).unwrap();
+        let (code, _, stderr) = run_in_home(&home.0, &["main.v2"], &[]);
+        assert_eq!(code, Some(1), "{le}: {stderr}");
+        assert!(stderr.contains(said), "{le}: {stderr}");
+        std::fs::write(home.0.join("v2.toml"), utf32("[python]\n", le)).unwrap();
+        std::fs::write(home.0.join("ok.v2"), "print(1)\n").unwrap();
+        let (code, _, stderr) = run_in_home(&home.0, &["ok.v2"], &[]);
+        assert_eq!(code, Some(2), "{le}: {stderr}");
+        assert!(stderr.contains("v2.toml: config error: the file is not valid UTF-8: it is UTF-32 (what Out-File -Encoding utf32 writes); save it as UTF-8"), "{le}: {stderr}");
+    }
+}
+
+#[test]
 fn a_url_in_a_string_gets_no_comment_hint() {
     // The `//` hint is for a comment that hid a bracket's close, not for one inside a string.
     let (code, _, stderr, _home) = run_with_files(&[("u.v2", "let u = print(\"http://x.com\"
@@ -3463,6 +3497,85 @@ fn file_and_exec_errors_say_what_to_write() {
 }
 
 #[test]
+fn home_in_hints_fits_the_os() {
+    // Round 19: in PowerShell and cmd HOME isn't set (PowerShell's $HOME is its own), so on
+    // Windows $HOME's hint names USERPROFILE, as ~'s does, and getenv("HOME")'s null hint says
+    // so too, with no Linux default; elsewhere getenv("USERPROFILE") names HOME (INTERNALS 5.3,
+    // 5.10).
+    let home = TempHome::new();
+    let src = if cfg!(windows) {
+        "func hint(f) {\n    try { f() } catch (e) { print(e.hint) }\n}\n\
+         hint(func() => read_file(\"$HOME/Downloads/data.csv\"))\nhint(func() => read_file(\"${HOME}\\\\x.csv\"))\n\
+         hint(func() => read_file(\"notes/%HOME%/x.csv\"))\nhint(func() => read_file(getenv(\"HOME\") + \"/x.csv\"))\n\
+         let h = getenv(\"HOME\")\nhint(func() => read_file(h + \"/x.csv\"))\n"
+    } else {
+        "func hint(f) {\n    try { f() } catch (e) { print(e.hint) }\n}\n\
+         hint(func() => getenv(\"USERPROFILE\") + \"/x.csv\")\nlet u = getenv(\"USERPROFILE\")\nhint(func() => u + \"/x.csv\")\n"
+    };
+    std::fs::write(home.0.join("h.v2"), src).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.env_remove(if cfg!(windows) { "HOME" } else { "USERPROFILE" });
+    cmd.arg("h.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let want = if cfg!(windows) {
+        let windows = "Windows sets USERPROFILE for the home folder, not HOME (Git Bash sets both): write getenv(\"USERPROFILE\")";
+        format!(
+            "write getenv(\"USERPROFILE\") in its place, or ./$HOME for a folder that is really named $HOME\n\
+             write getenv(\"USERPROFILE\") in its place, or ./${{HOME}} for a folder that is really named ${{HOME}}\n\
+             V2 doesn't expand %HOME% in paths: write getenv(\"USERPROFILE\") in its place\n\
+             getenv(\"HOME\") gave null: {windows}\n'h' is null: it was set from getenv(\"HOME\"), and {windows}\n"
+        )
+    } else {
+        let unix = "USERPROFILE is Windows' name for the home folder: write getenv(\"HOME\")";
+        format!("getenv(\"USERPROFILE\") gave null: {unix}\n'u' is null: it was set from getenv(\"USERPROFILE\"), and {unix}\n")
+    };
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn a_read_only_file_says_how_to_make_it_writable() {
+    // Round 19: a write to a read-only file said only "Access is denied" (Windows' read-only
+    // attribute; elsewhere no write bit): the hint says how to clear it. remove_file removes such
+    // a file on every OS, as rm does (DOCS 3.11, INTERNALS 5.10).
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("sub")).unwrap();
+    for name in ["ro.txt", "sub/my ro.txt"] {
+        let p = home.0.join(name);
+        std::fs::write(&p, "orig").unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&p, perms).unwrap();
+    }
+    let src = "func hint(f) {\n    try {\n        f()\n        print(\"written\")\n    } catch (e) {\n        print(e.message)\n        print(e.hint)\n    }\n}\n\
+               hint(func() => write_file(\"ro.txt\", \"changed\"))\nhint(func() => write_file(\"ro.txt\", \"more\", append: true))\n\
+               hint(func() => write_file(\"sub/my ro.txt\", \"changed\"))\n\
+               remove_file(\"ro.txt\")\nremove_file(\"sub/my ro.txt\")\nprint(exists(\"ro.txt\"), exists(\"sub/my ro.txt\"))\n";
+    std::fs::write(home.0.join("r.v2"), src).unwrap();
+    // root may write any file: then there is nothing to say, but remove_file still removes them.
+    let root = std::fs::OpenOptions::new().append(true).open(home.0.join("ro.txt")).is_ok();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["r.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.last(), Some(&"false false"), "{stdout}");
+    if root {
+        let _ = writeln!(std::io::stderr(), "SKIP the hint part of a_read_only_file_says_how_to_make_it_writable (root writes read-only files)");
+        return;
+    }
+    let (ro, sub) = if cfg!(windows) {
+        ("clear that with attrib -r ro.txt (or in its Properties)", "clear that with attrib -r \"sub\\my ro.txt\" (or in its Properties)")
+    } else {
+        ("make it writable with chmod u+w ro.txt", "make it writable with chmod u+w 'sub/my ro.txt'")
+    };
+    let denied = |name: &str| lines.iter().any(|l| l.starts_with(&format!("cannot write '{name}': ")));
+    assert!(denied("ro.txt") && denied("sub/my ro.txt"), "{stdout}");
+    assert_eq!(lines[1], format!("'ro.txt' is read-only: {ro}"), "{stdout}");
+    assert_eq!(lines[3], format!("'ro.txt' is read-only: {ro}"), "{stdout}");
+    assert_eq!(lines[5], format!("'sub/my ro.txt' is read-only: {sub}"), "{stdout}");
+}
+
+#[test]
 fn exec_and_file_errors_name_the_part_that_is_wrong() {
     // 5.10: a program in the current folder by its bare name, a script the OS doesn't start by
     // itself, a folder, a batch file given a line break, a missing folder and a file in the way.
@@ -3629,6 +3742,157 @@ fn git_bash_paths_and_names_windows_refuses_get_a_hint() {
     // Where ./aux is the device too (Windows 10), what its message says isn't checked.
     let checked = if dot_aux { want.len() - 1 } else { want.len() };
     assert_eq!(got[..checked.min(got.len())], want[..checked], "{stdout}");
+}
+
+/// The script that prints each call's value, or its error's message and hint, one per line.
+#[cfg(windows)]
+const SHOW: &str = "func show(f) {\n    try {\n        print(\"ok\", f())\n    } catch (e) {\n        print(e.message)\n        print(e.hint)\n    }\n}\n";
+
+#[cfg(windows)]
+#[test]
+fn names_windows_would_read_as_another_are_refused() {
+    // INTERNALS 5.10 (round 19): Windows drops a trailing dot or space, and makes CON or NUL a
+    // device, so remove_file("data.txt.") deleted data.txt, write_file("report.") wrote report and
+    // read_file("CON") waited for typed input. Every file builtin refuses them before the OS sees
+    // them; a \\?\ path is taken as written, and the hint shows that way to a file of such a name
+    // that is really there (WSL and Macs make them).
+    let home = TempHome::new();
+    std::fs::write(home.0.join("data.txt"), "keep me").unwrap();
+    std::fs::write(format!(r"\\?\{}\notes.txt ", home.0.display()), "space content").unwrap();
+    let verbatim = serde_json::to_string(&format!(r"\\?\{}\notes.txt ", home.0.display())).unwrap();
+    let src = format!(
+        "{SHOW}show(func() => remove_file(\"data.txt.\"))\nshow(func() => read_file(\"CON\"))\nshow(func() => write_file(\"report.\", \"x\"))\n\
+         show(func() => write_file(\"other.txt \", \"x\"))\nshow(func() => write_file(\"nul\", \"x\"))\nshow(func() => write_file(\"sub/NUL\", \"x\"))\n\
+         show(func() => exists(\"CON\"))\nshow(func() => list_dir(\"com1\"))\nshow(func() => make_dir(\"out.\"))\nshow(func() => read_file(\"notes.txt \"))\n\
+         show(func() => read_file({verbatim}))\nprint(list_dir(\".\"))\n"
+    );
+    std::fs::write(home.0.join("w.v2"), src).unwrap();
+    let start = Instant::now();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["w.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(start.elapsed() < Duration::from_secs(30), "read_file(\"CON\") waited: {:?}", start.elapsed());
+    let refused = "Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > \" | ? *): choose another name";
+    let dot = |verb: &str, name: &str, kept: &str| format!("cannot {verb} '{name}': a Windows file name can't end in a dot or a space ('{name}' would be '{kept}')");
+    let device = |verb: &str, path: &str, name: &str| format!("cannot {verb} '{path}': {name} is the name of a device on Windows");
+    let lines: Vec<&str> = stdout.lines().collect();
+    let want = [
+        dot("remove", "data.txt.", "data.txt"),
+        refused.into(),
+        device("read", "CON", "CON"),
+        refused.into(),
+        dot("write", "report.", "report"),
+        refused.into(),
+        dot("write", "other.txt ", "other.txt"),
+        refused.into(),
+        device("write", "nul", "nul"),
+        refused.into(),
+        device("write", "sub/NUL", "NUL"),
+        refused.into(),
+        device("check", "CON", "CON"),
+        refused.into(),
+        device("list", "com1", "com1"),
+        refused.into(),
+        dot("create", "out.", "out"),
+        refused.into(),
+        dot("read", "notes.txt ", "notes.txt"),
+    ];
+    assert_eq!(lines[..want.len().min(lines.len())], want, "{stdout}");
+    // The hint for the name that is there: its full path with \\?\ in front, which reads it.
+    let there = lines[want.len()];
+    let start = "Windows doesn't allow this file name (CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9 are devices; a name can't end in a dot or a space, or hold < > \" | ? *), but one of that name is there (WSL and Macs can make one): reach it by its full path with \\\\?\\ in front, as in read_file(";
+    let literal = there.strip_prefix(start).and_then(|r| r.strip_suffix(')')).unwrap_or_else(|| panic!("{there}"));
+    let shown: String = serde_json::from_str(literal).unwrap();
+    assert!(shown.starts_with(r"\\?\") && shown.ends_with(r"\notes.txt "), "{shown}");
+    assert_eq!(std::fs::read_to_string(&shown).unwrap(), "space content");
+    assert_eq!(lines[want.len() + 1..], ["ok space content", "[\"data.txt\", \"notes.txt \", \"w.v2\"]"], "{stdout}");
+    assert_eq!(std::fs::read_to_string(home.0.join("data.txt")).unwrap(), "keep me");
+    std::fs::remove_file(format!(r"\\?\{}\notes.txt ", home.0.display())).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_drive_or_share_that_isnt_there_is_named() {
+    // INTERNALS 5.10 (round 19): a drive that isn't there (an unplugged USB drive) got "there is
+    // no folder 'Q:\reports'" and a make_dir hint, and make_dir then said Rust's "failed to
+    // create whole tree". Now every file builtin names the drive, or the share it can't reach.
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    let absent = ('D'..='Z').rev().find(|l| {
+        let root: Vec<u16> = format!("{l}:\\").encode_utf16().chain([0]).collect();
+        // SAFETY: a NUL-terminated root path. 1 is DRIVE_NO_ROOT_DIR.
+        unsafe { GetDriveTypeW(root.as_ptr()) == 1 }
+    });
+    let Some(q) = absent else {
+        let _ = writeln!(std::io::stderr(), "SKIP a_drive_or_share_that_isnt_there_is_named (every drive letter is in use)");
+        return;
+    };
+    let lower = q.to_ascii_lowercase();
+    let share = r"\\localhost\v2-no-such-share-r19";
+    let src = format!(
+        "{SHOW}show(func() => write_file(\"{q}:\\\\reports\\\\out.csv\", \"x\"))\nshow(func() => make_dir(\"{q}:\\\\reports\"))\nshow(func() => make_dir(\"{q}:/\"))\n\
+         show(func() => read_file(\"{q}:/data.csv\"))\nshow(func() => list_dir(\"{q}:/\"))\nshow(func() => remove_file(\"{q}:/x.txt\"))\n\
+         show(func() => write_file(\"{lower}:y.txt\", \"x\"))\nprint(exists(\"{q}:/x\"))\n\
+         show(func() => read_file(\"\\\\\\\\localhost\\\\v2-no-such-share-r19\\\\x.txt\"))\nshow(func() => make_dir(\"//localhost/v2-no-such-share-r19/out\"))\n"
+    );
+    let home = TempHome::new();
+    std::fs::write(home.0.join("d.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["d.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let none = format!("there is no drive {q}: (is it plugged in or connected?)");
+    let mut want: Vec<String> = Vec::new();
+    for (verb, path) in [
+        ("write", format!("{q}:\\reports\\out.csv")),
+        ("create", format!("{q}:\\reports")),
+        ("create", format!("{q}:/")),
+        ("read", format!("{q}:/data.csv")),
+        ("list", format!("{q}:/")),
+        ("remove", format!("{q}:/x.txt")),
+        ("write", format!("{lower}:y.txt")),
+    ] {
+        want.push(format!("cannot {verb} '{path}': {none}"));
+        want.push("null".into());
+    }
+    want.push("false".into());
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[..want.len().min(lines.len())], want, "{stdout}");
+    assert!(!stdout.contains("failed to create whole tree") && !stdout.contains("make_dir"), "{stdout}");
+    // A share that can't be reached, as Windows reports it here (the Server service answers
+    // ERROR_BAD_NET_NAME, 67; without it, ERROR_BAD_NETPATH, 53).
+    let os = std::fs::metadata(format!(r"{share}\x.txt")).unwrap_err().raw_os_error();
+    if !matches!(os, Some(53 | 67)) {
+        let _ = writeln!(std::io::stderr(), "SKIP the share part of a_drive_or_share_that_isnt_there_is_named (Windows says {os:?})");
+        return;
+    }
+    let cant = format!("the share {share} can't be reached (is that computer on and connected, and is the share's name right?)");
+    let rest = [format!("cannot read '{share}\\x.txt': {cant}"), "null".into(), format!("cannot create '//localhost/v2-no-such-share-r19/out': {cant}"), "null".into()];
+    assert_eq!(lines[want.len()..], rest, "{stdout}");
+}
+
+#[cfg(windows)]
+#[test]
+fn tmp_on_windows_points_to_temp() {
+    // INTERNALS 5.10 (round 19): /tmp is Linux's and macOS's; make_dir("/tmp") would make \tmp
+    // at the top of the drive, which every user can write to. The hint says getenv("TEMP").
+    let home = TempHome::new();
+    let drive = home.0.to_string_lossy()[..2].to_string();
+    if Path::new(&format!(r"{drive}\tmp")).exists() || Path::new(&format!(r"{drive}\var\tmp")).exists() {
+        let _ = writeln!(std::io::stderr(), "SKIP tmp_on_windows_points_to_temp ({drive}\\tmp is there)");
+        return;
+    }
+    let src = format!(
+        "{SHOW}show(func() => write_file(\"/tmp/x.txt\", \"x\"))\nshow(func() => read_file(\"/var/tmp/x.txt\"))\nshow(func() => list_dir(\"/tmp\"))\n\
+         show(func() => make_dir(\"/tmp/work\"))\nprint(exists(\"/tmp\"))\n"
+    );
+    std::fs::write(home.0.join("t.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["t.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let temp = |tmp: &str, rest: &str| format!("{tmp} is Linux's and macOS's temp folder: on Windows use getenv(\"TEMP\"), as in {rest}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "cannot write '/tmp/x.txt': there is no folder '/tmp'", "{stdout}");
+    assert_eq!(lines[1], temp("/tmp", "getenv(\"TEMP\") + \"/x.txt\""), "{stdout}");
+    assert_eq!(lines[3], temp("/var/tmp", "getenv(\"TEMP\") + \"/x.txt\""), "{stdout}");
+    assert_eq!(lines[5], temp("/tmp", "getenv(\"TEMP\")"), "{stdout}");
+    assert_eq!(lines[6], "cannot create '/tmp/work': on Windows that makes \\tmp at the top of the drive, a folder other users can write to", "{stdout}");
+    assert_eq!(lines[7..], [temp("/tmp", "getenv(\"TEMP\") + \"/work\""), "false".into()], "{stdout}");
 }
 
 #[cfg(any(windows, target_os = "linux"))]
