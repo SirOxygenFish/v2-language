@@ -313,6 +313,39 @@ if command -v fish >/dev/null 2>&1; then
 fi
 result "a folder named with \", \$ and \`"
 
+# The command shown for this terminal works when pasted, escaped as the startup line is: for a
+# folder in the home folder, one outside it, and when no startup file could be written.
+# now TEXT: the command after TEXT in install.sh's output.
+now() { printf '%s\n' "$out" | sed -n "s/^$1\(.*\)/\1/p" | sed 's/)$//'; }
+fresh
+odd="$h/we\$ird \`dir\`"
+mkdir -p "$odd"
+install /bin/bash V2_INSTALL_DIR="$odd"
+ok=yes
+expect "$code" 0 "exit code"
+cmd=$(now 'Open a new terminal to use v2 (or, in this one, run: ')
+found=$(env -i HOME="$h" PATH="$sys" sh -c "$cmd; command -v v2" 2>&1 || true)
+expect "$found" "$odd/v2" "sh finds it after '$cmd'"
+outside="$tmp/out\$side \`dir\` $n"
+install /bin/bash V2_INSTALL_DIR="$outside"
+cmd=$(now 'Open a new terminal to use v2 (or, in this one, run: ')
+found=$(env -i HOME="$h" PATH="$sys" sh -c "$cmd; command -v v2" 2>&1 || true)
+expect "$found" "$outside/v2" "sh finds it outside the home folder after '$cmd'"
+if command -v fish >/dev/null 2>&1; then
+    install /usr/bin/fish V2_INSTALL_DIR="$odd"
+    cmd=$(now 'Open a new terminal to use v2 (or, in this one, run: ')
+    found=$(env -i HOME="$h" PATH="$sys" LANG=C.UTF-8 fish -c "$cmd; command -v v2" 2>&1 || true)
+    expect "$found" "$odd/v2" "fish finds it after '$cmd'"
+fi
+fresh
+mkdir "$h/.bashrc" "$h/$login"
+install /bin/bash V2_INSTALL_DIR="$h/we\$ird \`dir\`"
+expect "$code" 1 "exit code when no startup file can be written"
+cmd=$(now 'To use v2 in this terminal, run: ')
+found=$(env -i HOME="$h" PATH="$sys" sh -c "$cmd; command -v v2" 2>&1 || true)
+expect "$found" "$h/we\$ird \`dir\`/v2" "sh finds it after '$cmd' (no startup file written)"
+result "the command for this terminal, for a folder named with \$ and \`"
+
 # A system folder already on PATH: no startup file changes.
 fresh
 sysdir="$tmp/system bin $n"
@@ -350,7 +383,16 @@ printf '#!/bin/sh\necho old\n' >"$h/old/v2"
 chmod 755 "$h/old/v2"
 install /bin/bash PATH="$h/old:$sys"
 ok=yes
-says "Note: this terminal runs another v2, $h/old/v2; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=$h/old" || { echo "    no note"; ok=no; }
+says "Note: this terminal runs another v2, $h/old/v2; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=\"\$HOME/old\"" || { echo "    no note"; ok=no; }
+# The folder it names works when pasted, also with $ and a backtick, in the home folder or not.
+for odd in "$h/o\$ld \`x\`" "$tmp/o\$ld \`x\` $n"; do
+    mkdir -p "$odd"
+    cp "$h/old/v2" "$odd/v2"
+    install /bin/bash PATH="$odd:$sys"
+    set_dir=$(printf '%s\n' "$out" | sed -n 's/.*run this again with \(V2_INSTALL_DIR=.*\)$/\1/p')
+    got=$(env -i HOME="$h" PATH="$sys" sh -c "$set_dir; printf '%s' \"\$V2_INSTALL_DIR\"" 2>&1 || true)
+    expect "$got" "$odd" "V2_INSTALL_DIR after '$set_dir'"
+done
 install /bin/bash V2_VERSION=latest
 expect "$code" 1 "exit code for latest"
 says "V2_VERSION=latest isn't a release name: leave V2_VERSION unset" || { echo "    no message for latest"; ok=no; }

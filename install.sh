@@ -196,10 +196,14 @@ esac
 # fish, without the backtick), so any folder name works.
 quoted_for_sh() { printf '%s' "$1" | sed 's/[\\"$`]/\\&/g'; }
 quoted_for_fish() { printf '%s' "$1" | sed 's/[\\"$]/\\&/g'; }
-case "$dir" in
-"$HOME"/*) shown="\$HOME/$(quoted_for_sh "${dir#"$HOME"/}")" ;;
-*) shown=$(quoted_for_sh "$dir") ;;
-esac
+# sh_path FOLDER: as it goes between double quotes, `$HOME/…` when in the home folder.
+sh_path() {
+    case "$1" in
+    "$HOME"/*) printf '$HOME/%s' "$(quoted_for_sh "${1#"$HOME"/}")" ;;
+    *) quoted_for_sh "$1" ;;
+    esac
+}
+shown=$(sh_path "$dir")
 # add_line FILE LINE: 0 when it adds the line, 1 when FILE has that exact line already, 2 when
 # FILE can't be written.
 add_line() {
@@ -222,6 +226,8 @@ elif [ "$on_path" = yes ] && [ "$mine" = no ]; then
 else
     # The setting checks PATH, so a shell that reads two of the files gets the folder once.
     line="case \":\$PATH:\" in *\":$shown:\"*) ;; *) export PATH=\"$shown:\$PATH\" ;; esac"
+    # The command that does it in this terminal, escaped the same, so it works when pasted.
+    now="export PATH=\"$shown:\$PATH\""
     # The startup files, as the positional parameters (a home folder's path can have spaces).
     case "$(basename "${SHELL:-sh}")" in
     # Every zsh reads .zshenv: new terminals, `zsh -lc`, ssh commands.
@@ -240,6 +246,7 @@ else
         # Global, not universal: deleting the file undoes it.
         fdir=$(quoted_for_fish "$dir")
         line="contains \"$fdir\" \$PATH; or set -gx PATH \"$fdir\" \$PATH"
+        now="set -gx PATH \"$fdir\" \$PATH"
         ;;
     *) set -- "$HOME/.profile" ;;
     esac
@@ -272,9 +279,9 @@ else
     if [ "$on_path" = yes ]; then
         [ -z "$added" ] || say "New terminals will find v2 too (this one has $dir on PATH already)"
     elif [ -n "$added" ] || [ -z "$unwritable" ]; then
-        say "Open a new terminal to use v2 (or, in this one, run: export PATH=\"$dir:\$PATH\")"
+        say "Open a new terminal to use v2 (or, in this one, run: $now)"
     else
-        say "To use v2 in this terminal, run: export PATH=\"$dir:\$PATH\""
+        say "To use v2 in this terminal, run: $now"
     fi
 fi
 
@@ -287,7 +294,7 @@ if [ -n "$other" ] && [ "$other" != "$dir/v2" ]; then
     elif yes_value "${V2_NO_MODIFY_PATH:-}"; then
         say "Note: a terminal finds another v2 now: $other (put $dir before it in PATH, or remove it)"
     elif [ -z "${unwritable:-}" ]; then
-        say "Note: this terminal runs another v2, $other; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=$(dirname "$other")"
+        say "Note: this terminal runs another v2, $other; new terminals run this one. To update that one instead, run this again with V2_INSTALL_DIR=\"$(sh_path "$(dirname "$other")")\""
     else
         say "Note: a terminal finds another v2 now: $other (put $dir before it in PATH, or remove it)"
     fi
