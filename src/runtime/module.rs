@@ -69,7 +69,168 @@ pub fn resolve(sm: &SourceMap, importer: FileId, spec: &str) -> PathBuf {
 /// with control characters escaped (2.1). A drive-relative Windows path (`C:m.v2`) is neither
 /// relative to the file nor absolute.
 pub fn locate(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
-    locate_raw(sm, importer, spec).map_err(|m| shown_path(&m))
+    locate_noted(sm, importer, spec).map(|(path, _)| path)
+}
+
+/// `locate`, and the note for a spelling that differs from the file's name on disk only in case
+/// (`case_note`). A file already loaded under another canonical path (`SourceMap::same_file`) is
+/// that one.
+pub fn locate_noted(sm: &SourceMap, importer: FileId, spec: &str) -> Result<(PathBuf, Option<String>), String> {
+    let found = locate_raw(sm, importer, spec).map_err(|m| shown_path(&m))?;
+    let note = case_note(&resolve(sm, importer, spec), spec, &found);
+    match sm.same_file(&found) {
+        Some(id) => Ok((sm.file(id).path.clone(), note)),
+        None => Ok((found, note)),
+    }
+}
+
+thread_local! {
+    /// Import sites whose case note was printed: one note per site in a run (6.4).
+    static NOTED: std::cell::RefCell<std::collections::HashSet<(u32, u32)>> = Default::default();
+}
+
+/// Whether the case note for the import at `at` is still to be printed (once per site).
+pub fn first_note(at: Span) -> bool {
+    NOTED.with(|n| n.borrow_mut().insert((at.file.0, at.lo)))
+}
+
+/// `import "./REAL/Counter.V2"` that found `real/counter.v2`, on a file system that ignores case
+/// (Windows', macOS's): `note: './REAL/Counter.V2' is spelled './real/counter.v2' on disk: …`,
+/// since a case-sensitive one won't find it. The written names at its end are compared with the
+/// canonical path's last ones; a link among them (whose target has its own name) or any other
+/// difference (an 8.3 short name) is no case problem (6.4).
+pub fn case_note(target: &Path, spec: &str, found: &Path) -> Option<String> {
+    // The written names at the end, each with where it starts in `spec`.
+    let mut parts: Vec<(usize, &str)> = Vec::new();
+    let mut start = 0;
+    for (i, c) in spec.char_indices().chain(std::iter::once((spec.len(), '/'))) {
+        if i == spec.len() || std::path::is_separator(c) {
+            parts.push((start, &spec[start..i]));
+            start = i + c.len_utf8();
+        }
+    }
+    let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !(p.len() == 2 && p.ends_with(':'));
+    let k = parts.iter().rev().take_while(|(_, p)| plain(p)).count();
+    let written = &parts[parts.len() - k..];
+    let real: Vec<String> = found.components().rev().take(k).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    if k == 0 || real.len() < k {
+        return None;
+    }
+    let real: Vec<&String> = real.iter().rev().collect();
+    let same_but_case = written.iter().zip(&real).all(|((_, w), r)| w.to_lowercase() == r.to_lowercase());
+    if !same_but_case || written.iter().zip(&real).all(|((_, w), r)| *w == r.as_str()) {
+        return None;
+    }
+    let mut at = target.to_path_buf();
+    for _ in 0..k {
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        at.pop();
+    }
+    let sep = if spec.contains('/') || !spec.contains('\\') { "/" } else { "\\" };
+    let spelled = format!("{}{}", &spec[..written[0].0], real.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(sep));
+    Some(shown_path(&format!("note: '{spec}' is spelled '{spelled}' on disk: a case-sensitive file system, as Linux's, won't find it")))
+}
+
+/// A link on the way to a path that can't be followed (DOCS 3.10): one to something that isn't
+/// there, or one in a loop. Windows' junctions are links too (`FileType::is_symlink` says so).
+pub struct LinkProblem {
+    /// The path up to and including the link, spelled as the path was.
+    pub at: PathBuf,
+    /// What a link that leads nowhere names (`None` when it can't be read); `None` for a loop.
+    target: Option<PathBuf>,
+    looped: bool,
+    /// A link to a folder (a junction, a directory symlink): Windows removes it with rmdir.
+    dir: bool,
+}
+
+impl LinkProblem {
+    /// `'brokenjunc' is a link to C:\x\gone, which isn't there`, or `… is a link in a loop`, with
+    /// `name` (`'brokenjunc'`, or `it` for the path itself).
+    pub fn problem(&self, name: &str) -> String {
+        match (&self.target, self.looped) {
+            (_, true) => format!("{name} is a link in a loop"),
+            (Some(to), false) => format!("{name} is a link to {}, which isn't there", crate::syntax::span::strip_verbatim(to).display()),
+            (None, false) => format!("{name} is a link to something that isn't there"),
+        }
+    }
+
+    /// What fixes it, for a message that ends with what to do: `remove the link (rmdir
+    /// brokenjunc), or make C:\x\gone` (`del` for a file's link on Windows, `rm` elsewhere).
+    pub fn fix(&self) -> String {
+        let remove = match (cfg!(windows), self.dir) {
+            (true, true) => "rmdir",
+            (true, false) => "del",
+            (false, _) => "rm",
+        };
+        let link = crate::cli::shell_word(&self.at.to_string_lossy());
+        match (&self.target, self.looped) {
+            (Some(to), false) => format!("remove the link ({remove} {link}), or make {}", crate::syntax::span::strip_verbatim(to).display()),
+            _ => format!("remove the link ({remove} {link}), or point it somewhere else"),
+        }
+    }
+}
+
+/// The start of `path` as written that is the path `at`, one of its beginnings (`a/link` of
+/// `a/link/x.txt`, where `at` would print `a\link` on Windows).
+pub fn written_prefix<'a>(path: &'a str, at: &Path) -> std::borrow::Cow<'a, str> {
+    let ends = path.char_indices().filter(|&(_, c)| std::path::is_separator(c)).map(|(i, _)| i).chain(std::iter::once(path.len()));
+    match ends.map(|i| &path[..i]).find(|p| Path::new(p) == at) {
+        Some(p) => p.into(),
+        None => at.to_string_lossy().into_owned().into(),
+    }
+}
+
+/// Whether `e` says that links lead in a loop: `ELOOP`, or Windows'
+/// `ERROR_CANT_RESOLVE_FILENAME` (1921, "The name of the file cannot be resolved by the system").
+pub fn is_link_loop(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    return e.raw_os_error() == Some(libc::ELOOP);
+    #[cfg(windows)]
+    return e.raw_os_error() == Some(1921);
+}
+
+/// The first link on the way to `path`, or `path` itself, that leads nowhere or in a loop: each
+/// part is looked at with `symlink_metadata`, then a link followed with `metadata` (DOCS 3.10).
+/// `None` when every link leads somewhere, or a part can't be looked at (missing, unreadable).
+pub fn link_problem(path: &Path) -> Option<LinkProblem> {
+    let mut at = PathBuf::new();
+    for c in path.components() {
+        at.push(c);
+        if !matches!(c, std::path::Component::Normal(_)) {
+            continue;
+        }
+        let kind = std::fs::symlink_metadata(&at).ok()?.file_type();
+        if !kind.is_symlink() {
+            continue;
+        }
+        #[cfg(windows)]
+        let dir = std::os::windows::fs::FileTypeExt::is_symlink_dir(&kind);
+        #[cfg(unix)]
+        let dir = false;
+        match std::fs::metadata(&at) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Some(LinkProblem { target: std::fs::read_link(&at).ok(), at, looped: false, dir });
+            }
+            Err(e) if is_link_loop(&e) => return Some(LinkProblem { at, target: None, looped: true, dir }),
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// A file builtin's failure on a path through a link that leads nowhere or in a loop (5.10):
+/// `IOError: cannot write 'brokenjunc/new.txt': 'brokenjunc' is a link to C:\x\gone, which isn't
+/// there`, `hint: remove the link (rmdir brokenjunc), or make C:\x\gone`, not a `make_dir` hint
+/// that would fail, nor Windows' "Access is denied".
+pub fn link_error(verb: &str, path: &str) -> Option<crate::runtime::error::ErrorValue> {
+    let link = link_problem(Path::new(path))?;
+    let name = if link.at == Path::new(path) { "it".to_string() } else { format!("'{}'", written_prefix(path, &link.at)) };
+    let err = crate::runtime::error::ErrorValue::new("IOError", shown_path(&format!("cannot {verb} '{path}': {}", link.problem(&name))));
+    let _ = err.hint.set(shown_path(&link.fix()).into());
+    Some(err)
 }
 
 fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, String> {
@@ -80,8 +241,8 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
     let target = resolve(sm, importer, spec);
     let found = match std::fs::canonicalize(&target) {
         Ok(found) => crate::syntax::span::strip_verbatim(&found),
-        // There, but it can't be followed: a link to a file that isn't there, or the OS's
-        // reason (a loop of links: "Too many levels of symbolic links"), as for FILE (19.1).
+        // There, but it can't be followed: a link to a file that isn't there, a link in a loop
+        // (ELOOP, Windows' 1921), or the OS's reason, as for FILE (19.1).
         // A link to an anonymous pipe (/dev/stdin from a pipe, /proc/self/fd/0, <(…)) is there
         // to the OS, which follows /proc's links, though canonicalize can't name its target.
         Err(e) if std::fs::symlink_metadata(&target).is_ok() => {
@@ -90,12 +251,22 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, S
             }
             return Err(match std::fs::read_link(&target) {
                 Ok(to) if e.kind() == std::io::ErrorKind::NotFound => {
-                    format!("cannot import '{spec}': it is a symbolic link to {}, which isn't there", to.to_string_lossy())
+                    format!("cannot import '{spec}': it is a symbolic link to {}, which isn't there", crate::syntax::span::strip_verbatim(&to).to_string_lossy())
                 }
+                _ if is_link_loop(&e) => format!("cannot import '{spec}': it is a link in a loop"),
                 _ => format!("cannot import '{spec}': {}", os_message(&e)),
             });
         }
-        Err(_) => {
+        Err(e) => {
+            // A link on the way that leads nowhere or in a loop, a junction too (DOCS 3.10).
+            if let Some(link) = link_problem(&target) {
+                return Err(format!("cannot import '{spec}': {}", link.problem(&format!("'{}'", shown(&link.at)))));
+            }
+            // There, in a folder V2 may not read (a deny inherited from it): the OS's reason.
+            let lstat = std::fs::symlink_metadata(&target).err();
+            if e.kind() == std::io::ErrorKind::PermissionDenied || lstat.is_some_and(|l| l.kind() == std::io::ErrorKind::PermissionDenied) {
+                return Err(format!("cannot import '{spec}': {}", os_message(&e)));
+            }
             // `import "./util" as util` for util.v2.
             let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
             let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
@@ -336,4 +507,74 @@ pub fn shown(path: &Path) -> Rc<str> {
         full.push(name);
     }
     display_path(&full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spelling_that_differs_only_in_case_gets_a_note() {
+        // 6.4 (round 19): the written names at the end against the canonical path's last ones.
+        let base = std::env::temp_dir().join(format!("v2case-{}", std::process::id()));
+        let note = |spec: &str, found: &str| case_note(&base.join(spec), spec, &base.join(found));
+        assert_eq!(
+            note("./REAL/Counter.V2", "real/counter.v2").as_deref(),
+            Some("note: './REAL/Counter.V2' is spelled './real/counter.v2' on disk: a case-sensitive file system, as Linux's, won't find it")
+        );
+        // Only the parts written are compared, with the separator written.
+        assert_eq!(
+            note("../lib/X.v2", "lib/x.v2").as_deref(),
+            Some("note: '../lib/X.v2' is spelled '../lib/x.v2' on disk: a case-sensitive file system, as Linux's, won't find it")
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                note(r".\Lib\x.v2", "lib/x.v2").as_deref(),
+                Some(r"note: '.\Lib\x.v2' is spelled '.\lib\x.v2' on disk: a case-sensitive file system, as Linux's, won't find it")
+            );
+            // An 8.3 short name is another name, not a case problem.
+            assert_eq!(note("./REALDI~1/x.v2", "RealDirectory/x.v2"), None);
+        }
+        assert_eq!(note("./real/counter.v2", "real/counter.v2"), None);
+        assert_eq!(note("./other.v2", "real.v2"), None);
+    }
+
+    /// A link to a folder: a junction on Windows (which needs no administrator), else a symlink.
+    pub(crate) fn dir_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let ok = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).stdout(std::process::Stdio::null()).status().unwrap().success();
+            assert!(ok, "mklink /J {}", link.display());
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn links_that_lead_nowhere_or_in_a_loop_are_found() {
+        // DOCS 3.10 (round 19): a folder part of the path, a junction on Windows.
+        let d = std::env::temp_dir().join(format!("v2links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("gone")).unwrap();
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        dir_link(&d.join("broken"), &d.join("gone"));
+        std::fs::remove_dir(d.join("gone")).unwrap();
+        dir_link(&d.join("loop1"), &d.join("loop2"));
+        dir_link(&d.join("loop2"), &d.join("loop1"));
+        dir_link(&d.join("fine"), &d.join("real"));
+        let broken = link_problem(&d.join("broken").join("lib.v2")).expect("the broken link");
+        assert_eq!(broken.at, d.join("broken"));
+        assert_eq!(broken.problem("'broken'"), format!("'broken' is a link to {}, which isn't there", d.join("gone").display()));
+        let remove = if cfg!(windows) { "rmdir" } else { "rm" };
+        let shown = |p: &Path| crate::cli::shell_word(&p.to_string_lossy());
+        assert_eq!(broken.fix(), format!("remove the link ({remove} {}), or make {}", shown(&d.join("broken")), d.join("gone").display()));
+        let looped = link_problem(&d.join("loop1").join("x").join("y.v2")).expect("the loop");
+        assert_eq!((looped.at.clone(), looped.problem("it")), (d.join("loop1"), "it is a link in a loop".to_string()));
+        assert!(looped.fix().ends_with("), or point it somewhere else"), "{}", looped.fix());
+        // A link that leads somewhere, and a path that simply isn't there, have none.
+        assert!(link_problem(&d.join("fine").join("nope.v2")).is_none());
+        assert!(link_problem(&d.join("nope").join("x.v2")).is_none());
+        assert_eq!(written_prefix("a/broken/x.txt", Path::new("a").join("broken").as_path()), "a/broken");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

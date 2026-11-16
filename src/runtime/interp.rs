@@ -295,8 +295,16 @@ impl Interp {
 
     /// `import "spec" as name` (6.4): the module's namespace dict.
     fn import(&mut self, spec: &str, at: Span) -> Exec<Value> {
-        let path = match module::locate(&self.sm, at.file, spec) {
-            Ok(p) => p,
+        let path = match module::locate_noted(&self.sm, at.file, spec) {
+            Ok((p, note)) => {
+                // A spelling whose case differs from the file's: once per import site (6.4).
+                if let Some(note) = note.filter(|_| module::first_note(at)) {
+                    self.out.flush_or_stop();
+                    crate::runtime::builtins::start_line();
+                    stderrln!("{note}");
+                }
+                p
+            }
             Err(msg) => return self.fail_at("ImportError", msg, at),
         };
         match self.modules.get(&path) {
@@ -321,11 +329,15 @@ impl Interp {
             None => match module::parse_file(&mut self.sm, &path) {
                 Ok(p) => p,
                 Err(e) => {
-                    let msg = match e {
-                        crate::syntax::span::LoadError::Io(m) => m,
-                        crate::syntax::span::LoadError::NotUtf8 { message, .. } => message.into(),
+                    let (msg, hint) = match e {
+                        crate::syntax::span::LoadError::Io(m, hint) => (m, hint),
+                        crate::syntax::span::LoadError::NotUtf8 { message, .. } => (message.into(), None),
                     };
-                    return self.fail_at("ImportError", shown_path(&format!("cannot import '{spec}': {msg}")), at);
+                    let e = ErrorValue::new("ImportError", shown_path(&format!("cannot import '{spec}': {msg}")));
+                    if let Some(h) = hint {
+                        let _ = e.hint.set(h.into());
+                    }
+                    return Err(self.raise(Flow::Error(Rc::new(e)), at));
                 }
             },
         };

@@ -74,8 +74,9 @@ pub struct SourceFile {
 
 /// Why a file could not be loaded.
 pub enum LoadError {
-    /// The file can't be read (missing, unreadable): a startup error, exit 2.
-    Io(String),
+    /// The file can't be read (missing, unreadable): a startup error, exit 2; then what to do,
+    /// when the OS's reason has an answer (`read_hint`).
+    Io(String, Option<&'static str>),
     /// The bytes aren't UTF-8: a `SyntaxError` at the line and column of the first bad byte;
     /// `message` says so and how to fix it (2.1).
     NotUtf8 { display: Rc<str>, line: u32, col: u32, message: &'static str },
@@ -107,10 +108,45 @@ pub fn bomless_utf16(bytes: &[u8]) -> bool {
     pairs >= 2 && (count(true) * 4 >= pairs * 3 || count(false) * 4 >= pairs * 3)
 }
 
+/// What to do about a file V2 can't read, for the script and the files it imports (19.1, 6.4):
+/// on Windows one another program opened without sharing (`ERROR_SHARING_VIOLATION`,
+/// `ERROR_LOCK_VIOLATION`), as the file builtins say too (5.10).
+pub fn read_hint(e: &std::io::Error) -> Option<&'static str> {
+    (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))).then_some("another program has it open (Excel keeps an open file locked): close it there")
+}
+
+/// A file's identity, the same however a path reaches it: the volume's serial number and the
+/// file's index on Windows, the device and inode elsewhere. Two canonical paths can name one file
+/// (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`), so a module is looked up by
+/// it too (6.4).
+pub fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS};
+        // No access to the data: another program's lock (no sharing) doesn't stop it.
+        let f = std::fs::OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path).ok()?;
+        // SAFETY: a zeroed struct for an open handle, which `f` keeps open during the call.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+            return None;
+        }
+        Some((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+}
+
 #[derive(Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
     by_path: HashMap<PathBuf, FileId>,
+    /// Loaded files by `file_identity`.
+    by_identity: HashMap<(u64, u64), FileId>,
 }
 
 impl SourceMap {
@@ -121,21 +157,25 @@ impl SourceMap {
     /// Read, validate and normalize a file (3.1). A path that is already loaded returns its id.
     pub fn load(&mut self, path: &Path) -> Result<FileId, LoadError> {
         let canonical = std::fs::canonicalize(path)
-            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", shown_path(&path.to_string_lossy()), os_message(&e))))?;
+            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", shown_path(&path.to_string_lossy()), os_message(&e)), read_hint(&e)))?;
         let canonical = strip_verbatim(&canonical);
         // `v2 x.v2` in a folder whose name isn't UTF-8: script_dir() and messages couldn't name
         // it, as main says for such a FILE (19.1, round 16).
         if canonical.to_str().is_none() {
-            return Err(LoadError::Io(format!(
-                "the path '{}' is not valid UTF-8, which V2 needs: a folder on the way has a name in another encoding; rename it",
-                shown_path(&canonical.to_string_lossy())
-            )));
+            return Err(LoadError::Io(
+                format!(
+                    "the path '{}' is not valid UTF-8, which V2 needs: a folder on the way has a name in another encoding; rename it",
+                    shown_path(&canonical.to_string_lossy())
+                ),
+                None,
+            ));
         }
         if let Some(&id) = self.by_path.get(&canonical) {
             return Ok(id);
         }
         let bytes = std::fs::read(&canonical)
-            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", display_path(&canonical), os_message(&e))))?;
+            .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", display_path(&canonical), os_message(&e)), read_hint(&e)))?;
+        let identity = file_identity(&canonical);
         let display = display_path(&canonical);
         // Latin text in UTF-16 is valid UTF-8 with a NUL between the letters.
         if bomless_utf16(&bytes) {
@@ -159,7 +199,19 @@ impl SourceMap {
                 return Err(LoadError::NotUtf8 { display, line, col, message: not_utf8_message(e.as_bytes()) });
             }
         };
-        Ok(self.add(canonical, display, &text))
+        let id = self.add(canonical, display, &text);
+        if let Some(key) = identity {
+            self.by_identity.entry(key).or_insert(id);
+        }
+        Ok(id)
+    }
+
+    /// The loaded file that `path` names under another canonical path, if any (6.4).
+    pub fn same_file(&self, path: &Path) -> Option<FileId> {
+        if self.by_identity.is_empty() || self.by_path.contains_key(path) {
+            return None;
+        }
+        file_identity(path).and_then(|key| self.by_identity.get(&key).copied())
     }
 
     /// Add in-memory source (tests, and files already read). The text is normalized.

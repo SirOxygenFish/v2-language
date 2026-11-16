@@ -51,6 +51,8 @@ dir=$(full_path "${V2_INSTALL_DIR:-$HOME/.v2/bin}")
 case "$dir" in
 *"
 "*) fail "V2_INSTALL_DIR has a line break in it: choose a folder without one" ;;
+# PATH would split such a folder in two.
+*:*) fail "$dir has a ':' in it, which PATH uses between folders: set V2_INSTALL_DIR to a folder without one" ;;
 esac
 
 # 1. Which binary this computer needs.
