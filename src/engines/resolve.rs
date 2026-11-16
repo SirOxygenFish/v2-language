@@ -1020,6 +1020,7 @@ impl Resolver<'_> {
                                 );
                             }
                         }
+                        tilde_skips(spec, &path, Some(dir.as_path()), home().as_deref(), &seen, &mut skipped);
                         return Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Path, argv, version: Some(v), skipped });
                     }
                     Judged::TooOld(v, reason) => {
@@ -1033,6 +1034,7 @@ impl Resolver<'_> {
                 }
             }
         }
+        tilde_skips(spec, &path, None, home().as_deref(), &seen, &mut skipped);
         let status = match newest_old {
             Some(v) => Status::Old(v),
             None if failed => Status::Broken,
@@ -1086,6 +1088,72 @@ impl Resolver<'_> {
     }
 }
 
+/// The home folder a PATH entry's `~` stands for in bash (7.5); `None` when `HOME` isn't set.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
+}
+
+/// Unix: `PATH` entries that start with `~` (`~/.nvm/versions/node/v24/bin`, from a quoted
+/// `export PATH="~/…:$PATH"`) are relative, so the walk skips them, as execvp, dash and Python do;
+/// only bash's own lookup expands them, so the shell runs another program than V2 (7.5). One whose
+/// folder, `~` expanded, holds a program the engine looks for is added to `skipped`, with what to
+/// write instead: those before `upto`, the folder of the program V2 uses, or all when there is
+/// none, unless the walk met that file already (`seen`).
+fn tilde_skips(spec: &EngineSpec, path: &std::ffi::OsStr, upto: Option<&Path>, home: Option<&Path>, seen: &std::collections::HashSet<(PathBuf, Vec<String>)>, skipped: &mut Vec<(PathBuf, String)>) {
+    if !cfg!(unix) {
+        return;
+    }
+    let raw: Vec<PathBuf> = std::env::split_paths(path).collect();
+    let end = upto.and_then(|d| raw.iter().position(|r| r == d)).unwrap_or(raw.len());
+    for entry in &raw[..end] {
+        let text = entry.to_string_lossy();
+        let Some((folder, write)) = expand_tilde(&text, home) else { continue };
+        let found = spec.candidates.iter().filter(|c| c.len() == 1).map(|c| (folder.join(&*c[0]), &c[0])).find(|(p, _)| is_regular_file(p) && executable(p));
+        let Some((program, name)) = found else { continue };
+        let file = std::fs::canonicalize(&program).unwrap_or(program);
+        let shown = entry.join(&**name);
+        if seen.contains(&(file, Vec::new())) || skipped.iter().any(|(p, _)| *p == shown) {
+            continue;
+        }
+        skipped.push((shown, format!("its PATH entry starts with ~, which only bash expands: write {write} in your startup file")));
+    }
+}
+
+/// `~/x` → (`$HOME/x` expanded, `$HOME/x`), `~` → `$HOME`, `~user/x` → that user's home joined
+/// (written as the path) (7.5); `None` for an entry without `~`, or a home that isn't known.
+fn expand_tilde(entry: &str, home: Option<&Path>) -> Option<(PathBuf, String)> {
+    let rest = entry.strip_prefix('~')?;
+    let (user, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    let base = if user.is_empty() { home?.to_path_buf() } else { home_of(user)? };
+    let written = if user.is_empty() { "$HOME".to_string() } else { base.display().to_string() };
+    let tail = tail.trim_end_matches('/');
+    Some(if tail.is_empty() { (base, written) } else { (base.join(tail), format!("{written}/{tail}")) })
+}
+
+/// The home folder of the user `name` (`~name`), from the user database.
+#[cfg(unix)]
+fn home_of(name: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: a zeroed passwd is a valid out-parameter.
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwnam_r fills `pw`, its strings in `buf`, and sets `out` to `&pw` when found.
+    let rc = unsafe { libc::getpwnam_r(name.as_ptr(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut out) };
+    if rc != 0 || out.is_null() || pw.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points to a NUL-terminated string in `buf`, which is still alive.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+}
+
+#[cfg(not(unix))]
+fn home_of(_: &str) -> Option<PathBuf> {
+    None
+}
+
 /// What to do when `path` couldn't start because a shared library is missing (its probe said
 /// `error while loading shared libraries: libatomic.so.1: …`, as Node.js's own Linux build does
 /// on a minimal system): the package for libatomic, else the library to install.
@@ -1110,11 +1178,11 @@ pub fn probe_fix(id: &str, skipped: &[(PathBuf, String)], set: &[(&'static str, 
     (failed && !vars.is_empty()).then(|| crate::engines::spec::startup_fix(id, &vars))
 }
 
-/// Doctor (19.2): with a startup variable set, whether the program really starts (`python -c
-/// pass`, `node -e 0`), since `--version` answers before Python reads `PYTHONHOME` or Node runs
-/// a preload (8.4). `None` when it starts, or when the check can't tell (it timed out, or
-/// couldn't start at all); else what ran and how it ended, `-c pass failed (exit code 1): `, and
-/// the first line that names an error.
+/// Doctor (19.2): with a startup variable or an address-space limit set, whether the program
+/// really starts (Python importing what V2's worker imports, `node -e 0`), since `--version`
+/// answers before Python reads `PYTHONHOME` or Node runs a preload (8.4). `None` when it starts,
+/// or when the check can't tell (it timed out, or couldn't start at all); else what failed and
+/// how it ended, `-e 0 failed (exit code 1): `, and the first line that names an error.
 pub fn start_failure(prober: &dyn Prober, spec: &EngineSpec, argv: &[OsString]) -> Option<String> {
     let args = crate::engines::spec::start_args(&spec.id);
     if args.is_empty() {
@@ -1127,11 +1195,14 @@ pub fn start_failure(prober: &dyn Prober, spec: &EngineSpec, argv: &[OsString]) 
         ProbeOutcome::Killed(sig) => (None, Some(sig), String::new()),
         ProbeOutcome::Exited { code, output } => (code, None, output),
     };
-    // Python first prints its path configuration, Node the line of its loader that threw.
+    // Python first prints its path configuration, Node the line of its loader that threw. A
+    // traceback's exception is its first line after it that isn't indented (a frame, or the
+    // source line of one, `raise ImportError(…)`, is).
     let lines = || output.lines().map(str::trim).filter(|l| !l.is_empty());
-    let said = lines().find(|l| l.contains("rror")).or_else(|| lines().next());
+    let raised = output.lines().skip_while(|l| !l.starts_with("Traceback (most recent call last)")).skip(1).find(|l| !l.starts_with(char::is_whitespace) && !l.is_empty());
+    let said = raised.map(str::trim).or_else(|| lines().find(|l| l.contains("rror"))).or_else(|| lines().next());
     let said = said.map(|l| format!(": {}", l.chars().take(160).collect::<String>())).unwrap_or_default();
-    Some(format!("{} failed ({}){said}", args.join(" "), ExitInfo { code, signal }.describe()))
+    Some(format!("{} ({}){said}", crate::engines::spec::start_check_failed(&spec.id), ExitInfo { code, signal }.describe()))
 }
 
 /// 7.8's message: what was found (nothing, or only versions that are too old), what was tried,
@@ -1699,17 +1770,27 @@ mod tests {
 
     #[test]
     fn doctor_sees_whether_the_program_starts() {
-        // Round 18, 19.2: `--version` answers before Python reads PYTHONHOME, so doctor runs
-        // `python -c pass` (`node -e 0`) and reports the first line that names an error.
+        // Round 18, 19.2: `--version` answers before Python reads PYTHONHOME, so doctor starts
+        // the program (Python importing what V2's worker imports, `node -e 0`) and reports the
+        // first line that names an error.
         let python = PathBuf::from("/usr/bin/python3");
         let broken = "Python path configuration:\n  PYTHONHOME = '/nope'\nFatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding\nPython runtime state: core initialized\n";
         let p = fake(move |_| ProbeOutcome::Exited { code: Some(1), output: broken.into() });
         let argvs = p.argvs.clone();
         assert_eq!(
             start_failure(&p, &spec("py"), &[python.clone().into_os_string()]).as_deref(),
-            Some("-c pass failed (exit code 1): Fatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding")
+            Some("can't import the standard modules V2's worker uses (exit code 1): Fatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding")
         );
-        assert_eq!(argvs.borrow()[0], [python.clone().into_os_string(), "-c".into(), "pass".into()]);
+        let check = crate::engines::spec::start_args("py");
+        assert_eq!(argvs.borrow()[0], [python.clone().into_os_string(), "-c".into(), check[1].into()]);
+        // Round 19: a stale PYTHONPATH starts Python, then breaks a module the worker imports:
+        // the traceback's own line, not a source line in it that names an error.
+        let stale = "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/old/re.py\", line 1, in <module>\n    raise ImportError('stale re')\nImportError: stale re\n";
+        let p = fake(move |_| ProbeOutcome::Exited { code: Some(1), output: stale.into() });
+        assert_eq!(
+            start_failure(&p, &spec("py"), &[python.clone().into_os_string()]).as_deref(),
+            Some("can't import the standard modules V2's worker uses (exit code 1): ImportError: stale re")
+        );
         let node = PathBuf::from("/usr/bin/node");
         let preload = "node:internal/modules/cjs/loader:1247\n  throw err;\n  ^\n\nError: Cannot find module '/x/missing.js'\nRequire stack:\n";
         let p = fake(move |_| ProbeOutcome::Exited { code: Some(1), output: preload.into() });
@@ -1719,6 +1800,58 @@ mod tests {
             let p = fake(move |_| outcome.clone());
             assert_eq!(start_failure(&p, &spec("py"), &[python.clone().into_os_string()]), None);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tilde_path_entry_that_holds_the_program_is_named() {
+        // Round 19, 7.5: `export PATH="~/.nvm/…/bin:$PATH"` (quoted, so the shell didn't expand
+        // it): bash's own lookup expands it, execvp, dash, Python and V2 don't.
+        let home = temp("tilde-home");
+        let nvm = home.join(".nvm").join("v24").join("bin");
+        std::fs::create_dir_all(&nvm).unwrap();
+        exe(&nvm, "node");
+        let system = temp("tilde-system");
+        exe(&system, "node");
+        let entry = PathBuf::from("~/.nvm/v24/bin");
+        let path = std::env::join_paths([entry.clone(), system.clone()]).unwrap();
+        let js = spec("js");
+        let none = std::collections::HashSet::new();
+        let why = "its PATH entry starts with ~, which only bash expands: write $HOME/.nvm/v24/bin in your startup file".to_string();
+        let mut skipped = Vec::new();
+        tilde_skips(&js, &path, Some(&system), Some(&home), &none, &mut skipped);
+        assert_eq!(skipped, [(entry.join("node"), why.clone())], "before the one V2 uses");
+        // After it: bash runs the same one. Without a home, or for another program: nothing.
+        let after = std::env::join_paths([system.clone(), entry.clone()]).unwrap();
+        for (path, home, id) in [(&after, Some(&*home), "js"), (&path, None, "js"), (&path, Some(&*home), "py")] {
+            let mut skipped = Vec::new();
+            tilde_skips(&spec(id), path, Some(&system), home, &none, &mut skipped);
+            assert_eq!(skipped, [], "{id}");
+        }
+        // None usable: every such entry, after what the walk skipped.
+        let mut skipped = vec![(system.join("node"), "too old: 18.19.1 < 22.13".to_string())];
+        tilde_skips(&js, &path, None, Some(&home), &none, &mut skipped);
+        assert_eq!(skipped[1], (entry.join("node"), why));
+        // The same file met through an absolute entry: the shell and V2 agree.
+        let seen = std::collections::HashSet::from([(std::fs::canonicalize(nvm.join("node")).unwrap(), Vec::new())]);
+        let mut skipped = Vec::new();
+        tilde_skips(&js, &path, None, Some(&home), &seen, &mut skipped);
+        assert_eq!(skipped, []);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_expansion() {
+        let h = Path::new("/h");
+        assert_eq!(expand_tilde("~", Some(h)), Some((PathBuf::from("/h"), "$HOME".to_string())));
+        assert_eq!(expand_tilde("~/a/b/", Some(h)), Some((PathBuf::from("/h/a/b"), "$HOME/a/b".to_string())));
+        assert_eq!(expand_tilde("~/a", None), None);
+        assert_eq!(expand_tilde("/usr/bin", Some(h)), None);
+        assert_eq!(expand_tilde("bin", Some(h)), None);
+        // ~user: that user's home, written out.
+        let root = home_of("root").expect("root has a home");
+        assert_eq!(expand_tilde("~root/bin", Some(h)), Some((root.join("bin"), format!("{}/bin", root.display()))));
+        assert_eq!(expand_tilde("~no-such-user-v2/bin", Some(h)), None);
     }
 
     fn with_command(id: &str, argv: &[&str], from: ConfigSource) -> Config {

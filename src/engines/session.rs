@@ -132,6 +132,35 @@ pub fn worker_command(e: &ResolvedEngine, adapter: &Path) -> (Vec<OsString>, Vec
     (argv, env)
 }
 
+/// What a worker that exited with code 0 before its `hello` means (8.4): V2 speaks to the program
+/// over its standard input and output, which a wrapper in the command may keep for itself.
+/// `conda run` (`mamba run`, `micromamba run`) does, unless given `--no-capture-output` (or
+/// `--live-stream`): then what to write instead. `id`: the engine's.
+fn wrapper_note(id: &str, argv: &[OsString]) -> String {
+    let words: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let mut note = "; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through".to_string();
+    let stem = |w: &str| Path::new(w).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let Some(at) = words.iter().position(|w| matches!(stem(w).as_str(), "conda" | "mamba" | "micromamba")) else { return note };
+    let Some(run) = words.iter().skip(at + 1).position(|w| w == "run").map(|i| i + at + 1) else { return note };
+    if words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream") {
+        return note;
+    }
+    let tool = stem(&words[at]);
+    // `-n sales`, `--name sales` or `--name=sales`: the environment's own python.
+    let name = words[run + 1..].windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].clone());
+    let name = name.or_else(|| words[run + 1..].iter().find_map(|w| w.strip_prefix("--name=").map(str::to_string)));
+    let (program, place) = match (id, name) {
+        ("py", Some(n)) if cfg!(windows) => ("python", format!(" (envs\\{n}\\python.exe in {tool}'s folder)")),
+        ("py", Some(n)) => ("python", format!(" (envs/{n}/bin/python in {tool}'s folder)")),
+        ("py", None) => ("python", String::new()),
+        _ => ("node", String::new()),
+    };
+    note.push_str(&format!(
+        "; {tool} run passes them through only with --no-capture-output: add it after run, or name the environment's {program}{place} in [engines.{id}] command"
+    ));
+    note
+}
+
 /// `5 s`, `0.3 s`.
 fn secs(d: Duration) -> String {
     let s = d.as_secs_f64();
@@ -400,17 +429,15 @@ impl Interp {
                 self.sessions[s].state = State::Dead(DeadReason::SpawnFailed(e.clone()));
                 return Flow::Error(e);
             }
+            // A clean exit before `hello`: a wrapper that kept the protocol from the program (8.4).
+            // By the session's engine: a session a ts block started is js's.
+            let wrapper = if exit.is_some_and(|e| e.code == Some(0)) { wrapper_note(&tag, &self.sessions[s].engine.argv) } else { String::new() };
             // A variable the program reads as it starts may be why (8.4).
-            let id = self.sessions[s].engine.spec.id.clone();
-            let vars: String = super::spec::startup_variables(&id).iter().map(|(n, v)| format!("; {n} is set ({v}), which it reads as it starts")).collect();
+            let set = super::spec::startup_variables(&tag);
+            let vars = if set.is_empty() { String::new() } else { format!("; {}", super::spec::startup_vars_fix(&set)) };
             // Node.js reserves about 1 GB of address space as it starts (round 16).
-            #[cfg(unix)]
-            let limit = crate::address_limit()
-                .map(|l| format!("; a memory limit (ulimit -v) of {} MB is set for this shell, and {} as it starts: raise it", l >> 20, if &*id == "js" { "Node.js reserves about 1 GB" } else { "the engine may need more" }))
-                .unwrap_or_default();
-            #[cfg(not(unix))]
-            let limit = "";
-            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any{vars}{limit}"));
+            let limit = super::spec::limit_fix(&tag).map(|f| format!("; {f}")).unwrap_or_default();
+            return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any{wrapper}{vars}{limit}"));
         }
         let pid = pid.map_or_else(String::new, |p| format!(" (pid {p})"));
         error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above, if any", pending.name))
@@ -989,6 +1016,12 @@ impl Interp {
             // `sys.exit(n)` as `exit_code`) are its data (9.6).
             if let Some(data) = e.get("data").filter(|d| d.as_object().is_some_and(|o| !o.is_empty())) {
                 err.data = self.wire(s).decode(data)?;
+            }
+            // A block's own require() or import() of a package Node didn't find: the hints an
+            // @import of it gets (13.5).
+            let code = e.get("data").and_then(|d| d.get("code")).and_then(Json::as_str);
+            if let Some(hint) = code.filter(|_| err.hint.get().is_none() && &*self.tag(s) == "js").and_then(|c| super::imports::block_module_hint(message, c)) {
+                let _ = err.hint.set(hint.into());
             }
         }
         let frames = self.foreign_frames(s, e);
