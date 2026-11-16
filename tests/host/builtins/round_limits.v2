@@ -1,0 +1,8 @@
+// round with digits 0 gives an int, so NaN, infinity and floats beyond the 64-bit range (about
+// ±9.22e18) are a ValueError; more digits give a float, any float (DOCS 3.11, INTERNALS 5.10).
+print(round(9.2e18), round(-9.2e18), round(9.223372036854775e18))
+for x in [1e19, -9.3e18, 9.2233720368547758e18, 1e300, float("nan"), float("inf")] {
+    try { print(round(x)) } catch (e) { print(x, e.type, e.message) }
+}
+print(round(1e300, 1), round(-1e300, 2), round(1e19, 1), type(round(1e19, 1)), round(float("nan"), 1))
+print(round(3.7, 0), type(round(3.7, 0)), round(2.5, 1), type(round(2.5, 1)))
