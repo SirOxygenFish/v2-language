@@ -1309,11 +1309,34 @@ if __name__ == "__main__":
                 best = best or c
         return best
 
+    # Modules only one platform's Python has (13.5): sys.stdlib_module_names lists every
+    # platform's, so another platform's module isn't one this Python lacks.
+    UNIX_ONLY = ("fcntl", "grp", "posix", "pwd", "readline", "resource", "syslog", "termios")
+    WINDOWS_ONLY = ("msvcrt", "nt", "winreg", "winsound", "_winapi", "_overlapped")
+
+    def stdlib_hint(name):
+        """The hint for a module of Python's standard library this Python doesn't have (13.5): one
+        only another platform's Python has; on Linux, one the distribution packages apart
+        (tkinter: python3-tk on Debian and Ubuntu); else one this Python lacks, as python.org's
+        embeddable package lacks tkinter."""
+        windows = sys.platform == "win32"
+        if name in (UNIX_ONLY if windows else WINDOWS_ONLY):
+            hint = "'%s' is only in Python on %s" % (name, "Linux and macOS" if windows else "Windows")
+            return hint + ("; pyreadline3 is a substitute" if name == "readline" else "")
+        if sys.platform.startswith("linux"):
+            hint = "'%s' is part of Python's standard library, but this Python was installed without it" % name
+            if name != "tkinter":
+                return hint + "; pip can't add it"
+            geteuid = getattr(os, "geteuid", None)
+            apt = "apt update && apt install" if geteuid is not None and geteuid() == 0 else "sudo apt install"
+            return hint + ": on Debian and Ubuntu, %s python3-tk" % apt
+        return "'%s' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python" % name
+
     def package_hint(name, lead):
         """An ImportError's hint for a name Python has no module of (13.5): your own my-helper.py
         in the .v2 file's folders (`lead`), which no module name reaches; a module of the standard
-        library this Python lacks (tkinter in the embeddable package), which pip can't add; else a
-        distribution of that name, installed, whose module is named otherwise (installed_as)."""
+        library this Python doesn't have (stdlib_hint); else a distribution of that name,
+        installed, whose module is named otherwise (installed_as)."""
         if "." in name:
             return None
         under = name.replace("-", "_")
@@ -1327,7 +1350,7 @@ if __name__ == "__main__":
                         new = under + (".py" if entry.endswith(".py") else "")
                         return "Python module names use _: rename %s to %s and import py.%s" % (entry, new, under)
         if name in getattr(sys, "stdlib_module_names", ()):
-            return "'%s' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python" % name
+            return stdlib_hint(name)
         return installed_as(name)
 
     def installed_as(name):

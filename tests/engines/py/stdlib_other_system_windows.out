@@ -1,0 +1,4 @@
+ImportError: No module named 'fcntl'
+'fcntl' is only in Python on Linux and macOS
+ImportError: No module named 'termios'
+'termios' is only in Python on Linux and macOS
