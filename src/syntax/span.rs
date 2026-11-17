@@ -162,7 +162,9 @@ pub fn read_hint(e: &std::io::Error) -> Option<&'static str> {
 /// file's 128-bit ID on Windows (`FILE_ID_INFO`; the older 64-bit index isn't unique on ReFS, a
 /// Dev Drive's file system), the device and inode elsewhere. Two canonical paths can name one
 /// file (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`), so a module is looked up
-/// by it too (6.4). An ID of all zeros or all ones (some network redirectors give one) is none.
+/// by it too (6.4). An ID of all zeros or all ones (some network redirectors give one) is none,
+/// and so is one on a volume of serial number 0, as WSL's share reports, where inodes of two
+/// distributions could meet.
 pub fn file_identity(path: &Path) -> Option<(u64, u128)> {
     #[cfg(windows)]
     {
@@ -179,7 +181,7 @@ pub fn file_identity(path: &Path) -> Option<(u64, u128)> {
             return None;
         }
         let id = u128::from_le_bytes(info.FileId.Identifier);
-        (id != 0 && id != u128::MAX).then_some((info.VolumeSerialNumber, id))
+        (id != 0 && id != u128::MAX && info.VolumeSerialNumber != 0).then_some((info.VolumeSerialNumber, id))
     }
     #[cfg(unix)]
     {
@@ -194,6 +196,8 @@ pub struct SourceMap {
     by_path: HashMap<PathBuf, FileId>,
     /// Loaded files by `file_identity`.
     by_identity: HashMap<(u64, u128), FileId>,
+    /// Windows: loaded files on a `\\server\share` by `unc_key`.
+    by_unc: HashMap<String, FileId>,
 }
 
 impl SourceMap {
@@ -259,7 +263,15 @@ impl SourceMap {
 
     /// The loaded file that `path` names under another canonical path, if any (6.4).
     pub fn same_file(&self, path: &Path) -> Option<FileId> {
-        if self.by_identity.is_empty() || self.by_path.contains_key(path) {
+        if self.by_path.contains_key(path) {
+            return None;
+        }
+        // `\\wsl$\D\m.v2` or `\\WSL.LOCALHOST\d\m.v2` for a loaded `\\wsl.localhost\D\m.v2`: one
+        // file, though WSL's share gives no file IDs.
+        if let Some(&id) = path.to_str().filter(|_| cfg!(windows)).and_then(unc_key).and_then(|k| self.by_unc.get(&k)) {
+            return Some(id);
+        }
+        if self.by_identity.is_empty() {
             return None;
         }
         let key = file_identity(path)?;
@@ -283,6 +295,9 @@ impl SourceMap {
             }
         }
         let id = FileId(self.files.len() as u32);
+        if let Some(key) = path.to_str().filter(|_| cfg!(windows)).and_then(unc_key) {
+            self.by_unc.entry(key).or_insert(id);
+        }
         self.by_path.insert(path.clone(), id);
         self.files.push(SourceFile { path, display, text: text.into(), line_starts });
         id
@@ -387,6 +402,21 @@ pub fn strip_verbatim(p: &Path) -> PathBuf {
     } else {
         p.to_path_buf()
     }
+}
+
+/// A `\\server\share\…` path (as `strip_verbatim` leaves one, with `\`) as module identity
+/// compares it on Windows: the server and share in lower case, as Windows reads them in any case,
+/// and `wsl$` as `wsl.localhost`, the same WSL share; the rest as it is (on WSL's share it is a
+/// Linux path, where case matters) (6.4). `None` for another path.
+pub fn unc_key(path: &str) -> Option<String> {
+    let mut parts = path.strip_prefix(r"\\").filter(|r| !r.starts_with(['?', '.']))?.splitn(3, '\\');
+    let server = parts.next().filter(|s| !s.is_empty())?.to_lowercase();
+    let share = parts.next().filter(|s| !s.is_empty())?.to_lowercase();
+    let server = if server == "wsl$" { "wsl.localhost".to_string() } else { server };
+    Some(match parts.next() {
+        Some(rest) => format!(r"\\{server}\{share}\{rest}"),
+        None => format!(r"\\{server}\{share}"),
+    })
 }
 
 /// Relative to the current directory with `/` separators when inside it, else absolute, with
@@ -497,6 +527,27 @@ mod tests {
         assert_eq!(m.line_col(id, 5), (2, 2));
         assert_eq!(m.line_text(id, 2), "\u{e9}x");
         assert_eq!(m.line_text(id, 3), "");
+    }
+
+    #[test]
+    fn a_shares_name_is_one_however_it_is_spelled() {
+        // 6.4 (round 21): Windows reads a server and a share in any case, and \\wsl$ is
+        // \\wsl.localhost; WSL's share gives no file IDs, so a module there ran once per spelling.
+        assert_eq!(unc_key(r"\\WSL$\Ubuntu\home\Me\m.v2").as_deref(), Some(r"\\wsl.localhost\ubuntu\home\Me\m.v2"));
+        assert_eq!(unc_key(r"\\wsl.localhost\V2Win21").as_deref(), Some(r"\\wsl.localhost\v2win21"));
+        assert_eq!(unc_key(r"\\Srv\Docs\A.v2").as_deref(), Some(r"\\srv\docs\A.v2"));
+        for other in [r"C:\x\m.v2", r"\\?\C:\x", r"\\.\pipe\x", r"\\srv", r"\\", "m.v2"] {
+            assert_eq!(unc_key(other), None, "{other}");
+        }
+        if cfg!(windows) {
+            let mut m = SourceMap::new();
+            let id = m.add(PathBuf::from(r"\\wsl.localhost\Ubuntu\root\m.v2"), "m.v2".into(), "");
+            assert_eq!(m.same_file(Path::new(r"\\wsl$\ubuntu\root\m.v2")), Some(id));
+            assert_eq!(m.same_file(Path::new(r"\\WSL.LOCALHOST\UBUNTU\root\m.v2")), Some(id));
+            // The rest is a Linux path there, where case matters.
+            assert_eq!(m.same_file(Path::new(r"\\wsl$\Ubuntu\root\M.v2")), None);
+            assert_eq!(m.same_file(Path::new(r"\\wsl.localhost\Ubuntu\root\m.v2")), None, "the path itself is loaded");
+        }
     }
 
     #[test]
