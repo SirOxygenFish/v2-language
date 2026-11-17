@@ -1,0 +1,7 @@
+// platform: windows
+// exit: -1073741819
+// Round 20 (DOCS 3.11): exec's code of a crashed program is Windows' unsigned one, 3221225477
+// (0xC0000005), and exit() takes it as it is, so a wrapper passes the crash on.
+let r = exec(["cmd", "/c", "exit -1073741819"])
+print(r.code)
+exit(r.code)

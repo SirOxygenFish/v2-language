@@ -1319,6 +1319,33 @@ fn a_node_options_that_stops_node_is_named() {
 }
 
 #[test]
+fn a_js_crash_after_startup_names_node_options() {
+    // Round 20, INTERNALS 8.6: NODE_OPTIONS can stop Node after startup too (a heap limit), so a
+    // js session's crash during a block, or while idle, names it when it is set.
+    if !needs("js", "a_js_crash_after_startup_names_node_options") {
+        return;
+    }
+    let during = "print(@js { 1 })\ntry {\n    @js { process.kill(process.pid, \"SIGKILL\") }\n} catch (e) {\n    print(e.type, e.message)\n}\n";
+    // The worker's event loop waits while it is idle: the run kills it.
+    let kill = if cfg!(windows) { "[\"taskkill\", \"/F\", \"/PID\", str(pid)]" } else { "[\"kill\", \"-9\", str(pid)]" };
+    let idle = format!("let pid = @js {{ process.pid }}\nlet r = exec({kill})\nsleep(1)\ntry {{\n    @js {{ 2 }}\n}} catch (e) {{\n    print(e.type, e.message)\n}}\n");
+    let fix = "; NODE_OPTIONS is set (--max-old-space-size=4096), which it reads as it starts: unset it or fix it\n";
+    let files = [("during.v2", during), ("idle.v2", idle.as_str())];
+    let env = [("NODE_OPTIONS", "--max-old-space-size=4096")];
+    let (code, stdout, stderr, _home) = run_with_files_env(&files, &["during.v2"], &env);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.starts_with("1\nEngineCrashed engine 'js' (pid ") && stdout.ends_with(&format!("; see its error output above, if any{fix}")), "{stdout}");
+    let (code, stdout, stderr, _home) = run_with_files_env(&files, &["idle.v2"], &env);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.starts_with("EngineCrashed engine 'js' exited while idle (") && stdout.ends_with(fix), "{stdout}");
+    // Not set: no such clause.
+    if std::env::var_os("NODE_OPTIONS").is_none() {
+        let (_, stdout, _, _home) = run_with_files_env(&files, &["during.v2"], &[]);
+        assert!(stdout.ends_with("; see its error output above, if any\n"), "{stdout}");
+    }
+}
+
+#[test]
 fn a_v2_module_of_another_project_is_told_which_project_the_run_uses() {
     // Round 18, INTERNALS 13.5, 18.1: one project serves a run, so a .v2 file of another project
     // (its own v2.toml) doesn't find that project's own Python modules; the hint says so, rather
@@ -2347,6 +2374,35 @@ fn every_exit_path_removes_the_run_dir() {
         assert!(!String::from_utf8_lossy(&out.stdout).contains("not reached"), "{name}");
         assert_eq!(names_in(&tmp), Vec::<String>::new(), "{name} left its run dir");
     }
+}
+
+#[test]
+fn runs_started_together_keep_their_run_dirs() {
+    // Round 20, INTERNALS 20.3: a run's sweep of leftovers removed the folder another run had just
+    // made, which could look older than that run; runs started together with one temp folder all
+    // succeed, and leave nothing behind.
+    if !needs("py", "runs_started_together_keep_their_run_dirs") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("race.v2"), "print(@py { \"ok\" })\n").unwrap();
+    let tmp = home.0.join("tmp");
+    for round in 0..6 {
+        let runs: Vec<Child> = (0..8)
+            .map(|_| {
+                let mut cmd = v2_command(&home.0);
+                cmd.arg("race.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                with_temp(&mut cmd, &tmp);
+                cmd.spawn().expect("start v2")
+            })
+            .collect();
+        for child in runs {
+            let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(60)).unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!((out.status.code(), stdout.as_ref()), (Some(0), "ok\n"), "round {round}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+    assert_eq!(names_in(&tmp), Vec::<String>::new(), "a run left its run dir");
 }
 
 /// Whether process `pid` still runs (not a zombie waiting for its new parent to reap it).
@@ -3487,6 +3543,32 @@ fn a_temp_folder_that_doesnt_exist_is_named() {
     let (code, _out, err) = run_in_home(&home.0, &["b.v2"], &env);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("IOError: cannot create a private temp folder in ") && err.contains(&format!("; {problem}")), "{err}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_run_without_temp_variables_is_told_to_pass_them_on() {
+    // Round 20, INTERNALS 20.3: a program that starts v2 with only PATH leaves out TMP, TEMP and
+    // USERPROFILE, so Windows offers its own folder, where no block can run: doctor says so and
+    // doesn't count blocks ready. USERPROFILE alone is a temp folder Windows uses.
+    let home = TempHome::new();
+    let doctor = |env: &[(&str, &Path)]| {
+        let mut cmd = Command::new(BIN);
+        cmd.arg("doctor").current_dir(&home.0).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let note = "\n  temp: TEMP and TMP aren't set: a program that starts v2 with an environment of its own must pass them on (in Python, env=dict(os.environ, …))\n";
+    let out = doctor(&[]);
+    assert!(out.contains(note), "{out}");
+    assert!(out.lines().any(|l| l.starts_with("not ready: ") && l.contains("blocks")), "{out}");
+    let out = doctor(&[("USERPROFILE", &home.0)]);
+    assert!(!out.contains("temp:"), "{out}");
 }
 
 #[test]

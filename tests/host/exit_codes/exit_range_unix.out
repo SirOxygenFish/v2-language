@@ -1,0 +1,4 @@
+ValueError: exit code 2147483648 is out of range
+exit() takes a code from -2147483648 to 2147483647, and a shell sees only 0-255: use those for a code a shell checks
+ValueError: exit code -2147483649 is out of range
+exit() takes a code from -2147483648 to 2147483647, and a shell sees only 0-255: use those for a code a shell checks
