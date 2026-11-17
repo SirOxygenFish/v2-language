@@ -280,6 +280,35 @@ pub(crate) fn drop_js_extras(f: &Value, pos: &mut Vec<Value>) {
     }
 }
 
+/// A V2 function a worker called with fewer arguments than it declares (Node's `emit("data")`,
+/// DOCS 8.2): its own ArityError gets the hint to give those parameters a default. `given`: the
+/// number of positional arguments and the names of the named ones.
+fn fewer_args_hint(f: &Value, given: &(usize, Vec<Rc<str>>), e: &ErrorValue) {
+    let Value::Func(func) = f else { return };
+    let Callable::Closure { decl, name, .. } = &**func else { return };
+    if &*e.kind != "ArityError" || e.hint.get().is_some() || !e.message.starts_with(&format!("{name}() missing required argument")) {
+        return;
+    }
+    // From the first one missing, each parameter needs a default (none without one may follow).
+    let Some(first) = decl.params.iter().enumerate().position(|(i, (p, d))| d.is_none() && i >= given.0 && !given.1.contains(&p.text)) else { return };
+    let names: Vec<&str> = decl.params[first..].iter().filter(|(_, d)| d.is_none()).map(|(p, _)| &*p.text).collect();
+    let Some((last, rest)) = names.split_last() else { return };
+    let params: Vec<String> = decl
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, (p, d))| match d {
+            Some(_) => format!("{} = …", p.text),
+            None if i >= first => format!("{} = null", p.text),
+            None => p.text.to_string(),
+        })
+        .chain(decl.rest.iter().map(|r| format!("...{}", r.text)))
+        .collect();
+    let which = if rest.is_empty() { format!("{last} a default") } else { format!("{} and {last} defaults", rest.join(", ")) };
+    let head = decl.name.as_ref().map_or_else(|| "func".to_string(), |n| format!("func {}", n.text));
+    let _ = e.hint.set(format!("it was called with fewer arguments (Node's emit and callbacks often do): give {which}, as in {head}({})", params.join(", ")).into());
+}
+
 /// An error at no location yet: `raise` places it at the V2 expression.
 fn error(kind: &str, message: String) -> Flow {
     match fail::<()>(kind, message) {
@@ -862,6 +891,7 @@ impl Interp {
         if let Some(t) = self.sessions[s].pending.last().and_then(|p| p.timer.as_ref()) {
             t.pause();
         }
+        let given: (usize, Vec<Rc<str>>) = (pos.len(), kwargs.keys().map(|k| Rc::from(k.as_str())).collect());
         let result = match target {
             _ if self.xdepth >= MAX_XDEPTH => Err(depth_error()),
             Target::Fn(n) => match self.sessions[s].callables.get(n) {
@@ -889,6 +919,15 @@ impl Interp {
         };
         if let Err(Flow::Exit(code)) = result {
             return Err(Flow::Exit(code));
+        }
+        if let Err(Flow::Error(e)) = &result {
+            let callee = match target {
+                Target::Fn(n) => self.sessions[s].callables.get(n),
+                Target::Route(n) => usize::try_from(n).ok().and_then(|n| self.route_value(n)),
+            };
+            if let Some(f) = callee {
+                fewer_args_hint(&f, &given, e);
+            }
         }
         // The session died inside the callback (a nested request to it failed): the callback's
         // error, or 8.2's "not running", goes on up (8.6).
@@ -1025,6 +1064,9 @@ impl Interp {
             if let (Some((_, original)), Some(x)) = (sent, Rc::get_mut(&mut err)) {
                 x.data = original.data.clone();
                 x.cause = original.cause.clone();
+                if let Some(hint) = original.hint.get() {
+                    let _ = x.hint.set(hint.clone());
+                }
             }
             // A V2 error that crossed foreign code keeps its own frames, with the foreign ones
             // between the callback's and those below the request (9.6).
@@ -1058,12 +1100,13 @@ impl Interp {
             err.foreign_type = Some(kind.into());
             err
         };
+        // The adapter's own hint (a file of the user's that hides a standard module, a file that
+        // open() can't read as UTF-8, 9.6; an ImportError's installed package whose module is
+        // named otherwise, which wins over the host's install line, 13.5).
+        if let Some(hint) = e.get("hint").and_then(Json::as_str).filter(|_| matches!(&*err.kind, "ForeignError" | "ImportError")) {
+            let _ = err.hint.set(hint.into());
+        }
         if &*err.kind == "ForeignError" {
-            // The adapter's own hint (a file of the user's that hides a standard module, a file
-            // that open() can't read as UTF-8, 9.6).
-            if let Some(hint) = e.get("hint").and_then(Json::as_str) {
-                let _ = err.hint.set(hint.into());
-            }
             // A foreign exception's own simple fields (Node's `code: "ENOENT"`, the n of
             // `sys.exit(n)` as `exit_code`) are its data (9.6).
             if let Some(data) = e.get("data").filter(|d| d.as_object().is_some_and(|o| !o.is_empty())) {

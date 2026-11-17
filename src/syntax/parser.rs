@@ -42,6 +42,10 @@ pub fn parse_program(sm: &SourceMap, toks: Vec<Token>) -> Result<Vec<Stmt>, Diag
 /// Python's `def f(a, **kwargs)`, written as `func f(a, **kw)` or `func(**kw)` (2.4).
 const KWARGS_PARAM_HINT: &str = "V2 has no **kwargs parameter: take the options as one dict parameter, as in func f(a, opts) { … }";
 
+/// Python's `for root, dirs, files in os.walk(d)` and `for i, (a, b) in …`: V2's loop names one
+/// or two (2.4).
+const FOR_NAMES_HINT: &str = "a for loop takes one name, or two (index or key, then item): for e in walk(d) { let root = e[0] … }, or loop in a @py block";
+
 /// What V2 writes for Python or JavaScript written out of habit, from the tokens where a syntax
 /// error stopped (4.3): `def f(`, `var x`, `and`, `x is None`, `x => …`, `i++`, `i--`, `===`,
 /// `if x:`, `function(x) {`, `class P {`, `switch x {`.
@@ -791,6 +795,11 @@ impl<'a> Parser<'a> {
                     let name = if self.at_op(Op::LParen) {
                         self.bump();
                         let n = self.expect_name("a name for the error")?;
+                        // TypeScript's `catch (e: Error)`, Java's `catch (Exception e)`.
+                        if matches!(self.peek(), Tok::Op(Op::Colon) | Tok::Ident(_)) {
+                            let d = Diag::new(format!("expected `)`, found {}", self.peek()), self.span());
+                            return Err(d.hint("V2 catches every error: catch (e) { … }, then test e.type"));
+                        }
                         self.expect_op(Op::RParen)?;
                         Some(n)
                     } else {
@@ -852,17 +861,25 @@ impl<'a> Parser<'a> {
     fn for_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.bump();
         if self.at_op(Op::LParen) {
-            return Err(Diag::new("a for head takes no parentheses", self.span()).hint("for x in xs { … }"));
+            // Python's `for (a, b) in pairs`: no unpacking (2.4).
+            let names = matches!(self.peek_at(1), Tok::Ident(_)) && matches!(self.peek_at(2), Tok::Op(Op::Comma));
+            return Err(Diag::new("a for head takes no parentheses", self.span()).hint(if names { FOR_NAMES_HINT } else { "for x in xs { … }" }));
         }
-        let first = self.expect_name("a loop variable after `for`")?;
+        // `for [a, b] in …`, `for i, (a, b) in …`: a loop variable that would unpack.
+        let unpacks = |at: bool| move |d: Diag| if at { d.hint(FOR_NAMES_HINT) } else { d };
+        let at = self.at_op(Op::LBracket);
+        let first = self.expect_name("a loop variable after `for`").map_err(unpacks(at))?;
         let second = if self.at_op(Op::Comma) {
             self.bump();
-            Some(self.expect_name("a second loop variable")?)
+            let at = self.at_op(Op::LParen) || self.at_op(Op::LBracket);
+            Some(self.expect_name("a second loop variable").map_err(unpacks(at))?)
         } else {
             None
         };
         if !self.at_kw(Kw::In) {
-            return Err(Diag::new(format!("expected `in`, found {}", self.peek()), self.span()));
+            let d = Diag::new(format!("expected `in`, found {}", self.peek()), self.span());
+            // Python's `for root, dirs, files in os.walk(d)`: a third name.
+            return Err(if second.is_some() && self.at_op(Op::Comma) { d.hint(FOR_NAMES_HINT) } else { d });
         }
         self.bump();
         self.deeper()?;
@@ -935,7 +952,15 @@ impl<'a> Parser<'a> {
                 self.check_dup_param(&params, &n)?;
                 rest = Some(n);
             } else {
-                let n = self.expect_name("a parameter name")?;
+                // Python's `def f(*args)`.
+                let star = self.at_op(Op::Star).then(|| match self.peek_at(1) {
+                    Tok::Ident(w) => w.to_string(),
+                    _ => "args".into(),
+                });
+                let n = self.expect_name("a parameter name").map_err(|d| match &star {
+                    Some(rest) => d.hint(format!("V2 collects extra arguments with ...{rest}")),
+                    None => d,
+                })?;
                 self.check_dup_param(&params, &n)?;
                 let default = if self.at_op(Op::Eq) {
                     self.bump();
@@ -2130,6 +2155,20 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("for i in 1..=3 {\n}"), "a..b leaves out b: for 1, 2 and 3 write 1..4");
         assert_eq!(hint("dumps(d, indent=2)"), "V2 writes a named argument as name: value, as in f(x, indent: 2)");
         assert_eq!(hint("try {\n} catch e {\n}"), "V2 writes catch (e) { ... }");
+        // Round 21 (L2): a typed catch, Python's unpacking loops and *args.
+        let any = "V2 catches every error: catch (e) { … }, then test e.type";
+        assert_eq!(diag("try {\n} catch (e: Error) {\n}").message, "expected `)`, found `:`");
+        assert_eq!(hint("try {\n} catch (e: Error) {\n}"), any);
+        assert_eq!(hint("try {\n} catch (Exception e) {\n}"), any);
+        let names = "a for loop takes one name, or two (index or key, then item): for e in walk(d) { let root = e[0] … }, or loop in a @py block";
+        assert_eq!(diag("for root, dirs, files in walk(\".\") {\n}").message, "expected `in`, found `,`");
+        for src in ["for root, dirs, files in walk(\".\") {\n}", "for i, (a, b) in [[1, 2]] {\n}", "for i, [a, b] in xs {\n}", "for [a, b] in xs {\n}", "for (a, b) in xs {\n}"] {
+            assert_eq!(hint(src), names, "{src}");
+        }
+        assert_eq!(hint("for (let i = 0; i < 3; i++) {\n}"), "for x in xs { … }");
+        assert_eq!(diag("func f(*args) {\n}").message, "expected a parameter name, found `*`");
+        assert_eq!(hint("func f(*args) {\n}"), "V2 collects extra arguments with ...args");
+        assert_eq!(hint("let f = func(a, *rest) => a"), "V2 collects extra arguments with ...rest");
         assert_eq!(hint("if x > 1:\n    print(x)"), "V2 puts a block in { }, not after a colon: if x > 1 { ... }");
         assert_eq!(hint("let f = function(x) {\n    return x\n}"), "V2 writes an anonymous function as func(x) { ... }");
         // Python's f-string braces, and the import forms.

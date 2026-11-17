@@ -1,0 +1,7 @@
+one() missing required argument 'x' | it was called with fewer arguments (Node's emit and callbacks often do): give x a default, as in func one(x = null)
+two() missing required argument 'b' | it was called with fewer arguments (Node's emit and callbacks often do): give b a default, as in func two(a, b = null, c = …)
+func@fewer_args.v2:38() missing required arguments 'p' and 'q' | it was called with fewer arguments (Node's emit and callbacks often do): give p and q defaults, as in func(p = null, q = null)
+two() missing required argument 'a' | it was called with fewer arguments (Node's emit and callbacks often do): give a and b defaults, as in func two(a = null, b = null, c = …)
+one() missing required argument 'x' | null
+one() missing required argument 'x' | null
+called with null

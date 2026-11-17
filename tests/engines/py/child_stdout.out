@@ -1,2 +1,2 @@
 0 0
-no fileno: True
+no fileno: fileno: a block's stdout is V2's and has no file descriptor: leave stdout= out (the output then goes to stderr), or capture it (capture_output=True, text=True) and print(r.stdout), or use V2's exec([…])
