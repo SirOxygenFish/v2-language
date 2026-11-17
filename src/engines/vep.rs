@@ -314,9 +314,12 @@ pub fn parse_frame(line: &[u8], caps: Caps) -> Result<Frame, String> {
 /// `buffer` cap is reserved for zero-copy data.
 pub const HOST_CAPS: [&str; 0] = [];
 
-/// `init`: the project root and the host's caps (9.3).
-pub fn init(id: u64, project_root: &str) -> Json {
-    json!({"t": "init", "id": id, "project_root": project_root, "caps": HOST_CAPS})
+/// `init`: the project root, the host's caps, and which of V2's stdout and stderr are terminals,
+/// as `[columns, rows]` (`null`: not one), which blocks see as theirs (9.3, 9.9).
+pub fn init(id: u64, project_root: &str, terminals: [Option<(u16, u16)>; 2]) -> Json {
+    let size = |t: Option<(u16, u16)>| t.map_or(Json::Null, |(columns, rows)| json!([columns, rows]));
+    let terminals = json!({"stdout": size(terminals[0]), "stderr": size(terminals[1])});
+    json!({"t": "init", "id": id, "project_root": project_root, "caps": HOST_CAPS, "terminals": terminals})
 }
 
 /// What a `load` frame carries (9.4, 12.2); `request` gives it its id.
@@ -419,6 +422,13 @@ mod tests {
         assert_eq!(too_big_message("py", 70 << 20), "value too large to send to engine 'py' (70 MiB, limit 64 MiB)");
         write_frame(&mut sink, &bye()).unwrap();
         assert_eq!(sink, b"{\"t\":\"bye\"}\n");
+    }
+
+    #[test]
+    fn init_says_which_of_v2s_streams_are_terminals() {
+        // 9.3: [columns, rows] for a terminal, null for anything else.
+        let m = init(0, "/p", [Some((132, 40)), None]);
+        assert_eq!(m["terminals"], json!({"stdout": [132, 40], "stderr": null}));
     }
 
     #[test]

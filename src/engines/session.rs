@@ -602,7 +602,12 @@ impl Interp {
             self.kill_session(s, DeadReason::Exited { exit: None, during: None, at: Some(at) });
             return Err(self.raise(depth_error(), at));
         }
-        let init = vep::init(0, &root);
+        // Where V2's output goes, as it is now: a resize later isn't passed on (9.9).
+        let terminals = [process::terminal_size(1), process::terminal_size(2)];
+        if terminals.iter().any(Option::is_some) {
+            process::TOLD_TERMINAL.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let init = vep::init(0, &root, terminals);
         match self.exchange(s, init, startup, at) {
             Ok(_) => {
                 self.sessions[s].state = State::Ready;
@@ -861,7 +866,9 @@ impl Interp {
             Stream::Stdout => self.out.write_str(text),
             Stream::Stderr => {
                 self.out.flush_or_stop();
-                stderr!("{text}");
+                // A closed pipe stops the run there (6.5); other failures are ignored, as for V2's own
+                // diagnostics.
+                let _ = crate::runtime::builtins::write_stderr(text.as_bytes());
                 Ok(())
             }
         }
