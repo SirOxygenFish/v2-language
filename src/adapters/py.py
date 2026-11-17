@@ -502,7 +502,7 @@ if __name__ == "__main__":
             """The worker has no terminal (8.3): getpass's fallback would warn that the input
             may be echoed and print the prompt, then fail on stdin (DOCS 4.6). On Windows it
             reads V2's console, as DOCS says."""
-            raise OSError("getpass can't ask in a block: a block has no terminal, and V2's input() owns standard input; ask in V2 and pass the answer in as a block arg")
+            raise OSError("getpass can't ask in a block: a block has no terminal, and V2's input() owns standard input: ask in V2 with input(prompt, echo: false) and pass the answer in as a block arg")
 
         getpass.getpass = no_getpass
 

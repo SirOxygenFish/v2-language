@@ -49,7 +49,11 @@ pub static BUILTINS: &[BuiltinDef] = &[
         params: &[ParamSpec::req("type"), ParamSpec::opt("message", || Value::Null), ParamSpec::opt("data", || Value::Null)],
         f: error,
     },
-    BuiltinDef { name: "input", params: &[ParamSpec::opt("prompt", || Value::str(""))], f: input },
+    BuiltinDef {
+        name: "input",
+        params: &[ParamSpec::opt("prompt", || Value::str("")), ParamSpec::opt("echo", || Value::Bool(true))],
+        f: input,
+    },
     BuiltinDef { name: "len", params: &[ParamSpec::req("x")], f: len },
     BuiltinDef { name: "type", params: &[ParamSpec::req("x")], f: |_, a, _| Ok(Value::str(a[0].type_name())) },
     BuiltinDef { name: "str", params: &[ParamSpec::req("x")], f: |it, a, at| Ok(Value::Str(it.str_of(&a[0], at)?.into())) },
@@ -331,12 +335,6 @@ impl Out {
     /// Drop what is waiting: the rest of the output of a request whose write failed (9.9).
     pub fn discard(&mut self) {
         lock(self.pending).clear();
-    }
-
-    /// Flush, and raise a failure as 5.10's `IOError` (`input()`'s prompt).
-    pub fn flush_or_raise(&mut self) -> Exec<()> {
-        let r = self.flush();
-        self.raise(r)
     }
 
     /// A failed write's `IOError`. What it couldn't write goes with it: a program that catches
@@ -1272,16 +1270,34 @@ const INPUT_NULLS: u32 = 1000;
 /// The nulls `input()` gave since it last read a line.
 static NULLS_IN_A_ROW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// `input(prompt = "")`: one line from stdin without `\n` and one `\r` before it; `null` at end
-/// of input; the prompt is flushed first (5.10). A menu loop that never checks for null would
-/// spin forever once the input ends: the 1000th null in a row is an IOError instead.
+/// `input(prompt = "", echo: true)`: one line from stdin without `\n` and one `\r` before it;
+/// `null` at end of input; the prompt is flushed first (5.10). With `echo: false` and stdin a
+/// terminal, what is typed isn't shown (`EchoOff`), and a line break goes after the line, where
+/// the prompt went, as getpass does. A menu loop that never checks for null would spin forever
+/// once the input ends: the 1000th null in a row is an IOError instead.
 fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     use std::sync::atomic::Ordering;
+    let echo = bool_arg(&args[1], "input", "echo")?;
     let prompt = it.str_of(&args[0], at)?;
-    it.out.write_str(&prompt)?;
-    it.out.flush_or_raise()?;
+    // Echo goes off before the prompt shows, so nothing typed after it is shown. A failed write
+    // turns it back on before it is reported: a reader that went away ends the run at once.
+    let quiet = if echo { None } else { EchoOff::start() };
+    lock(it.out.pending).extend_from_slice(prompt.as_bytes());
+    if let Err(e) = it.out.flush() {
+        drop(quiet);
+        // Always the IOError, if the run doesn't end here.
+        return it.out.raise(Err(e)).map(|()| Value::Null);
+    }
     let mut line = Vec::new();
-    match std::io::stdin().lock().read_until(b'\n', &mut line) {
+    let read = std::io::stdin().lock().read_until(b'\n', &mut line);
+    if let Some(quiet) = quiet {
+        drop(quiet);
+        // The terminal didn't show the Enter that ended the line.
+        if matches!(read, Ok(n) if n > 0) {
+            it.out.write_str("\n")?;
+        }
+    }
+    match read {
         Ok(0) => {
             if NULLS_IN_A_ROW.fetch_add(1, Ordering::Relaxed) + 1 >= INPUT_NULLS {
                 let err = ErrorValue::new("IOError", format!("the input has ended, and input() has given null {INPUT_NULLS} times in a row"));
@@ -1322,6 +1338,167 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             }
             Err(Flow::Error(Rc::new(err)))
         }
+    }
+}
+
+/// `input(echo: false)`: while it lives, the terminal on stdin doesn't show what is typed (5.10).
+/// Unix: `ECHO` cleared with `tcsetattr`, line input (`ICANON`) kept, the settings before kept in
+/// `ECHO_SAVED` for Ctrl+Z (`echo_around_stop`) and `TERMINAL_CHANGED` set, so Ctrl+C's path puts
+/// the settings v2 started with back whatever stdout is (`restore_terminal`). Windows:
+/// `ENABLE_ECHO_INPUT` cleared on the console input handle, the mode before kept in `ECHO_MODE` for
+/// Ctrl+C's path (`echo_back`).
+struct EchoOff {
+    #[cfg(unix)]
+    saved: libc::termios,
+    #[cfg(windows)]
+    saved: u32,
+}
+
+/// Unix: the settings the terminal had before the live `EchoOff` turned echo off (`None`: none is
+/// live). Its lock is held while they change, so Ctrl+Z and the end of the line don't interleave.
+#[cfg(unix)]
+static ECHO_SAVED: Mutex<Option<libc::termios>> = Mutex::new(None);
+
+/// Unix: whether another process group is the foreground job of the terminal on stdin (a terminal
+/// that isn't v2's controlling one has no jobs, so v2 isn't in its background).
+#[cfg(unix)]
+fn background() -> bool {
+    // SAFETY: plain queries of stdin's terminal and of this process.
+    unsafe {
+        let job = libc::tcgetpgrp(0);
+        job != -1 && job != libc::getpgrp()
+    }
+}
+
+/// Unix, Ctrl+Z (`process::suspend`, 6.5): `stop` stops v2 until it goes on. While `input(echo:
+/// false)` waits, the terminal first gets back the settings it had before, so the shell shows what
+/// is typed while v2 is stopped (dash leaves the terminal as it finds it); once v2 goes on as the
+/// foreground job, echo goes off again (bash has put its own settings back meanwhile). Gone on in
+/// the background (`bg`), v2 waits for the foreground first, stopped by SIGTTOU (`tcdrain`) as its
+/// read would be by SIGTTIN.
+#[cfg(unix)]
+pub fn echo_around_stop(stop: impl FnOnce()) {
+    let live = ECHO_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(saved) = *live else {
+        drop(live);
+        return stop();
+    };
+    let mut quiet = saved;
+    quiet.c_lflag &= !libc::ECHO;
+    // SAFETY: plain calls on stdin with the settings tcgetattr gave.
+    unsafe {
+        if !background() {
+            libc::tcsetattr(0, libc::TCSANOW, &saved);
+        }
+        stop();
+        if background() {
+            libc::tcdrain(0);
+        }
+        if !background() {
+            libc::tcsetattr(0, libc::TCSANOW, &quiet);
+        }
+    }
+}
+
+/// Windows: the console input mode `input(echo: false)` changed, while it is changed
+/// (`NO_MODE`: none).
+#[cfg(windows)]
+static ECHO_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(NO_MODE);
+#[cfg(windows)]
+const NO_MODE: u32 = u32::MAX;
+
+impl EchoOff {
+    /// Echo off, or `None` when stdin isn't a terminal (a pipe or a file reads as usual) or its
+    /// mode can't be set.
+    fn start() -> Option<EchoOff> {
+        #[cfg(unix)]
+        // SAFETY: tcgetattr fills a zeroed struct for any descriptor, a terminal or not, and
+        // tcsetattr gets a copy of what it gave.
+        unsafe {
+            use crate::engines::process::TERMINAL_CHANGED;
+            use std::sync::atomic::Ordering::SeqCst;
+            if libc::isatty(0) != 1 {
+                return None;
+            }
+            // In the background (`v2 x.v2 &`, Ctrl+Z then bg) tcdrain stops v2 with SIGTTOU until it
+            // is the foreground job, so the settings read below are the ones the shell gives it, not
+            // its line editor's. Still in the background (SIGTTOU ignored, an orphaned job): read as
+            // plain input, leaving the terminal alone.
+            if background() {
+                libc::tcdrain(0);
+                if background() {
+                    return None;
+                }
+            }
+            let mut saved: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut saved) != 0 {
+                return None;
+            }
+            let mut quiet = saved;
+            quiet.c_lflag &= !libc::ECHO;
+            let mut live = ECHO_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+            // Set first, so a Ctrl+C right after the change puts it back.
+            TERMINAL_CHANGED.store(true, SeqCst);
+            if libc::tcsetattr(0, libc::TCSANOW, &quiet) != 0 {
+                TERMINAL_CHANGED.store(false, SeqCst);
+                return None;
+            }
+            *live = Some(saved);
+            Some(EchoOff { saved })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use std::sync::atomic::Ordering;
+            use windows_sys::Win32::System::Console::{GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT};
+            let stdin = std::io::stdin().as_raw_handle();
+            let mut saved = 0;
+            // SAFETY: the standard input handle stays open for the process; GetConsoleMode fails
+            // for one that isn't a console, and fills its out-parameter.
+            if unsafe { GetConsoleMode(stdin, &mut saved) } == 0 {
+                return None;
+            }
+            // Kept first, so a Ctrl+C right after the change puts it back.
+            ECHO_MODE.store(saved, Ordering::SeqCst);
+            // SAFETY: as above.
+            if unsafe { SetConsoleMode(stdin, saved & !ENABLE_ECHO_INPUT) } == 0 {
+                ECHO_MODE.store(NO_MODE, Ordering::SeqCst);
+                return None;
+            }
+            Some(EchoOff { saved })
+        }
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let mut live = ECHO_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: stdin gets back the settings tcgetattr gave.
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.saved) };
+            *live = None;
+            crate::engines::process::TERMINAL_CHANGED.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: the standard input handle stays open for the process.
+            unsafe { windows_sys::Win32::System::Console::SetConsoleMode(std::io::stdin().as_raw_handle(), self.saved) };
+            ECHO_MODE.store(NO_MODE, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Windows, on the interrupt path (6.5): Ctrl+C during `input(echo: false)` gives the console its
+/// echo back. Stdin's handle without its lock, which the interpreter thread holds while it reads.
+#[cfg(windows)]
+pub fn echo_back() {
+    use std::os::windows::io::AsRawHandle;
+    let mode = ECHO_MODE.load(std::sync::atomic::Ordering::SeqCst);
+    if mode != NO_MODE {
+        // SAFETY: the standard input handle stays open for the process.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(std::io::stdin().as_raw_handle(), mode) };
     }
 }
 
