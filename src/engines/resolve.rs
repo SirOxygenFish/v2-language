@@ -556,6 +556,34 @@ fn env_tilde(var: &str, name: &str) -> Option<String> {
     Some(if cfg!(windows) { format!("{what}, as in $env:{var} = \"{path}\"") } else { format!("{what}, as in {var}=\"{path}\"") })
 }
 
+/// Windows: a working folder on a `\\server\share` (`\\wsl.localhost\Ubuntu\…`, also as
+/// `\\?\UNC\…`), as cmd's `pushd` takes it. cmd.exe can't work in one (7.5, 7.6).
+pub fn share_folder(cwd: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+    match cwd.components().next() {
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..)) => Some(crate::syntax::span::strip_verbatim(cwd).display().to_string()),
+        _ => None,
+    }
+}
+
+/// What cmd.exe does in a `\\server\share` working folder (it says "UNC paths are not supported"
+/// and works in the Windows folder instead), after `cmd.exe` or `… runs in cmd.exe, which`.
+pub fn cmd_cant_work() -> String {
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    format!(r"can't work in a \\server\share folder and would run in {windows}")
+}
+
+/// Windows: a WSL link on a drive (a Linux venv made from WSL under /mnt/c), which Windows can't
+/// even stat (`ERROR_CANT_ACCESS_FILE`), but which its folder lists as a link.
+fn wsl_link_on_drive(p: &Path) -> bool {
+    let cant = std::fs::symlink_metadata(p).err().is_some_and(|e| cfg!(windows) && e.raw_os_error() == Some(1920));
+    let listed = || {
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return false };
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.file_name().eq_ignore_ascii_case(name) && e.file_type().is_ok_and(|t| t.is_symlink()))
+    };
+    cant && listed()
+}
+
 /// A path on WSL's share, `\\wsl.localhost\<distro>\…` or `\\wsl$\<distro>\…` (Windows).
 fn on_wsl_share(p: &Path) -> bool {
     use std::path::{Component, Prefix};
@@ -575,6 +603,9 @@ fn on_wsl_share(p: &Path) -> bool {
 fn not_windows_program(p: &Path) -> Option<bool> {
     if !cfg!(windows) {
         return None;
+    }
+    if wsl_link_on_drive(p) {
+        return Some(true);
     }
     let meta = std::fs::symlink_metadata(p).ok().filter(|m| !m.is_dir())?;
     match std::fs::metadata(p) {
@@ -754,7 +785,7 @@ pub fn remake_venv(venv: &Path) -> String {
 /// beside it, named in `V2_ENGINE_PY`.
 pub fn foreign_venv(venv: &Path) -> Option<String> {
     let home = pyvenv_value(venv, "home").unwrap_or_default();
-    let there = |p: PathBuf| std::fs::symlink_metadata(p).is_ok();
+    let there = |p: PathBuf| std::fs::symlink_metadata(&p).is_ok() || wsl_link_on_drive(&p);
     let made_on = if cfg!(windows) {
         let bin = venv.join("bin");
         let posix = (there(bin.join("python")) || there(bin.join("python3"))) && !there(bin.join("python.exe"));
@@ -1040,8 +1071,22 @@ impl Resolver<'_> {
             let hint = crate::config::configured_escape_hint(Path::new(name), from, &spec.id).map_or(hint, |h| format!("; {h}"));
             return Err(NotFound::broken(format!("engine '{}' command '{}' not found (set by {}){hint}", spec.id, shown_program(name), set_by(from)), command_words, from));
         };
+        // Windows: a .bat or .cmd (pyenv-win's shim, conda.bat) runs in cmd.exe, which in a
+        // \\server\share working folder would start the worker in the Windows folder.
+        let batch = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
         let mut argv = vec![path.into_os_string()];
         argv.extend(command[1..].iter().map(OsString::from));
+        if batch && share_folder(&self.lookup.cwd).is_some() {
+            let exe = if &*spec.id == "py" { "python.exe" } else { "node.exe" };
+            let message = format!(
+                "engine '{}' command '{}' (set by {}) runs in cmd.exe, which {}: name the program itself ({exe}), or run v2 from a folder on a drive",
+                spec.id,
+                shown_program(&argv[0].to_string_lossy()),
+                set_by(from),
+                cmd_cant_work()
+            );
+            return Err(NotFound::broken(message, join(&argv), from));
+        }
         self.usable(spec, argv, Origin::Config(from.clone()), &format!("command '{}'", shown_program(name)), from)
     }
 
@@ -2711,6 +2756,82 @@ mod tests {
             let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
             assert!(nf.message.ends_with(" isn't a Windows program (a Linux one): the Windows v2 runs Windows programs: name a python.exe, or run the Linux v2 inside WSL"), "{}", nf.message);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_command_is_refused_in_a_share_folder() {
+        // The review of round 21, 7.6: a configured .bat or .cmd (pyenv-win's shim, conda.bat)
+        // runs in cmd.exe, which in a \\server\share working folder would start the worker in the
+        // Windows folder: refused there before any probe; from a drive folder it is probed.
+        let d = temp("batchshare");
+        let shim = d.join("pyshim.bat");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        let p = fake(|_| says("Python 3.12.1"));
+        let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        for (id, exe) in [("py", "python.exe"), ("js", "node.exe")] {
+            let cfg = with_command(id, &[&shim.display().to_string(), "-X"], ConfigSource::Env(format!("V2_ENGINE_{}", id.to_uppercase())));
+            for share in [r"\\wsl.localhost\Ubuntu\home\ann\p", r"\\?\UNC\server\share\p"] {
+                let l = Lookup { cwd: PathBuf::from(share), ..lookup(&[], None) };
+                let nf = resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), id).unwrap_err();
+                let want = format!(
+                    "engine '{id}' command '{}' (set by V2_ENGINE_{}) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself ({exe}), or run v2 from a folder on a drive",
+                    shim.display(),
+                    id.to_uppercase()
+                );
+                assert_eq!(nf.message, want);
+                assert_eq!((nf.status, nf.command.as_deref()), (Status::Broken, Some(&*format!("{} -X", crate::cli::shell_word(&shim.display().to_string())))));
+            }
+        }
+        assert_eq!(p.calls.get(), 0, "no probe");
+        let cfg = with_command("py", &[&shim.display().to_string()], ConfigSource::Env("V2_ENGINE_PY".into()));
+        assert!(resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_wsl_link_on_a_drive_is_a_linux_program() {
+        // The review of round 21 (W7, W2): a link WSL makes on a drive (a Linux venv made from
+        // WSL under /mnt/c) can't even be stat'ed from Windows (os error 1920), yet it is there:
+        // a Linux program, never "not found", and a Linux venv's python. Needs a WSL distro
+        // (V2_TEST_WSL_DISTRO), which makes the links in a temp folder.
+        let Some(distro) = std::env::var("V2_TEST_WSL_DISTRO").ok().filter(|d| !d.is_empty()) else {
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), b"SKIP a_wsl_link_on_a_drive_is_a_linux_program (V2_TEST_WSL_DISTRO not set)\n");
+            return;
+        };
+        /// Removes the folder through WSL, which can remove its links.
+        struct Gone(String, PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let script = "rm -rf \"$(wslpath -u \"$1\")\"";
+                let _ = std::process::Command::new("wsl.exe").args(["-d", &self.0, "-u", "root", "-e", "sh", "-c", script, "sh"]).arg(&self.1).status();
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let d = crate::syntax::span::strip_verbatim(&std::fs::canonicalize(temp("wsllink")).unwrap());
+        let _gone = Gone(distro.clone(), d.clone());
+        let venv = d.join("lxvenv");
+        std::fs::create_dir_all(venv.join("bin")).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = x\n").unwrap();
+        let link = |at: &Path| {
+            let script = "ln -s /usr/bin/python3 \"$(wslpath -u \"$1\")\"";
+            let made = std::process::Command::new("wsl.exe").args(["-d", &distro, "-u", "root", "-e", "sh", "-c", script, "sh"]).arg(at).status().unwrap();
+            assert!(made.success(), "ln -s {}", at.display());
+        };
+        let python = d.join("python3");
+        link(&python);
+        link(&venv.join("bin").join("python"));
+        assert_eq!(std::fs::symlink_metadata(&python).err().and_then(|e| e.raw_os_error()), Some(1920), "Windows stats a WSL link on a drive now");
+        let p = fake(|_| says("Python 3.12.1"));
+        let cfg = with_command("py", &[&python.display().to_string()], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(
+            nf.message,
+            format!("engine 'py' command '{}' (set by V2_ENGINE_PY) isn't a Windows program (a Linux one): the Windows v2 runs Windows programs: name a python.exe, or run the Linux v2 inside WSL", python.display())
+        );
+        let at = Config { python_venv: Some(Sourced { value: venv.clone(), from: project_source() }), ..Config::default() };
+        let nf = resolve_with(&at, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.starts_with(&format!("[python] venv '{}' was made on Linux or macOS: keep it, ", venv.display())), "{}", nf.message);
     }
 
     #[test]

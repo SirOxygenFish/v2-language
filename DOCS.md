@@ -709,7 +709,10 @@ writes UTF-8, which V2 reads), with no timeout. cmd.exe can't work in a `\\serve
 such as a project in WSL opened as `\\wsl.localhost\Ubuntu\…`, and would run in `C:\Windows`: there
 `exec` raises `IOError` instead of starting it or a `.bat` or `.cmd` file (`npm.cmd`), which cmd.exe
 runs. Run the program itself, or
-`exec(["cmd", "/c", "pushd \"\\\\wsl.localhost\\Ubuntu\\home\\ann\\p\" && npm run build"])`.
+`exec(["cmd", "/c", "pushd \"\\\\wsl.localhost\\Ubuntu\\home\\ann\\p\" && npm run build"])` (a
+`pushd` or `cd /d` to an absolute folder; a relative one is looked for in `C:\Windows`). For the
+same reason an engine command that is a `.bat` or `.cmd` (pyenv-win's shim) is `EngineNotFound`
+there, and `v2 doctor` there shows it `broken`.
 `exec` returns when the program exits, and what the
 program started is stopped then, or on Ctrl+C; only a process that escapes that
 ([chapter 16](#16-security-and-trust)) and keeps the outputs open makes `exec` wait until it closes

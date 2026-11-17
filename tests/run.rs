@@ -4696,6 +4696,46 @@ fn exec_refuses_cmd_in_a_share_folder() {
     assert_eq!(stdout, format!("IOError: exec: cmd.exe {rest}\nIOError: exec: build.bat runs in cmd.exe, which {rest}\n0\n0 true\n"), "{stderr}");
 }
 
+#[cfg(windows)]
+#[test]
+fn an_engine_through_a_batch_file_is_refused_in_a_share_folder() {
+    // The review of round 21, 7.6, 19.2: a configured .bat (pyenv-win's shim, conda.bat) runs in
+    // cmd.exe, which from a \\server\share working folder would start the worker in the Windows
+    // folder (os.getcwd() was C:\Windows): EngineNotFound, and doctor's row broken, out of
+    // ready:. From the drive folder the same command is ok. Skipped where the \\localhost share
+    // isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP an_engine_through_a_batch_file_is_refused_in_a_share_folder (no \\\\localhost share)");
+        return;
+    }
+    let shim = home.0.join("pyshim.bat");
+    std::fs::write(&shim, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.1& exit /b 0)\r\nexit /b 1\r\n").unwrap();
+    std::fs::write(home.0.join("v2.toml"), format!("[engines.py]\ncommand = ['{}']\n", shim.display())).unwrap();
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
+    assert_eq!((code, &*doctor_rows(&stdout)["py"][0]), (Some(0), "ok"), "{stdout}{stderr}");
+    let run = |args: &[&str]| {
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(&unc).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let head = format!("engine 'py' command '{}' (set by ", shim.display());
+    let tail = format!("v2.toml) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself (python.exe), or run v2 from a folder on a drive\n");
+    let (code, stdout, stderr) = run(&["doctor"]);
+    assert_eq!((code, &*doctor_rows(&stdout)["py"][0]), (Some(0), "broken"), "{stdout}{stderr}");
+    let note = stdout.lines().find(|l| l.starts_with("  py: ")).unwrap_or_default();
+    assert!(note.starts_with(&format!("  py: {head}")) && format!("{note}\n").ends_with(&tail), "{stdout}");
+    assert!(stdout.lines().any(|l| l.starts_with("ready: ") && !l.contains("py")), "{stdout}");
+    let (code, _, stderr) = run(&["s.v2"]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains(&format!("EngineNotFound: {head}")) && stderr.contains(&tail), "{stderr}");
+}
+
 #[test]
 fn doctor_quotes_a_configured_command_with_a_space() {
     // 19.2: an item with a space is quoted when there is more than one, also when it isn't found.
