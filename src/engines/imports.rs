@@ -347,6 +347,13 @@ fn py_part(seg: &str) -> bool {
     cs.next().is_some_and(|c| c == '_' || c.is_alphabetic()) && cs.all(|c| c == '_' || c.is_alphanumeric()) && !PY_KEYWORDS.contains(&seg)
 }
 
+/// `opencv-python`, `my-helper`: a name of one part with `-` that is a module name with `_` for
+/// each, which the worker refuses with a hint: an installed distribution's module, or a file of
+/// yours to rename (13.5).
+fn pip_style(name: &str) -> bool {
+    name.contains('-') && py_part(&name.replace('-', "_"))
+}
+
 /// `lib.sub` for the relative folder `lib/sub`, when each folder's name is a `py_part`.
 fn py_dotted(rel: &Path) -> Option<String> {
     let parts: Vec<String> = rel.iter().map(|c| c.to_string_lossy().into_owned()).collect();
@@ -489,7 +496,8 @@ enum PipFor {
     /// One found on PATH while the activated venv (VIRTUAL_ENV) has no python that runs: that
     /// venv, and what is wrong with it (`resolve::activated_venv_problem`).
     Passed(PathBuf, String),
-    /// One found on PATH in a venv (an activated one): its argv, and that venv, which V2 uses.
+    /// One found on PATH in a venv or a conda environment (an activated one): its argv, and that
+    /// venv or environment, which V2 uses.
     OnPath(Vec<std::ffi::OsString>, PathBuf),
 }
 
@@ -502,9 +510,18 @@ fn pip_for(engine: &crate::engines::resolve::ResolvedEngine, active: Option<Path
     }
     let passed = active.and_then(|venv| crate::engines::resolve::activated_venv_problem(&venv, &engine.skipped).map(|problem| PipFor::Passed(venv, problem)));
     passed.or_else(|| {
-        let venv = crate::engines::resolve::venv_of(Path::new(engine.argv.first()?))?;
+        let program = Path::new(engine.argv.first()?);
+        let venv = crate::engines::resolve::venv_of(program).or_else(|| conda_prefix(program))?;
         Some(PipFor::OnPath(engine.argv.clone(), venv))
     })
+}
+
+/// The conda environment a python is in (an activated one found on PATH): its prefix, which
+/// holds `conda-meta`, above `bin/python` (on Windows, beside `python.exe`).
+fn conda_prefix(python: &Path) -> Option<PathBuf> {
+    let dir = python.parent()?;
+    let prefix = if cfg!(windows) { dir } else { dir.parent()? };
+    prefix.join("conda-meta").is_dir().then(|| prefix.to_path_buf())
 }
 
 /// After "install it for the Python V2 uses": a command that works for `argv`, the Python V2 was
@@ -1589,7 +1606,7 @@ impl Interp {
     /// relative or absolute JS specifier the absolute path from the importing file's folder.
     fn module_unit(&self, file: FileId, key: &str, name: &str) -> Exec<String> {
         if key == "py" {
-            if !name.split('.').all(py_part) {
+            if !name.split('.').all(py_part) && !pip_style(name) {
                 // `py."./helper.py"`, as js takes a file: Python's names are module names.
                 let hint = if name.ends_with(".py") || name.contains(['/', '\\']) { self.py_path_hint(file, name) } else { String::new() };
                 return Err(import_error(format!("'{name}' is not a valid Python module name{hint}")));
@@ -1825,6 +1842,16 @@ impl Interp {
             crate::engines::session::drop_js_extras(&f, &mut pos);
         }
         self.call_value(&f, pos, named, at)
+    }
+
+    /// What route `n` calls now, if it is settled (a target, or a V2 function's current value),
+    /// without resolving it: for the hint of a call that failed (session.rs `fewer_args_hint`).
+    pub(crate) fn route_value(&self, n: usize) -> Option<Value> {
+        match self.routes.get(n)? {
+            Route::Target(f) => Some(f.clone()),
+            Route::V2 { file, name } => own_value(&self.files.get(file)?.frame, name),
+            Route::Pending { .. } => None,
+        }
     }
 
     /// A `Pending` route's target, found now (13.6); not loaded yet and constants give 13.7's
@@ -2126,6 +2153,28 @@ mod tests {
         let failed = vec![(python.clone(), "version probe failed (exit code 103): No Python at 'C:\\gone\\python.exe'".to_string())];
         let passed = pip_for(&engine(Origin::Path, &system, failed.clone()), Some(venv.clone()));
         assert!(matches!(&passed, Some(PipFor::Passed(v, problem)) if *v == venv && problem.contains("has a python that doesn't run (No Python at 'C:\\gone\\python.exe')")), "{:?}", passed.map(|_| ()));
+    }
+
+    #[test]
+    fn a_conda_python_found_on_path_gets_its_own_install_line() {
+        // Round 21 (L9): an activated conda environment's python (conda-meta in its prefix) is the
+        // one V2 uses, as an activated venv's is: its own install line, not "the Python that v2
+        // doctor shows".
+        let d = temp("conda");
+        let prefix = d.join("envs").join("sales");
+        let python = if cfg!(windows) { prefix.join("python.exe") } else { prefix.join("bin").join("python") };
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, "").unwrap();
+        let spec = Rc::new(crate::engines::spec::builtins().into_iter().find(|s| &*s.id == "py").unwrap());
+        let engine = crate::engines::resolve::ResolvedEngine { spec, origin: crate::engines::resolve::Origin::Path, argv: vec![python.clone().into_os_string()], version: None, skipped: Vec::new() };
+        assert!(pip_for(&engine, None).is_none(), "no conda-meta yet");
+        std::fs::create_dir_all(prefix.join("conda-meta")).unwrap();
+        let p = pip_for(&engine, None);
+        assert!(matches!(&p, Some(PipFor::OnPath(_, v)) if *v == prefix));
+        assert_eq!(
+            missing_package_hint("No module named 'cowsay'", &site(&d), p.as_ref()).unwrap(),
+            format!("if 'cowsay' isn't misspelled, install it for the Python V2 uses: {} -m pip install cowsay", python.display())
+        );
     }
 
     #[test]

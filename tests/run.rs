@@ -3731,7 +3731,8 @@ fn doctor_reports_configured_problems() {
     // 19): macOS's temp folder is a symlink, and Windows' may be an 8.3 short name.
     let real = PathBuf::from(real_path(&home.0));
     let toml = real.join("v2.toml");
-    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing/python.exe").display(), toml.display())), "{stdout}");
+    // On Windows with one separator, not the joined `…\missing/python.exe` (round 21, W7).
+    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing").join("python.exe").display(), toml.display())), "{stdout}");
     assert!(stdout.contains(&format!("config file: {}", toml.display())), "{stdout}");
 }
 
@@ -4608,7 +4609,14 @@ fn doctor_and_a_js_run_name_a_conda_run_that_cant_work() {
         let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
         assert_eq!(code, Some(0), "{stderr}");
         let rows = doctor_rows(&stdout);
-        assert_eq!((&*rows["py"][0], &*rows["js"][0]), ("ok", "ok"), "{stdout}");
+        // Round 21 (L1): no block can run, so the row is broken and the engine isn't ready (ts
+        // runs on js), and DOCS 15's `grep -q '^ready:.* py'` fails as the scripts would.
+        let status = |told: bool| if told { "broken" } else { "ok" };
+        let js_told = js_note.is_some();
+        assert_eq!((&*rows["py"][0], &*rows["js"][0], &*rows["ts"][0]), (status(py_told), status(js_told), status(js_told)), "{stdout}");
+        let ready: Vec<&str> = [("py", py_told), ("js", js_told), ("ts", js_told)].iter().filter(|(_, told)| !told).map(|(id, _)| *id).collect();
+        assert!(stdout.contains(&format!("\nready: {}\n", if ready.is_empty() { "none".to_string() } else { ready.join(", ") })), "{stdout}");
+        assert_eq!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), js_told, "{stdout}");
         assert_eq!(stdout.contains(&py_note), py_told, "{py}: {stdout}");
         match js_note {
             Some(note) => assert!(stdout.contains(note), "{js}: {stdout}"),
@@ -4627,6 +4635,155 @@ fn doctor_and_a_js_run_name_a_conda_run_that_cant_work() {
         "EngineCrashed: engine 'js' exited during startup (exit code 0); see its error output above, if any; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"
     };
     assert!(stderr.starts_with("j.v2:1:1: ") && stderr.contains(want), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_command_through_wsl_exe_is_told_it_runs_a_linux_python() {
+    // Round 21 (W7), 7.6, 8.4, 19.2: wsl.exe runs a Linux python, which answers --version but
+    // can't open the worker's adapter, a Windows path (exit code 2): doctor's note, and the
+    // run's. This wsl answers --version as Python, then exits as that python does.
+    let home = TempHome::new();
+    let bin = home.0.join("wsl-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wsl = bin.join("wsl.cmd");
+    std::fs::write(&wsl, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.3& exit /b 0)\r\necho python3: can't open file 1>&2\r\nexit /b 2\r\n").unwrap();
+    std::fs::write(home.0.join("v2.toml"), format!("[engines.py]\ncommand = ['{}', '-e', 'python3']\n", wsl.display())).unwrap();
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let note = "wsl.exe runs a Linux python, which the Windows v2 can't use, as its adapter is a Windows path: name a python.exe, or run the Linux v2 inside WSL";
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(doctor_rows(&stdout)["py"][0], "ok", "{stdout}");
+    assert!(stdout.contains(&format!("\n  py: {note}\n")), "{stdout}");
+    let (code, _, stderr) = run_in_home(&home.0, &["s.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("EngineCrashed: engine 'py' exited during startup (exit code 2); see its error output above, if any; {note}\n")), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_refuses_cmd_in_a_share_folder() {
+    // Round 21 (W1), 7.5: cmd.exe can't use a \\server\share working folder (a project in WSL):
+    // it says so on its stderr, works in the Windows folder instead and exits 0. So exec refuses
+    // it, and a batch file it would run, before starting either; other programs run there.
+    // Skipped where the \\localhost share isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP exec_refuses_cmd_in_a_share_folder (no \\\\localhost share)");
+        return;
+    }
+    std::fs::write(home.0.join("build.bat"), "@echo off\r\necho building in %CD%\r\n").unwrap();
+    // The command line to write, as a V2 string: pushd "<folder>" && …
+    let pushd = |then: &str| format!("\"pushd \\\"{}\\\" && {then}\"", unc.replace('\\', r"\\"));
+    // What the hint says, followed: build.bat runs in the folder (pushd maps a drive to the share).
+    let script = format!(
+        "func show(f) {{\n    try {{ f() }} catch (e) {{ print(e.type + \": \" + e.message) }}\n}}\n\
+         show(func() => exec([\"cmd\", \"/c\", \"cd\"]))\nshow(func() => exec([\"./build.bat\"]))\nprint(exec([\"hostname\"]).code)\n\
+         let r = exec([\"cmd\", \"/c\", {}])\nprint(r.code, r.stdout.trim().ends_with(\"{}\"))\n",
+        pushd(r".\\build.bat"),
+        real[2..].replace('\\', r"\\")
+    );
+    std::fs::write(home.0.join("w.v2"), script).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("w.v2").current_dir(&unc).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+    let (stdout, stderr) = (normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let rest = format!("can't work in a \\\\server\\share folder and would run in {windows}: run the program itself, or exec([\"cmd\", \"/c\", {}])", pushd("…"));
+    assert_eq!(stdout, format!("IOError: exec: cmd.exe {rest}\nIOError: exec: build.bat runs in cmd.exe, which {rest}\n0\n0 true\n"), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn an_engine_through_a_batch_file_is_refused_in_a_share_folder() {
+    // The review of round 21, 7.6, 19.2: a configured .bat (pyenv-win's shim, conda.bat) runs in
+    // cmd.exe, which from a \\server\share working folder would start the worker in the Windows
+    // folder (os.getcwd() was C:\Windows): EngineNotFound, and doctor's row broken, out of
+    // ready:. From the drive folder the same command is ok. Skipped where the \\localhost share
+    // isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP an_engine_through_a_batch_file_is_refused_in_a_share_folder (no \\\\localhost share)");
+        return;
+    }
+    let shim = home.0.join("pyshim.bat");
+    std::fs::write(&shim, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.1& exit /b 0)\r\nexit /b 1\r\n").unwrap();
+    std::fs::write(home.0.join("v2.toml"), format!("[engines.py]\ncommand = ['{}']\n", shim.display())).unwrap();
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
+    assert_eq!((code, &*doctor_rows(&stdout)["py"][0]), (Some(0), "ok"), "{stdout}{stderr}");
+    let run = |args: &[&str]| {
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(&unc).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let head = format!("engine 'py' command '{}' (set by ", shim.display());
+    let tail = format!("v2.toml) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself (python.exe), or run v2 from a folder on a drive\n");
+    let (code, stdout, stderr) = run(&["doctor"]);
+    assert_eq!((code, &*doctor_rows(&stdout)["py"][0]), (Some(0), "broken"), "{stdout}{stderr}");
+    let note = stdout.lines().find(|l| l.starts_with("  py: ")).unwrap_or_default();
+    assert!(note.starts_with(&format!("  py: {head}")) && format!("{note}\n").ends_with(&tail), "{stdout}");
+    assert!(stdout.lines().any(|l| l.starts_with("ready: ") && !l.contains("py")), "{stdout}");
+    let (code, _, stderr) = run(&["s.v2"]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains(&format!("EngineNotFound: {head}")) && stderr.contains(&tail), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_batch_file_on_path_is_passed_over_in_a_share_folder() {
+    // The review of round 21, 7.6, 19.2: from a \\server\share working folder, pyenv-win's
+    // shims\python.bat on PATH is skipped like a Store placeholder and the search goes on; with
+    // nothing else py doesn't run, and doctor says what to do instead of repairing Python. From
+    // the drive folder the shim is used. Skipped where the \\localhost share isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP a_batch_file_on_path_is_passed_over_in_a_share_folder (no \\\\localhost share)");
+        return;
+    }
+    let shims = home.0.join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    let shim = shims.join("python.bat");
+    std::fs::write(&shim, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.1& exit /b 0)\r\nexit /b 1\r\n").unwrap();
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let run = |cwd: &str, path: &std::ffi::OsStr, args: &[&str]| {
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(cwd).env("PATH", path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let skipped = format!("skipped {} (runs in cmd.exe, which can't work in a \\\\server\\share folder)", shim.display());
+    let fix = "fix: name the program itself (python.exe) with V2_ENGINE_PY, or run v2 from a folder on a drive";
+    // Only the shim on PATH: doctor's row is broken, with the shim, and the fix isn't a repair.
+    let (code, stdout, stderr) = run(&unc, shims.as_os_str(), &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(doctor_rows(&stdout)["py"][..2], ["broken".to_string(), shim.display().to_string()], "{stdout}");
+    assert!(stdout.contains(&format!("\n  py: engine 'py' (Python) was found but doesn't run (see why below)\n  py: {skipped}\n  py: {fix}\n")), "{stdout}");
+    assert!(!stdout.contains("repair that Python"), "{stdout}");
+    let (code, _, stderr) = run(&unc, shims.as_os_str(), &["s.v2"]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains("EngineNotFound: engine 'py' (Python) was found but doesn't run (see why below)\n"), "{stderr}");
+    assert!(stderr.contains(&format!("\n    skipped: {} (runs in cmd.exe, which can't work in a \\\\server\\share folder)\n    {fix}\n", shim.display())), "{stderr}");
+    // The drive folder: the shim, which answers --version, is used.
+    let (_, stdout, stderr) = run(&real, shims.as_os_str(), &["doctor"]);
+    assert_eq!(doctor_rows(&stdout)["py"][..2], ["ok".to_string(), shim.display().to_string()], "{stdout}{stderr}");
+    // With this machine's Python after the shim, the share folder's search goes on to it.
+    if needs("py", "a_batch_file_on_path_is_passed_over_in_a_share_folder") {
+        let path = std::env::join_paths(std::iter::once(shims.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        let (_, stdout, stderr) = run(&unc, &path, &["doctor"]);
+        let rows = doctor_rows(&stdout);
+        assert!(rows["py"][0] == "ok" && rows["py"][1] != shim.display().to_string(), "{stdout}{stderr}");
+        assert!(stdout.contains(&format!("\n  py: {skipped}\n")), "{stdout}");
+    }
 }
 
 #[test]
@@ -5466,6 +5623,104 @@ fn an_activated_venv_gets_its_own_install_line_until_its_python_stops_running() 
     let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &env);
     assert_eq!(code, Some(0), "{stderr}");
     assert!(stdout.contains(&format!("\n  py: {problem}")), "{stdout}");
+}
+
+#[test]
+fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
+    // Round 21 (L0, L9): a distribution the venv has, asked for by its pip name (normalized:
+    // pyzzyaml for PyZzYAML, zz_opencv_python, or quoted with -), names its module before any
+    // install line, as pip would only say it is installed; a my-helper.py of yours gets the rename.
+    // Fake distributions like PyYAML's (top_level.txt) and opencv-python's (a RECORD only), and
+    // each hint works when followed (INTERNALS 13.5). Review of round 21: like protobuf's, a
+    // namespace package is named by its package (google.protobuf, never google); like
+    // llama-cpp-python's, folders of data (bin, include, lib) are no modules; like
+    // python-multipart's, the module closest to the distribution's name comes first; one with no
+    // module gets no such hint; and py.myhelper is never offered my-helper.py.
+    if !needs("py", "a_package_imported_by_its_pip_name_gets_the_module_it_provides") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    let venv = home.0.join(".venv");
+    let made = Command::new(&python).args(["-m", "venv", "--without-pip"]).arg(&venv).output().expect("run python -m venv");
+    assert!(made.status.success(), "python -m venv: {}", String::from_utf8_lossy(&made.stderr));
+    let site = find_dir(&venv, "site-packages").expect("the venv's site-packages");
+    for (rel, text) in [
+        ("PyZzYAML-6.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: PyZzYAML\nVersion: 6.0\n"),
+        ("PyZzYAML-6.0.dist-info/top_level.txt", "_zzyaml\nzzyaml\n"),
+        ("zzyaml/__init__.py", "x = \"zzyaml here\"\n"),
+        ("zz_opencv_python-5.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-opencv-python\nVersion: 5.0\n"),
+        ("zz_opencv_python-5.0.dist-info/RECORD", "zzcv2/__init__.py,,\nzz_opencv_python-5.0.dist-info/METADATA,,\nzz_opencv_python-5.0.dist-info/RECORD,,\n"),
+        ("zzcv2/__init__.py", "y = 2\n"),
+        ("zzprotobuf-4.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zzprotobuf\nVersion: 4.0\n"),
+        ("zzprotobuf-4.0.dist-info/top_level.txt", "zzgoogle\n"),
+        ("zzprotobuf-4.0.dist-info/RECORD", "zzgoogle/zzproto/__init__.py,,\nzzgoogle/zzproto/wire.py,,\nzzgoogle/_zzupb/_message.abi3.so,,\nzzprotobuf-4.0.dist-info/RECORD,,\n"),
+        ("zzgoogle/zzproto/__init__.py", "z = 4\n"),
+        ("zz_llama_python-0.3.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-llama-python\nVersion: 0.3\n"),
+        ("zz_llama_python-0.3.dist-info/RECORD", "bin/zz-llama-cli,,\ninclude/zzllama.h,,\nlib/libzzllama.so,,\nzz_llama/__init__.py,,\nzz_llama/lib/libzzllama.so,,\nzz_llama_python-0.3.dist-info/RECORD,,\n"),
+        ("zz_llama/__init__.py", "w = 5\n"),
+        ("zz_python_multipart-0.0.20.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-python-multipart\nVersion: 0.0.20\n"),
+        ("zz_python_multipart-0.0.20.dist-info/RECORD", "multizz/__init__.py,,\nzz_python_multipart/__init__.py,,\nzz_python_multipart-0.0.20.dist-info/RECORD,,\n"),
+        ("zz_python_multipart/__init__.py", "v = 6\n"),
+        ("zz_data_only-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-data-only\nVersion: 1.0\n"),
+        ("zz_data_only-1.0.dist-info/RECORD", "share/zzdata/a.txt,,\nbin/zzdata,,\nzz_data_only-1.0.dist-info/RECORD,,\n"),
+        // Python 3.12 and later list only the files of a RECORD that are there.
+        ("multizz/__init__.py", ""),
+        ("zzgoogle/zzproto/wire.py", ""),
+        ("zzgoogle/_zzupb/_message.abi3.so", ""),
+        ("bin/zz-llama-cli", ""),
+        ("include/zzllama.h", ""),
+        ("lib/libzzllama.so", ""),
+        ("zz_llama/lib/libzzllama.so", ""),
+        ("share/zzdata/a.txt", ""),
+        ("bin/zzdata", ""),
+    ] {
+        let path = site.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    std::fs::write(home.0.join("my-helper.py"), "def f():\n    return \"helper\"\n").unwrap();
+    let imports = ["py.pyzzyaml as m", "py.PyZzYAML as m", "py.\"zz-opencv-python\" as m", "py.zz_opencv_python as m", "{ f } from py.\"my-helper\"", "{ f } from py.my_helper",
+        "py.zzprotobuf as m", "py.zz_llama_python as m", "py.\"zz-python-multipart\" as m", "py.zz_data_only as m", "{ f } from py.myhelper"];
+    let tries: String = imports.iter().map(|i| format!("try {{\n    @import {i}\n}} catch (e) {{\n    print(e.message, \"|\", e.hint)\n}}\n")).collect();
+    std::fs::write(home.0.join("m.v2"), tries).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    let yaml = "PyZzYAML is installed, and its module is named zzyaml: @import py.zzyaml as zzyaml";
+    let cv = "zz-opencv-python is installed, and its module is named zzcv2: @import py.zzcv2 as zzcv2";
+    let rename = "Python module names use _: rename my-helper.py to my_helper.py and import py.my_helper";
+    let want = [
+        format!("No module named 'pyzzyaml' | {yaml}"),
+        format!("No module named 'PyZzYAML' | {yaml}"),
+        format!("'zz-opencv-python' is not a valid Python module name | {cv}"),
+        format!("No module named 'zz_opencv_python' | {cv}"),
+        format!("'my-helper' is not a valid Python module name | {rename}"),
+        format!("No module named 'my_helper' | {rename}"),
+        "No module named 'zzprotobuf' | zzprotobuf is installed, and its module is named zzgoogle.zzproto: @import py.zzgoogle.zzproto as zzproto".into(),
+        "No module named 'zz_llama_python' | zz-llama-python is installed, and its module is named zz_llama: @import py.zz_llama as zz_llama".into(),
+        "'zz-python-multipart' is not a valid Python module name | zz-python-multipart is installed, and its modules are named zz_python_multipart and multizz: @import py.zz_python_multipart as zz_python_multipart".into(),
+    ];
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!((code, &lines[..lines.len().min(want.len())]), (Some(0), &want.iter().map(String::as_str).collect::<Vec<_>>()[..]), "{stderr}");
+    // No module to name, and no my-helper.py offered for py.myhelper: the install line.
+    let rest = &lines[want.len()..];
+    assert_eq!(rest.len(), 2, "{stdout}");
+    for (line, name) in rest.iter().zip(["zz_data_only", "myhelper"]) {
+        assert!(line.starts_with(&format!("No module named '{name}' | if '{name}' isn't misspelled, install it for the Python V2 uses")) && !line.contains("is installed"), "{line}");
+    }
+    // Uncaught: the hint, and no install line.
+    std::fs::write(home.0.join("m.v2"), "@import py.pyzzyaml as m\nprint(m.x)\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("ImportError: No module named 'pyzzyaml'") && stderr.contains(&format!("\n  hint: {yaml}\n")) && !stderr.contains("pip"), "{stderr}");
+    // Followed.
+    std::fs::rename(home.0.join("my-helper.py"), home.0.join("my_helper.py")).unwrap();
+    let follow = "@import py.zzyaml as zzyaml\n@import py.zzcv2 as zzcv2\n@import { f } from py.my_helper\n@import py.zzgoogle.zzproto as zzproto\n\
+        @import py.zz_llama as zz_llama\n@import py.zz_python_multipart as zz_python_multipart\n\
+        print(zzyaml.x, zzcv2.y, f(), zzproto.z, zz_llama.w, zz_python_multipart.v)\n";
+    std::fs::write(home.0.join("m.v2"), follow).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "zzyaml here 2 helper 4 5 6\n"), "{stderr}");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 // requires: py
-// R44: a Python module name must be dotted identifiers; nothing is sent for one that isn't
-// (INTERNALS 13.5).
+// R44: a Python module name must be dotted identifiers; nothing is sent for one that isn't, but
+// for a pip-style name of one part with -, which the worker refuses with its hint (INTERNALS 13.5).
 func show(f) {
     try {
         print(f())
