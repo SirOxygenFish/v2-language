@@ -735,6 +735,41 @@ fn iconvs_line_takes_its_code_page_from_the_locale() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "Iğdır şehri\n", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_v2_tomls_iconv_line_names_the_file_it_is_about() {
+    // INTERNALS 18.5 (round 20): v2.toml is found from the script's folder up (18.1), so from
+    // another folder iconv's line names it by its path. Followed there, it converts that file
+    // and leaves the folder's own v2.toml as it was.
+    let home = TempHome::new();
+    for d in ["proj/sub", "other"] {
+        std::fs::create_dir_all(home.0.join(d)).unwrap();
+    }
+    // "# Çağrı" in cp1254; other/ has a v2.toml of its own, in UTF-8.
+    std::fs::write(home.0.join("proj/v2.toml"), b"# \xc7a\xf0r\xfd\n").unwrap();
+    std::fs::write(home.0.join("proj/a.v2"), "print(\"ok\")\n").unwrap();
+    let mine = "# Çağrı'nın projesi\n";
+    std::fs::write(home.0.join("other/v2.toml"), mine).unwrap();
+    let run = |cwd: &str, file: &str| {
+        let out = v2_command(&home.0).env("LC_ALL", "tr_TR.UTF-8").arg(file).current_dir(home.0.join(cwd)).stdin(Stdio::null()).output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let proj = std::fs::canonicalize(home.0.join("proj")).unwrap();
+    let (file, new) = (proj.join("v2.toml").display().to_string(), proj.join("new.toml").display().to_string());
+    let says = |files: &str| (Some(2), String::new(), format!("{file}: config error: the file is not valid UTF-8: it may be in an older encoding, such as Windows-1254: save it as UTF-8, as in iconv -f cp1254 -t utf-8 {files}, then check the text\n"));
+    assert_eq!(run("proj", "a.v2"), says("v2.toml > new.toml && mv new.toml v2.toml"));
+    let line = format!("{file} > {new} && mv {new} {file}");
+    assert_eq!(run("other", "../proj/a.v2"), says(&line));
+    assert_eq!(run("proj/sub", "../a.v2"), says(&line));
+    let iconv = Command::new("sh").arg("-c").arg(format!("iconv -f cp1254 -t utf-8 {line}")).current_dir(home.0.join("other")).output().unwrap();
+    if !iconv.status.success() {
+        return; // no iconv with cp1254 here
+    }
+    assert_eq!(std::fs::read_to_string(home.0.join("other/v2.toml")).unwrap(), mine);
+    assert_eq!(std::fs::read_to_string(proj.join("v2.toml")).unwrap(), "# Çağrı\n");
+    assert_eq!(run("other", "../proj/a.v2"), (Some(0), "ok\n".to_string(), String::new()));
+}
+
 /// Run generated source in a fresh temp home; returns (exit code, stdout, stderr).
 fn run_generated(name: &str, src: &str) -> (Option<i32>, String, String) {
     let home = TempHome::new();

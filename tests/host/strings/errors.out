@@ -28,3 +28,17 @@ ArityError: str.encode() takes 0 positional arguments but 1 was given
   hint: V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode("cp1254") }
 ArityError: str.encode() got an unexpected argument 'encoding'
   hint: V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode("cp1254") }
+ArityError: bytes.decode() takes 0 positional arguments but 1 was given
+  hint: V2's decode() reads UTF-8: write b.decode()
+ArityError: bytes.decode() takes 0 positional arguments but 1 was given
+  hint: V2's decode() reads UTF-8: write b.decode()
+ArityError: bytes.decode() got an unexpected argument 'encoding'
+  hint: V2's decode() reads UTF-8: write b.decode()
+ArityError: bytes.decode() takes 0 positional arguments but 2 were given
+  hint: V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode("cp1254") }
+ArityError: str.encode() takes 0 positional arguments but 1 was given
+  hint: V2's encode() writes UTF-8: write s.encode()
+ArityError: str.encode() got an unexpected argument 'encoding'
+  hint: V2's encode() writes UTF-8: write s.encode()
+Gü
+3

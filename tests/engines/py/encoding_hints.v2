@@ -13,3 +13,21 @@ try {
     print(e.hint)
 }
 print(@py(x) { float(x.replace("٫", ".")) })
+// U+066C between thousands (ar-EG, fa-IR), which Python refuses, is taken out first (the second
+// review of round 20).
+for t in ["١٬٢٣٤٫٥", "۱٬۲۳۴٫۵"] {
+    x = t
+    try {
+        float(x)
+    } catch (e) {
+        print(e.hint)
+    }
+    print(@py(x) { float(x.replace("٬", "").replace("٫", ".")) })
+}
+x = "١٬٢٣٤"
+try {
+    int(x)
+} catch (e) {
+    print(e.hint)
+}
+print(@py(x) { int(x.replace("٬", "")) })
