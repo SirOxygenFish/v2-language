@@ -5,4 +5,12 @@ hi
 1
 @export lists 'ｈｅｌｌｏ' but block 's' does not define it
 Python reads as 'world': export world, and import it as @import { world as ｗｏｒｌｄ } from t
+@export lists 'ﬁle' (U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle } from tup
+@export lists 'ﬁle' (U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle } from imp
+@export lists 'ﬁle' (U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle } from loop
+@export lists 'ﬁle' (U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle } from ctx
+@export lists 'ｈｅｌｌｏ' (U+FF48 …), which Python reads as 'hello': export hello, and import it as @import { hello as ｈｅｌｌｏ } from cond
+@export lists 'ﬁle' but block 'none' does not define it
+7
+0123456789
 ImportError | 'buyut' is not exported by 'r' — did you mean 'büyüt'? (or should its @export say 'buyut'?)

@@ -20,3 +20,7 @@ show(func() => buyuk)
 let d = {"cafe\u{301}": 1}
 show(func() => d["caf\u{e9}"])
 show(func() => d["cafe"])
+// A long one too: its decomposed letter is 2 edits, within the distance (round 20, third pass).
+let long = {"u\u{308}ber_alles": 1, "gro\u{308}\u{df}en": 2}
+show(func() => long["\u{fc}ber_alles"])
+show(func() => long["gr\u{f6}\u{df}en"])
