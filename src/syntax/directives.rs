@@ -379,11 +379,16 @@ impl<'a> DirParser<'a> {
                         (kind, n)
                     }
                     other => {
-                        // `@export { f， g }`: an input method's comma gets its hint (3.2), not the
-                        // @@export one; a backtick's is about V2's strings.
+                        // `@export { f， g }`: a space, a zero-width character, a quote or an input
+                        // method's form in the list is its slip, with its hint (3.2). Any other
+                        // character, or one outside the list (a docstring's `@export – marks it`),
+                        // gets the @@export one: the line may be the block's own text.
+                        let slip = depth > 0
+                            && matches!(other, '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200D}' | '\u{202F}' | '\u{205F}' | '\u{2060}' | '\u{3000}' | '\u{FEFF}' | '\u{2018}'..='\u{201F}' | '\u{300C}'..='\u{300F}' | '\u{FF01}'..='\u{FF5E}')
+                            && !matches!(other, '\u{FF40}' | '\u{FF5E}');
                         let (shown, hint) = crate::syntax::lexer::shown_char(other);
                         let d = Diag::new(format!("unexpected character {shown} in a directive"), span(col, col + len));
-                        let d = match hint.filter(|_| other != '`') {
+                        let d = match hint.filter(|_| slip) {
                             Some(h) => d.hint(h),
                             None => d,
                         };
@@ -1052,7 +1057,17 @@ mod tests {
             ("unexpected character '\u{FF0C}' (a full-width ',' from an input method) in a directive".into(), "type , with the input method off".into())
         );
         assert_eq!(both("@py {\n    @export { f\u{3000}}\n    def f(): pass\n}"), ("unexpected character U+3000 (an ideographic space) in a directive".into(), "type a plain space instead".into()));
+        assert_eq!(both("@py {\n    @export { f\u{200B}}\n    def f(): pass\n}").1, "delete it");
+        assert_eq!(both("@py {\n    @export { \u{201C}f\u{201D} }\n    def f(): pass\n}").1, "use a straight quote: \" or '");
         assert_eq!(both("@js {\n  @import { `a` } from @py\n}").1, hint);
+        // Any other character, or one outside the list, keeps it: a docstring's line is the
+        // block's own text, and `｀` or `～` typed as ASCII is no better.
+        let export = "a line that starts with @export is V2's; for code of the block's own language that starts with @export, write @@export";
+        let doc = "@py {\n    def f():\n        \"\"\"Shown.\n        @export \u{2013} marks it\n        \"\"\"\n}";
+        assert_eq!(both(doc), ("unexpected character '\u{2013}' (a dash) in a directive".into(), export.into()));
+        for c in ['\u{2013}', '\u{D7}', '\u{F7}', '\u{FF40}', '\u{FF5E}'] {
+            assert_eq!(both(&format!("@py {{\n    @export {{ f{c} }}\n    def f(): pass\n}}")).1, export, "{c}");
+        }
     }
 
     #[test]
