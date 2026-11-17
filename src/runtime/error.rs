@@ -124,20 +124,22 @@ fn osa(a: &[char], b: &[char]) -> usize {
 /// `min(3, (len + 2) / 3)`; of
 /// candidates as close, the first that starts with the name, else the first. One that is the
 /// name typed without its accents (`grosse` for `größe`, `buyut` for `büyüt`) is as close as one
-/// that differs only in case, but not one that is the name in another Unicode form (NFC equal:
-/// `café` decomposed), which looks the same: the callers' `module::unicode_twin` names those.
+/// that differs only in case. One that is the name in another Unicode form (NFC equal: `café`
+/// decomposed) looks the same, so it is never suggested, as the name itself isn't: the callers'
+/// `module::unicode_twin` names those.
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     use unicode_normalization::UnicodeNormalization;
     let target: Vec<char> = name.to_lowercase().chars().collect();
     let limit = if target.len() <= 5 { 1 } else { 3usize.min(target.len().div_ceil(3)) };
     let plain = folded(name);
+    let composed: String = name.nfc().collect();
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {
-        if c == name {
+        if c == name || (!(name.is_ascii() && c.is_ascii()) && c.nfc().eq(composed.chars())) {
             continue;
         }
         let cand: Vec<char> = c.to_lowercase().chars().collect();
-        let accents = !(name.is_ascii() && c.is_ascii()) && folded(c) == plain && c.nfc().ne(name.nfc());
+        let accents = !(name.is_ascii() && c.is_ascii()) && folded(c) == plain;
         let d = if accents { 0 } else { osa(&target, &cand) };
         // A suggestion keeps some of the name: `y` isn't a typo of `f`.
         let prefix = cand.starts_with(&target);
@@ -508,6 +510,11 @@ mod tests {
         // nothing; `module::unicode_twin` names those. Other candidates still count.
         assert_eq!(did_you_mean("caf\u{e9}", ["cafe\u{301}"]), None);
         assert_eq!(did_you_mean("gr\u{f6}\u{df}e", ["gro\u{308}\u{df}e"]), None);
+        // Long names too, whose one decomposed letter (2 edits) is within the distance (third pass).
+        assert_eq!(did_you_mean("\u{fc}ber_alles", ["u\u{308}ber_alles"]), None);
+        assert_eq!(did_you_mean("gr\u{f6}\u{df}en", ["gro\u{308}\u{df}en"]), None);
+        assert_eq!(did_you_mean("na\u{ef}ve_x", ["nai\u{308}ve_x"]), None);
+        assert_eq!(did_you_mean("\u{fc}ber_alles", ["u\u{308}ber_alles", "uber_alle"]), Some("uber_alle"));
         assert_eq!(did_you_mean("gr\u{f6}\u{df}e", ["gro\u{308}\u{df}e", "grosse"]), Some("grosse"));
         assert_eq!(did_you_mean("Caf\u{e9}", ["cafe\u{301}"]), Some("cafe\u{301}"));
     }
