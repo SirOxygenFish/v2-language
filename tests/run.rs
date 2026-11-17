@@ -3223,6 +3223,205 @@ fn input_without_echo_hides_what_is_typed() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn input_without_echo_gives_the_terminal_back_when_stdout_isnt_one() {
+    // INTERNALS 5.10 and 6.5 (round 22, the review of L3): with stdin a terminal and stdout a file,
+    // Ctrl+C at the password prompt puts the terminal's settings back, though v2's stdout isn't the
+    // terminal (`TERMINAL_CHANGED`); with stdout a closed pipe the prompt can't be written: exit 141,
+    // the settings put back first.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("stop.v2"), "input(\"Password: \", echo: false)\nprint(\"not reached\")\n").unwrap();
+    let out = home.0.join("out.txt");
+    for case in ["stdout to a file", "stdout a closed pipe"] {
+        let mut pty = Pty::open(80, 24);
+        let before = pty.flags();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("stop.v2").current_dir(&home.0);
+        pty.attach(&mut cmd);
+        if case == "stdout to a file" {
+            cmd.stdout(std::fs::File::create(&out).unwrap());
+        } else {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            cmd.stdout(writer);
+        }
+        let mut child = cmd.spawn().expect("start v2");
+        drop(cmd);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let stop = |child: &mut Child, why: &str| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{case}: {why}");
+        };
+        if case == "stdout to a file" {
+            // The prompt is in the file and echo is off: v2 reads.
+            while pty.flags()[3] & libc::ECHO != 0 || std::fs::read_to_string(&out).unwrap_or_default() != "Password: " {
+                if Instant::now() > deadline {
+                    stop(&mut child, "no prompt with echo off");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            pty.master.write_all(b"\x03").unwrap();
+        }
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                stop(&mut child, "v2 didn't end");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if case == "stdout to a file" {
+            assert_interrupted(&status, SIGINT, case);
+        } else {
+            assert_eq!(status.code(), Some(141), "{case}");
+        }
+        assert_eq!(pty.flags(), before, "{case}: the terminal's settings weren't put back");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn input_without_echo_and_job_control() {
+    // DOCS 3.11, INTERNALS 5.10 and 6.5 (round 22, the review of L3): a Python stand-in for a shell
+    // with job control runs v2 as a job. Ctrl+Z at the password prompt: echo is on while v2 is
+    // stopped (dash leaves the terminal as it finds it), and off again once fg goes on with it (bash
+    // puts its own settings back meanwhile), also after a bg in between. A prompt reached in the
+    // background: v2 waits, stopped by SIGTTOU, before it reads the terminal's settings (it would
+    // take the line editor's raw mode, and put it back at the end), and asks once in the foreground.
+    if !needs("py", "input_without_echo_and_job_control") {
+        return;
+    }
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    let home = TempHome::new();
+    std::fs::write(home.0.join("ask.v2"), "let pw = input(\"Password: \", echo: false)\nprint(f\"got [${pw}]\")\nprint(f\"name [${input(\"Name: \")}]\")\n").unwrap();
+    let shell = r#"import os, signal, sys, termios
+case, argv = sys.argv[1], sys.argv[2:]
+shell = termios.tcgetattr(0)
+raw = termios.tcgetattr(0)
+raw[3] &= ~(termios.ECHO | termios.ICANON)
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)  # a shell takes the terminal back without stopping
+
+
+def say(text):
+    os.write(1, (text + "\n").encode())
+
+
+def flags():
+    a = termios.tcgetattr(0)
+    return "echo=%s icanon=%s" % (bool(a[3] & termios.ECHO), bool(a[3] & termios.ICANON))
+
+
+def stopped():
+    _, status = os.waitpid(pid, os.WUNTRACED)
+    os.tcsetpgrp(0, os.getpgrp())
+    if not os.WIFSTOPPED(status):
+        say("not stopped: %s" % status)
+        sys.exit(1)
+    return signal.Signals(os.WSTOPSIG(status)).name
+
+
+if case == "background":
+    termios.tcsetattr(0, termios.TCSANOW, raw)  # the line editor's mode while a job runs in the background
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    if case != "background":
+        os.tcsetpgrp(0, os.getpid())
+    for s in (signal.SIGTTOU, signal.SIGTTIN, signal.SIGTSTP):
+        signal.signal(s, signal.SIG_DFL)
+    os.execv(argv[0], argv)
+try:
+    os.setpgid(pid, pid)
+except OSError:
+    pass
+if case != "background":
+    os.tcsetpgrp(0, pid)
+say("stopped by %s, %s" % (stopped(), flags()))
+if case == "ctrl_z then bg":
+    termios.tcsetattr(0, termios.TCSANOW, raw)
+    os.killpg(pid, signal.SIGCONT)  # bg: it goes on without the terminal
+    stopped()
+    say("stopped again")
+termios.tcsetattr(0, termios.TCSANOW, shell)  # the settings bash gives a job it goes on with
+say("fg")
+os.tcsetpgrp(0, pid)
+os.killpg(pid, signal.SIGCONT)
+_, status = os.waitpid(pid, 0)
+os.tcsetpgrp(0, os.getpgrp())
+say("v2 ended %s, %s" % (os.waitstatus_to_exitcode(status), flags()))
+"#;
+    std::fs::write(home.0.join("shell.py"), shell).unwrap();
+    let rest = "\r\ngot [s3cret]\r\nName: ada\r\nname [ada]\r\nv2 ended 0, echo=True icanon=True\r\n";
+    let cases = [
+        ("ctrl_z", format!("Password: stopped by SIGSTOP, echo=True icanon=True\r\nfg\r\n{rest}")),
+        ("ctrl_z then bg", format!("Password: stopped by SIGSTOP, echo=True icanon=True\r\nstopped again\r\nfg\r\n{rest}")),
+        ("background", format!("stopped by SIGTTOU, echo=False icanon=False\r\nfg\r\nPassword: {rest}")),
+    ];
+    for (case, want) in cases {
+        let mut pty = Pty::open(80, 24);
+        let before = pty.flags();
+        let mut cmd = Command::new("python3");
+        cmd.args(["shell.py", case, BIN, "ask.v2"]).current_dir(&home.0).env("HOME", &home.0).env_remove("VIRTUAL_ENV");
+        pty.attach(&mut cmd);
+        let mut child = cmd.spawn().expect("start python3");
+        drop(cmd);
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let stop = |child: &mut Child, why: &str, seen: &[u8]| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{case}: {why}: {}", String::from_utf8_lossy(seen).escape_debug());
+        };
+        if case != "background" {
+            if !pty.read_until(&mut seen, deadline, |s| find(s, b"Password: ").is_some()) {
+                stop(&mut child, "no prompt", &seen);
+            }
+            // Ctrl+Z, typed.
+            pty.master.write_all(b"\x1a").unwrap();
+        }
+        if !pty.read_until(&mut seen, deadline, |s| find(s, b"fg\r\n").is_some()) {
+            stop(&mut child, "v2 never stopped", &seen);
+        }
+        let fg = find(&seen, b"fg\r\n").unwrap() + 4;
+        // After fg echo goes off again (Ctrl+Z), or off at last (the background).
+        while pty.flags()[3] & libc::ECHO != 0 {
+            if Instant::now() > deadline {
+                stop(&mut child, "echo didn't go off after fg", &seen);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let asking = pty.flags();
+        if asking != [before[0], before[1], before[2], before[3] & !libc::ECHO] {
+            stop(&mut child, &format!("echo isn't off alone after fg ({before:?} became {asking:?})"), &seen);
+        }
+        if case == "background" && !pty.read_until(&mut seen, deadline, |s| find(&s[fg..], b"Password: ").is_some()) {
+            stop(&mut child, "no prompt after fg", &seen);
+        }
+        pty.master.write_all(b"s3cret\n").unwrap();
+        if !pty.read_until(&mut seen, deadline, |s| find(&s[fg..], b"Name: ").is_some()) {
+            stop(&mut child, "no second prompt", &seen);
+        }
+        pty.master.write_all(b"ada\n").unwrap();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                stop(&mut child, "the shell didn't end", &seen);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| s.ends_with(b"icanon=True\r\n"));
+        let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
+        assert!(status.success(), "{case}: {shown}");
+        assert_eq!(shown, want.escape_debug().to_string(), "{case}");
+        assert_eq!(pty.flags(), before, "{case}: the terminal's settings weren't put back: {shown}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn the_readmes_way_to_leave_a_job_running_returns_at_once() {
