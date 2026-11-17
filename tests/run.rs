@@ -3033,12 +3033,50 @@ impl Pty {
         true
     }
 
-    /// The terminal's input, output, control and local flags.
+    /// Whatever is drawn now, into `seen`, without waiting.
+    fn drain(&mut self, seen: &mut Vec<u8>) {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = self.master.read(&mut buf) {
+            seen.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    /// Wait for `child` until `deadline`, reading what is drawn into `seen` meanwhile: on macOS a
+    /// session leader's exit waits until its terminal's output has been read (XNU's `ttywait`), so a
+    /// test that stopped reading would wait for ever. Past the deadline it is killed and reaped
+    /// (`reap`): `None`.
+    fn wait(&mut self, child: &mut Child, seen: &mut Vec<u8>, deadline: Instant) -> Option<std::process::ExitStatus> {
+        loop {
+            self.drain(seen);
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() > deadline {
+                self.reap(child, seen);
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Kill `child` and reap it, reading what is drawn meanwhile (`wait`), for at most 10 s.
+    fn reap(&mut self, child: &mut Child, seen: &mut Vec<u8>) {
+        let _ = child.kill();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            self.drain(seen);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The terminal's input, output, control and local flags, read through the master: once v2, the
+    /// session leader, has ended, macOS has revoked the slave (its descriptors are no terminal any
+    /// more), and Linux and macOS give a master the slave's settings.
     fn flags(&self) -> [libc::tcflag_t; 4] {
         use std::os::fd::AsRawFd;
         // SAFETY: tcgetattr fills a zeroed struct.
         let mut t: libc::termios = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::tcgetattr(self.slave.as_raw_fd(), &mut t) }, 0, "tcgetattr: {}", std::io::Error::last_os_error());
+        assert_eq!(unsafe { libc::tcgetattr(self.master.as_raw_fd(), &mut t) }, 0, "tcgetattr: {}", std::io::Error::last_os_error());
         [t.c_iflag, t.c_oflag, t.c_cflag, t.c_lflag]
     }
 }
@@ -3068,23 +3106,13 @@ fn an_interrupt_gives_the_terminal_back() {
         let ready = pty.read_until(&mut seen, Instant::now() + Duration::from_secs(30), |s| find(s, b"ready").is_some());
         let changed = pty.flags();
         if !ready || (what == "py" && changed[3] & libc::ECHO != 0) {
-            let _ = child.kill();
-            let _ = child.wait();
+            pty.reap(&mut child, &mut seen);
             panic!("{what}: the program never got ready with echo off: {}", String::from_utf8_lossy(&seen).escape_debug());
         }
         // Ctrl+C, typed.
         pty.master.write_all(b"\x03").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("{what}: v2 didn't stop on Ctrl+C");
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let Some(status) = pty.wait(&mut child, &mut seen, Instant::now() + Duration::from_secs(10)) else {
+            panic!("{what}: v2 didn't stop on Ctrl+C");
         };
         let at = find(&seen, b"ready").unwrap();
         pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| find(&s[at..], b"\x1b[?25h").is_some());
@@ -3132,20 +3160,13 @@ termios.tcsetattr(0, termios.TCSANOW, saved)
     let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
     let mut seen = Vec::new();
     if !pty.read_until(&mut seen, Instant::now() + Duration::from_secs(30), |s| find(s, b"ready").is_some()) {
-        let _ = child.kill();
-        let _ = child.wait();
+        pty.reap(&mut child, &mut seen);
         panic!("the pager never got ready: {}", String::from_utf8_lossy(&seen).escape_debug());
     }
     // Ctrl+C, typed: to the pager and v2 alike.
     pty.master.write_all(b"\x03").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the pager didn't end after v2 did: {}", String::from_utf8_lossy(&seen).escape_debug());
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    if pty.wait(&mut child, &mut seen, Instant::now() + Duration::from_secs(10)).is_none() {
+        panic!("the pager didn't end after v2 did: {}", String::from_utf8_lossy(&seen).escape_debug());
     }
     pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| find(s, b"v2=").is_some_and(|i| s[i..].contains(&b'\n')));
     let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
@@ -3185,19 +3206,10 @@ fn ends_other_than_the_normal_one_show_the_cursor_again() {
         }
         let mut child = cmd.spawn().expect("start v2");
         drop(cmd);
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("{what}: v2 didn't end");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
         let mut seen = Vec::new();
+        let Some(status) = pty.wait(&mut child, &mut seen, Instant::now() + Duration::from_secs(60)) else {
+            panic!("{what}: v2 didn't end");
+        };
         let wait = Duration::from_millis(if shown { 2000 } else { 300 });
         pty.read_until(&mut seen, Instant::now() + wait, |s| find(s, b"\x1b[?25l").is_some_and(|i| find(&s[i..], b"\x1b[?25h").is_some()));
         let screen = String::from_utf8_lossy(&seen).escape_debug().to_string();
@@ -3244,19 +3256,10 @@ fn blocks_see_v2s_terminal() {
         };
         let mut child = cmd.spawn().expect("start v2");
         drop(cmd);
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("{what}: v2 didn't end");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
         let mut seen = Vec::new();
+        let Some(status) = pty.wait(&mut child, &mut seen, Instant::now() + Duration::from_secs(60)) else {
+            panic!("{what}: v2 didn't end");
+        };
         let wait = Duration::from_millis(if file == Some("out.txt") { 200 } else { 2000 });
         pty.read_until(&mut seen, Instant::now() + wait, |s| s.ends_with(b"end\r\n"));
         let screen = String::from_utf8_lossy(&seen).replace("\r\n", "\n");
@@ -3507,35 +3510,28 @@ fn input_without_echo_hides_what_is_typed() {
         let mut child = cmd.spawn().expect("start v2");
         let mut seen = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(30);
-        let stop = |child: &mut Child, why: &str, seen: &[u8]| {
-            let _ = child.kill();
-            let _ = child.wait();
+        let stop = |pty: &mut Pty, child: &mut Child, why: &str, seen: &mut Vec<u8>| {
+            pty.reap(child, seen);
             panic!("{file}: {why}: {}", String::from_utf8_lossy(seen).escape_debug());
         };
         if !pty.read_until(&mut seen, deadline, |s| find(s, b"Password: ").is_some()) {
-            stop(&mut child, "no prompt", &seen);
+            stop(&mut pty, &mut child, "no prompt", &mut seen);
         }
         let asking = pty.flags();
         if asking != [before[0], before[1], before[2], before[3] & !libc::ECHO] || asking[3] & libc::ICANON == 0 {
-            stop(&mut child, &format!("echo isn't off alone while it waits ({before:?} became {asking:?})"), &seen);
+            stop(&mut pty, &mut child, &format!("echo isn't off alone while it waits ({before:?} became {asking:?})"), &mut seen);
         }
         pty.master.write_all(typed.as_bytes()).unwrap();
         let mut after = None;
         if file == "ask.v2" {
             if !pty.read_until(&mut seen, deadline, |s| find(s, b"Name: ").is_some()) {
-                stop(&mut child, "no second prompt", &seen);
+                stop(&mut pty, &mut child, "no second prompt", &mut seen);
             }
             after = Some(pty.flags());
             pty.master.write_all(b"ada\n").unwrap();
         }
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                stop(&mut child, "v2 didn't end", &seen);
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let Some(status) = pty.wait(&mut child, &mut seen, deadline) else {
+            panic!("{file}: v2 didn't end: {}", String::from_utf8_lossy(&seen).escape_debug());
         };
         // The last line, or after Ctrl+C the cursor shown again (6.5).
         let end: &[u8] = if file == "ask.v2" { b"name [ada]\r\n" } else { b"\x1b[?25h" };
@@ -3580,29 +3576,23 @@ fn input_without_echo_gives_the_terminal_back_when_stdout_isnt_one() {
         let mut child = cmd.spawn().expect("start v2");
         drop(cmd);
         let deadline = Instant::now() + Duration::from_secs(30);
-        let stop = |child: &mut Child, why: &str| {
-            let _ = child.kill();
-            let _ = child.wait();
+        let mut seen = Vec::new();
+        let stop = |pty: &mut Pty, child: &mut Child, why: &str, seen: &mut Vec<u8>| {
+            pty.reap(child, seen);
             panic!("{case}: {why}");
         };
         if case == "stdout to a file" {
             // The prompt is in the file and echo is off: v2 reads.
             while pty.flags()[3] & libc::ECHO != 0 || std::fs::read_to_string(&out).unwrap_or_default() != "Password: " {
                 if Instant::now() > deadline {
-                    stop(&mut child, "no prompt with echo off");
+                    stop(&mut pty, &mut child, "no prompt with echo off", &mut seen);
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
             pty.master.write_all(b"\x03").unwrap();
         }
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                stop(&mut child, "v2 didn't end");
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let Some(status) = pty.wait(&mut child, &mut seen, deadline) else {
+            panic!("{case}: v2 didn't end");
         };
         if case == "stdout to a file" {
             assert_interrupted(&status, SIGINT, case);
@@ -3701,49 +3691,42 @@ say("v2 ended %s, %s" % (os.waitstatus_to_exitcode(status), flags()))
         drop(cmd);
         let mut seen = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(30);
-        let stop = |child: &mut Child, why: &str, seen: &[u8]| {
-            let _ = child.kill();
-            let _ = child.wait();
+        let stop = |pty: &mut Pty, child: &mut Child, why: &str, seen: &mut Vec<u8>| {
+            pty.reap(child, seen);
             panic!("{case}: {why}: {}", String::from_utf8_lossy(seen).escape_debug());
         };
         if case != "background" {
             if !pty.read_until(&mut seen, deadline, |s| find(s, b"Password: ").is_some()) {
-                stop(&mut child, "no prompt", &seen);
+                stop(&mut pty, &mut child, "no prompt", &mut seen);
             }
             // Ctrl+Z, typed.
             pty.master.write_all(b"\x1a").unwrap();
         }
         if !pty.read_until(&mut seen, deadline, |s| find(s, b"fg\r\n").is_some()) {
-            stop(&mut child, "v2 never stopped", &seen);
+            stop(&mut pty, &mut child, "v2 never stopped", &mut seen);
         }
         let fg = find(&seen, b"fg\r\n").unwrap() + 4;
         // After fg echo goes off again (Ctrl+Z), or off at last (the background).
         while pty.flags()[3] & libc::ECHO != 0 {
             if Instant::now() > deadline {
-                stop(&mut child, "echo didn't go off after fg", &seen);
+                stop(&mut pty, &mut child, "echo didn't go off after fg", &mut seen);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         let asking = pty.flags();
         if asking != [before[0], before[1], before[2], before[3] & !libc::ECHO] {
-            stop(&mut child, &format!("echo isn't off alone after fg ({before:?} became {asking:?})"), &seen);
+            stop(&mut pty, &mut child, &format!("echo isn't off alone after fg ({before:?} became {asking:?})"), &mut seen);
         }
         if case == "background" && !pty.read_until(&mut seen, deadline, |s| find(&s[fg..], b"Password: ").is_some()) {
-            stop(&mut child, "no prompt after fg", &seen);
+            stop(&mut pty, &mut child, "no prompt after fg", &mut seen);
         }
         pty.master.write_all(b"s3cret\n").unwrap();
         if !pty.read_until(&mut seen, deadline, |s| find(&s[fg..], b"Name: ").is_some()) {
-            stop(&mut child, "no second prompt", &seen);
+            stop(&mut pty, &mut child, "no second prompt", &mut seen);
         }
         pty.master.write_all(b"ada\n").unwrap();
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                stop(&mut child, "the shell didn't end", &seen);
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let Some(status) = pty.wait(&mut child, &mut seen, deadline) else {
+            panic!("{case}: the shell didn't end: {}", String::from_utf8_lossy(&seen).escape_debug());
         };
         pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| s.ends_with(b"icanon=True\r\n"));
         let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
