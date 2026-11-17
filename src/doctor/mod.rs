@@ -350,7 +350,9 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 let fixes: Vec<String> = nf.skipped.iter().filter_map(|(p, why)| crate::engines::resolve::library_fix(p, why)).map(|fix| format!("{id}: fix: {fix}")).collect();
                 if fixes.is_empty() && matches!(nf.status, Status::Broken) && nf.command.is_none() {
                     let program = if id == "py" { "Python" } else { "Node.js" };
-                    notes.push(match crate::engines::resolve::probe_fix(&id, &nf.skipped, &crate::engines::spec::startup_variables(&id)) {
+                    // A batch file passed over in a \\server\share folder: the program is fine.
+                    let fix = crate::engines::resolve::batch_fix(&id, &nf.skipped).or_else(|| crate::engines::resolve::probe_fix(&id, &nf.skipped, &crate::engines::spec::startup_variables(&id)));
+                    notes.push(match fix {
                         Some(fix) => format!("{id}: fix: {fix}"),
                         None => format!("{id}: fix: repair that {program}, or install one: {}", install_hint(&id)),
                     });

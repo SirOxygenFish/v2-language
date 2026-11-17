@@ -711,8 +711,9 @@ such as a project in WSL opened as `\\wsl.localhost\Ubuntu\…`, and would run i
 runs. Run the program itself, or
 `exec(["cmd", "/c", "pushd \"\\\\wsl.localhost\\Ubuntu\\home\\ann\\p\" && npm run build"])` (a
 `pushd` or `cd /d` to an absolute folder; a relative one is looked for in `C:\Windows`). For the
-same reason an engine command that is a `.bat` or `.cmd` (pyenv-win's shim) is `EngineNotFound`
-there, and `v2 doctor` there shows it `broken`.
+same reason an engine command that is a `.bat` or `.cmd` is `EngineNotFound` there, and one
+found on `PATH` (pyenv-win's `python.bat` shim) is passed over for the next; `v2 doctor` there
+says so.
 `exec` returns when the program exits, and what the
 program started is stopped then, or on Ctrl+C; only a process that escapes that
 ([chapter 16](#16-security-and-trust)) and keeps the outputs open makes `exec` wait until it closes
