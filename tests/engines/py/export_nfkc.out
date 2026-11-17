@@ -1,5 +1,8 @@
 ImportError | @export lists 'ｈｅｌｌｏ' (U+FF48 …), which Python reads as 'hello': export hello, and import it as @import { hello as ｈｅｌｌｏ } from p
-U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle }
-@import { file as ﬁle }
+U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle } from @py
+@import { file as ﬁle } from @py
 hi
+1
+@export lists 'ｈｅｌｌｏ' but block 's' does not define it
+Python reads as 'world': export world, and import it as @import { world as ｗｏｒｌｄ } from t
 ImportError | 'buyut' is not exported by 'r' — did you mean 'büyüt'? (or should its @export say 'buyut'?)

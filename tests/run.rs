@@ -979,6 +979,65 @@ fn a_missing_module_names_the_file_it_probably_meant() {
 }
 
 #[test]
+fn a_folder_in_another_unicode_form_says_so() {
+    // INTERNALS 6.4, 5.10 (round 20's review): a folder on the way named as macOS writes names
+    // (decomposed), and `import "./büyüt"` for a Mac's `büyüt.v2`, get the note: not nothing, nor
+    // a make_dir hint that would make a second folder that looks the same. macOS finds them.
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let (folder, folder_nfd) = ("gr\u{f6}\u{df}e", "gro\u{308}\u{df}e");
+    let (file, file_nfd) = ("b\u{fc}y\u{fc}t", "bu\u{308}yu\u{308}t");
+    let (data, data_nfd) = ("\u{f6}rdner", "o\u{308}rdner");
+    let note = |n: &str| format!("there is a '{n}' whose name looks the same but is written in decomposed Unicode (letters plus combining accents, as macOS writes names): rename it");
+    let main = format!(
+        "func show(f) {{ try {{ f()\n print(\"ok\") }} catch (e) {{ print(e.message, \"|\", e.hint) }} }}\n\
+         show(func() {{ import \"./{folder}/u.v2\" as u }})\n\
+         show(func() {{ import \"./{file}\" as b }})\n\
+         show(func() => read_file(\"{data}/a.txt\"))\n\
+         show(func() => write_file(\"{data}/new.txt\", \"x\"))\n"
+    );
+    let (u, b, a) = (format!("{folder_nfd}/u.v2"), format!("{file_nfd}.v2"), format!("{data_nfd}/a.txt"));
+    let files = [("main.v2", main.as_str()), (u.as_str(), "let x = 1\n"), (b.as_str(), "let y = 2\n"), (a.as_str(), "a\n")];
+    let (code, stdout, stderr, home) = run_with_files(&files, &["main.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        stdout,
+        format!(
+            "cannot find module './{folder}/u.v2' (looked for {folder}/u.v2) | {}\ncannot find module './{file}' (looked for {file}) | {}\ncannot read '{data}/a.txt': there is no folder '{data}' | {}\ncannot write '{data}/new.txt': there is no folder '{data}' | {}\n",
+            note(folder_nfd),
+            note(&b),
+            note(data_nfd),
+            note(data_nfd)
+        )
+    );
+    // Renamed as the notes say: found, and `./büyüt` gets the .v2 it lacks (6.4).
+    std::fs::rename(home.0.join(folder_nfd), home.0.join(folder)).unwrap();
+    std::fs::rename(home.0.join(&b), home.0.join(format!("{file}.v2"))).unwrap();
+    std::fs::rename(home.0.join(data_nfd), home.0.join(data)).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["main.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, format!("ok\ncannot find module './{file}' (looked for {file}) — did you mean './{file}.v2'? | null\nok\nok\n"));
+    std::fs::write(home.0.join("fixed.v2"), format!("import \"./{file}.v2\" as b\nprint(b.y)\n")).unwrap();
+    assert_eq!(run_in_home(&home.0, &["fixed.v2"], &[]).1, "2\n");
+}
+
+#[test]
+fn a_module_whose_v2_differs_in_case_is_named() {
+    // INTERNALS 6.4 (round 20's review): `./lib/Util.V2` for lib/Util.v2, whose names without
+    // `.v2` are the same, so 5.9's did-you-mean, which leaves out the name itself, can't name it.
+    let files = [("main.v2", "import \"./lib/Util.V2\" as u\nprint(u.x)\n"), ("lib/Util.v2", "let x = 1\n")];
+    let (code, stdout, stderr, _home) = run_with_files(&files, &["main.v2"]);
+    if cfg!(target_os = "linux") {
+        assert_eq!(code, Some(1));
+        assert!(stderr.contains("ImportError: cannot find module './lib/Util.V2' (looked for lib/Util.V2) — did you mean './lib/Util.v2'? (Linux matches the case of file names)\n"), "{stderr}");
+    } else {
+        // Windows' and macOS's file systems find it, with 6.4's note.
+        assert_eq!((code, stdout.as_str()), (Some(0), "1\n"), "{stderr}");
+    }
+}
+
+#[test]
 fn exec_runs_a_program_without_a_shell() {
     // DOCS 3.11, INTERNALS 5.10: the arguments arrive exactly as given; the code, stdout and
     // stderr come back; `input` is piped and then closed; a non-zero code is not an error. The
