@@ -705,14 +705,26 @@ fn npm_hint(name: &str, dir: &Path, call: Option<&str>) -> String {
     let pnp = dir.ancestors().flat_map(|d| [d.join(".pnp.cjs"), d.join(".pnp.js")]).find(|p| p.is_file()).map(|p| {
         format!("this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install", p.display())
     });
-    let installed: Vec<String> = modules.first().and_then(|m| std::fs::read_dir(m).ok()).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    // The packages of the nearest node_modules: `@scope/name` for a scope's, none of its dot
+    // entries (.bin, .package-lock.json), which are no packages (the third review of round 19).
+    let entries = |m: &Path| -> Vec<(String, PathBuf)> {
+        std::fs::read_dir(m).into_iter().flatten().flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.path())).filter(|(n, _)| !n.starts_with('.')).collect()
+    };
+    let installed: Vec<String> = modules
+        .first()
+        .map(|m| entries(m))
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|(n, path)| if n.starts_with('@') { entries(&path).into_iter().map(|(s, _)| format!("{n}/{s}")).collect() } else { vec![n] })
+        .collect();
     // The did-you-mean names what is written: `js.lodash` for an @import, `"lodash"` in a block.
     let near = did_you_mean(&package, installed.iter().map(String::as_str)).map(|n| if call.is_some() { format!("did you mean \"{n}\"? ") } else { format!("did you mean {}? ", written(n)) });
-    // A name that may be the script's own or an npm package's: the package it nearly spells, or,
-    // for the package of that name, Yarn's fix or the install line (the second review of round 19:
-    // never `npm install` a typo).
+    // A name that may be the script's own or an npm package's: for the package of that name,
+    // Yarn's fix or the install line, after the package it nearly spells when there is one, as the
+    // general hint words it (the reviews of round 19: never `npm install` a typo unsaid).
     let or_package = || match (&near, &pnp) {
-        (Some(near), _) => format!("; {}", near.trim_end()),
+        (Some(near), Some(pnp)) => format!("; {near}if '{package}' isn't misspelled: {pnp}"),
+        (Some(near), None) => format!("; {near}if '{package}' isn't misspelled, npm install {package} in {}", dir.display()),
         (None, Some(pnp)) => format!("; or, for the npm package {package}: {pnp}"),
         (None, None) => format!("; or, for the npm package {package}, npm install {package} in {}", dir.display()),
     };
@@ -725,16 +737,10 @@ fn npm_hint(name: &str, dir: &Path, call: Option<&str>) -> String {
     if folder {
         let example = if name.contains('/') { format!("./{name}") } else { format!("./{name}/…") };
         // `require("config")` beside a config folder of data (node-config's own layout, Cypress's,
-        // Prisma's): the npm package too, unless the folder holds code of the script's own (a
-        // package.json, or a .js or .ts file in it), or the name came from import(), whose message
-        // names only the package part (the second review of round 19).
-        let code = |f: &Path| {
-            f.join("package.json").is_file()
-                || std::fs::read_dir(f).into_iter().flatten().flatten().any(|e| {
-                    Path::new(&e.file_name()).extension().and_then(|x| x.to_str()).is_some_and(|x| OWN_EXTS.contains(&x.to_ascii_lowercase().as_str()))
-                })
-        };
-        let npm = if name == first && call != Some("import") && !code(&dir.join(first)) { or_package() } else { String::new() };
+        // Prisma's): the npm package too, unless the folder holds code of the script's own, or the
+        // name came from import(), whose message names only the package part (the reviews of
+        // round 19).
+        let npm = if name == first && call != Some("import") && !holds_code(&dir.join(first), 2) { or_package() } else { String::new() };
         return format!("{first} is a folder of your own, whose files are {loaded} by their paths from the .v2 file's folder, as in {} ({unnamed}){npm}", by_path(&example));
     }
     if let Some(pnp) = pnp {
@@ -747,6 +753,24 @@ fn npm_hint(name: &str, dir: &Path, call: Option<&str>) -> String {
         near.unwrap_or_default(),
         dir.display()
     )
+}
+
+/// Whether the folder `f` holds code of the script's own (13.5): a package.json, or a file with
+/// one of `OWN_EXTS` in it or in its folders `depth` levels down (node_modules and hidden folders
+/// aside; at most 500 entries a folder).
+fn holds_code(f: &Path, depth: usize) -> bool {
+    if f.join("package.json").is_file() {
+        return true;
+    }
+    std::fs::read_dir(f).into_iter().flatten().flatten().take(500).any(|e| {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            depth > 0 && !name.starts_with('.') && name != "node_modules" && holds_code(&e.path(), depth - 1)
+        } else {
+            Path::new(&*name).extension().and_then(|x| x.to_str()).is_some_and(|x| OWN_EXTS.contains(&x.to_ascii_lowercase().as_str()))
+        }
+    })
 }
 
 /// Whether the project at `root` has the Python module `name` (13.5): a `name.py` or `name`
@@ -2273,8 +2297,21 @@ mod tests {
         // install of the typo; in a Yarn PnP project, Yarn's fix instead of npm install.
         std::fs::create_dir_all(d.join("node_modules").join("bignumber.js")).unwrap();
         let own = "a file of your own is loaded by its path from the .v2 file's folder, as in require(\"./bignumer.js\"): check its name (\"bignumer.js\", without ./, names an npm package)";
-        assert_eq!(require("bignumer.js"), format!("{own}; did you mean \"bignumber.js\"?"));
-        assert!(import("bignumer.js").ends_with("names an npm package); did you mean js.\"bignumber.js\"?"), "{}", import("bignumer.js"));
+        let install = format!("if 'bignumer.js' isn't misspelled, npm install bignumer.js in {}", d.display());
+        assert_eq!(require("bignumer.js"), format!("{own}; did you mean \"bignumber.js\"? {install}"));
+        assert!(import("bignumer.js").ends_with(&format!("names an npm package); did you mean js.\"bignumber.js\"? {install}")), "{}", import("bignumer.js"));
+        // The third review: code only in a subfolder is still the script's own; a scope folder
+        // (@prisma) or a dot entry (.bin) is no package to suggest.
+        std::fs::create_dir_all(d.join("src").join("util")).unwrap();
+        std::fs::write(d.join("src").join("util").join("index.js"), "").unwrap();
+        assert!(!require("src").contains("npm install"), "{}", require("src"));
+        std::fs::create_dir_all(d.join("node_modules").join("@prisma").join("client")).unwrap();
+        std::fs::create_dir_all(d.join("node_modules").join(".bin")).unwrap();
+        std::fs::create_dir_all(d.join("prisma")).unwrap();
+        std::fs::write(d.join("prisma").join("schema.prisma"), "").unwrap();
+        assert!(require("prisma").ends_with(&format!("; or, for the npm package prisma, npm install prisma in {}", d.display())), "{}", require("prisma"));
+        assert!(require("bin").starts_with("if 'bin' isn't misspelled"), "{}", require("bin"));
+        assert!(require("@prisma/clinet").starts_with("did you mean \"@prisma/client\"? "), "{}", require("@prisma/clinet"));
         std::fs::write(d.join(".pnp.cjs"), "").unwrap();
         assert!(
             require("chart.js").ends_with(&format!("; or, for the npm package chart.js: this project uses Yarn Plug'n'Play ({}), which Node can't read without Yarn's loader: set nodeLinker: node-modules in .yarnrc.yml and run yarn install", d.join(".pnp.cjs").display())),
