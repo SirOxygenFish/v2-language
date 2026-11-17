@@ -124,8 +124,10 @@ fn osa(a: &[char], b: &[char]) -> usize {
 /// `min(3, (len + 2) / 3)`; of
 /// candidates as close, the first that starts with the name, else the first. One that is the
 /// name typed without its accents (`grosse` for `größe`, `buyut` for `büyüt`) is as close as one
-/// that differs only in case.
+/// that differs only in case, but not one that is the name in another Unicode form (NFC equal:
+/// `café` decomposed), which looks the same: the callers' `module::unicode_twin` names those.
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    use unicode_normalization::UnicodeNormalization;
     let target: Vec<char> = name.to_lowercase().chars().collect();
     let limit = if target.len() <= 5 { 1 } else { 3usize.min(target.len().div_ceil(3)) };
     let plain = folded(name);
@@ -135,7 +137,8 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
             continue;
         }
         let cand: Vec<char> = c.to_lowercase().chars().collect();
-        let d = if !(name.is_ascii() && c.is_ascii()) && folded(c) == plain { 0 } else { osa(&target, &cand) };
+        let accents = !(name.is_ascii() && c.is_ascii()) && folded(c) == plain && c.nfc().ne(name.nfc());
+        let d = if accents { 0 } else { osa(&target, &cand) };
         // A suggestion keeps some of the name: `y` isn't a typo of `f`.
         let prefix = cand.starts_with(&target);
         let better = |(bd, b): (usize, &str)| d < bd || (d == bd && prefix && !b.to_lowercase().starts_with(&*name.to_lowercase()));
@@ -497,6 +500,16 @@ mod tests {
         assert_eq!(folded("Straße"), "strasse");
         // Other letters still count: no accent makes `buyuk` `büyüt`.
         assert_eq!(did_you_mean("buyuk", ["büyüt"]), None);
+    }
+
+    #[test]
+    fn did_you_mean_leaves_out_the_name_in_another_unicode_form() {
+        // 5.9 (round 20's review): `café` decomposed looks like `café`, so suggesting it says
+        // nothing; `module::unicode_twin` names those. Other candidates still count.
+        assert_eq!(did_you_mean("caf\u{e9}", ["cafe\u{301}"]), None);
+        assert_eq!(did_you_mean("gr\u{f6}\u{df}e", ["gro\u{308}\u{df}e"]), None);
+        assert_eq!(did_you_mean("gr\u{f6}\u{df}e", ["gro\u{308}\u{df}e", "grosse"]), Some("grosse"));
+        assert_eq!(did_you_mean("Caf\u{e9}", ["cafe\u{301}"]), Some("cafe\u{301}"));
     }
 
     fn sm_with(text: &str) -> (SourceMap, FileId) {

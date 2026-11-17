@@ -168,6 +168,20 @@ fn error(kind: &str, message: String) -> Flow {
     Flow::Error(Rc::new(ErrorValue::new(kind, message)))
 }
 
+/// Whether a py block's top level, read as Python reads names (NFKC), defines `name`: a line that
+/// starts `def NAME`, `async def NAME` or `class NAME`, or assigns it (`NAME =`, `NAME: int = …`),
+/// read from its lines as `imports.rs` reads a block's definitions (12.2).
+fn defines_read(body: &str, name: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    body.lines().any(|line| {
+        let line: String = line.nfkc().collect();
+        match ["def ", "async def ", "class "].iter().find_map(|f| line.strip_prefix(f)) {
+            Some(rest) => rest.trim_start().strip_prefix(name).is_some_and(|after| after.is_empty() || after.starts_with(['(', '[', ':', ' '])),
+            None => line.strip_prefix(name).map(str::trim_start).is_some_and(|after| (after.starts_with('=') && !after.starts_with("==")) || after.starts_with(':')),
+        }
+    })
+}
+
 impl Interp {
     /// `block 'stats'`, or `@py block at main.v2:12` without a label; tags print canonical (12.1).
     pub fn block_name(&self, b: &EngineBlock) -> String {
@@ -355,13 +369,14 @@ impl Interp {
     }
 
     /// 12.2's message for an `@export` name block `b` (of engine `lang`) doesn't define. Python
-    /// reads a name in its NFKC form, so a block that defines `ｈｅｌｌｏ` defines `hello`: that
-    /// name, with the code points of the first character that changes (`(U+FF48 …)`: more change).
+    /// reads a name in its NFKC form, so a block that defines `ｈｅｌｌｏ` defines `hello`: when its
+    /// top level, read so, defines that name (`defines_read`), that name, with the code points of
+    /// the first character that changes (`(U+FF48 …)`: more change).
     fn missing_export(&self, b: &EngineBlock, missing: &str, lang: &str) -> String {
         use unicode_normalization::UnicodeNormalization;
         let read: String = missing.nfkc().collect();
         let name = read.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && read.chars().all(|c| c.is_alphanumeric() || c == '_');
-        if lang != "py" || read == missing || !name {
+        if lang != "py" || read == missing || !name || !defines_read(&b.body, &read) {
             return format!("@export lists '{missing}' but {} does not define it", self.block_name(b));
         }
         let changed: Vec<char> = missing.chars().filter(|&c| std::iter::once(c).nfkc().ne(std::iter::once(c))).collect();
@@ -370,8 +385,9 @@ impl Interp {
             [one] => format!("U+{:04X}", *one as u32),
             [first, ..] => format!("U+{:04X} …", *first as u32),
         };
-        let from = b.label.as_ref().map(|l| format!(" from {}", l.text)).unwrap_or_default();
-        format!("@export lists '{missing}' ({points}), which Python reads as '{read}': export {read}, and import it as @import {{ {read} as {missing} }}{from}")
+        // A block without a label is reached as `from @py` (DOCS 6.2).
+        let from = b.label.as_ref().map_or_else(|| format!("@{lang}"), |l| l.text.to_string());
+        format!("@export lists '{missing}' ({points}), which Python reads as '{read}': export {read}, and import it as @import {{ {read} as {missing} }} from {from}")
     }
 
     /// The session of `e`'s engine, started at its first use (8.2, 8.3); a ts block starts the

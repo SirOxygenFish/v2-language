@@ -167,9 +167,11 @@ fn missing_message(file: &str, path: &Path, rest: &[&str], command: &str) -> Vec
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
-        let hint = match did_you_mean(&name, folders.iter().map(String::as_str)) {
-            Some(close) => format!("there is no folder {shown}: did you mean '{close}'?"),
-            None => format!("there is no folder {shown}"),
+        // A Mac's `größe` for `größe` as typed comes first: a did-you-mean would look the same.
+        let hint = match (crate::runtime::module::unicode_twin(&parent, &name), did_you_mean(&name, folders.iter().map(String::as_str))) {
+            (Some(twin), _) => format!("there is no folder {shown}: {twin}"),
+            (None, Some(close)) => format!("there is no folder {shown}: did you mean '{close}'?"),
+            (None, None) => format!("there is no folder {shown}"),
         };
         return vec![format!("cannot find '{file}'"), hint];
     }
@@ -215,8 +217,10 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String
         }
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    // `größe.v2` copied from a Mac, its `ö` an `o` plus an accent: it looks like the name typed.
-    if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name) {
+    // `größe.v2` copied from a Mac, its `ö` an `o` plus an accent: it looks like the name typed
+    // (or like NAME`.v2`, for `v2 größe`).
+    let with_v2 = || if path.extension().is_none() { crate::runtime::module::unicode_twin(folder, &format!("{name}.v2")) } else { None };
+    if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name).or_else(with_v2) {
         return twin;
     }
     // `v2 mein spiel.v2`, `v2 my mod [v1].v2 arg`: the shell split a name with spaces; the
@@ -454,6 +458,34 @@ mod tests {
         let how = "decomposed Unicode (letters plus combining accents, as macOS writes names)";
         assert_eq!(hint("gr\u{f6}\u{df}e.v2"), format!("there is a 'gro\u{308}\u{df}e.v2' whose name looks the same but is written in {how}: rename it"));
         assert_eq!(hint("cafe\u{301}.v2"), format!("there is a 'caf\u{e9}.v2' whose name looks the same, but the name given is written in {how}: type it again"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_or_name_v2_in_another_unicode_form_is_named() {
+        // 19.1 (round 20's review): a Mac's `größe` folder on FILE's way, and `v2 größe_çalış` for
+        // a Mac's `größe_çalış.v2`, get the note, not a did-you-mean that looks like the name typed.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let d = temp("unicode-folder");
+        let (folder, folder_nfd) = ("gr\u{f6}\u{df}e", "gro\u{308}\u{df}e");
+        let (file, file_nfd) = ("gr\u{f6}\u{df}e_\u{e7}al\u{131}\u{15f}", "gro\u{308}\u{df}e_c\u{327}al\u{131}s\u{327}");
+        std::fs::create_dir_all(d.join(folder_nfd)).unwrap();
+        std::fs::write(d.join(folder_nfd).join("x.v2"), "").unwrap();
+        std::fs::write(d.join(format!("{file_nfd}.v2")), "").unwrap();
+        let at = |f: &str| d.join(f).to_string_lossy().into_owned();
+        let hint = |f: &str| entry_error(&at(f), &[], "v2").expect("missing").lines().nth(1).unwrap().to_string();
+        let how = "decomposed Unicode (letters plus combining accents, as macOS writes names)";
+        let x = format!("{folder}/x.v2");
+        assert_eq!(hint(&x), format!("there is no folder {}: there is a '{folder_nfd}' whose name looks the same but is written in {how}: rename it", d.join(folder).display()));
+        assert_eq!(hint(file), format!("there is a '{file_nfd}.v2' whose name looks the same but is written in {how}: rename it"));
+        // Renamed as the note says: found, and `v2 größe_çalış` gets the .v2 it lacks.
+        std::fs::rename(d.join(folder_nfd), d.join(folder)).unwrap();
+        std::fs::rename(d.join(format!("{file_nfd}.v2")), d.join(format!("{file}.v2"))).unwrap();
+        assert!(entry_error(&at(&x), &[], "v2").is_none());
+        assert_eq!(hint(file), format!("did you mean '{}.v2'?", at(file)));
+        assert!(entry_error(&at(&format!("{file}.v2")), &[], "v2").is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 
