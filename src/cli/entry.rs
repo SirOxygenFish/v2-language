@@ -222,7 +222,10 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: 
     if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name) {
         return twin;
     }
-    if path.extension().is_none() {
+    // A folder can hold both forms: then NAME.v2 itself is the one to run (below).
+    let bare = path.extension().is_none();
+    let with_v2 = bare && folder.join(format!("{name}.v2")).is_file();
+    if bare && !with_v2 {
         if let Some(twin) = crate::runtime::module::unicode_twin(folder, &format!("{name}.v2")) {
             return format!("{twin}, and run {command} {}", quoted(&crate::runtime::module::composed_v2(file, &name)));
         }
@@ -232,8 +235,10 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: 
     if let Some(joined) = (1..=rest.len()).rev().map(|k| rest[..k].join(" ")).find(|n| folder.join(format!("{name} {n}")).is_file()) {
         return format!("the file's name has a space, so the shell split it: put it in quotes, as in v2 \"{file} {joined}\"");
     }
-    if path.extension().is_none() && folder.join(format!("{name}.v2")).is_file() {
-        return format!("did you mean '{file}.v2'?");
+    // `v2 hello/` too: hello.v2, not hello/.v2.
+    let written = crate::runtime::module::trim_separators(file);
+    if with_v2 {
+        return format!("did you mean '{written}.v2'?");
     }
     // `v2 doctr`, `v2 chek x.v2`: a command, misspelled; `v2 CHECK x.v2`, in another case.
     let commands = ["check", "doctor", "cache"];
@@ -264,8 +269,8 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: 
     let stem = |s: &str| s.strip_suffix(".v2").unwrap_or(s).to_string();
     let stems: Vec<String> = scripts.iter().map(|s| stem(s)).collect();
     if let Some(close) = did_you_mean(&stem(&name), stems.iter().map(String::as_str)).map(|c| format!("{c}.v2")) {
-        let suggestion = match file.rfind(['/', '\\']) {
-            Some(i) => format!("{}{close}", &file[..=i]),
+        let suggestion = match written.rfind(['/', '\\']) {
+            Some(i) => format!("{}{close}", &written[..=i]),
             None => close.to_string(),
         };
         if suggestion.contains(' ') {
@@ -412,6 +417,12 @@ mod tests {
         assert_eq!(hint("hello", None), format!("did you mean '{dir}hello.v2'?"));
         assert_eq!(hint("notes.v2", None), "there is a 'notes.v2.txt': your editor added '.txt', so rename it to 'notes.v2'");
         assert_eq!(hint("helo.v2", None), format!("did you mean '{dir}hello.v2'?"));
+        // Round 20, fourth pass: FILE with a separator at its end names hello.v2, not hello/.v2.
+        assert_eq!(hint("hello/", None), format!("did you mean '{dir}hello.v2'?"));
+        assert_eq!(hint("helo/", None), format!("did you mean '{dir}hello.v2'?"));
+        if cfg!(windows) {
+            assert_eq!(hint("hello\\", None), format!("did you mean '{dir}hello.v2'?"));
+        }
         assert_eq!(hint("zzzzzz.v2", None), "the .v2 files there: b.v2, hello.v2");
         // A name with a space, split by the shell or typed with _.
         std::fs::write(d.join("mein spiel.v2"), "print(1)\n").unwrap();
@@ -504,6 +515,17 @@ mod tests {
         assert_eq!(hint(file), format!("there is a '{file_nfd}.v2' whose name looks the same but is written in {how}: rename it, and run v2 {with_v2}"));
         let checked = entry_error(&at(file), &[], "v2 check").unwrap();
         assert!(checked.ends_with(&format!(": rename it, and run v2 check {with_v2}")), "{checked}");
+        // With a separator at its end (fourth pass): the same run, not one of `größe_çalış/.v2`.
+        assert_eq!(hint(&format!("{file}/")), format!("there is a '{file_nfd}.v2' whose name looks the same but is written in {how}: rename it, and run v2 {with_v2}"));
+        if cfg!(windows) {
+            assert!(hint(&format!("{file}\\")).ends_with(&format!(": rename it, and run v2 {with_v2}")));
+        }
+        // Both forms there (Linux and NTFS keep both, fourth pass): the composed one is run as it
+        // is, with no rename onto its name.
+        std::fs::write(d.join(format!("{file}.v2")), "").unwrap();
+        assert_eq!(hint(file), format!("did you mean '{}.v2'?", at(file)));
+        assert!(entry_error(&at(&format!("{file}.v2")), &[], "v2").is_none());
+        std::fs::remove_file(d.join(format!("{file}.v2"))).unwrap();
         // A decomposed name given for a composed `naïve.v2`: the run, with the name composed.
         std::fs::write(d.join("na\u{ef}ve.v2"), "").unwrap();
         let composed = quoted(&format!("{}.v2", at("na\u{ef}ve")));
