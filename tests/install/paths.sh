@@ -241,6 +241,21 @@ if [ "$(id -u)" = 0 ] && [ "$(uname -s)" = Linux ] && mkdir -p "$tmp/noexec" && 
     ! says "v2.new" || { echo "    the shell's error is shown too"; ok=no; }
     expect "$(ls -A "$tmp/noexec")" "" "files left in the folder"
     result "an install folder mounted noexec"
+    # The same in a language whose messages aren't English, under bash (Fedora's sh), which says
+    # them in the user's language: when such a locale is there, with its messages translated.
+    loc=$(locale -a 2>/dev/null | grep -i -m 1 -E '^(de_DE|tr_TR|ja_JP|fr_FR|es_ES)\.utf-?8$' || true)
+    if [ -n "$loc" ] && [ "$(LC_ALL=$loc bash -c 'cd /nonexistent' 2>&1 | grep -c 'No such file')" = 0 ]; then
+        fresh
+        code=0
+        out=$(cd "$h" && env -i HOME="$h" SHELL=/bin/bash PATH="$sys" V2_ARCHIVE="$archive" LANG="$loc" V2_INSTALL_DIR="$tmp/noexec/bin" bash "$root/install.sh" 2>&1) || code=$?
+        ok=yes
+        expect "$code" 1 "exit code"
+        says "$tmp/noexec/bin doesn't let programs run (its file system is mounted noexec): install into a folder that does, with V2_INSTALL_DIR" || { echo "    no message"; ok=no; }
+        ! says "v2.new" || { echo "    the shell's error is shown too"; ok=no; }
+        result "an install folder mounted noexec, in $loc"
+    else
+        echo "SKIP an install folder mounted noexec in another language (no locale with translated messages)"
+    fi
     umount "$tmp/noexec"
 else
     echo "SKIP noexec mounts (they need root on Linux)"

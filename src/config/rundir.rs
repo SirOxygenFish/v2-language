@@ -6,6 +6,7 @@
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 
 static RUN_DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
@@ -38,6 +39,10 @@ fn temp_variable() -> Option<&'static str> {
 /// What is wrong with the temp folder blocks need, and what to do (20.3): `None` when it is a
 /// folder. Doctor says it too (19.2).
 pub fn temp_problem() -> Option<String> {
+    #[cfg(windows)]
+    if let Some(problem) = unset_problem() {
+        return Some(problem);
+    }
     let base = std::env::temp_dir();
     if base.is_dir() {
         #[cfg(windows)]
@@ -52,6 +57,16 @@ pub fn temp_problem() -> Option<String> {
         Some(var) => format!("{var} names {shown}, which {what}: blocks can't run until it names a folder you can write to"),
         None => format!("the temp folder {shown} {what}: blocks can't run until it does"),
     })
+}
+
+/// Windows: with none of `TMP`, `TEMP` and `USERPROFILE` set, as a program that starts v2 with a
+/// small environment of its own leaves them, Windows offers its own folder, where a user can't
+/// write (20.3).
+#[cfg(windows)]
+fn unset_problem() -> Option<String> {
+    let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty());
+    (!["TMP", "TEMP", "USERPROFILE"].into_iter().any(set))
+        .then(|| "TEMP and TMP aren't set: a program that starts v2 with an environment of its own must pass them on (in Python, env=dict(os.environ, …))".to_string())
 }
 
 /// The temp folder as messages show it: without the separator Windows ends it with.
@@ -188,9 +203,11 @@ fn create() -> Result<PathBuf, String> {
 /// The run dirs that runs killed outright (SIGKILL, Task Manager) left in `base`: a real folder
 /// named `v2-{pid}-{32 hex}` (on POSIX this user's), whose pid isn't running, is removed, best
 /// effort (20.3). A live pid keeps its folder, except on Windows, which reuses pids soon: there a
-/// process that started after the folder was made isn't the run that made it.
+/// process that started clearly after the folder was made isn't the run that made it. A folder
+/// changed within `MARGIN` stays whatever its pid says: a run that is starting may have just made it.
 fn sweep_stale(base: &Path) {
     let me = std::process::id();
+    let now = SystemTime::now();
     for entry in std::fs::read_dir(base).into_iter().flatten().flatten() {
         let name = entry.file_name();
         let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("v2-")) else { continue };
@@ -201,11 +218,22 @@ fn sweep_stale(base: &Path) {
         }
         let path = entry.path();
         let Ok(m) = std::fs::symlink_metadata(&path) else { continue };
-        if !m.is_dir() || !owned_by_me(&m) || owner_running(pid, &m) {
+        if !m.is_dir() || !owned_by_me(&m) || young(m.modified().ok(), now) || owner_running(pid, &m) {
             continue;
         }
         let _ = std::fs::remove_dir_all(&path);
     }
+}
+
+/// How far apart a folder's time and a process's start must be to say which came first, and how
+/// long a folder stays untouched before the sweep may remove it (20.3). A run makes its folder a
+/// few ms after it starts, and file times are coarser than that (NTFS takes the clock's last tick,
+/// up to 16 ms old), so a run's folder can look older than the run.
+const MARGIN: Duration = Duration::from_secs(5);
+
+/// Whether a folder last changed at `changed` is too new to remove (a time to come is too).
+fn young(changed: Option<SystemTime>, now: SystemTime) -> bool {
+    changed.is_some_and(|t| !matches!(now.duration_since(t), Ok(age) if age >= MARGIN))
 }
 
 /// Whether the run that made the folder `m` describes may still be running (20.3).
@@ -214,13 +242,21 @@ fn owner_running(pid: u32, _: &std::fs::Metadata) -> bool {
     running(pid)
 }
 
-/// Windows: a process with that pid that started after the folder was made has the pid again.
+/// Windows: a process with that pid that started clearly after the folder was made has the pid
+/// again.
 #[cfg(windows)]
 fn owner_running(pid: u32, m: &std::fs::Metadata) -> bool {
     match (started(pid), m.created()) {
-        (Some(started), Ok(made)) => started <= made,
+        (Some(started), Ok(made)) => !reused(started, made),
         _ => running(pid),
     }
+}
+
+/// Windows: whether a process that started at `started` can't be the run that made a folder at
+/// `made`: it started more than `MARGIN` later.
+#[cfg(windows)]
+fn reused(started: SystemTime, made: SystemTime) -> bool {
+    started.duration_since(made).is_ok_and(|after| after > MARGIN)
 }
 
 /// When the process with this pid started, if it is running and can be asked.
@@ -400,7 +436,7 @@ mod tests {
     #[test]
     fn run_dirs_of_killed_runs_are_swept() {
         // 20.3: what a run killed outright left is removed by the next run that makes a run dir;
-        // a live pid's folder, and anything else, stay.
+        // a live pid's folder, one changed within MARGIN, and anything else, stay.
         let base = std::env::temp_dir().join(format!("v2sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -410,34 +446,83 @@ mod tests {
         child.wait().unwrap();
         let hex = "0123456789abcdef0123456789abcdef";
         let stale = base.join(format!("v2-{dead}-{hex}"));
+        let fresh = base.join(format!("v2-{dead}-{}", "f".repeat(32)));
         let live = base.join(format!("v2-{}-{hex}", std::process::id()));
         let other = base.join(format!("v2-{dead}-not-hex"));
-        for d in [&stale, &live, &other] {
+        for d in [&stale, &fresh, &live, &other] {
             std::fs::create_dir_all(d.join("adapters")).unwrap();
             std::fs::write(d.join("adapters").join("py.py"), "x").unwrap();
         }
+        for d in [&stale, &live, &other] {
+            backdate(d, false);
+        }
         assert!(!running(dead) && running(std::process::id()));
-        // Windows reuses pids: a folder made before the process that has its pid now started.
+        // Windows reuses pids: a folder made long before the process that has its pid now
+        // started is a killed run's; one made 50 ms before it may be its own, as file times are
+        // coarse and a run makes its folder a few ms after it starts.
         #[cfg(windows)]
-        let (mut later, reused) = {
-            let made = base.join("made first");
-            std::fs::create_dir_all(made.join("adapters")).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        let (mut later, reused, close) = {
+            let (made, just) = (base.join("made first"), base.join("made just before"));
+            for d in [&made, &just] {
+                std::fs::create_dir_all(d.join("adapters")).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(50));
             let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
-            let reused = base.join(format!("v2-{}-{hex}", child.id()));
+            let (reused, close) = (base.join(format!("v2-{}-{hex}", child.id())), base.join(format!("v2-{}-{}", child.id(), "e".repeat(32))));
             std::fs::rename(&made, &reused).unwrap();
-            (child, reused)
+            std::fs::rename(&just, &close).unwrap();
+            backdate(&reused, true);
+            backdate(&close, false);
+            (child, reused, close)
         };
         sweep_stale(&base);
         assert!(!stale.exists(), "the killed run's folder goes");
+        assert!(fresh.exists(), "a folder changed within MARGIN stays");
         assert!(live.exists() && other.exists(), "a running pid's folder and other names stay");
         #[cfg(windows)]
         {
             assert!(!reused.exists(), "a pid that a later process has now");
+            assert!(close.exists(), "a folder made a few ms before its process started");
             let _ = later.kill();
             let _ = later.wait();
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_folder_made_as_its_run_starts_is_kept() {
+        // 20.3 (round 20): runs started together removed each other's folders, as a folder made
+        // a few ms after its run started can look older than the run. Only a process that started
+        // more than MARGIN after the folder has its pid again; a folder is young within MARGIN.
+        let now = SystemTime::now();
+        #[cfg(windows)]
+        {
+            assert!(!reused(now, now - Duration::from_millis(3)), "a folder made a few ms before its process started");
+            assert!(!reused(now, now + Duration::from_millis(3)), "a folder made after its process started");
+            assert!(reused(now, now - Duration::from_secs(3600)), "a folder made long before");
+        }
+        assert!(young(Some(now - Duration::from_millis(3)), now) && young(Some(now + Duration::from_secs(1)), now));
+        assert!(!young(Some(now - Duration::from_secs(60)), now) && !young(None, now));
+    }
+
+    /// Set a folder's last change an hour back, and on Windows with `created` its creation too.
+    fn backdate(dir: &Path, created: bool) {
+        let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        let mut open = std::fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES, with FILE_FLAG_BACKUP_SEMANTICS, which opens a folder.
+            open.access_mode(0x100).custom_flags(0x0200_0000);
+        }
+        #[cfg(unix)]
+        open.read(true);
+        let times = std::fs::FileTimes::new().set_modified(hour_ago);
+        #[cfg(windows)]
+        let times = if created { std::os::windows::fs::FileTimesExt::set_created(times, hour_ago) } else { times };
+        #[cfg(unix)]
+        let _ = created;
+        open.open(dir).unwrap().set_times(times).unwrap();
     }
 
     #[test]

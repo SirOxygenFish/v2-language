@@ -152,7 +152,9 @@ staged="$dir/v2.new"
 cp "$bin" "$staged" || fail "could not write to $dir: choose a folder you can write to with V2_INSTALL_DIR"
 chmod 755 "$staged"
 ran=0
-"$staged" --version >"$tmp/version" 2>"$tmp/error" || ran=$?
+# Through a shell started in the C locale, so the shell's words read below are English whatever
+# the locale (bash's own messages don't follow LC_ALL=C set in front of a command).
+LC_ALL=C LANGUAGE='' sh -c '"$0" --version' "$staged" >"$tmp/version" 2>"$tmp/error" || ran=$?
 if [ "$ran" -ne 0 ]; then
     rm -f "$staged"
     staged=""

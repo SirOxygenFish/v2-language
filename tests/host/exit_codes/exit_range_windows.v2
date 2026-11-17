@@ -1,0 +1,11 @@
+// platform: windows
+// Round 20 (DOCS 3.11, INTERNALS 5.10): on Windows exit() takes -2147483648 to 4294967295; past
+// that, the ValueError's hint names the range.
+for code in [4294967296, -2147483649] {
+    try {
+        exit(code)
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        print(e.hint)
+    }
+}

@@ -150,6 +150,18 @@ fn wrapper_note(id: &str, argv: &[OsString], fds: bool, hello: bool) -> String {
     note
 }
 
+/// After startup, a js session's crash (a ts block's too) ends `; NODE_OPTIONS is set (…), which
+/// it reads as it starts: unset it or fix it` when it is set: a heap limit there stops Node later
+/// (8.4, 8.6).
+fn node_options_note(key: &str) -> String {
+    let set = if key == "js" { super::spec::startup_variables(key) } else { Vec::new() };
+    if set.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", super::spec::startup_vars_fix(&set))
+    }
+}
+
 /// How V2 talks to a worker (8.4, 9.9), and what a command that runs it through another program
 /// must do with that: two pipes it inherits, named in `V2_VEP_FDS` (`fds`: js on Unix), or its
 /// standard input and output.
@@ -500,7 +512,8 @@ impl Interp {
             return error("EngineCrashed", format!("engine '{tag}' exited during startup ({how}); see its error output above, if any{wrapper}{vars}{limit}"));
         }
         let pid = pid.map_or_else(String::new, |p| format!(" (pid {p})"));
-        error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above, if any", pending.name))
+        let node = node_options_note(&tag);
+        error("EngineCrashed", format!("engine '{tag}'{pid} exited during {} ({how}); see its error output above, if any{node}", pending.name))
     }
 
     /// 8.4: preload noise to stderr, `hello` (VEP/1, caps, version), then `init`, all within
@@ -632,7 +645,7 @@ impl Interp {
         if let Some(exit) = idle_exit {
             process::stop_if_interrupted();
             self.kill_session(s, DeadReason::Exited { exit: Some(exit), during: None, at: Some(at) });
-            let msg = format!("engine '{tag}' exited while idle ({})", exit.describe());
+            let msg = format!("engine '{tag}' exited while idle ({}){}", exit.describe(), node_options_note(&tag));
             return Err(self.raise(error("EngineCrashed", msg), at));
         }
         Ok(())
