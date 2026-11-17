@@ -1,0 +1,31 @@
+// requires: py
+// A module of Python's standard library that this Python lacks (tkinter in python.org's
+// embeddable package, or in a minimal Python): pip can't add it, so the hint says so instead of
+// the pip line (INTERNALS 13.5). Here a finder makes this Python lack it.
+@py {
+    import sys, importlib.abc
+
+    class Without(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path, target=None):
+            if name == "tkinter":
+                raise ModuleNotFoundError("No module named 'tkinter'", name="tkinter")
+            return None
+
+    sys.modules.pop("tkinter", None)
+    sys.meta_path.insert(0, Without())
+}
+try {
+    @import { Tk } from py.tkinter
+    print(Tk)
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print(e.hint)
+}
+// A submodule of it: the same, for the part Python couldn't find.
+try {
+    @import { Button } from py.tkinter.ttk
+    print(Button)
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print(e.hint)
+}

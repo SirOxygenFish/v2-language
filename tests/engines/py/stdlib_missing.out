@@ -1,0 +1,4 @@
+ImportError: No module named 'tkinter'
+'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+ImportError: No module named 'tkinter'
+'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python

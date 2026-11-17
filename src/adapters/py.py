@@ -1311,8 +1311,9 @@ if __name__ == "__main__":
 
     def package_hint(name, lead):
         """An ImportError's hint for a name Python has no module of (13.5): your own my-helper.py
-        in the .v2 file's folders (`lead`), which no module name reaches; else a distribution of
-        that name, installed, whose module is named otherwise (installed_as)."""
+        in the .v2 file's folders (`lead`), which no module name reaches; a module of the standard
+        library this Python lacks (tkinter in the embeddable package), which pip can't add; else a
+        distribution of that name, installed, whose module is named otherwise (installed_as)."""
         if "." in name:
             return None
         under = name.replace("-", "_")
@@ -1325,6 +1326,8 @@ if __name__ == "__main__":
                     if "-" in stem and mine:
                         new = under + (".py" if entry.endswith(".py") else "")
                         return "Python module names use _: rename %s to %s and import py.%s" % (entry, new, under)
+        if name in getattr(sys, "stdlib_module_names", ()):
+            return "'%s' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python" % name
         return installed_as(name)
 
     def installed_as(name):
