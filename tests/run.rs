@@ -896,6 +896,66 @@ fn a_drive_relative_import_is_an_import_error() {
 }
 
 #[test]
+fn a_file_name_in_another_unicode_form_says_so() {
+    // INTERNALS 19.1, 6.4, 5.10 (round 20): a file named as macOS writes names (decomposed, `o`
+    // plus U+0308 for `ö`), asked for as a keyboard types it. macOS's file system finds one by the
+    // other, so there they simply work.
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let (typed, nfd, csv) = ("gr\u{f6}\u{df}e.v2", "gro\u{308}\u{df}e.v2", "daten_u\u{308}.csv");
+    let note = |n: &str| format!("there is a '{n}' whose name looks the same but is written in decomposed Unicode (letters plus combining accents, as macOS writes names): rename it");
+    let files = [(nfd, "print(\"ran\")\n"), (csv, "a,b\n"), ("imp.v2", "import \"./gr\u{f6}\u{df}e.v2\" as g\n"), ("read.v2", "print(read_file(\"daten_\u{fc}.csv\"))\n")];
+    let (code, _, stderr, home) = run_with_files(&files, &[typed]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.ends_with(&format!("\n{}\n", note(nfd))), "{stderr}");
+    for args in [&["imp.v2"][..], &["check", "imp.v2"]] {
+        let (code, _, stderr) = run_in_home(&home.0, args, &[]);
+        assert_eq!(code, Some(1));
+        assert!(stderr.contains(&format!("ImportError: cannot find module './{typed}'")) && stderr.contains(&format!("\n  hint: {}\n", note(nfd))), "{stderr}");
+    }
+    let (code, _, stderr) = run_in_home(&home.0, &["read.v2"], &[]);
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains(&format!("\n  hint: {}\n", note(csv))), "{stderr}");
+    // Renamed, as the hint says, the names are found.
+    std::fs::rename(home.0.join(nfd), home.0.join(typed)).unwrap();
+    std::fs::rename(home.0.join(csv), home.0.join("daten_\u{fc}.csv")).unwrap();
+    assert_eq!(run_in_home(&home.0, &[typed], &[]).1, "ran\n");
+    assert_eq!(run_in_home(&home.0, &["imp.v2"], &[]).1, "ran\n");
+    assert_eq!(run_in_home(&home.0, &["read.v2"], &[]).1, "a,b\n\n");
+}
+
+#[test]
+fn a_missing_module_names_the_file_it_probably_meant() {
+    // INTERNALS 6.4 (round 20): a .v2 file of the import's folder within 5.9's did-you-mean
+    // distance (accents and case too), as the path written with its name.
+    let main = "func show(f) { try { f() } catch (e) { print(e.message) } }\n\
+                show(func() { import \"./lib/utl.v2\" as a })\n\
+                show(func() { import \"./lib/buyut.v2\" as b })\n\
+                import \"./lib/Util.v2\" as u\n\
+                print(u.x)\n\
+                func lower() {\n    import \"./lib/util.v2\" as c\n    print(c.x)\n}\n\
+                show(lower)\n";
+    let files = [("main.v2", main), ("lib/Util.v2", "let x = 1\n"), ("lib/b\u{fc}y\u{fc}t.v2", "")];
+    let (code, stdout, stderr, home) = run_with_files(&files, &["main.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    // Windows' and macOS's file systems find Util.v2 by util.v2, with 6.4's note.
+    let case = if cfg!(target_os = "linux") {
+        "cannot find module './lib/util.v2' (looked for lib/util.v2) — did you mean './lib/Util.v2'? (Linux matches the case of file names)\n"
+    } else {
+        "1\n"
+    };
+    assert_eq!(
+        stdout,
+        format!("cannot find module './lib/utl.v2' (looked for lib/utl.v2) — did you mean './lib/Util.v2'?\ncannot find module './lib/buyut.v2' (looked for lib/buyut.v2) — did you mean './lib/b\u{fc}y\u{fc}t.v2'?\n1\n{case}")
+    );
+    std::fs::write(home.0.join("typo.v2"), "import \"./lib/utl.v2\" as a\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["check", "typo.v2"], &[]);
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("ImportError: cannot find module './lib/utl.v2' (looked for lib/utl.v2) — did you mean './lib/Util.v2'?\n"), "{stderr}");
+}
+
+#[test]
 fn exec_runs_a_program_without_a_shell() {
     // DOCS 3.11, INTERNALS 5.10: the arguments arrive exactly as given; the code, stdout and
     // stderr come back; `input` is piped and then closed; a non-zero code is not an error. The
@@ -947,6 +1007,17 @@ try { exec(["./no_such_dir/prog"]) } catch (e) { print(e.message.ends_with("not 
             "false true\n",
         )
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_gives_the_program_its_name_as_written() {
+    // INTERNALS 7.5 (round 20): it runs by its absolute path, but its argv[0] is the name as
+    // written, as a shell passes it, so its messages start `ls:`, not `/usr/bin/ls:`.
+    let src = "print(exec([\"sh\", \"-c\", \"echo $0\"]).stdout.trim())\nprint(exec([\"ls\", \"/no/such/v2-dir\"]).stderr.starts_with(\"ls: \"))\n";
+    let (code, stdout, stderr) = run_generated("argv0.v2", src);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, "sh\ntrue\n");
 }
 
 #[test]

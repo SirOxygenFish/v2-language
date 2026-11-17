@@ -299,7 +299,9 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
             // `import "./util" as util` for util.v2.
             let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
             let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
-            return Err((format!("cannot find module '{spec}' (looked for {}){hint}", shown(&target)), None));
+            // Else a file of that folder it probably meant (`./util.v2` for Util.v2 on Linux).
+            let (near, twin) = if hint.is_empty() { nearby_module(&target, spec) } else { (String::new(), None) };
+            return Err((format!("cannot find module '{spec}' (looked for {}){hint}{near}", shown(&target)), twin));
         }
     };
     // A pipe or a device (a FIFO, a link to /dev/zero) would never end being read; the entry
@@ -345,6 +347,59 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
         _ => format!("read a data file with read_file(f\"${{script_dir()}}/{}\")", rel.replace('\\', "/")),
     };
     Err((format!("cannot import '{spec}': import loads .v2 files; {next}"), None))
+}
+
+/// After a lookup of `name` in `folder` failed: a name there that is `name` in another Unicode
+/// form (`größe.v2` as a Mac writes it, `o` plus a combining U+0308, for `größe.v2` typed with
+/// `ö`), and what to do, as the CLI's line and the hint of an `ImportError` and a file builtin's
+/// `IOError` say it (19.1, 6.4, 5.10).
+pub fn unicode_twin(folder: &Path, name: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization;
+    let want: String = name.nfc().collect();
+    let twin = std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .find(|n| n != name && !(n.is_ascii() && name.is_ascii()) && n.nfc().eq(want.chars()))?;
+    let how = "decomposed Unicode (letters plus combining accents, as macOS writes names)";
+    Some(if twin.nfc().ne(twin.chars()) {
+        format!("there is a '{twin}' whose name looks the same but is written in {how}: rename it")
+    } else {
+        format!("there is a '{twin}' whose name looks the same, but the name given is written in {how}: type it again")
+    })
+}
+
+/// A relative `import` of a missing `.v2` file (6.4): ` — did you mean './Util.v2'?` (the path as
+/// written with the name found) for a `.v2` file of its folder within 5.9's did-you-mean
+/// distance, the names compared without `.v2`; a case-sensitive file system's case is named.
+/// Else the hint for a name in another Unicode form (`unicode_twin`).
+fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
+    let (Some(folder), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str())) else { return (String::new(), None) };
+    if let Some(twin) = unicode_twin(folder, name) {
+        return (String::new(), Some(twin));
+    }
+    let stem = |s: &str| s.len().checked_sub(3).filter(|&i| s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".v2")).map(|i| s[..i].to_string());
+    let Some(want) = stem(name).filter(|_| Path::new(spec).is_relative()) else { return (String::new(), None) };
+    let stems: Vec<(String, String)> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| stem(&n).map(|s| (s, n)))
+        .collect();
+    let Some(close) = crate::runtime::error::did_you_mean(&want, stems.iter().map(|(s, _)| s.as_str())) else { return (String::new(), None) };
+    let found = stems.iter().find(|(s, _)| s == close).map_or(close, |(_, n)| n.as_str());
+    let written = match spec.rfind(['/', '\\']) {
+        Some(i) => format!("{}{found}", &spec[..=i]),
+        None => found.to_string(),
+    };
+    let case = if found.to_lowercase() == name.to_lowercase() {
+        if cfg!(target_os = "linux") { " (Linux matches the case of file names)" } else { " (this file system matches the case of file names)" }
+    } else {
+        ""
+    };
+    (format!(" — did you mean '{written}'?{case}"), None)
 }
 
 /// `fs::canonicalize` without the `\\?\` prefix, or `None` when the file is missing.
