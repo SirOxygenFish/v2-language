@@ -1143,6 +1143,9 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             if stdin_is_file() {
                 // `v2 x.v2 < data.txt`: no shell setting changes a file's bytes.
                 let _ = err.hint.set(format!("the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with {}", code_page_way()).into());
+            } else if cfg!(windows) && !std::io::stderr().is_terminal() {
+                // No console shows the hint: a program runs v2, and its pipe carries its encoding.
+                let _ = err.hint.set("the program that sends v2 its input must send UTF-8 (in Python, encoding=\"utf-8\")".into());
             } else if cfg!(windows) {
                 // A Windows shell sends its console's old code page unless told otherwise.
                 let _ = err.hint.set("in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run".into());
@@ -1996,9 +1999,29 @@ fn getenv(_it: &mut Interp, mut args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `exit(code = 0)`: ends the run at once; no `catch` or `finally` runs (5.8, 5.10).
 fn exit(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let code = int_arg(&args[0], "exit", "code")?;
+    match exit_code(code) {
+        Some(c) => Err(Flow::Exit(c)),
+        None => {
+            let err = ErrorValue::new("ValueError", format!("exit code {code} is out of range"));
+            let range = if cfg!(windows) {
+                "exit() takes a code from -2147483648 to 4294967295 on Windows"
+            } else {
+                "exit() takes a code from -2147483648 to 2147483647, and a shell sees only 0-255: use those for a code a shell checks"
+            };
+            let _ = err.hint.set(range.into());
+            Err(Flow::Error(Rc::new(err)))
+        }
+    }
+}
+
+/// The code `exit(code)` ends the process with: an i32, and on Windows, whose exit codes are 32
+/// unsigned bits (exec's `code` of a crashed program is 3221225477), 2147483648 to 4294967295 too,
+/// passed on as those same bits (5.10).
+fn exit_code(code: i64) -> Option<i32> {
     match i32::try_from(code) {
-        Ok(c) => Err(Flow::Exit(c)),
-        Err(_) => value_error(format!("exit code {code} is out of range")),
+        Ok(c) => Some(c),
+        Err(_) if cfg!(windows) => u32::try_from(code).ok().map(|c| c as i32),
+        Err(_) => None,
     }
 }
 
