@@ -125,8 +125,8 @@ fn osa(a: &[char], b: &[char]) -> usize {
 /// candidates as close, the first that starts with the name, else the first. One that is the
 /// name typed without its accents (`grosse` for `größe`, `buyut` for `büyüt`) is as close as one
 /// that differs only in case. One that is the name in another Unicode form (NFC equal: `café`
-/// decomposed) looks the same, so it is never suggested, as the name itself isn't: the callers'
-/// `module::unicode_twin` names those.
+/// decomposed) looks the same, so it is never suggested, as the name itself isn't (for a file or
+/// a folder, the callers' `module::unicode_twin` names those; a key gets no hint).
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     use unicode_normalization::UnicodeNormalization;
     let target: Vec<char> = name.to_lowercase().chars().collect();
@@ -507,7 +507,8 @@ mod tests {
     #[test]
     fn did_you_mean_leaves_out_the_name_in_another_unicode_form() {
         // 5.9 (round 20's review): `café` decomposed looks like `café`, so suggesting it says
-        // nothing; `module::unicode_twin` names those. Other candidates still count.
+        // nothing; for a file or a folder `module::unicode_twin` names those. Other candidates
+        // still count.
         assert_eq!(did_you_mean("caf\u{e9}", ["cafe\u{301}"]), None);
         assert_eq!(did_you_mean("gr\u{f6}\u{df}e", ["gro\u{308}\u{df}e"]), None);
         // Long names too, whose one decomposed letter (2 edits) is within the distance (third pass).
