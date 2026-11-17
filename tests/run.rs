@@ -6006,7 +6006,12 @@ fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
     // namespace package is named by its package (google.protobuf, never google); like
     // llama-cpp-python's, folders of data (bin, include, lib) are no modules; like
     // python-multipart's, the module closest to the distribution's name comes first; one with no
-    // module gets no such hint; and py.myhelper is never offered my-helper.py.
+    // module gets no such hint; and py.myhelper is never offered my-helper.py. Second review: a
+    // pip install -e of a flat layout (its RECORD lists only the .pth and setuptools' finder,
+    // which resolves the module from the project), of a src layout (a .pth naming the folder) and
+    // setup.py develop (an egg-info with SOURCES.txt, no RECORD) are named by their top_level.txt;
+    // a namespace folder it names but has no file in (google-auth's scripts) is none, and an
+    // editable install's own finder module is never named.
     if !needs("py", "a_package_imported_by_its_pip_name_gets_the_module_it_provides") {
         return;
     }
@@ -6024,7 +6029,8 @@ fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
         ("zz_opencv_python-5.0.dist-info/RECORD", "zzcv2/__init__.py,,\nzz_opencv_python-5.0.dist-info/METADATA,,\nzz_opencv_python-5.0.dist-info/RECORD,,\n"),
         ("zzcv2/__init__.py", "y = 2\n"),
         ("zzprotobuf-4.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zzprotobuf\nVersion: 4.0\n"),
-        ("zzprotobuf-4.0.dist-info/top_level.txt", "zzgoogle\n"),
+        ("zzprotobuf-4.0.dist-info/top_level.txt", "zzgoogle\nzzscripts\n"),
+        ("zzscripts/notes.txt", ""),
         ("zzprotobuf-4.0.dist-info/RECORD", "zzgoogle/zzproto/__init__.py,,\nzzgoogle/zzproto/wire.py,,\nzzgoogle/_zzupb/_message.abi3.so,,\nzzprotobuf-4.0.dist-info/RECORD,,\n"),
         ("zzgoogle/zzproto/__init__.py", "z = 4\n"),
         ("zz_llama_python-0.3.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-llama-python\nVersion: 0.3\n"),
@@ -6050,10 +6056,51 @@ fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
+    let src = |dir: &str| home.0.join("editsrc").join(dir);
+    let egg = src("eggproj");
+    for (path, text) in [
+        (src("flat").join("zzedithelper.py"), "e = 7\n"),
+        (src("srcl").join("zzother_pkg").join("__init__.py"), "o = 8\n"),
+        (egg.join("zz_egg.egg-info").join("PKG-INFO"), "Metadata-Version: 2.1\nName: zz-egg\nVersion: 1.0\n"),
+        (egg.join("zz_egg.egg-info").join("top_level.txt"), "zzeggmod\n"),
+        (egg.join("zz_egg.egg-info").join("SOURCES.txt"), "setup.py\nzzeggmod/__init__.py\ntests/__init__.py\nzz_egg.egg-info/PKG-INFO\n"),
+        (egg.join("setup.py"), ""),
+        (egg.join("zzeggmod").join("__init__.py"), "g = 9\n"),
+        (egg.join("tests").join("__init__.py"), ""),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let finder = format!(
+        "import sys\nfrom importlib.util import spec_from_file_location\n\nMAPPING = {{\"zzedithelper\": {:?}}}\n\n\nclass _EditableFinder:\n    @classmethod\n    \
+         def find_spec(cls, fullname, path=None, target=None):\n        if fullname in MAPPING:\n            return spec_from_file_location(fullname, MAPPING[fullname])\n        \
+         return None\n\n\ndef install():\n    if _EditableFinder not in sys.meta_path:\n        sys.meta_path.append(_EditableFinder)\n",
+        src("flat").join("zzedithelper.py").display().to_string()
+    );
+    for (rel, text) in [
+        ("__editable___zz_edit_helper_0_1_finder.py", finder),
+        ("__editable__.zz_edit_helper-0.1.pth", "import __editable___zz_edit_helper_0_1_finder; __editable___zz_edit_helper_0_1_finder.install()\n".into()),
+        ("zz_edit_helper-0.1.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-edit-helper\nVersion: 0.1\n".into()),
+        ("zz_edit_helper-0.1.dist-info/top_level.txt", "zzedithelper\n".into()),
+        ("zz_edit_helper-0.1.dist-info/RECORD", "__editable__.zz_edit_helper-0.1.pth,,\n__editable___zz_edit_helper_0_1_finder.py,,\nzz_edit_helper-0.1.dist-info/RECORD,,\n".into()),
+        ("__editable__.zz_other_dist-0.1.pth", format!("{}\n", src("srcl").display())),
+        ("zz_other_dist-0.1.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-other-dist\nVersion: 0.1\n".into()),
+        ("zz_other_dist-0.1.dist-info/top_level.txt", "zzother_pkg\n".into()),
+        ("zz_other_dist-0.1.dist-info/RECORD", "__editable__.zz_other_dist-0.1.pth,,\nzz_other_dist-0.1.dist-info/RECORD,,\n".into()),
+        ("easy-install.pth", format!("{}\n", egg.display())),
+        ("__editable__.zz_edit_bare-0.1.pth", "# its finder would be imported here\n".into()),
+        ("__editable___zz_edit_bare_0_1_finder.py", "".into()),
+        ("zz_edit_bare-0.1.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-edit-bare\nVersion: 0.1\n".into()),
+        ("zz_edit_bare-0.1.dist-info/RECORD", "__editable__.zz_edit_bare-0.1.pth,,\n__editable___zz_edit_bare_0_1_finder.py,,\nzz_edit_bare-0.1.dist-info/RECORD,,\n".into()),
+    ] {
+        std::fs::create_dir_all(site.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(site.join(rel), text).unwrap();
+    }
     std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
     std::fs::write(home.0.join("my-helper.py"), "def f():\n    return \"helper\"\n").unwrap();
     let imports = ["py.pyzzyaml as m", "py.PyZzYAML as m", "py.\"zz-opencv-python\" as m", "py.zz_opencv_python as m", "{ f } from py.\"my-helper\"", "{ f } from py.my_helper",
-        "py.zzprotobuf as m", "py.zz_llama_python as m", "py.\"zz-python-multipart\" as m", "py.zz_data_only as m", "{ f } from py.myhelper"];
+        "py.zzprotobuf as m", "py.zz_llama_python as m", "py.\"zz-python-multipart\" as m",
+        "py.zz_edit_helper as m", "py.zz_other_dist as m", "py.zz_egg as m", "py.zz_data_only as m", "py.zz_edit_bare as m", "{ f } from py.myhelper"];
     let tries: String = imports.iter().map(|i| format!("try {{\n    @import {i}\n}} catch (e) {{\n    print(e.message, \"|\", e.hint)\n}}\n")).collect();
     std::fs::write(home.0.join("m.v2"), tries).unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
@@ -6070,13 +6117,16 @@ fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
         "No module named 'zzprotobuf' | zzprotobuf is installed, and its module is named zzgoogle.zzproto: @import py.zzgoogle.zzproto as zzproto".into(),
         "No module named 'zz_llama_python' | zz-llama-python is installed, and its module is named zz_llama: @import py.zz_llama as zz_llama".into(),
         "'zz-python-multipart' is not a valid Python module name | zz-python-multipart is installed, and its modules are named zz_python_multipart and multizz: @import py.zz_python_multipart as zz_python_multipart".into(),
+        "No module named 'zz_edit_helper' | zz-edit-helper is installed, and its module is named zzedithelper: @import py.zzedithelper as zzedithelper".into(),
+        "No module named 'zz_other_dist' | zz-other-dist is installed, and its module is named zzother_pkg: @import py.zzother_pkg as zzother_pkg".into(),
+        "No module named 'zz_egg' | zz-egg is installed, and its module is named zzeggmod: @import py.zzeggmod as zzeggmod".into(),
     ];
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!((code, &lines[..lines.len().min(want.len())]), (Some(0), &want.iter().map(String::as_str).collect::<Vec<_>>()[..]), "{stderr}");
     // No module to name, and no my-helper.py offered for py.myhelper: the install line.
     let rest = &lines[want.len()..];
-    assert_eq!(rest.len(), 2, "{stdout}");
-    for (line, name) in rest.iter().zip(["zz_data_only", "myhelper"]) {
+    assert_eq!(rest.len(), 3, "{stdout}");
+    for (line, name) in rest.iter().zip(["zz_data_only", "zz_edit_bare", "myhelper"]) {
         assert!(line.starts_with(&format!("No module named '{name}' | if '{name}' isn't misspelled, install it for the Python V2 uses")) && !line.contains("is installed"), "{line}");
     }
     // Uncaught: the hint, and no install line.
@@ -6088,10 +6138,11 @@ fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
     std::fs::rename(home.0.join("my-helper.py"), home.0.join("my_helper.py")).unwrap();
     let follow = "@import py.zzyaml as zzyaml\n@import py.zzcv2 as zzcv2\n@import { f } from py.my_helper\n@import py.zzgoogle.zzproto as zzproto\n\
         @import py.zz_llama as zz_llama\n@import py.zz_python_multipart as zz_python_multipart\n\
-        print(zzyaml.x, zzcv2.y, f(), zzproto.z, zz_llama.w, zz_python_multipart.v)\n";
+        @import py.zzedithelper as zzedithelper\n@import py.zzother_pkg as zzother_pkg\n@import py.zzeggmod as zzeggmod\n\
+        print(zzyaml.x, zzcv2.y, f(), zzproto.z, zz_llama.w, zz_python_multipart.v, zzedithelper.e, zzother_pkg.o, zzeggmod.g)\n";
     std::fs::write(home.0.join("m.v2"), follow).unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
-    assert_eq!((code, stdout.as_str()), (Some(0), "zzyaml here 2 helper 4 5 6\n"), "{stderr}");
+    assert_eq!((code, stdout.as_str()), (Some(0), "zzyaml here 2 helper 4 5 6 7 8 9\n"), "{stderr}");
 }
 
 #[test]
