@@ -1558,7 +1558,8 @@ impl Interp {
             MethodTarget::Method(def) => def,
         };
         let fname = format!("{}.{}", o.type_name(), def.name);
-        let args = self.at(bind_spec(&fname, def.params, pos, named), name.span)?;
+        // `b.decode("latin-1")`: what to do instead (5.4).
+        let args = self.at(bind_spec(&fname, def.params, pos, named), name.span).inspect_err(|f| methods::utf8_only(&fname, f))?;
         let r = (def.f)(self, o, args, name.span);
         self.at(r, name.span)
     }
