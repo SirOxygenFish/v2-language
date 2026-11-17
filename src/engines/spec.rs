@@ -248,9 +248,9 @@ pub fn start_args(id: &str) -> &'static [&'static str] {
 }
 
 #[cfg(not(windows))]
-const PY_START_CHECK: &str = "import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback, linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit, errno, shutil, warnings";
+const PY_START_CHECK: &str = "import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback, linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit, errno, warnings";
 #[cfg(windows)]
-const PY_START_CHECK: &str = "import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback, linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit, errno, shutil, warnings, msvcrt, ctypes";
+const PY_START_CHECK: &str = "import sys; sys.path[:1] = [p for p in sys.path[:1] if p]; import os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback, linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit, errno, warnings, msvcrt, ctypes";
 
 /// How doctor names that check in its note (19.2): `-e 0 failed`, or for Python, whose check is
 /// long, what it does.
