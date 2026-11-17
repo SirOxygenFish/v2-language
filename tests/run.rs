@@ -1565,6 +1565,11 @@ fn an_embeddable_python_and_a_long_pythonpath_in_doctor_and_a_crash() {
     std::fs::write(home.0.join("embed").join("python313._pth"), "python313.zip\n.\n").unwrap();
     std::fs::write(home.0.join("start.v2"), "@py { 1 }\n").unwrap();
     std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    // A venv this system could use (round 22 review, 3): its python and pyvenv.cfg.
+    let venv_python = home.0.join(".venv").join(if cfg!(windows) { "Scripts\\python.exe" } else { "bin/python" });
+    std::fs::create_dir_all(venv_python.parent().unwrap()).unwrap();
+    std::fs::write(&venv_python, "").unwrap();
+    std::fs::write(home.0.join(".venv").join("pyvenv.cfg"), "home = x\nversion = 3.12.3\n").unwrap();
     let long = format!("{}\u{1b}{};end", "d".repeat(100), "e".repeat(20));
     let shown = format!("{}\\u{{1b}}{};end", "d".repeat(100), "e".repeat(20));
     let env = |python: &Path| vec![("V2_ENGINE_PY", python.as_os_str().to_owned()), ("PYTHONPATH", std::ffi::OsString::from(&long))];
@@ -1580,6 +1585,10 @@ fn an_embeddable_python_and_a_long_pythonpath_in_doctor_and_a_crash() {
     assert!(stdout.contains(&format!("\n  py: PYTHONPATH is set ({shown}), which Python reads as it starts\n")), "{stdout}");
     assert!(stdout.contains("\n  py: V2_ENGINE_PY is set, so [python] venv '") && stdout.contains(&unused), "{stdout}");
     assert!(!stdout.contains("embeddable"), "{stdout}");
+    // Round 22 review (3): V2_ENGINE_PY naming that venv's own python leaves nothing unused.
+    let (code, stdout, _) = run(&venv_python, &["doctor"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(!stdout.contains("isn't used"), "{stdout}");
     let (code, _, stderr) = run(&full, &["start.v2"]);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains(&format!("exited during startup (exit code 1); see its error output above, if any; PYTHONPATH is set ({shown}), which it reads as it starts: unset it or fix it\n")), "{stderr}");
@@ -5975,6 +5984,14 @@ fn a_python_venv_from_v2_toml_is_used_unless_v2_engine_py_is_set() {
     let (code, stdout, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[("V2_ENGINE_PY", std::ffi::OsStr::new(&python))]);
     assert_eq!(code, Some(0), "{stderr}");
     assert_ne!(stdout, ".venv\n", "V2_ENGINE_PY lost to the venv");
+    // Round 22 (4) and its review (6): the venv's own module, missing from the Python
+    // V2_ENGINE_PY names: the hint says why, before the install line (INTERNALS 13.5).
+    std::fs::write(home.0.join("sub/main.v2"), "@import { where } from py.venvonly\nprint(where())\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["sub/main.v2"], &[("V2_ENGINE_PY", std::ffi::OsStr::new(&python))]);
+    assert_eq!(code, Some(1), "{stderr}");
+    let unset = if cfg!(windows) { "Remove-Item Env:V2_ENGINE_PY" } else { "unset V2_ENGINE_PY" };
+    let note = format!(".venv' (v2.toml) isn't used: to use it, {unset}; or if 'venvonly' isn't misspelled, install it for the Python V2 uses");
+    assert!(stderr.contains("ImportError: No module named 'venvonly'") && stderr.contains("hint: V2_ENGINE_PY is set, so [python] venv '") && stderr.contains(&note), "{stderr}");
 }
 
 #[test]

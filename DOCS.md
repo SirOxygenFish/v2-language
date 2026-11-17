@@ -2011,7 +2011,7 @@ whole engine for the rest of the run, so later uses of it raise `EngineCrashed`.
 that may hang, use the language's own timeout, which you can retry: `urlopen(url, timeout=5)`,
 `fetch(url, { signal: AbortSignal.timeout(5000) })`.
 
-`V2_ENGINE_PY` wins over `[python] venv` (`v2 doctor` says so while it is set). Setting both
+`V2_ENGINE_PY` wins over `[python] venv` (`v2 doctor` names a venv it leaves unused). Setting both
 `[python] venv` and `[engines.py] command` in `v2.toml` is a configuration error: keep one. So a
 project used from Windows and from Linux
 (code in WSL) keeps a venv for each system: `venv` names one, and `V2_ENGINE_PY` the other's

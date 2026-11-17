@@ -1,0 +1,18 @@
+// requires: py
+// platform: unix
+// Round 22 review (4): sys.stdlib_module_names lists every system's modules, so one only
+// Windows' Python has isn't one this Python lacks (INTERNALS 13.5).
+try {
+    @import py.winreg as winreg
+    print(winreg)
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print(e.hint)
+}
+try {
+    @import { getch } from py.msvcrt
+    print(getch)
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print(e.hint)
+}

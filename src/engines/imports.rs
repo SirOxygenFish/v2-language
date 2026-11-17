@@ -499,7 +499,7 @@ enum PipFor {
     /// One found on PATH in a venv or a conda environment (an activated one): its argv, and that
     /// venv or environment, which V2 uses.
     OnPath(Vec<std::ffi::OsString>, PathBuf),
-    /// Python's embeddable package, which has no pip (`resolve::embeddable`): whether V2 was told
+    /// Python's embeddable package without pip (`resolve::pth_python`): whether V2 was told
     /// to use it (a command, V2_ENGINE_PY), else it was found on PATH.
     Embeddable(bool),
 }
@@ -507,9 +507,10 @@ enum PipFor {
 /// What the install line of an engine's `ImportError` is for: the Python V2 was told to use; for
 /// one found on PATH, the activated venv (`active`, VIRTUAL_ENV's value) when the search couldn't
 /// use its python, else the venv that Python is in, if any. Python's embeddable package, either
-/// way, has no pip.
+/// way, while it has no pip (in its `Lib\site-packages`, where get-pip.py puts it).
 fn pip_for(engine: &crate::engines::resolve::ResolvedEngine, active: Option<PathBuf>) -> Option<PipFor> {
-    let embedded = engine.argv.first().is_some_and(|p| crate::engines::resolve::embeddable(Path::new(p), engine.version).is_some());
+    let pth = engine.argv.first().and_then(|p| crate::engines::resolve::pth_python(Path::new(p), engine.version));
+    let embedded = pth.is_some_and(|p| p.package() && !p.pip);
     if engine.origin != crate::engines::resolve::Origin::Path {
         return Some(if embedded { PipFor::Embeddable(true) } else { PipFor::Told(engine.argv.clone()) });
     }
@@ -2288,6 +2289,16 @@ mod tests {
         let venv_line = format!("there is a virtual environment in {}, which V2 isn't using: name it in a v2.toml next to it, [python] venv = \".venv\"; and {none}", proj.join(".venv").display());
         assert_eq!(hint(&proj, PipFor::Embeddable(false)), venv_line);
         assert_eq!(hint(&proj, PipFor::Embeddable(true)), none, "V2_ENGINE_PY wins over a venv");
+        // Round 22 review (1): with pip (import site uncommented in its ._pth, get-pip.py run),
+        // its own pip line, which works there.
+        let pip = portable.join("Lib").join("site-packages").join("pip");
+        std::fs::create_dir_all(&pip).unwrap();
+        assert!(matches!(pip_for(&told, None), Some(PipFor::Told(argv)) if argv == told.argv));
+        assert!(pip_for(&engine(Origin::Path, Version(3, 13, 9)), None).is_none());
+        // A full Python given a ._pth (its Lib has the venv module) isn't the package either.
+        std::fs::remove_dir_all(&pip).unwrap();
+        std::fs::create_dir_all(portable.join("Lib").join("venv")).unwrap();
+        assert!(matches!(pip_for(&told, None), Some(PipFor::Told(_))));
     }
 
     #[test]
