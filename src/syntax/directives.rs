@@ -379,7 +379,14 @@ impl<'a> DirParser<'a> {
                         (kind, n)
                     }
                     other => {
-                        let d = Diag::new(format!("unexpected character {} in a directive", crate::syntax::lexer::shown_char(other).0), span(col, col + len));
+                        // `@export { f， g }`: an input method's comma gets its hint (3.2), not the
+                        // @@export one; a backtick's is about V2's strings.
+                        let (shown, hint) = crate::syntax::lexer::shown_char(other);
+                        let d = Diag::new(format!("unexpected character {shown} in a directive"), span(col, col + len));
+                        let d = match hint.filter(|_| other != '`') {
+                            Some(h) => d.hint(h),
+                            None => d,
+                        };
                         // JavaScript's `$x` in an `@import { }` or `@export { }` list goes in quotes.
                         let after_as = matches!(toks.last(), Some(DTok { kind: DK::Kw(w), .. }) if &**w == "as");
                         let d = match toks.first().map(|t| &t.kind) {
@@ -1034,6 +1041,18 @@ mod tests {
         // The line escaped is the block's own.
         let (p, _) = run("@js {\n  const css = `\n@@import url(\"theme.css\");\n`\n}").unwrap();
         assert!(p.body.contains("\n@import url(\"theme.css\");\n"), "{:?}", p.body);
+        // Round 20: an input method's comma or space in a list is its slip, with the lexer's hint
+        // (3.2); a backtick keeps this one.
+        let both = |src: &str| {
+            let d = diag(src);
+            (d.message, d.hint.unwrap_or_default())
+        };
+        assert_eq!(
+            both("@py {\n    @export { f\u{FF0C} g }\n    def f(): pass\n}"),
+            ("unexpected character '\u{FF0C}' (a full-width ',' from an input method) in a directive".into(), "type , with the input method off".into())
+        );
+        assert_eq!(both("@py {\n    @export { f\u{3000}}\n    def f(): pass\n}"), ("unexpected character U+3000 (an ideographic space) in a directive".into(), "type a plain space instead".into()));
+        assert_eq!(both("@js {\n  @import { `a` } from @py\n}").1, hint);
     }
 
     #[test]

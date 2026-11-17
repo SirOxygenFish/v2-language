@@ -18,6 +18,8 @@ pub const PAD_HINT: &str = "pad with \" \" * n, as in let s = str(x), then \" \"
 pub const KWARGS_HINT: &str = "V2 has no ** for named arguments: write them by name, or call it in a block, as in @py(f, opts) { f(**opts) }";
 /// Python's `{**a, **b}` and `a | b`, JavaScript's `{...a, ...b}`, and `a + b` of two dicts (4.5, 5.3).
 pub const MERGE_HINT: &str = "copy and set keys: let c = a.copy(), then for k, v in b { c[k] = v }";
+/// A `#` (or `＃`) where V2 code goes (3.2).
+const COMMENT_HINT: &str = "comments start with //";
 
 /// The hint for a format V2 doesn't have (`spec` is what follows the `:`, `expr` the expression
 /// before it as written): a width or an alignment, with `.Nf` or nothing more, can be padded
@@ -372,9 +374,7 @@ impl<'a> Lexer<'a> {
                 }
                 // `${x:#x}`: Python's alternate form, in a format.
                 '#' if self.in_format(self.pos) => return Err(self.format_error(self.span_here(1), self.pos)),
-                '#' => {
-                    return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint("comments start with //"))
-                }
+                '#' => return Err(Diag::new("unexpected character '#'", self.span_here(1)).hint(COMMENT_HINT)),
                 '@' => self.at_sign(m)?,
                 _ => self.operator(m)?,
             }
@@ -667,10 +667,19 @@ impl<'a> Lexer<'a> {
         if c == '`' && line.starts_with("```") && line[3..].chars().all(|c| c.is_ascii_alphanumeric()) {
             hint = Some("```v2 and ``` mark an example in a Markdown file: copy only the lines between them".into());
         }
-        // `１２`: the whole full-width run, as ASCII.
-        let run = full_width_run(self.rest());
-        if run.chars().count() > 1 {
-            hint = Some(format!("type {run} with the input method off"));
+        // `１２`: the whole full-width run, as ASCII, up to a `＃`, `｀` or `～` (below); 20
+        // characters of a long one.
+        let run: Vec<char> = full_width_run(self.rest()).chars().take_while(|c| !matches!(c, '#' | '`' | '~')).collect();
+        if run.len() > 1 {
+            let more = if run.len() > 20 { "…" } else { "" };
+            hint = Some(format!("type {}{more} with the input method off", run.iter().take(20).collect::<String>()));
+        }
+        // `＃`, `｀`, `～`: the hint of the character they stand for, which V2 doesn't read either.
+        match c {
+            '\u{FF03}' => hint = Some(COMMENT_HINT.into()),
+            '\u{FF40}' => hint = shown_char('`').1,
+            '\u{FF5E}' => hint = Some("V2 has no bitwise operators".into()),
+            _ => {}
         }
         // `${x:#x}`, `${x:£>8}`: a format's own character.
         if self.in_format(self.pos) {
@@ -805,9 +814,11 @@ impl<'a> Lexer<'a> {
         }
         if int_part.len() > 1 && int_part.starts_with('0') {
             let d = Diag::new("a number can't start with 0 (leading zeros)", span);
-            return Err(match self.decimal_comma_before(m.pos) {
-                Some(whole) if !is_float => d.hint(decimal_comma_hint(&whole, text)),
-                _ => d,
+            let before = self.comma_groups_before(m.pos);
+            let hint = if before.is_empty() || is_float { None } else { decimal_comma_hint(&[before, vec![text], self.comma_groups_after()].concat()) };
+            return Err(match hint {
+                Some(h) => d.hint(h),
+                None => d,
             });
         }
         let clean = text.replace('_', "");
@@ -824,13 +835,37 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// `0,05`: the int literal and `,` right before byte `at`, with no space between, a
-    /// decimal comma's whole part (2.4).
-    fn decimal_comma_before(&self, at: usize) -> Option<String> {
-        let [.., a, comma] = &self.toks[..] else { return None };
-        let adjacent = comma.span.hi as usize == at && a.span.hi == comma.span.lo;
-        let whole = self.src.get(a.span.lo as usize..a.span.hi as usize)?;
-        (adjacent && matches!((&a.tok, &comma.tok), (Tok::Int(_), Tok::Op(Op::Comma))) && whole.bytes().all(|c| c.is_ascii_digit() || c == b'_')).then(|| whole.to_string())
+    /// `0,05`, `1,000`: the int literals before byte `at`, each with a `,` after it and no space
+    /// between, as written: a decimal comma's whole part, or thousands (2.4). Empty for none.
+    fn comma_groups_before(&self, mut at: usize) -> Vec<&str> {
+        let mut groups = Vec::new();
+        let mut toks = &self.toks[..];
+        while let [rest @ .., a, comma] = toks {
+            let adjacent = comma.span.hi as usize == at && a.span.hi == comma.span.lo;
+            let digits = self.src.get(a.span.lo as usize..a.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_'));
+            match digits {
+                Some(whole) if adjacent && matches!((&a.tok, &comma.tok), (Tok::Int(_), Tok::Op(Op::Comma))) => groups.insert(0, whole),
+                _ => break,
+            }
+            at = a.span.lo as usize;
+            toks = rest;
+        }
+        groups
+    }
+
+    /// `1,000,000` read up to its first `000`: the `,000` groups after it, as written (2.4).
+    fn comma_groups_after(&self) -> Vec<&str> {
+        let mut groups = Vec::new();
+        let mut r = self.rest();
+        while let Some(after) = r.strip_prefix(',') {
+            let n = after.find(|c: char| !(c.is_ascii_digit() || c == '_')).unwrap_or(after.len());
+            if n == 0 || after[n..].starts_with(|c: char| c == '.' || is_ident_continue(c)) {
+                break;
+            }
+            groups.push(&after[..n]);
+            r = &after[n..];
+        }
+        groups
     }
 
     fn push_int(&mut self, value: Option<u64>, m: Mark) -> Result<(), Diag> {
@@ -1595,7 +1630,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// `_` only between two digits (3.4).
 /// A character as `unexpected character …` names it (3.2), with a hint for the ones that come
 /// from copying code out of a web page, a chat or a word processor: invisible ones by code point,
 /// look-alikes of a quote, a minus or a space with what to type instead, and an input method's
@@ -1615,7 +1649,8 @@ pub fn shown_char(c: char) -> (String, Option<String>) {
         '\u{300C}'..='\u{300F}' => (format!("'{c}' (a corner quote)"), hint("use a straight quote: \" or '")),
         '\u{FF01}'..='\u{FF5E}' => {
             let ascii = full_width_run(&c.to_string());
-            (format!("'{c}' (a full-width '{ascii}' from an input method)"), Some(format!("type {ascii} with the input method off")))
+            let name = if c == '\u{FF07}' { "a full-width apostrophe".to_string() } else { format!("a full-width '{ascii}'") };
+            (format!("'{c}' ({name} from an input method)"), Some(format!("type {ascii} with the input method off")))
         }
         '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), hint("use a plain minus sign: -")),
         '\u{00D7}' | '\u{22C5}' | '\u{00B7}' => (format!("'{c}' (a multiplication sign)"), hint("multiply with *: 5 * 3")),
@@ -1628,10 +1663,33 @@ pub fn shown_char(c: char) -> (String, Option<String>) {
     }
 }
 
-/// `19,99` where one number goes (`let preis = 19,99`, `sleep(0,5)`): the hint that writes it
-/// with a point (2.4).
-pub fn decimal_comma_hint(whole: &str, fraction: &str) -> String {
-    format!("decimal numbers use a point: write {whole}.{fraction}, not {whole},{fraction}")
+/// `19,99`, `1,500`, `1,000,000` where one number goes (`let preis = 19,99`, `sleep(0,5)`): the
+/// digit groups as written, a `,` with no space between each (2.4). Two groups are a decimal
+/// comma, written with a point; a first group of one to three digits that doesn't start with 0,
+/// then groups of exactly three, may be thousands, so that hint names both readings (only the
+/// thousands one past one comma). `None` for another run (`1,5,0`).
+pub fn decimal_comma_hint(groups: &[&str]) -> Option<String> {
+    let digits = |g: &str| !g.is_empty() && g.bytes().all(|c| c.is_ascii_digit());
+    let thousands = match groups {
+        [first, rest @ ..] => {
+            !rest.is_empty() && first.len() <= 3 && digits(first) && !first.starts_with('0') && rest.iter().all(|g| g.len() == 3 && digits(g))
+        }
+        [] => false,
+    };
+    match groups {
+        _ if thousands => {
+            let decimal = match groups {
+                [whole, fraction] => format!(" (a decimal one has a point: {whole}.{})", match fraction.trim_end_matches('0') {
+                    "" => "0",
+                    f => f,
+                }),
+                _ => String::new(),
+            };
+            Some(format!("numbers are written without thousands commas: {} or {}{decimal}", groups.concat(), groups.join("_")))
+        }
+        [whole, fraction] => Some(format!("decimal numbers use a point: write {whole}.{fraction}, not {whole},{fraction}")),
+        _ => None,
+    }
 }
 
 /// The ASCII form of the full-width forms (U+FF01 to U+FF5E) that start `text`: `１２` is `12`
@@ -1640,6 +1698,7 @@ fn full_width_run(text: &str) -> String {
     text.chars().map_while(|c| matches!(c, '\u{FF01}'..='\u{FF5E}').then(|| char::from_u32(c as u32 - 0xFEE0)).flatten()).collect()
 }
 
+/// `_` only between two digits (3.4).
 fn check_underscores(digits: &str) -> Result<(), &'static str> {
     if digits.starts_with('_') || digits.ends_with('_') || digits.contains("__") {
         return Err("`_` in a number must sit between two digits");
@@ -2001,6 +2060,20 @@ let n = names
         assert_eq!(both("let x = \u{FF11}\u{FF12}"), pair("unexpected character '\u{FF11}' (a full-width '1' from an input method)", "type 12 with the input method off"));
         assert_eq!(both("print(\u{300C}hello\u{300D})"), pair("unexpected character '\u{300C}' (a corner quote)", "use a straight quote: \" or '"));
         assert_eq!(both("\"\u{65E5}\" \u{FF0B} 1"), pair("unexpected character '\u{FF0B}' (a full-width '+' from an input method)", "type + with the input method off"));
+        // A long run: 20 of its characters, as the excerpt is cut too.
+        let ones = |n: usize| format!("let x = {}", "\u{FF11}".repeat(n));
+        assert_eq!(both(&ones(300)).1, format!("type {}\u{2026} with the input method off", "1".repeat(20)));
+        assert_eq!(both(&ones(21)).1, format!("type {}\u{2026} with the input method off", "1".repeat(20)));
+        assert_eq!(both(&ones(20)).1, format!("type {} with the input method off", "1".repeat(20)));
+        // `＃`, `｀`, `～` stand for characters V2 doesn't read either: their hints; a run stops
+        // before one.
+        let fw = |c: char| format!("unexpected character '{c}' (a full-width '{}' from an input method)", char::from_u32(c as u32 - 0xFEE0).unwrap());
+        assert_eq!(both("\u{FF03} comment"), (fw('\u{FF03}'), "comments start with //".into()));
+        assert_eq!(both("\u{FF03}\u{FF03} comment"), (fw('\u{FF03}'), "comments start with //".into()));
+        assert_eq!(both("print(\u{FF40}\u{FF41}\u{FF40})"), (fw('\u{FF40}'), "V2 writes a template string as f\"text ${x}\"".into()));
+        assert_eq!(both("print(1 \u{FF5E} 2)"), (fw('\u{FF5E}'), "V2 has no bitwise operators".into()));
+        assert_eq!(both("let x = \u{FF11}\u{FF12}\u{FF03}").1, "type 12 with the input method off");
+        assert_eq!(both("print(\u{FF07}a\u{FF07})"), pair("unexpected character '\u{FF07}' (a full-width apostrophe from an input method)", "type ' with the input method off"));
     }
 
     #[test]
@@ -2146,6 +2219,18 @@ let n = names
         assert_eq!(hint("sleep(0,05)").as_deref(), Some("decimal numbers use a point: write 0.05, not 0,05"));
         assert_eq!(hint("f(0, 05)"), None);
         assert_eq!(hint("f(x,05)"), None);
+        // Round 20: `1,000` may be thousands, which a point would make 1.0; `1,000,000` is.
+        let thousands = "numbers are written without thousands commas";
+        assert_eq!(hint("let x = 1,000").unwrap(), format!("{thousands}: 1000 or 1_000 (a decimal one has a point: 1.0)"));
+        assert_eq!(hint("print(1,000)").unwrap(), format!("{thousands}: 1000 or 1_000 (a decimal one has a point: 1.0)"));
+        assert_eq!(hint("let x = 1,050").unwrap(), format!("{thousands}: 1050 or 1_050 (a decimal one has a point: 1.05)"));
+        assert_eq!(hint("let n = 1,000,000").unwrap(), format!("{thousands}: 1000000 or 1_000_000"));
+        assert_eq!(hint("let n = 1,500,000").unwrap(), format!("{thousands}: 1500000 or 1_500_000"));
+        assert_eq!(hint("print(1,000, 2)").unwrap(), format!("{thousands}: 1000 or 1_000 (a decimal one has a point: 1.0)"));
+        // A first group that starts with 0, or one of four digits, isn't thousands; nor are other runs.
+        assert_eq!(hint("let x = 0,050").as_deref(), Some("decimal numbers use a point: write 0.050, not 0,050"));
+        assert_eq!(hint("let x = 1234,050").as_deref(), Some("decimal numbers use a point: write 1234.050, not 1234,050"));
+        assert_eq!(hint("print(1,05,2)"), None);
         assert_eq!(err("0b101"), "V2 has only decimal and 0x hex integer literals");
         assert_eq!(err("0o17"), "V2 has only decimal and 0x hex integer literals");
         assert_eq!(err("12abc"), "a number can't be followed directly by a letter");

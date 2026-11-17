@@ -95,7 +95,8 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         {
             return Some("an index takes one key: write x[a][b], or, for a pandas or numpy handle, do it in a block, as in @py(df) { df.loc[r, \"col\"] }".into())
         }
-        // `let preis = 19,99`, `x = 2,5`, `if x > 2,5 {`: a decimal comma where one expression ends.
+        // `let preis = 19,99`, `x = 2,5`, `if x > 2,5 {`: a decimal comma where one expression ends
+        // (`1,500`: or thousands).
         Some(Tok::Op(Op::Comma)) if decimal_comma(toks, i, sm).is_some() => return decimal_comma(toks, i, sm),
         Some(Tok::Op(Op::Comma)) if after_let => return Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()),
         Some(Tok::Op(Op::Comma)) if after_return => return Some("V2 returns one value: return a list, as in return [a, b]".into()),
@@ -214,16 +215,33 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
 }
 
 /// The `,` at `toks[i]` between two int literals, with no space on either side (`19,99`): a
-/// decimal comma, and the hint that writes the number with a point (2.4).
+/// decimal comma, or thousands (`1,500`, `1,500,250`: the whole run of them), and the hint for
+/// the number (2.4).
 fn decimal_comma(toks: &[Token], i: usize, sm: &SourceMap) -> Option<String> {
-    let (a, comma, b) = (toks.get(i.checked_sub(1)?)?, toks.get(i)?, toks.get(i + 1)?);
-    let ints = matches!((&a.tok, &comma.tok, &b.tok), (Tok::Int(_), Tok::Op(Op::Comma), Tok::Int(_)));
-    if !ints || a.span.hi != comma.span.lo || comma.span.hi != b.span.lo {
+    let text = &sm.file(toks.get(i)?.span.file).text;
+    let digits = |t: &Token| match t.tok {
+        Tok::Int(_) => text.get(t.span.lo as usize..t.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_')),
+        _ => None,
+    };
+    // The `,` at `toks[k]` joins two such literals.
+    let joins = |k: usize| match (k.checked_sub(1).and_then(|j| toks.get(j)), toks.get(k), toks.get(k + 1)) {
+        (Some(a), Some(comma), Some(b)) => {
+            matches!(comma.tok, Tok::Op(Op::Comma)) && a.span.hi == comma.span.lo && comma.span.hi == b.span.lo && digits(a).is_some() && digits(b).is_some()
+        }
+        _ => false,
+    };
+    if !joins(i) {
         return None;
     }
-    let text = &sm.file(a.span.file).text;
-    let digits = |t: &Token| text.get(t.span.lo as usize..t.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_'));
-    Some(decimal_comma_hint(digits(a)?, digits(b)?))
+    let (mut first, mut last) = (i, i);
+    while first >= 2 && joins(first - 2) {
+        first -= 2;
+    }
+    while joins(last + 2) {
+        last += 2;
+    }
+    let groups: Vec<&str> = (first - 1..=last + 1).step_by(2).filter_map(|k| digits(&toks[k])).collect();
+    decimal_comma_hint(&groups)
 }
 
 /// Python's `from os.path import join, exists as e` as V2 writes it:
@@ -2071,6 +2089,16 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("print(f\"${3,5:.2f}\")"), point("3,5"));
         assert_eq!(hint("print(f\"${1_000,5}\")"), point("1_000,5"));
         assert_eq!(hint("func f() {\n    return 2,5\n}"), point("2,5"));
+        // Round 20: three digits after the `,` may be thousands, so both readings; more groups of
+        // three are (`1,000` and `1,000,000` stop at the lexer's leading zeros first).
+        let thousands = |n: &str, rest: &str| Some(format!("numbers are written without thousands commas: {} or {}{rest}", n.replace(',', ""), n.replace(',', "_")));
+        assert_eq!(hint("let x = 1,500"), thousands("1,500", " (a decimal one has a point: 1.5)"));
+        assert_eq!(hint("let x = 12,345"), thousands("12,345", " (a decimal one has a point: 12.345)"));
+        assert_eq!(hint("print(f\"${1,500}\")"), thousands("1,500", " (a decimal one has a point: 1.5)"));
+        assert_eq!(hint("let n = 1,500,250"), thousands("1,500,250", ""));
+        assert_eq!(hint("let x = 1234,567"), point("1234,567"));
+        assert_eq!(hint("let x = 0,500"), point("0,500"));
+        assert_eq!(hint("let x = 1,5,2"), Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()));
         // With a space it is a list of values, and a tuple keeps its own hint.
         assert_eq!(hint("let x = 1\nif x > 2, 5 { print(1) }"), None);
         assert_eq!(hint("let p = (2,5)").as_deref(), Some("V2 has no tuples: write a list, as in [1, 2]"));

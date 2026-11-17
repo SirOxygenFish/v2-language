@@ -69,6 +69,9 @@ const ENGINE_KEYS: &[&str] = &["command", "flags", "startup_timeout", "call_time
 const PYTHON_KEYS: &[&str] = &["venv"];
 /// The names `[engines.…]` takes for the built-in engines a did-you-mean offers (18.2).
 const ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs"];
+/// The engine names a bare key with another keyboard's letter may have meant (`[engines.tş]`):
+/// ts's too, which `bare_key_hint` sends to `[engines.js]` (18.5).
+const KEY_ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "ts", "typescript", "c", "cpp", "cxx", "rust", "rs"];
 
 /// The variable `~` is read from (18.1).
 const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -555,37 +558,54 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
 }
 
 /// `[pythın]`, `vënv = …`: TOML's "invalid unquoted key" at byte `at`, a character a bare key
-/// can't hold (18.5). The hint names it, and the section, engine or key the key read whole is
-/// close to, compared as an ASCII keyboard writes it (`folded_key`).
+/// can't hold (18.5). The hint names it as the lexer does (3.2: a bidi or control character by
+/// code point), and the section, engine or key the key read whole is close to, compared as an
+/// ASCII keyboard writes it (`folded_key`); a character after the key (`venv\u{a0}=`) gets the
+/// lexer's hint for it instead.
 fn bare_key_hint(text: &str, at: usize, message: &str) -> Option<String> {
     let c = text.get(at..)?.chars().next()?;
     if c.is_ascii() || !message.contains("unquoted key") {
         return None;
     }
-    let hint = format!("'{c}' (U+{:04X}) can't be in a bare key: TOML takes A-Z, a-z, 0-9, - and _ there", c as u32);
+    let (shown, instead) = crate::syntax::lexer::shown_char(c);
+    let shown = if shown == format!("'{c}'") { format!("{shown} (U+{:04X})", c as u32) } else { shown };
+    let hint = format!("{shown} can't be in a bare key: TOML takes A-Z, a-z, 0-9, - and _ there");
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let stop = |c: char| c.is_whitespace() || "[].=\"'#,".contains(c);
     let lo = text[start..at].char_indices().rev().find(|&(_, c)| stop(c)).map_or(start, |(i, c)| start + i + c.len_utf8());
     let hi = text[at..].find(stop).map_or(text.len(), |i| at + i);
+    if hi == at {
+        return Some(match instead {
+            Some(h) => format!("{hint} — {h}"),
+            None => hint,
+        });
+    }
     let head: String = text[start..lo].split_whitespace().collect();
     // In a `[…]` line, a section or an engine; on a key's line, a key of the section above it.
     let section = || {
         let line = text[..start].lines().rev().map(str::trim).find(|l| l.starts_with('['))?;
         Some(line.trim_start_matches('[').split(']').next()?.split_whitespace().collect::<String>())
     };
-    let (known, near): (&[&str], fn(&str) -> String) = match head.as_str() {
-        "[" => (SECTIONS, |s| format!("[{s}]")),
-        "[engines." => (ENGINE_NAMES, |s| format!("[engines.{s}]")),
+    // What follows the key in its `[…]` (`[ëngines.py]`: `.py`) stays in the suggestion.
+    let rest: String = text[hi..].lines().next().unwrap_or_default().split(']').next().unwrap_or_default().split_whitespace().collect();
+    // The suggestion for a known name, given what follows the key.
+    type Near = fn(&str, &str) -> String;
+    let (known, near): (&[&str], Near) = match head.as_str() {
+        "[" => (SECTIONS, |s, rest| format!("did you mean [{s}{rest}]?")),
+        "[engines." => (KEY_ENGINE_NAMES, |s, _| match canonical_tag(s) {
+            "ts" => "ts runs on the js engine: configure [engines.js]".into(),
+            _ => format!("did you mean [engines.{s}]?"),
+        }),
         "" => match section() {
-            Some(s) if s == "python" => (PYTHON_KEYS, |s| format!("'{s}'")),
-            Some(s) if s.starts_with("engines.") => (ENGINE_KEYS, |s| format!("'{s}'")),
+            Some(s) if s == "python" => (PYTHON_KEYS, |s, _| format!("did you mean '{s}'?")),
+            Some(s) if s.starts_with("engines.") => (ENGINE_KEYS, |s, _| format!("did you mean '{s}'?")),
             _ => return Some(hint),
         },
         _ => return Some(hint),
     };
     let folded = folded_key(&text[lo..hi]);
     match known.iter().copied().find(|k| *k == folded).or_else(|| did_you_mean(&folded, known.iter().copied())) {
-        Some(k) => Some(format!("{hint} — did you mean {}?", near(k))),
+        Some(k) => Some(format!("{hint} — {}", near(k, &rest))),
         None => Some(hint),
     }
 }
@@ -742,6 +762,17 @@ mod tests {
             ("[engines.js]\nst\u{e4}rt\u{fc}p_timeout = 5\n", "2:3", format!("'\u{e4}' (U+00E4) {rule} — did you mean 'startup_timeout'?")),
             ("[gr\u{f6}\u{df}e]\n", "1:4", format!("'\u{f6}' (U+00F6) {rule}")),
             ("\u{e7}ay = 1\n", "1:1", format!("'\u{e7}' (U+00E7) {rule}")),
+            // Round 20: ts's names, which configure [engines.js]; the rest of a header kept.
+            ("[engines.t\u{15f}]\ncommand = [\"x\"]\n", "1:11", format!("'\u{15f}' (U+015F) {rule} — ts runs on the js engine: configure [engines.js]")),
+            ("[engines.typescr\u{131}pt]\n", "1:17", format!("'\u{131}' (U+0131) {rule} — ts runs on the js engine: configure [engines.js]")),
+            ("[\u{eb}ngines.py]\ncommand = [\"python3\"]\n", "1:2", format!("'\u{eb}' (U+00EB) {rule} — did you mean [engines.py]?")),
+            ("[eng\u{ef}nes . js ]\n", "1:5", format!("'\u{ef}' (U+00EF) {rule} — did you mean [engines.js]?")),
+            // Named as the lexer names it: a bidi or control character by code point, so it can't
+            // act on the terminal; one after the key gets what to type instead.
+            ("[py\u{202e}thon]\n", "1:4", format!("U+202E {rule} — did you mean [python]?")),
+            ("[py\u{85}thon]\n", "1:4", format!("U+0085 {rule}")),
+            ("[python]\nvenv\u{a0}= \".venv\"\n", "2:5", format!("U+00A0 (a no-break space) {rule} — type a plain space instead")),
+            ("[python]\n\u{ff56}env = \".venv\"\n", "2:1", format!("'\u{ff56}' (a full-width 'v' from an input method) {rule} — did you mean 'venv'?")),
         ];
         for (toml_text, at, hint) in cases {
             let e = project("bareascii", toml_text).unwrap_err().0;
