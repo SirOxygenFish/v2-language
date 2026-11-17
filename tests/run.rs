@@ -1043,6 +1043,18 @@ fn a_missing_module_names_the_file_it_probably_meant() {
     let (code, _, stderr) = run_in_home(&home.0, &["check", "typo.v2"], &[]);
     assert_eq!(code, Some(1));
     assert!(stderr.contains("ImportError: cannot find module './lib/utl.v2' (looked for lib/utl.v2) — did you mean './lib/Util.v2'?\n"), "{stderr}");
+    // A separator at the path's end (round 20, fourth pass): the file, not './lib/Util/.v2' or
+    // './lib/utl.v2/Util.v2'.
+    let slash = "func show(f) { try { f() } catch (e) { print(e.message) } }\n\
+                 show(func() { import \"./lib/Util/\" as a })\n\
+                 show(func() { import \"./lib/utl.v2/\" as b })\n";
+    std::fs::write(home.0.join("slash.v2"), slash).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["slash.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        stdout,
+        "cannot find module './lib/Util/' (looked for lib/Util) — did you mean './lib/Util.v2'?\ncannot find module './lib/utl.v2/' (looked for lib/utl.v2) — did you mean './lib/Util.v2'?\n"
+    );
 }
 
 #[test]
@@ -1079,6 +1091,12 @@ fn a_folder_in_another_unicode_form_says_so() {
             note(data_nfd)
         )
     );
+    // With a separator at its end (fourth pass): the same import, not './büyüt/.v2'.
+    let slash = format!("func show(f) {{ try {{ f() }} catch (e) {{ print(e.message, \"|\", e.hint) }} }}\nshow(func() {{ import \"./{file}/\" as b }})\n");
+    std::fs::write(home.0.join("slash.v2"), slash).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["slash.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, format!("cannot find module './{file}/' (looked for {file}) | {with_v2}\n"));
     // Renamed as the notes say: found, and `./büyüt` gets the .v2 it lacks (6.4); the import the
     // note names works (fixed.v2).
     std::fs::rename(home.0.join(folder_nfd), home.0.join(folder)).unwrap();
@@ -1087,6 +1105,9 @@ fn a_folder_in_another_unicode_form_says_so() {
     let (code, stdout, stderr) = run_in_home(&home.0, &["main.v2"], &[]);
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(stdout, format!("ok\ncannot find module './{file}' (looked for {file}) — did you mean './{file}.v2'? | null\nok\nok\n"));
+    let (code, stdout, stderr) = run_in_home(&home.0, &["slash.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, format!("cannot find module './{file}/' (looked for {file}) — did you mean './{file}.v2'? | null\n"));
     std::fs::write(home.0.join("fixed.v2"), format!("import \"./{file}.v2\" as b\nprint(b.y)\n")).unwrap();
     assert_eq!(run_in_home(&home.0, &["fixed.v2"], &[]).1, "2\n");
     // Written decomposed for a composed `naïve.v2`: the import, with the name composed.

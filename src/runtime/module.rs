@@ -298,7 +298,7 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
             }
             // `import "./util" as util` for util.v2.
             let with = target.with_file_name(format!("{}.v2", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
-            let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{spec}.v2'?") };
+            let hint = if spec.ends_with(".v2") || !with.is_file() { String::new() } else { format!(" — did you mean '{}.v2'?", trim_separators(spec)) };
             // Else a file of that folder it probably meant (`./util.v2` for Util.v2 on Linux).
             let (near, twin) = if hint.is_empty() { nearby_module(&target, spec) } else { (String::new(), None) };
             return Err((format!("cannot find module '{spec}' (looked for {}){hint}{near}", shown(&target)), twin));
@@ -384,21 +384,28 @@ pub fn folder_twin(path: &Path) -> Option<String> {
 /// A path written without `.v2` whose last name, `name`, has a `unicode_twin` with `.v2`: as it
 /// is written, its last name composed (NFC, as a keyboard types it and as the twin is once
 /// renamed), plus `.v2`, for the CLI's `, and run v2 größe.v2` and an import's
-/// `, and import './büyüt.v2'` (19.1, 6.4).
+/// `, and import './büyüt.v2'` (19.1, 6.4). A separator at its end is dropped (`./büyüt/`).
 pub fn composed_v2(written: &str, name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
+    let written = trim_separators(written);
     match written.strip_suffix(name) {
         Some(before) => format!("{before}{}.v2", name.nfc().collect::<String>()),
         None => format!("{written}.v2"),
     }
 }
 
+/// A path as written without the separators it ends with (`/`, and on Windows `\` too), whose
+/// last name a hint changes: `hello/` is `hello`, so its `.v2` is `hello.v2`, not `hello/.v2`.
+pub fn trim_separators(written: &str) -> &str {
+    written.trim_end_matches(|c| c == '/' || (cfg!(windows) && c == '\\'))
+}
+
 /// A relative `import` of a missing `.v2` file (6.4): ` — did you mean './Util.v2'?` (the path as
-/// written with the name found) for a `.v2` file of its folder within 5.9's did-you-mean
-/// distance, the names compared without `.v2`, or one whose name differs only in its `.v2`'s
-/// case; a case-sensitive file system's case is named. Before those, the hint for a name in
-/// another Unicode form (`unicode_twin`): PATH's, PATH`.v2`'s when PATH doesn't end in `.v2`
-/// (with the import that works then), or a missing folder's on the way (`folder_twin`).
+/// written, `trim_separators`, with the name found) for a `.v2` file of its folder within 5.9's
+/// did-you-mean distance, the names compared without `.v2`, or one whose name differs only in
+/// its `.v2`'s case; a case-sensitive file system's case is named. Before those, the hint for a
+/// name in another Unicode form (`unicode_twin`): PATH's, PATH`.v2`'s when PATH doesn't end in
+/// `.v2` (with the import that works then), or a missing folder's on the way (`folder_twin`).
 fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
     let (Some(folder), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str())) else { return (String::new(), None) };
     let with_v2 = || unicode_twin(folder, &format!("{name}.v2")).map(|t| format!("{t}, and import '{}'", composed_v2(spec, name)));
@@ -424,6 +431,7 @@ fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
     }) else {
         return (String::new(), None);
     };
+    let spec = trim_separators(spec);
     let written = match spec.rfind(['/', '\\']) {
         Some(i) => format!("{}{found}", &spec[..=i]),
         None => found.to_string(),
