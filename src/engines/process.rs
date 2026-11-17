@@ -67,13 +67,13 @@ pub fn exit_interrupted() -> ! {
     die(&lock())
 }
 
-/// The exit code when stdout's reader went away: 128 + SIGPIPE, what a shell shows for a command
-/// a closed pipe stopped (6.5).
+/// The exit code when stdout's or stderr's reader went away: 128 + SIGPIPE, what a shell shows for
+/// a command a closed pipe stopped (6.5).
 pub const EXIT_BROKEN_PIPE: i32 = 141;
 
-/// stdout's reader went away (`v2 x.v2 | head`): nothing more can be shown, so the run ends at
-/// once and quietly, as for an interrupt but with no output left to write: every child stopped
-/// as a tree, the run dir removed, exit 141 (6.5).
+/// stdout's or stderr's reader went away (`v2 x.v2 | head`, `2>&1 | head`): nothing more can be
+/// shown, so the run ends at once and quietly, as for an interrupt but with no output left to
+/// write: every child stopped as a tree, the run dir removed, exit 141 (6.5).
 pub fn exit_broken_pipe() -> ! {
     let w = lock();
     for (_, kill) in &w.children {
@@ -83,6 +83,7 @@ pub fn exit_broken_pipe() -> ! {
     for (_, kill) in &w.children {
         kill.wait_stopped(deadline);
     }
+    cursor_back();
     if let Some(dir) = &w.run_dir {
         remove_run_dir(dir);
     }
@@ -101,12 +102,210 @@ fn die(w: &Watch) -> ! {
     for (_, kill) in &w.children {
         kill.wait_stopped(deadline);
     }
+    // Once nothing draws on it any more.
+    restore_terminal();
     if let Some(dir) = &w.run_dir {
         remove_run_dir(dir);
     }
     #[cfg(unix)]
     die_by_signal();
     hard_exit(EXIT_INTERRUPTED)
+}
+
+/// Unix: the settings of stdin, stdout and stderr that were terminals when v2 started (6.5).
+#[cfg(unix)]
+static TERMINAL: OnceLock<Vec<(libc::c_int, libc::termios)>> = OnceLock::new();
+
+/// Unix, at startup: remember the terminal's settings (echo, line input), which the interrupt path
+/// puts back (6.5).
+#[cfg(unix)]
+fn remember_terminal() {
+    let saved = (0..3)
+        .filter_map(|fd| {
+            // SAFETY: tcgetattr fills a zeroed struct for any descriptor, a terminal or not.
+            let mut t: libc::termios = unsafe { std::mem::zeroed() };
+            (unsafe { libc::isatty(fd) == 1 && libc::tcgetattr(fd, &mut t) == 0 }).then_some((fd, t))
+        })
+        .collect();
+    let _ = TERMINAL.set(saved);
+}
+
+/// Set while v2 itself has changed the terminal's settings and not yet put them back (input read
+/// with echo off): the interrupt path then puts them back whatever stdout is (6.5).
+pub(crate) static TERMINAL_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// On the interrupt path: a block stopped on the spot never ran the code that undoes what it did to
+/// the terminal (echo turned off, a live display's hidden cursor), so on Unix the terminal gets back
+/// the settings it had when v2 started (only while v2 is its foreground job: a background one would
+/// change the settings of the shell that now reads it), and the cursor is shown (`show_cursor`).
+/// Only when v2's stdout is a terminal, as v2 is then what the screen shows (in `v2 x.v2 | less`
+/// the pager has put the terminal in a mode of its own, and Ctrl+C reaches it too), or when
+/// `TERMINAL_CHANGED` is set (6.5).
+fn restore_terminal() {
+    if terminal_size(1).is_none() && !TERMINAL_CHANGED.load(Ordering::SeqCst) {
+        return;
+    }
+    #[cfg(unix)]
+    if let Some(saved) = TERMINAL.get() {
+        // SAFETY: plain calls on the standard descriptors with the settings tcgetattr gave; SIGTTOU
+        // ignored, a race with the shell taking the terminal back can't stop the process; TCSANOW
+        // doesn't wait for output.
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            for (fd, t) in saved.iter().filter(|(fd, _)| libc::tcgetpgrp(*fd) == libc::getpgrp()) {
+                libc::tcsetattr(*fd, libc::TCSANOW, t);
+            }
+        }
+    }
+    show_cursor();
+}
+
+/// Set once a worker has been told that V2's stdout or stderr is a terminal (9.3): from then on a
+/// block's live display may have hidden the cursor.
+pub static TOLD_TERMINAL: AtomicBool = AtomicBool::new(false);
+
+/// An end other than the normal one (`exit(n)`, an uncaught error, a closed pipe): a live display a
+/// block started may never have ended (plain Python's `sys.exit` would have run its cleanup), so
+/// when v2's stdout is a terminal and a worker was told it has one, the cursor is shown (6.5).
+pub fn cursor_back() {
+    if TOLD_TERMINAL.load(Ordering::SeqCst) && terminal_size(1).is_some() {
+        show_cursor();
+    }
+}
+
+/// `ESC[?25h` (show the cursor), once to each terminal among stdout and stderr: on Unix one whose
+/// foreground process group is v2's (SIGTTOU ignored), on Windows a console with VT processing on.
+/// From a thread of its own, at most 100 ms, as a terminal whose output is stopped (Ctrl+S, a
+/// console's selection) blocks the write (6.5).
+fn show_cursor() {
+    const SHOW: &[u8] = b"\x1b[?25h";
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = spawn_helper(std::thread::Builder::new(), move || {
+        #[cfg(unix)]
+        // SAFETY: plain calls on the standard descriptors.
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            let device = |fd| {
+                let mut st: libc::stat = std::mem::zeroed();
+                (libc::fstat(fd, &mut st) == 0).then_some((st.st_dev, st.st_ino))
+            };
+            let mut shown = None;
+            for fd in [1, 2] {
+                if libc::isatty(fd) == 1 && libc::tcgetpgrp(fd) == libc::getpgrp() && (shown.is_none() || shown != device(fd)) {
+                    libc::write(fd, SHOW.as_ptr().cast(), SHOW.len());
+                    shown = device(fd);
+                }
+            }
+        }
+        #[cfg(windows)]
+        // SAFETY: plain calls on the standard handles, which stay open for the process.
+        unsafe {
+            use windows_sys::Win32::Foundation::CompareObjectHandles;
+            use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, WriteConsoleA, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+            let mut shown = Vec::new();
+            for kind in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let h = GetStdHandle(kind);
+                let mut mode = 0;
+                if GetConsoleMode(h, &mut mode) == 0 || mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0 || shown.iter().any(|&o| CompareObjectHandles(o, h) != 0) {
+                    continue;
+                }
+                let mut written = 0;
+                WriteConsoleA(h, SHOW.as_ptr(), SHOW.len() as u32, &mut written, std::ptr::null());
+                shown.push(h);
+            }
+        }
+        let _ = done.send(());
+    });
+    if writer.is_ok() {
+        let _ = finished.recv_timeout(Duration::from_millis(100));
+    }
+}
+
+/// Whether V2's stdout (`fd` 1) or stderr (2) is a terminal, and then its size (columns, rows; 0
+/// when the terminal doesn't say), which `init` passes on to the blocks (9.3, 9.9). Unix: isatty
+/// and TIOCGWINSZ; Windows: a console, its window.
+pub fn terminal_size(fd: i32) -> Option<(u16, u16)> {
+    #[cfg(unix)]
+    // SAFETY: isatty and TIOCGWINSZ only read the descriptor's state, into a zeroed struct.
+    unsafe {
+        if libc::isatty(fd) != 1 {
+            return None;
+        }
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws as *mut libc::winsize) != 0 {
+            return Some((0, 0));
+        }
+        Some((ws.ws_col, ws.ws_row))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO};
+        let h = if fd == 1 { std::io::stdout().as_raw_handle() } else { std::io::stderr().as_raw_handle() };
+        // SAFETY: the standard handle stays open for the process; each call fills its out-parameter.
+        unsafe {
+            let mut mode = 0;
+            if GetConsoleMode(h, &mut mode) == 0 {
+                return None;
+            }
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(h, &mut info) == 0 {
+                return Some((0, 0));
+            }
+            let w = info.srWindow;
+            let span = |a: i16, b: i16| u16::try_from(i32::from(b) - i32::from(a) + 1).unwrap_or(0);
+            Some((span(w.Left, w.Right), span(w.Top, w.Bottom)))
+        }
+    }
+}
+
+/// Windows: what `console_vt_on` changed: a standard handle, the mode its console had, and the mode
+/// v2 set, put back at every exit (6.5).
+#[cfg(windows)]
+static CONSOLE_MODES: OnceLock<Vec<(u32, u32, u32)>> = OnceLock::new();
+
+/// Windows, at startup: stdout's and stderr's consoles get `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, so
+/// the escape sequences of colors and live displays render in conhost too (6.5, 9.9). A console
+/// whose VT processing is on already (Windows Terminal, another v2 on it: `v2 a.v2 | v2 b.v2`) is
+/// left as it is and not recorded.
+#[cfg(windows)]
+fn console_vt_on() {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    // Both modes first: stdout and stderr are often one console, which the first change alters.
+    // SAFETY: plain calls on the standard handles; each fills its out-parameter.
+    let found: Vec<(u32, u32)> = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            let mut mode = 0;
+            (GetConsoleMode(GetStdHandle(kind), &mut mode) != 0 && mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0).then_some((kind, mode))
+        })
+        .collect();
+    let mut changed = Vec::new();
+    for (kind, mode) in found {
+        let set = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        // SAFETY: as above; a Windows without VT processing refuses the flag, which changes nothing.
+        if unsafe { SetConsoleMode(GetStdHandle(kind), set) } != 0 {
+            changed.push((kind, mode, set));
+        }
+    }
+    let _ = CONSOLE_MODES.set(changed);
+}
+
+/// Windows, at every exit (the end of the run, an interrupt, a closed pipe): a console v2 turned VT
+/// processing on for gets back the mode it had, unless its mode has changed since (6.5).
+#[cfg(windows)]
+pub fn restore_console() {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode};
+    for &(kind, mode, set) in CONSOLE_MODES.get().into_iter().flatten() {
+        // SAFETY: plain calls on the standard handles; GetConsoleMode fills its out-parameter.
+        unsafe {
+            let h = GetStdHandle(kind);
+            let mut now = 0;
+            if GetConsoleMode(h, &mut now) != 0 && now == set {
+                SetConsoleMode(h, mode);
+            }
+        }
+    }
 }
 
 /// Unix: end by the signal that came, as a program without a handler does, so the shell sees a
@@ -163,8 +362,10 @@ pub fn remove_run_dir(dir: &std::path::Path) {
 }
 
 /// `_exit` on Unix (no atexit handlers, no C stdio flushing); on Windows Rust's exit is
-/// `ExitProcess`.
+/// `ExitProcess`, after the consoles get their modes back.
 fn hard_exit(code: i32) -> ! {
+    #[cfg(windows)]
+    restore_console();
     #[cfg(unix)]
     // SAFETY: `_exit` ends the process; nothing here relies on cleanup.
     unsafe {
@@ -455,6 +656,10 @@ impl Watchdog {
     /// would end the run, so the OS default stays (6.5).
     pub fn start() -> Watchdog {
         default_sigchld();
+        #[cfg(unix)]
+        remember_terminal();
+        #[cfg(windows)]
+        console_vt_on();
         if ensure_thread() {
             install_interrupt_handler();
         }

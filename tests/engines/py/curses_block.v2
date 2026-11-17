@@ -1,0 +1,14 @@
+// requires: py
+// platform: unix
+// curses can't run in a block, which has no terminal of its own: curses.wrapper's fileno() says
+// so, not subprocess's stdout= advice (INTERNALS 9.9; round 22, L6).
+try {
+    @py {
+        import curses
+        def main(stdscr):
+            stdscr.addstr(0, 0, "hello from curses")
+        curses.wrapper(main)
+    }
+} catch (e) {
+    print(e.type, "|", e.foreign_type, "|", e.message)
+}
