@@ -527,12 +527,13 @@ fn lossy_hint(path: &str) -> Option<String> {
 }
 
 /// A file that isn't there under its name, but is in another Unicode form (`daten_ü.csv` copied
-/// from a Mac, its `ü` a `u` plus an accent): `module::unicode_twin`'s hint (5.10).
+/// from a Mac, its `ü` a `u` plus an accent), or a folder on its way that is: `module::unicode_twin`'s
+/// hint (5.10), before the `make_dir` one, which would make a second folder that looks the same.
 fn unicode_twin_hint(path: &str, e: &std::io::Error) -> Option<String> {
     let p = std::path::Path::new(path);
     let name = p.file_name()?.to_str().filter(|_| e.kind() == std::io::ErrorKind::NotFound)?;
     let folder = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    super::module::unicode_twin(folder, name).map(|h| shown_path(&h))
+    super::module::unicode_twin(folder, name).or_else(|| super::module::folder_twin(p)).map(|h| shown_path(&h))
 }
 
 /// Windows: `/c/Users/me/x.txt`, Git Bash's spelling of `C:/Users/me/x.txt` (one letter after

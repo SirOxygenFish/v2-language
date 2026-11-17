@@ -15,3 +15,8 @@ show(func() => buyut)
 show(func() => yardim)
 // Other letters still count.
 show(func() => buyuk)
+// A key in another Unicode form (decomposed) looks like the one typed, so it isn't suggested
+// (round 20's review); typed without the accent, it still is.
+let d = {"cafe\u{301}": 1}
+show(func() => d["caf\u{e9}"])
+show(func() => d["cafe"])

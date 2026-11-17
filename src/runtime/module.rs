@@ -369,13 +369,28 @@ pub fn unicode_twin(folder: &Path, name: &str) -> Option<String> {
     })
 }
 
+/// After a lookup of `path` failed because a folder on its way isn't there: `unicode_twin`'s hint
+/// for the first folder that is missing (`größe/x.v2` when the folder is a Mac's `größe`), as the
+/// CLI, an `ImportError` and a file builtin's `IOError` say it (19.1, 6.4, 5.10).
+pub fn folder_twin(path: &Path) -> Option<String> {
+    let mut missing = path.parent().filter(|p| !p.as_os_str().is_empty() && !p.is_dir())?;
+    while let Some(parent) = missing.parent().filter(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
+        missing = parent;
+    }
+    let folder = missing.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    unicode_twin(folder, missing.file_name()?.to_str()?)
+}
+
 /// A relative `import` of a missing `.v2` file (6.4): ` — did you mean './Util.v2'?` (the path as
 /// written with the name found) for a `.v2` file of its folder within 5.9's did-you-mean
-/// distance, the names compared without `.v2`; a case-sensitive file system's case is named.
-/// Else the hint for a name in another Unicode form (`unicode_twin`).
+/// distance, the names compared without `.v2`, or one whose name differs only in its `.v2`'s
+/// case; a case-sensitive file system's case is named. Before those, the hint for a name in
+/// another Unicode form (`unicode_twin`): PATH's, PATH`.v2`'s when PATH doesn't end in `.v2`, or
+/// a missing folder's on the way (`folder_twin`).
 fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
     let (Some(folder), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str())) else { return (String::new(), None) };
-    if let Some(twin) = unicode_twin(folder, name) {
+    let twin = unicode_twin(folder, name).or_else(|| if spec.ends_with(".v2") { None } else { unicode_twin(folder, &format!("{name}.v2")) });
+    if let Some(twin) = twin.or_else(|| folder_twin(target)) {
         return (String::new(), Some(twin));
     }
     let stem = |s: &str| s.len().checked_sub(3).filter(|&i| s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".v2")).map(|i| s[..i].to_string());
@@ -388,8 +403,14 @@ fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|n| stem(&n).map(|s| (s, n)))
         .collect();
-    let Some(close) = crate::runtime::error::did_you_mean(&want, stems.iter().map(|(s, _)| s.as_str())) else { return (String::new(), None) };
-    let found = stems.iter().find(|(s, _)| s == close).map_or(close, |(_, n)| n.as_str());
+    // `./lib/Util.V2` for Util.v2: the same stem, which did-you-mean leaves out as the name itself.
+    let same = stems.iter().find(|(s, n)| *s == want && n != name).map(|(_, n)| n.as_str());
+    let Some(found) = same.or_else(|| {
+        let close = crate::runtime::error::did_you_mean(&want, stems.iter().map(|(s, _)| s.as_str()))?;
+        Some(stems.iter().find(|(s, _)| s == close).map_or(close, |(_, n)| n.as_str()))
+    }) else {
+        return (String::new(), None);
+    };
     let written = match spec.rfind(['/', '\\']) {
         Some(i) => format!("{}{found}", &spec[..=i]),
         None => found.to_string(),
