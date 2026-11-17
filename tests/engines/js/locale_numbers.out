@@ -14,3 +14,27 @@ float() reads the digits 0 to 9 only: for other digits, convert in a block, as i
 1234567.5
 int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x.replace(",", "")) }
 1234567
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+ValueError could not convert string to float: '०,१२३'
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+ValueError could not convert string to float: '০,১২৩'
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+ValueError could not convert string to float: '໐,໑໒໓'
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+ValueError could not convert string to float: '០,១២៣'
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+ValueError could not convert string to float: '१२३४,५६७'
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+ValueError could not convert string to float: '১২৩৪,৫৬৭'
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+ValueError invalid literal for int() with base 10: '१.२३४'
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+ValueError invalid literal for int() with base 10: '໑.໒໓໔'
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+ValueError invalid literal for int() with base 10: '១.២៣៤'
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+12.5
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+0.123
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace(",", "")) }
+-1234.5
