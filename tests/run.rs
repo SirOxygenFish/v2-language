@@ -5479,6 +5479,26 @@ fn control_characters_in_file_names_are_shown_escaped() {
 }
 
 #[test]
+fn bidi_characters_in_file_names_are_shown_escaped() {
+    // 2.1, 2.4, DOCS 3.9 (round 20): a bidi override in a file's name (`rapor\u{202e}v2.exe`, which
+    // a terminal would show reversed) prints as \u{202e} in a diagnostic's header and source line,
+    // the CLI's listing and did-you-mean, and e.file. Windows names can hold it too.
+    let home = TempHome::new();
+    let name = "rapor\u{202e}lmth.v2";
+    std::fs::write(home.0.join(name), "import \"./m\u{2066}x.v2\" as m\nlet x = nope // \u{202e} note\n").unwrap();
+    std::fs::write(home.0.join("m\u{2066}x.v2"), "try { throw \"boom\" } catch (e) { print(e.file) }\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &[name], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "m\\u{2066}x.v2\n"), "{stderr:?}");
+    assert!(stderr.starts_with("rapor\\u{202e}lmth.v2:2:9: NameError: 'nope' is not declared\n    let x = nope // \\u{202e} note\n            ^\n"), "{stderr:?}");
+    let (code, _, listing) = run_in_home(&home.0, &["rapor\u{202e}lmtx.v2"], &[]);
+    assert_eq!(code, Some(2), "{listing:?}");
+    assert!(listing.contains("\ndid you mean 'rapor\\u{202e}lmth.v2'?\n"), "{listing:?}");
+    for text in [&stdout, &stderr, &listing] {
+        assert!(!text.contains(['\u{202e}', '\u{2066}']), "{text:?}");
+    }
+}
+
+#[test]
 #[cfg_attr(not(debug_assertions), ignore = "the V2_TEST_MAX_READ cap exists in debug builds only")]
 fn read_file_and_exec_stop_past_what_a_str_holds() {
     // 5.10: past 1 GiB, the most text `*` makes (here the debug builds' V2_TEST_MAX_READ,

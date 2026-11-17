@@ -67,6 +67,8 @@ pub const BUILTIN_TAGS: &[&str] = &["py", "js", "ts", "c", "cpp", "rust"];
 const SECTIONS: &[&str] = &["engines", "python"];
 const ENGINE_KEYS: &[&str] = &["command", "flags", "startup_timeout", "call_timeout"];
 const PYTHON_KEYS: &[&str] = &["venv"];
+/// The names `[engines.…]` takes for the built-in engines a did-you-mean offers (18.2).
+const ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs"];
 
 /// The variable `~` is read from (18.1).
 const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -486,6 +488,8 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
             message.push_str(&format!("\n  hint: a section's name goes on a line of its own, its keys on the lines below it:\n    [{}]\n    {}", section.trim(), rest.trim()));
         } else if (message.contains("escape") || message.contains("unicode")) && line_text.is_some_and(|l| l.contains('\\')) {
             message.push_str("\n  hint: in \"…\", a backslash starts an escape: write Windows paths with / or in single quotes, as in venv = 'C:\\proj\\.venv'");
+        } else if let Some(hint) = e.span().and_then(|span| bare_key_hint(text, span.start, &message)) {
+            message.push_str(&format!("\n  hint: {hint}"));
         } else if let Some((key, value)) = line_text.and_then(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())) {
             // `venv = .venv`: text needs quotes (single ones keep a Windows path's backslashes);
             // a `#` comment after it stays outside them.
@@ -546,6 +550,76 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
     Ok(())
 }
 
+/// `[pythın]`, `vënv = …`: TOML's "invalid unquoted key" at byte `at`, a character a bare key
+/// can't hold (18.5). The hint names it, and the section, engine or key the key read whole is
+/// close to, compared as an ASCII keyboard writes it (`folded_key`).
+fn bare_key_hint(text: &str, at: usize, message: &str) -> Option<String> {
+    let c = text.get(at..)?.chars().next()?;
+    if c.is_ascii() || !message.contains("unquoted key") {
+        return None;
+    }
+    let hint = format!("'{c}' (U+{:04X}) can't be in a bare key: TOML takes A-Z, a-z, 0-9, - and _ there", c as u32);
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let stop = |c: char| c.is_whitespace() || "[].=\"'#,".contains(c);
+    let lo = text[start..at].char_indices().rev().find(|&(_, c)| stop(c)).map_or(start, |(i, c)| start + i + c.len_utf8());
+    let hi = text[at..].find(stop).map_or(text.len(), |i| at + i);
+    let head: String = text[start..lo].split_whitespace().collect();
+    // In a `[…]` line, a section or an engine; on a key's line, a key of the section above it.
+    let section = || {
+        let line = text[..start].lines().rev().map(str::trim).find(|l| l.starts_with('['))?;
+        Some(line.trim_start_matches('[').split(']').next()?.split_whitespace().collect::<String>())
+    };
+    let (known, near): (&[&str], fn(&str) -> String) = match head.as_str() {
+        "[" => (SECTIONS, |s| format!("[{s}]")),
+        "[engines." => (ENGINE_NAMES, |s| format!("[engines.{s}]")),
+        "" => match section() {
+            Some(s) if s == "python" => (PYTHON_KEYS, |s| format!("'{s}'")),
+            Some(s) if s.starts_with("engines.") => (ENGINE_KEYS, |s| format!("'{s}'")),
+            _ => return Some(hint),
+        },
+        _ => return Some(hint),
+    };
+    let folded = folded_key(&text[lo..hi]);
+    match known.iter().copied().find(|k| *k == folded).or_else(|| did_you_mean(&folded, known.iter().copied())) {
+        Some(k) => Some(format!("{hint} — did you mean {}?", near(k))),
+        None => Some(hint),
+    }
+}
+
+/// A key as an ASCII keyboard writes it (18.5): lower case, ı and İ as i, ß as ss, the Latin
+/// letters of Latin-1 and Latin Extended-A without their diacritics (ö as o, ş as s, ł as l),
+/// combining marks dropped.
+fn folded_key(key: &str) -> String {
+    // Each character's base letter, 16 to a row; `*` keeps the character.
+    const LATIN_1: &[u8] = concat!("aaaaaaaceeeeiiii", "dnooooo*ouuuuy*s", "aaaaaaaceeeeiiii", "dnooooo*ouuuuy*y").as_bytes();
+    const EXTENDED_A: &[u8] = concat!(
+        "aaaaaaccccccccdd", // U+0100
+        "ddeeeeeeeeeegggg",
+        "gggghhhhiiiiiiii",
+        "iiiijjkkklllllll", // U+0130: İ, ı
+        "lllnnnnnnnnnoooo",
+        "oooorrrrrrssssss",
+        "ssttttttuuuuuuuu",
+        "uuuuwwyyyzzzzzzs",
+    )
+    .as_bytes();
+    let mut out = String::new();
+    for c in key.chars() {
+        let base = match c as u32 {
+            n @ 0x00C0..=0x00FF => Some(LATIN_1[(n - 0xC0) as usize]),
+            n @ 0x0100..=0x017F => Some(EXTENDED_A[(n - 0x100) as usize]),
+            0x0300..=0x036F => continue,
+            _ => None,
+        };
+        match base.filter(|b| *b != b'*') {
+            Some(b) if c == 'ß' => out.extend([b as char, b as char]),
+            Some(b) => out.push(b as char),
+            None => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
 /// `[engines.<tag>]` tables: names canonicalized, built-in keys checked and typed, custom tables
 /// kept as written (18.2).
 fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Overrides) -> Result<(), ConfigError> {
@@ -578,8 +652,7 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
         // a `kind`, which only a custom engine has (`[engines.r]`, DOCS 13).
         let custom = t.contains_key("kind");
         if !BUILTIN_TAGS.contains(&tag.as_str()) && crate::engines::registry::later_language(&tag).is_none() && !custom {
-            let names = ["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs"];
-            if let Some(near) = crate::runtime::error::did_you_mean(name, names) {
+            if let Some(near) = crate::runtime::error::did_you_mean(name, ENGINE_NAMES.iter().copied()) {
                 return Err(f.error(format!("[engines.{name}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")));
             }
         }
@@ -650,6 +723,27 @@ mod tests {
         // 18.3: `venv = ""` would name the project folder itself.
         let e = project("emptyvenv", "[python]\nvenv = \"\"\n").unwrap_err().0;
         assert!(e.ends_with("[python] venv is empty: name the virtual environment's folder, as in venv = \".venv\""), "{e}");
+    }
+
+    #[test]
+    fn a_non_ascii_bare_key_is_named_with_the_key_meant() {
+        // 18.5 (round 20): TOML's "expected letters" means ASCII ones; a Turkish or German
+        // keyboard's letter is named, and the section, engine or key it was close to suggested.
+        let rule = "can't be in a bare key: TOML takes A-Z, a-z, 0-9, - and _ there";
+        let cases = [
+            ("[pyth\u{131}n]\nvenv = \".venv\"\n", "1:6", format!("'\u{131}' (U+0131) {rule} — did you mean [python]?")),
+            ("[PYTH\u{130}N]\n", "1:6", format!("'\u{130}' (U+0130) {rule} — did you mean [python]?")),
+            ("[python]\nv\u{eb}nv = \".venv\"\n", "2:2", format!("'\u{eb}' (U+00EB) {rule} — did you mean 'venv'?")),
+            ("[engines.p\u{131}]\ncommand = [\"python3\"]\n", "1:11", format!("'\u{131}' (U+0131) {rule} — did you mean [engines.py]?")),
+            ("[engines.js]\nst\u{e4}rt\u{fc}p_timeout = 5\n", "2:3", format!("'\u{e4}' (U+00E4) {rule} — did you mean 'startup_timeout'?")),
+            ("[gr\u{f6}\u{df}e]\n", "1:4", format!("'\u{f6}' (U+00F6) {rule}")),
+            ("\u{e7}ay = 1\n", "1:1", format!("'\u{e7}' (U+00E7) {rule}")),
+        ];
+        for (toml_text, at, hint) in cases {
+            let e = project("bareascii", toml_text).unwrap_err().0;
+            assert!(e.contains(&format!("v2.toml:{at}: config error: ")) && e.ends_with(&format!("\n  hint: {hint}")), "{toml_text:?}: {e}");
+        }
+        assert_eq!(folded_key("\u{130}stanbul-\u{15f}\u{131}\u{11f}-\u{142}\u{f8}d\u{17a}-stra\u{df}e-e\u{301}"), "istanbul-sig-lodz-strasse-e");
     }
 
     #[test]
