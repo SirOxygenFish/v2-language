@@ -261,15 +261,25 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     not_ready.push(id);
                     continue;
                 }
-                rows.push([id.clone(), "ok".into(), e.shown(), version, e.origin.label()]);
+                // A configured `conda run` that answers --version but can't run a worker (8.4):
+                // broken, as no block can run.
+                let conda = crate::engines::session::conda_run_note(&e);
+                rows.push([id.clone(), if conda.is_some() { "broken" } else { "ok" }.into(), e.shown(), version, e.origin.label()]);
                 skipped(&e.skipped, &mut notes);
                 notes.extend(activated_venv_note(&id, &e.skipped).filter(|_| e.origin == crate::engines::resolve::Origin::Path));
                 for (name, value) in vars {
                     notes.push(format!("{id}: {name} is set ({value}), which {} reads as it starts", if id == "py" { "Python" } else { "Node.js" }));
                 }
-                // A configured `conda run` that answers --version but can't run a worker (8.4).
-                notes.extend(crate::engines::session::conda_run_note(&e).map(|note| format!("{id}: {note}")));
-                ready.push(id);
+                // Windows: wsl.exe, which runs a Linux interpreter (7.6).
+                notes.extend(crate::engines::resolve::linux_interpreter_note(&id, &e.argv).filter(|_| spec.session_of.is_none()).map(|note| format!("{id}: {note}")));
+                match conda {
+                    Some(note) => {
+                        notes.push(format!("{id}: {note}"));
+                        no_start.insert(id.clone());
+                        not_ready.push(id);
+                    }
+                    None => ready.push(id),
+                }
             }
             Err(nf) => {
                 // ts is held to js's minimum (7.6).
