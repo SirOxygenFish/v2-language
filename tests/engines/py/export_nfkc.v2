@@ -53,6 +53,75 @@ try {
 } catch (e) {
     print(e.message.split(", which ")[1])
 }
+// Any mention of the name Python reads counts, so each way Python defines one gets that wording
+// (round 20, third pass): a tuple assignment, import-as, for, with, under an if. A longer name
+// that holds it (`files`) is no mention.
+try {
+    @py tup {
+        ﬁle, n = 1, 2
+        @export { ﬁle }
+    }
+} catch (e) {
+    print(e.message)
+}
+try {
+    @py imp {
+        from os import sep as ﬁle
+        @export { ﬁle }
+    }
+} catch (e) {
+    print(e.message)
+}
+try {
+    @py loop {
+        for ﬁle in [1]:
+            pass
+        @export { ﬁle }
+    }
+} catch (e) {
+    print(e.message)
+}
+try {
+    @py ctx {
+        import contextlib
+        with contextlib.nullcontext(1) as ﬁle:
+            pass
+        @export { ﬁle }
+    }
+} catch (e) {
+    print(e.message)
+}
+try {
+    @py cond {
+        if True:
+            ｈｅｌｌｏ = 1
+        @export { ｈｅｌｌｏ }
+    }
+} catch (e) {
+    print(e.message)
+}
+try {
+    @py none {
+        ﬁles = [1]
+        @export { ﬁle }
+    }
+} catch (e) {
+    print(e.message)
+}
+// Followed, those work.
+@py loop2 {
+    for ｃｏｕｎｔ in [7]:
+        pass
+    @export { count }
+}
+@import { count as ｃｏｕｎｔ } from loop2
+print(ｃｏｕｎｔ)
+@py imp2 {
+    from string import digits as ｄｉｇｉｔｓ
+    @export { digits }
+}
+@import { digits as ｄｉｇｉｔｓ } from imp2
+print(ｄｉｇｉｔｓ)
 // An export one accent away gets its did-you-mean (5.9).
 @py r {
     def büyüt(s):
