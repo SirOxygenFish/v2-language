@@ -1,0 +1,18 @@
+// requires: py
+// platform: windows
+// Round 22 review (4): sys.stdlib_module_names lists every system's modules, so one only
+// Linux's and macOS's Python has isn't one this Python lacks (INTERNALS 13.5).
+try {
+    @import py.fcntl as fcntl
+    print(fcntl)
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print(e.hint)
+}
+try {
+    @import { tcgetattr } from py.termios
+    print(tcgetattr)
+} catch (e) {
+    print(e.type + ": " + e.message)
+    print(e.hint)
+}

@@ -1,7 +1,6 @@
 // requires: py
-// A module of Python's standard library that this Python lacks (tkinter in python.org's
-// embeddable package, or in a minimal Python): pip can't add it, so the hint says so instead of
-// the pip line (INTERNALS 13.5). Here a finder makes this Python lack it.
+// A module of Python's standard library that this Python doesn't have gets a hint other than the
+// pip line, which can't add it (INTERNALS 13.5). Here a finder makes this Python lack tkinter.
 @py {
     import sys, importlib.abc
 
@@ -14,18 +13,40 @@
     sys.modules.pop("tkinter", None)
     sys.meta_path.insert(0, Without())
 }
+// The hint the adapter gives for this system (below for each), on the module and a submodule.
+let mine = @py { __import__("sys").modules["__main__"].stdlib_hint("tkinter") }
 try {
     @import { Tk } from py.tkinter
     print(Tk)
 } catch (e) {
     print(e.type + ": " + e.message)
-    print(e.hint)
+    print(e.hint == mine)
 }
-// A submodule of it: the same, for the part Python couldn't find.
 try {
     @import { Button } from py.tkinter.ttk
     print(Button)
 } catch (e) {
     print(e.type + ": " + e.message)
-    print(e.hint)
+    print(e.hint == mine)
+}
+// Round 22 review (4, 5): what each system's Python says. sys.stdlib_module_names is the same on
+// every system, so a module only another system's Python has (fcntl on Windows, winreg elsewhere)
+// is named as such; on Linux, tkinter is a package of its own (python3-tk on Debian and Ubuntu,
+// with sudo unless root); elsewhere, as in python.org's embeddable package, a full Python has it.
+@py {
+    import os, sys
+    M = sys.modules["__main__"]
+    platform, geteuid = sys.platform, getattr(os, "geteuid", None)
+    try:
+        for system, uid in [("linux", 0), ("linux", 1000), ("darwin", 501), ("win32", None)]:
+            sys.platform = system
+            os.geteuid = lambda: uid
+            for name in ["tkinter", "readline", "fcntl", "winreg"]:
+                print(system, uid, M.package_hint(name, []))
+    finally:
+        sys.platform = platform
+        if geteuid is None:
+            del os.geteuid
+        else:
+            os.geteuid = geteuid
 }

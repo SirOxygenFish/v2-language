@@ -176,12 +176,12 @@ fn activated_venv_note(id: &str, skipped: &[(PathBuf, String)]) -> Option<String
     crate::engines::resolve::activated_venv_problem(Path::new(&venv), skipped, &crate::engines::resolve::Lookup::from_env()).map(|problem| format!("py: {problem}"))
 }
 
-/// Python's embeddable package (7.6), which reads no startup variable: what it does instead, for
-/// doctor's notes (19.2).
+/// A Python with a `pythonXY._pth` (Python's embeddable package, 7.6), which reads no startup
+/// variable: what decides its `sys.path` instead, and what it lacks, for doctor's notes (19.2).
 fn embeddable_note(e: &crate::engines::resolve::ResolvedEngine) -> Option<String> {
     let program = Path::new(e.argv.first()?);
-    let pth = crate::engines::resolve::embeddable(program, e.version).filter(|_| &*e.spec.id == "py")?;
-    Some(format!("py: this is Python's embeddable package: its {pth} decides sys.path (PYTHONPATH is ignored), and it has no pip or venv"))
+    let p = crate::engines::resolve::pth_python(program, e.version).filter(|_| &*e.spec.id == "py")?;
+    Some(format!("py: {}", crate::engines::resolve::pth_note(&p)))
 }
 
 fn plural(n: usize, word: &str) -> String {

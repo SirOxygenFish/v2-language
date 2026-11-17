@@ -1,0 +1,4 @@
+ImportError: No module named 'winreg'
+'winreg' is only in Python on Windows
+ImportError: No module named 'msvcrt'
+'msvcrt' is only in Python on Windows

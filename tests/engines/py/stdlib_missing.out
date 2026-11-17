@@ -1,4 +1,20 @@
 ImportError: No module named 'tkinter'
-'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+true
 ImportError: No module named 'tkinter'
-'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+true
+linux 0 'tkinter' is part of Python's standard library, but this Python was installed without it: on Debian and Ubuntu, apt update && apt install python3-tk
+linux 0 'readline' is part of Python's standard library, but this Python was installed without it; pip can't add it
+linux 0 'fcntl' is part of Python's standard library, but this Python was installed without it; pip can't add it
+linux 0 'winreg' is only in Python on Windows
+linux 1000 'tkinter' is part of Python's standard library, but this Python was installed without it: on Debian and Ubuntu, sudo apt install python3-tk
+linux 1000 'readline' is part of Python's standard library, but this Python was installed without it; pip can't add it
+linux 1000 'fcntl' is part of Python's standard library, but this Python was installed without it; pip can't add it
+linux 1000 'winreg' is only in Python on Windows
+darwin 501 'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+darwin 501 'readline' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+darwin 501 'fcntl' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+darwin 501 'winreg' is only in Python on Windows
+win32 None 'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
+win32 None 'readline' is only in Python on Linux and macOS; pyreadline3 is a substitute
+win32 None 'fcntl' is only in Python on Linux and macOS
+win32 None 'winreg' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python
