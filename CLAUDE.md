@@ -35,15 +35,18 @@ it is loaded automatically into every session and every subagent.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
   `C:\tmp` and `C:\var` are round 19's test leftovers (the safety check refused their removal; the
   owner was asked to delete them): leave them; tmp_on_windows_points_to_temp skips while there.
-  Rounds 1 to 20 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds: round 21 next. Round 20's reviews
+  Rounds 1 to 21 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds (again on 2026-11-17): round 22 next.
+  With workflows off, a round runs as Agent calls (worktree isolation, run_in_background), each
+  implementer reviewed by another agent and sent the review by SendMessage. Round 20's reviews
   needed four passes after the first fixes; stop a chain once its issues are nits. Rounds run as workflows:
   two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
   implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
   the reviews' issues, then mine on the second reviews'. A worktree may start from main, not
-  v2-reboot: give agents the base commit and have them check it. (Round 20's prompts:
-  scratchpad/newcomer/prompt-*-r20.md, made by scratchpad/setup_round20.py (distro v2new24t); round
-  21 takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
+  v2-reboot: give agents the base commit and have them check it. (Round 21's prompts:
+  scratchpad/newcomer/prompt-*-r21.md, made by scratchpad/setup_round21.py (distros v2new24u, and
+  v2win21 for the Windows agent's WSL side; WSL-share tests: V2_TEST_WSL_DISTRO=v2win21, set from
+  PowerShell or Python, never Git Bash); round 22 takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
   cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
