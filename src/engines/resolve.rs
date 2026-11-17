@@ -537,7 +537,7 @@ pub fn source_label(from: &ConfigSource) -> String {
 /// cwd as any relative path (18.4): what to do (7.6). After `~/`, the variable set with the path
 /// written out, as a shell expands it in double quotes: `V2_ENGINE_PY="$HOME/bin/python3"`, on
 /// Windows PowerShell's `$env:V2_ENGINE_PY = "$env:USERPROFILE\py\python.exe"`; a bare `~` (or
-/// `~/`), the home folder and no program, gets no example.
+/// `~/`, `~\`), the home folder and no program, gets no example.
 fn env_tilde(var: &str, name: &str) -> Option<String> {
     let p = Path::new(name);
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2281,7 +2281,7 @@ mod tests {
         // A ~ that quotes kept, joined to the cwd as config does (18.4, round 20). A bare ~ is the
         // home folder, no program: the hint gives no example (the second review of round 20).
         let cwd = std::env::current_dir().unwrap();
-        for (value, path) in [("~/tools 1/bin/python3", "tools 1/bin/python3"), ("~", ""), ("~/", "")] {
+        for (value, path) in [("~/tools 1/bin/python3", "tools 1/bin/python3"), ("~", ""), ("~/", ""), ("~\\", "")] {
             let joined = if value == "~" { value.into() } else { cwd.join(value).to_string_lossy().into_owned() };
             let cfg = with_command("py", &[&joined], ConfigSource::Env("V2_ENGINE_PY".into()));
             let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
