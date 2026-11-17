@@ -554,9 +554,10 @@ pub fn quoted(s: &str, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{200C}' | '\u{200D}' if joins(i) => out.push(c),
             // Invisible characters, and spaces other than the plain one (a no-break space from a
-            // web page or Excel looks like one and isn't equal to it).
+            // web page or Excel looks like one and isn't equal to it); WSL's stand-ins for what a
+            // Windows name can't hold (U+F03A for the `:` of a Linux name, `span::is_stand_in`).
             c if c.is_control()
-                || matches!(c as u32, 0x00A0 | 0x00AD | 0x1680 | 0x2000..=0x200F | 0x2028..=0x202F | 0x205F..=0x2064 | 0x3000 | 0xFEFF) =>
+                || matches!(c as u32, 0x00A0 | 0x00AD | 0x1680 | 0x2000..=0x200F | 0x2028..=0x202F | 0x205F..=0x2064 | 0x3000 | 0xFEFF | 0xF000..=0xF0FF) =>
             {
                 out.push_str(&format!("\\u{{{:x}}}", c as u32))
             }

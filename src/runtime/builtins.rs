@@ -488,7 +488,11 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("/dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)".into());
     } else if let Some(h) = msys_hint(path).filter(|_| e.kind() == std::io::ErrorKind::NotFound) {
         let _ = err.hint.set(h.into());
+    } else if let Some(h) = linux_path_hint(path).filter(|_| e.kind() == std::io::ErrorKind::NotFound) {
+        let _ = err.hint.set(h.into());
     } else if let Some(h) = unicode_twin_hint(path, e) {
+        let _ = err.hint.set(h.into());
+    } else if let Some(h) = stand_in_hint(verb, path) {
         let _ = err.hint.set(h.into());
     } else if bad_windows_name(path) {
         let _ = err.hint.set(format!("{BAD_NAME}: choose another name").into());
@@ -536,21 +540,42 @@ fn unicode_twin_hint(path: &str, e: &std::io::Error) -> Option<String> {
     super::module::unicode_twin(folder, name).or_else(|| super::module::folder_twin(p)).map(|h| shown_path(&h))
 }
 
-/// Windows: `/c/Users/me/x.txt`, Git Bash's spelling of `C:/Users/me/x.txt` (one letter after
-/// the first `/`, a drive that exists, and no such folder on this drive: `\c`): what to write
-/// instead (5.10).
+/// Windows: `/c/Users/me/x.txt`, Git Bash's spelling of `C:/Users/me/x.txt`, or `/mnt/c/…`, WSL's
+/// (`unix_drive`): what to write instead (5.10).
 fn msys_hint(path: &str) -> Option<String> {
-    let b = path.as_bytes();
-    if !cfg!(windows) || b.first() != Some(&b'/') || !b.get(1).is_some_and(u8::is_ascii_alphabetic) || !matches!(b.get(2), None | Some(b'/')) {
-        return None;
-    }
-    let drive = format!("{}:", (b[1] as char).to_ascii_uppercase());
-    if !std::path::Path::new(&format!("{drive}/")).is_dir() || std::path::Path::new(&path[..2]).exists() {
-        return None;
-    }
+    let (written, windows, whose) = unix_drive(path)?;
     let mut write = String::new();
-    super::value::quoted(&format!("{drive}{}", if path.len() > 2 { &path[2..] } else { "/" }), &mut write);
-    Some(format!("on Windows, /{}/… is Git Bash's spelling of {drive}/…: write {write}", (b[1] as char).to_ascii_lowercase()))
+    super::value::quoted(&windows, &mut write);
+    Some(format!("on Windows, {}/… is {whose} spelling of {}/…: write {write}", written.to_ascii_lowercase(), &windows[..2]))
+}
+
+/// Windows: a path in Git Bash's spelling, `/c/Users/me/x.txt` (one letter after the first `/`),
+/// or WSL's, `/mnt/c/Users/me/x.txt`, of `C:/Users/me/x.txt`, where that drive exists and this
+/// drive has no such folder (`\c`, `\mnt\c`): the part that names the drive as written, the
+/// Windows spelling, and whose spelling it is (5.10, 19.1).
+pub(crate) fn unix_drive(path: &str) -> Option<(&str, String, &'static str)> {
+    let (at, whose) = if path.starts_with("/mnt/") { (5, "WSL's") } else { (1, "Git Bash's") };
+    let b = path.as_bytes();
+    if !cfg!(windows) || b.first() != Some(&b'/') || !b.get(at).is_some_and(u8::is_ascii_alphabetic) || !matches!(b.get(at + 1), None | Some(b'/')) {
+        return None;
+    }
+    let drive = format!("{}:", (b[at] as char).to_ascii_uppercase());
+    let written = &path[..at + 1];
+    if !std::path::Path::new(&format!("{drive}/")).is_dir() || std::path::Path::new(written).exists() {
+        return None;
+    }
+    Some((written, format!("{drive}{}", if path.len() > at + 1 { &path[at + 1..] } else { "/" }), whose))
+}
+
+/// Windows: a Linux path that isn't there, whose first folder is one of Linux's own (`/root`,
+/// `/home`, `/usr`, `/etc`, `/opt`, `/srv`, `/var`) and not on this drive: where WSL's files are
+/// from Windows (5.10, 19.1).
+pub(crate) fn linux_path_hint(path: &str) -> Option<String> {
+    let first = path.strip_prefix('/')?.split('/').next()?;
+    if !cfg!(windows) || !matches!(first, "root" | "home" | "usr" | "etc" | "opt" | "srv" | "var") || std::path::Path::new(&format!("/{first}")).exists() {
+        return None;
+    }
+    Some(r"a Linux path: from Windows, WSL's files are \\wsl.localhost\<distro>\…".to_string())
 }
 
 /// Windows: a part of `path` that Windows refuses as a file name: a device (`CON`, `PRN`, `AUX`,
@@ -622,30 +647,15 @@ fn windows_name(verb: &str, path: &str) -> Exec<()> {
     if !cfg!(windows) || path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
         return Ok(());
     }
-    let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
-    let trailing = after_drive.split(['/', '\\']).find(|part| !matches!(*part, "." | "..") && (part.ends_with('.') || part.ends_with(' ')));
-    let why = match (trailing, device_name(path)) {
-        (Some(part), _) => {
-            let kept = part.trim_end_matches(['.', ' ']);
-            let would = if kept.is_empty() { String::new() } else { format!(" ('{}' would be '{}')", shown_path(part), shown_path(kept)) };
-            format!("a Windows file name can't end in a dot or a space{would}")
-        }
-        (None, Some(device)) => format!("{} is the name of a device on Windows", shown_path(&device)),
+    // A device: what must be there for `\\?\` to reach it is its whole path.
+    let (why, there) = match (dotted_name(path), device_name(path)) {
+        (Some(dotted), _) => dotted,
+        (None, Some(device)) => (format!("{} is the name of a device on Windows", shown_path(&device)), verbatim(path).filter(|v| std::fs::symlink_metadata(v).is_ok())),
         (None, None) => return Ok(()),
     };
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
-    let builtin = match verb {
-        "read" => "read_file",
-        "write" => "write_file",
-        "check" => "exists",
-        "list" => "list_dir",
-        "create" => "make_dir",
-        _ => "remove_file",
-    };
-    // What must be there for `\\?\` to reach it: the path through its last part that ends in a dot
-    // or a space (the folder `dir.` of a write to `dir./new.txt`), else the device's whole path.
-    let through = if trailing.is_some() { through_last_dotted(path) } else { path };
-    let hint = match verbatim(path).filter(|_| verbatim(through).is_some_and(|t| std::fs::symlink_metadata(t).is_ok())) {
+    let builtin = builtin_name(verb);
+    let hint = match there {
         Some(v) => {
             let mut q = String::new();
             super::value::quoted(&v, &mut q);
@@ -655,6 +665,49 @@ fn windows_name(verb: &str, path: &str) -> Exec<()> {
     };
     let _ = err.hint.set(hint.into());
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// The file builtin whose messages say `cannot {verb}`.
+fn builtin_name(verb: &str) -> &'static str {
+    match verb {
+        "read" => "read_file",
+        "write" => "write_file",
+        "check" => "exists",
+        "list" => "list_dir",
+        "create" => "make_dir",
+        _ => "remove_file",
+    }
+}
+
+/// Windows: for a path with a part (not `.` or `..`) that ends in a dot or a space, which Windows
+/// drops (`data.txt.` is `data.txt` to it), the reason it is refused, `a Windows file name can't
+/// end in a dot or a space ('data.txt.' would be 'data.txt')`, and the `\\?\` path that reaches it
+/// when one of that name is there (`verbatim`; WSL and Macs make them: the path through its last
+/// part that ends so, `through_last_dotted`, so for `dir./new.txt` the folder `dir.`); for the file
+/// builtins (`windows_name`), an import and FILE (5.10, 6.4, 19.1). A `\\?\` or `\\.\` path is
+/// taken as written.
+pub(crate) fn dotted_name(path: &str) -> Option<(String, Option<String>)> {
+    if !cfg!(windows) || path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
+        return None;
+    }
+    let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
+    let part = after_drive.split(['/', '\\']).find(|part| !matches!(*part, "." | "..") && (part.ends_with('.') || part.ends_with(' ')))?;
+    let kept = part.trim_end_matches(['.', ' ']);
+    let would = if kept.is_empty() { String::new() } else { format!(" ('{}' would be '{}')", shown_path(part), shown_path(kept)) };
+    let there = verbatim(path).filter(|_| verbatim(through_last_dotted(path)).is_some_and(|t| std::fs::symlink_metadata(t).is_ok()));
+    Some((format!("a Windows file name can't end in a dot or a space{would}"), there))
+}
+
+/// Windows: a path that names with `: * ? " < > |` what WSL made from a Linux name with them
+/// (`module::stand_in_twin`: `mod:x.v2`, which Windows shows as `mod\u{f03a}x.v2`): how to reach
+/// it, `WSL made one of that name, which Windows shows with \u{f03a} for ':': reach it as
+/// read_file("…mod\u{f03a}x.v2"), or rename it in WSL` (5.10).
+fn stand_in_hint(verb: &str, path: &str) -> Option<String> {
+    let twin = super::module::stand_in_twin(path)?;
+    let held = super::module::after_root(path)?.chars().find(|c| super::module::HELD.contains(c))?;
+    let mut q = String::new();
+    super::value::quoted(&twin, &mut q);
+    Some(format!("WSL made one of that name, which Windows shows with \\u{{{:x}}} for '{held}': reach it as {}({q}), or rename it in WSL", 0xF000 + held as u32, builtin_name(verb)))
 }
 
 /// `path` up to the end of its last part (not `.` or `..`) that ends in a dot or a space:
@@ -703,12 +756,20 @@ fn verbatim(path: &str) -> Option<String> {
         return None;
     } else {
         let cwd = std::env::current_dir().ok()?.to_str()?.to_string();
-        if cwd.starts_with(r"\\") {
+        if cwd.starts_with(r"\\?\") {
             return None;
         }
+        // The top of the current drive, or of the share (`\\server\share`) the cwd is on.
+        let top = match cwd.strip_prefix(r"\\") {
+            Some(unc) => {
+                let mut it = unc.splitn(3, '\\');
+                format!(r"\\{}\{}", it.next()?, it.next()?)
+            }
+            None => cwd.get(..2)?.to_string(),
+        };
         match given.strip_prefix('\\') {
             // `\x`: at the top of the current drive.
-            Some(rest) => format!(r"{}\{rest}", cwd.get(..2)?),
+            Some(rest) => format!(r"{top}\{rest}"),
             None => format!(r"{}\{given}", cwd.trim_end_matches('\\')),
         }
     };
@@ -923,12 +984,14 @@ fn shell_shorthand(verb: &str, path: &str) -> Exec<()> {
         let name = first.trim_matches(['%', '$', '{', '}']).trim_start_matches("env:");
         format!("getenv(\"{}\") in its place", home_var(name))
     } else {
-        // `notes 12:30.txt` on Windows: a `:` after the drive names a hidden stream of the file
-        // before it, so the write would seem to work and leave that file empty.
-        let after_drive = if path.as_bytes().get(1) == Some(&b':') { &path[2..] } else { path };
-        if cfg!(windows) && !path.starts_with(r"\\") && after_drive.contains(':') {
+        // `notes 12:30.txt` on Windows: a `:` after the drive, or after a share's
+        // `\\server\share` (either slash), names a hidden stream of the file before it, so the
+        // write would seem to work and leave that file empty (WSL's share takes it as a Linux
+        // name's): refused on every path alike.
+        if cfg!(windows) && super::module::after_root(path).is_some_and(|rest| rest.contains(':')) {
             let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': a Windows file name can't have ':' in it", shown_path(path)));
-            let _ = err.hint.set("use another character, as in 12-30 for a time".into());
+            let hint = stand_in_hint(verb, path).unwrap_or_else(|| "use another character, as in 12-30 for a time".into());
+            let _ = err.hint.set(hint.into());
             return Err(Flow::Error(Rc::new(err)));
         }
         return windows_name(verb, path);
@@ -984,6 +1047,24 @@ fn shell_command_hint(name: &str, argv: &[Value]) -> Option<String> {
     let call = if cfg!(windows) { format!("exec([\"cmd\", \"/c\", {}])", rest.join(", ")) } else { format!("exec([\"sh\", \"-c\", {}])", quoted(&words.join(" "))) };
     let also = if lower == "dir" { " (or list_dir(path) for the names in a folder)" } else { "" };
     Some(format!("'{name}' is a command of {shell}, not a program: write {call}{also}"))
+}
+
+/// Windows: a Linux program (`ls`, `grep`, `sed`, `awk`, `sh`) that isn't on PATH: run it in WSL,
+/// `run Linux programs with exec(["wsl.exe", "-e", "ls", "-la"])`, with the arguments as given
+/// (`-e`, not `--`, passes them on as they are) (5.10).
+fn linux_program_hint(name: &str, argv: &[Value]) -> Option<String> {
+    if !cfg!(windows) || !matches!(name, "ls" | "grep" | "sed" | "awk" | "sh") {
+        return None;
+    }
+    let mut call = String::from(r#"exec(["wsl.exe", "-e""#);
+    // exec has checked that every item is a str.
+    for v in argv {
+        if let Value::Str(s) = v {
+            call.push_str(", ");
+            super::value::quoted(s, &mut call);
+        }
+    }
+    Some(format!("run Linux programs with {call}])"))
 }
 
 /// A script that doesn't start by itself (`./build.ps1`, `./tool.py` on Windows; one without
@@ -1688,9 +1769,10 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "make_dir", "path")?;
     shell_shorthand("create", &path)?;
     // Windows: `/c/Users/me/out`, Git Bash's spelling, would make `\c\Users\me\out` on this
-    // drive, where nothing else finds it: refused as the missing folder it is (5.10).
-    if let Some(h) = msys_hint(&path) {
-        let err = ErrorValue::new("IOError", format!("cannot create '{}': there is no folder '{}'", shown_path(&path), &path[..2]));
+    // drive, where nothing else finds it, and WSL's `/mnt/c/…` `\mnt\c\…`: refused as the missing
+    // folder it is (5.10).
+    if let (Some((written, ..)), Some(h)) = (unix_drive(&path), msys_hint(&path)) {
+        let err = ErrorValue::new("IOError", format!("cannot create '{}': there is no folder '{written}'", shown_path(&path)));
         let _ = err.hint.set(h.into());
         return Err(Flow::Error(Rc::new(err)));
     }
@@ -1832,7 +1914,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             // Not there: a batch file's path would go to cmd.exe, which says so as its output.
             if !p.exists() {
                 let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': there is no such file"));
-                if let Some(h) = msys_hint(name) {
+                if let Some(h) = msys_hint(name).or_else(|| linux_path_hint(name)) {
                     let _ = err.hint.set(h.into());
                 }
                 return Err(Flow::Error(Rc::new(err)));
@@ -1868,6 +1950,8 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
                 let mut quoted = String::new();
                 super::value::quoted(name, &mut quoted);
                 let _ = err.hint.set(format!("{name} is in node_modules/.bin, where npm puts a package's programs: run it with npx, as in exec([\"npx\", {quoted}, …])").into());
+            } else if let Some(hint) = linux_program_hint(name, &items) {
+                let _ = err.hint.set(hint.into());
             }
             return Err(Flow::Error(Rc::new(err)));
         }
@@ -2230,6 +2314,49 @@ mod tests {
         assert_eq!(refused("/tmp/work"), Some((makes("/tmp/work", r"\tmp"), temp("/tmp", "getenv(\"TEMP\") + \"/work\""))));
         assert_eq!(refused("/var/tmp/x"), Some((makes("/var/tmp/x", r"\var\tmp"), temp("/var/tmp", "getenv(\"TEMP\") + \"/x\""))));
         assert_eq!(refused("/tmp"), Some((makes("/tmp", r"\tmp"), temp("/tmp", "getenv(\"TEMP\")"))));
+    }
+
+    #[test]
+    fn wsls_and_linuxs_paths_get_their_windows_way() {
+        // INTERNALS 5.10 (round 21): /mnt/c/… is WSL's spelling of C:/…, as /c/… is Git Bash's;
+        // a Linux path whose first folder this drive doesn't have is WSL's; ls not on PATH runs
+        // in WSL. Each only where its folder isn't on the current drive (`\mnt`, `\root`).
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let letter = cwd[..1].to_ascii_lowercase();
+        let here = |p: &str| std::path::Path::new(p).exists();
+        if cfg!(windows) && !here("/mnt") && !here(&format!("/{letter}")) {
+            let upper = letter.to_ascii_uppercase();
+            assert_eq!(unix_drive(&format!("/mnt/{letter}/Users/me/x.txt")), Some((&*format!("/mnt/{letter}"), format!("{upper}:/Users/me/x.txt"), "WSL's")));
+            assert_eq!(unix_drive(&format!("/mnt/{letter}")), Some((&*format!("/mnt/{letter}"), format!("{upper}:/"), "WSL's")));
+            assert_eq!(unix_drive(&format!("/{letter}/x")), Some((&*format!("/{letter}"), format!("{upper}:/x"), "Git Bash's")));
+            let hint = msys_hint(&format!("/mnt/{upper}/x/y.txt"));
+            assert_eq!(hint.as_deref(), Some(&*format!("on Windows, /mnt/{letter}/… is WSL's spelling of {upper}:/…: write \"{upper}:/x/y.txt\"")));
+        }
+        for not in ["/mnt", "/mnt/", "/mnt/cc/x", "/mnty/c/x", "mnt/c/x", "/mnt//c"] {
+            assert_eq!(unix_drive(not), None, "{not}");
+        }
+        if cfg!(windows) && !here("/root") {
+            assert_eq!(linux_path_hint("/root/proj/main.v2").as_deref(), Some(r"a Linux path: from Windows, WSL's files are \\wsl.localhost\<distro>\…"));
+        }
+        for not in ["/rooty/x", "root/x", "/proc/self", "/dev/stdin", "C:/root/x"] {
+            assert_eq!(linux_path_hint(not), None, "{not}");
+        }
+        let argv = [Value::str("ls"), Value::str("-la"), Value::str("my dir")];
+        let want = cfg!(windows).then(|| r#"run Linux programs with exec(["wsl.exe", "-e", "ls", "-la", "my dir"])"#.to_string());
+        assert_eq!(linux_program_hint("ls", &argv), want);
+        assert_eq!(linux_program_hint("dir", &argv), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn names_with_a_dot_or_space_at_the_end_are_read_as_written() {
+        // INTERNALS 5.10, 6.4, 19.1 (round 21): an import and FILE take the file builtins' reason.
+        let (why, there) = dotted_name("lib./util.v2").expect("a dotted folder");
+        assert_eq!((why.as_str(), there), ("a Windows file name can't end in a dot or a space ('lib.' would be 'lib')", None));
+        assert_eq!(dotted_name("run.v2 ").map(|d| d.0).as_deref(), Some("a Windows file name can't end in a dot or a space ('run.v2 ' would be 'run.v2')"));
+        for fine in ["./run.v2", "../x.v2", r"\\?\C:\x\run.v2.", r"\\.\C:\x.", "C:x.v2"] {
+            assert!(dotted_name(fine).is_none(), "{fine}");
+        }
     }
 
     #[test]

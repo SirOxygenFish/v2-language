@@ -592,7 +592,10 @@ print(util.slug("Hello World"))    // hello-world
   Windows and macOS, with a note, since Linux won't find it. A missing module's error names the
   file of its folder you probably meant (`did you mean './Util.v2'?`, on Linux for the wrong case
   too), or a file or a folder on the way whose name looks the same but is written as macOS writes
-  names (decomposed Unicode).
+  names (decomposed Unicode). On Windows a path with a name that ends in a dot or a space
+  (`./util.v2.`, which Windows would read as `./util.v2`) is refused, as in the file functions,
+  and a module WSL made from a Linux name with `:` or `?` is reached by its stand-in
+  ([3.11](#311-builtins)).
 - A module runs once, the first time it is imported; later imports reuse it, also when they reach
   it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`).
 - `util` is a dict of the module's exported names, taken when the module finishes running.
@@ -653,14 +656,21 @@ it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
 wrote, and `read_file("/dev/stdin")` reads the rest of standard input, after what `input()` read. The file
 functions raise `IOError` when they fail (`exists` just returns `false`); on Windows, for a file
-another program keeps open (as Excel does), its hint says to close it there, for a Git Bash path
-that isn't there (`/c/Users/me/notes`, which `make_dir` doesn't make) it gives the Windows spelling (`C:/Users/me/notes`),
+another program keeps open (as Excel does), its hint says to close it there, for a Git Bash or WSL path
+that isn't there (`/c/Users/me/notes` or `/mnt/c/Users/me/notes`, which `make_dir` doesn't make) it gives the Windows spelling (`C:/Users/me/notes`),
+for another Linux path that isn't there (`/home/me/notes`, `/root/…`, `/usr/…`) it says where WSL's files are
+from Windows (`\\wsl.localhost\<distro>\…`),
 and for a name Windows doesn't allow (`what?.txt`, `CON`, one that ends in a dot) it says why.
 A path that Windows would read as another is refused before anything is read or written, in every
-file function, `exists` too: a name that ends in a dot or a space, which Windows drops
-(`remove_file("data.txt.")` would delete `data.txt`), and a device (`CON`, `NUL` in any folder,
-`COM1`), where `read_file("CON")` would wait for typed input; when a file of such a name is there
+file function, `exists` too: a name with a `:` (`notes 12:30.txt`, a hidden stream of `notes 12` to
+Windows), on a drive or a `\\server\share` path, with either slash; a name that ends in a dot or a space, which Windows drops
+(`remove_file("data.txt.")` would delete `data.txt`); and a device (a bare `CON` or `COM1`, and `NUL`
+in any folder of a drive; on a `\\server\share` path such a name is an ordinary file), where `read_file("CON")` would wait for typed input; when a file of such a name is there
 (WSL and Macs make them), the hint shows its full path with `\\?\` in front, which reaches it.
+WSL shows a Linux name with a character Windows names can't hold (`mod:x.v2`) to Windows with a
+stand-in for it (U+F03A for `:`), which V2 prints as `\u{f03a}`: a path with the stand-in reaches the
+file (`read_file("mod\u{f03a}x.v2")`, an import, the script), and the hint for the name as Linux
+writes it says so.
 On Windows a drive that isn't there (an unplugged USB drive) is said as such, `there is no drive Q:`,
 and so is a network drive or share that can't be reached; a write to a read-only file says how to make it
 writable (`attrib -r`; `chmod u+w` on Linux and macOS); and `/tmp`, Linux's and macOS's temp folder,
@@ -702,7 +712,9 @@ Linux and macOS a program killed by a signal has `code` 128 + the signal number;
 crashed program's `code` is Windows' unsigned 32-bit one, 3221225477 (0xC0000005) for an access
 violation, which `exit` takes, so `exit(r.code)` passes it on. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>` (`there is no such file` for a
-path that isn't there, with the Windows spelling of a Git Bash path, as for the file functions).
+path that isn't there, with the Windows spelling of a Git Bash or WSL path, as for the file functions;
+on Windows `ls`, `grep`, `sed`, `awk` or `sh` not on `PATH` gets `exec(["wsl.exe", "-e", "ls", …])`,
+which runs it in WSL).
 For cmd.exe, the one string after `/c` (or `/k`) is a command line, passed as written, as cmd reads what you type: `exec(["cmd", "/c", "cd /d \"my dir\" && dir"])`. It runs in V2's working
 directory and environment (plus `PYTHONIOENCODING=utf-8` when that isn't set, so a Python program
 writes UTF-8, which V2 reads), with no timeout. `exec` returns when the program exits, and what the
@@ -2020,7 +2032,10 @@ exactly `check`, `doctor` or `cache` is a command; to run a script with such a n
 path: `v2 ./doctor`. A script that isn't there, or a folder given as one, is a usage error whose
 message says what to do next: the folder V2 looked in, and the file you probably meant
 (`did you mean 'hello.v2'?`, or the `hello.v2.txt` your editor saved), or the folder on the way
-that isn't there.
+that isn't there. On Windows a script path that ends in a dot or a space (`run.v2.`), which Windows
+would read as another file, is refused, as in the file functions ([3.11](#311-builtins)), and a
+Git Bash, WSL or Linux path (`/c/…`, `/mnt/c/…`, `/root/…`) gets the Windows spelling, or where
+WSL's files are.
 
 | Exit code | Meaning                                                                  |
 | --------- | ------------------------------------------------------------------------ |
