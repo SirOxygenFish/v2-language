@@ -612,8 +612,8 @@ shows the shim, and VERSION the version it picks there.
 
 **My code lives in WSL: which V2?** Install the Linux V2 inside WSL and run it there: the project's
 venv, `node_modules` and links are Linux's. The Windows V2 on `\\wsl.localhost\<distro>\...` needs
-a Windows venv (named in `V2_ENGINE_PY`), can't follow Linux links or run `cmd` there, and runs
-Linux programs with `exec(["wsl.exe", "-d", "Ubuntu", "-e", "ls", "-l"])` (`-e`, not `--`, passes
+a Windows venv (named in `V2_ENGINE_PY`), can't follow Linux links, runs `cmd` only through
+`pushd` to an absolute folder, and runs Linux programs with `exec(["wsl.exe", "-d", "Ubuntu", "-e", "ls", "-l"])` (`-e`, not `--`, passes
 the arguments as given).
 
 **Do TypeScript blocks check my types?** No: `@ts` blocks run on Node.js with the types removed,

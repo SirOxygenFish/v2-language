@@ -1770,39 +1770,41 @@ pub(crate) fn named_hint(builtin: &str, name: &str) -> Option<String> {
 
 /// Windows: a working folder on a `\\server\share` (`\\wsl.localhost\Ubuntu\…`, also as
 /// `\\?\UNC\…`), as cmd's `pushd` takes it; cmd.exe can't work in one (7.5).
-fn share_folder(cwd: &std::path::Path) -> Option<String> {
-    use std::path::{Component, Prefix};
-    match cwd.components().next() {
-        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..)) => Some(crate::syntax::span::strip_verbatim(cwd).display().to_string()),
-        _ => None,
-    }
+/// A cmd.exe command line whose first command moves to an absolute folder, `pushd
+/// "\\server\share\p"` or `cd /d C:\p` (`X:\`, `X:/` or `\\`, quoted or not): it works from the
+/// Windows folder cmd starts in, where a relative one (`cd /d logs`) would be looked for (7.5).
+fn moves_to_absolute(line: &str) -> bool {
+    let line = line.trim_start();
+    let lower = line.to_ascii_lowercase();
+    let Some(rest) = ["pushd ", "cd /d ", "chdir /d "].iter().find(|c| lower.starts_with(*c)).map(|c| &line[c.len()..]) else { return false };
+    let target = rest.trim_start().trim_start_matches('"');
+    let b = target.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')) || target.starts_with(r"\\")
 }
 
 /// Windows: exec's refusal of cmd.exe, or a `.bat` or `.cmd` file it would run (`npm.cmd`), in a
 /// `\\server\share` working folder, where cmd says "UNC paths are not supported" and works in the
 /// Windows folder instead, exit code 0 (7.5): what to run instead. Not for a cmd.exe whose
-/// command line first changes the folder (`pushd "\\server\share\p" && …`, `cd /d C:\p && …`).
+/// command line first moves to an absolute folder (`pushd "\\server\share\p" && …`).
 fn cmd_in_share(argv: &[OsString], cwd: &std::path::Path) -> Option<String> {
-    let folder = share_folder(cwd)?;
+    let folder = crate::engines::resolve::share_folder(cwd)?;
     let program = std::path::Path::new(argv.first()?);
     let file = program.file_name()?.to_string_lossy().into_owned();
     let ext = program.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let line = argv.iter().skip(1).position(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k")).map(|i| {
         let rest: Vec<String> = argv[i + 2..].iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        rest.join(" ").trim_start().to_ascii_lowercase()
+        rest.join(" ")
     });
-    let moves = line.is_some_and(|l| l.starts_with("pushd ") || l.starts_with("cd /d ") || l.starts_with("chdir /d "));
-    let who = if file.eq_ignore_ascii_case("cmd.exe") && !moves {
+    let who = if file.eq_ignore_ascii_case("cmd.exe") && !line.is_some_and(|l| moves_to_absolute(&l)) {
         "cmd.exe".to_string()
     } else if ext == "bat" || ext == "cmd" {
         format!("{file} runs in cmd.exe, which")
     } else {
         return None;
     };
-    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let mut line = String::new();
     super::value::quoted(&format!("pushd \"{folder}\" && …"), &mut line);
-    Some(format!("exec: {who} can't work in a \\\\server\\share folder and would run in {windows}: run the program itself, or exec([\"cmd\", \"/c\", {line}])"))
+    Some(format!("exec: {who} {}: run the program itself, or exec([\"cmd\", \"/c\", {line}])", crate::engines::resolve::cmd_cant_work()))
 }
 
 fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
@@ -2257,8 +2259,20 @@ mod tests {
             assert_eq!(cmd_in_share(&npm, share), Some(format!("exec: npm.cmd runs in cmd.exe, which {rest}")));
             assert_eq!(cmd_in_share(&npm, std::path::Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\ann\p")), Some(format!("exec: npm.cmd runs in cmd.exe, which {rest}")));
             assert_eq!(cmd_in_share(&argv(&["C:\\x\\BUILD.BAT"]), share).map(|m| m.starts_with("exec: BUILD.BAT runs in cmd.exe, ")), Some(true));
+            // The review of round 21: a relative folder is looked for in the Windows folder cmd
+            // starts in (`cd /d logs` is C:\Windows\Logs), so it moves nowhere V2 meant.
+            for relative in [&["cmd.exe", "/c", "cd /d logs && cd"][..], &["cmd.exe", "/c", "pushd src && dir"], &["cmd.exe", "/c", "chdir /d \"build\" && make"], &["cmd.exe", "/c", "pushd", "system32"], &["cmd.exe", "/c", "cd /d build && make"]] {
+                assert_eq!(cmd_in_share(&argv(relative), share), Some(format!("exec: cmd.exe {rest}")), "{relative:?}");
+            }
         }
-        for moves in [&["cmd.exe", "/C", "pushd \"\\\\wsl.localhost\\Ubuntu\\p\" && npm run build"][..], &["cmd.exe", "/k", " cd /d C:\\p && dir"], &["cmd.exe", "/c", "pushd", "\\\\server\\share"]] {
+        let absolute: [&[&str]; 5] = [
+            &["cmd.exe", "/C", "pushd \"\\\\wsl.localhost\\Ubuntu\\p\" && npm run build"],
+            &["cmd.exe", "/k", " cd /d C:\\p && dir"],
+            &["cmd.exe", "/c", "CD /D \"D:/work p\" && dir"],
+            &["cmd.exe", "/c", "chdir /d C:/p&&dir"],
+            &["cmd.exe", "/c", "pushd", "\\\\server\\share"],
+        ];
+        for moves in absolute {
             assert_eq!(cmd_in_share(&argv(moves), share), None, "{moves:?}");
         }
         assert_eq!(cmd_in_share(&argv(&[r"C:\Program Files\nodejs\node.exe", "x.js"]), share), None);
