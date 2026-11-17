@@ -667,6 +667,35 @@ fn windows_name(verb: &str, path: &str) -> Exec<()> {
     Err(Flow::Error(Rc::new(err)))
 }
 
+/// Windows: a `\\?\` path with its `/` read as `\` and its `.` and `..` parts taken out, as
+/// Windows reads any other path, though it passes a `\\?\` one on as written: no Windows name is
+/// `.` or `..` or holds `/`, so `f"${script_dir()}/data.csv"` works in a script run by its `\\?\`
+/// path (2.1, 5.10). Other paths come back as they are.
+fn verbatim_parts(path: &str) -> std::borrow::Cow<'_, str> {
+    let Some(rest) = path.strip_prefix(r"\\?\").filter(|_| cfg!(windows)) else { return path.into() };
+    let parts: Vec<&str> = rest.split(['/', '\\']).collect();
+    if !rest.contains('/') && !parts.iter().any(|p| matches!(*p, "." | "..")) {
+        return path.into();
+    }
+    // The root: `C:`, `Volume{…}`, or `UNC\server\share`.
+    let root = if parts[0].eq_ignore_ascii_case("UNC") { 3 } else { 1 };
+    let mut kept: Vec<&str> = parts.iter().take(root).copied().collect();
+    for part in parts.iter().skip(root) {
+        match *part {
+            "" | "." => {}
+            ".." => {
+                if kept.len() > root {
+                    kept.pop();
+                }
+            }
+            p => kept.push(p),
+        }
+    }
+    // A path that ends at its root keeps the `\` after it (`\\?\C:\`).
+    let tail = if kept.len() == root && root == 1 { r"\" } else { "" };
+    format!(r"\\?\{}{tail}", kept.join(r"\")).into()
+}
+
 /// The file builtin whose messages say `cannot {verb}`.
 fn builtin_name(verb: &str) -> &'static str {
     match verb {
@@ -896,6 +925,17 @@ fn tmp_refusal(path: &str, there: &dyn Fn(&str) -> bool) -> Option<ErrorValue> {
     let made = tmp.replace('/', "\\");
     let err = ErrorValue::new("IOError", format!("cannot create '{}': on Windows that makes {made} at the top of the drive, a folder other users can write to", shown_path(path)));
     let _ = err.hint.set(tmp_advice(tmp, rest).into());
+    Some(err)
+}
+
+/// Windows: `make_dir`'s refusal of another Linux path whose top folder this drive doesn't have
+/// (`linux_path_hint`: `/root/proj`), which it would make at the top of the drive, as `/tmp`'s is
+/// (5.10).
+fn linux_dir_refusal(path: &str) -> Option<ErrorValue> {
+    let hint = linux_path_hint(path)?;
+    let top = path[1..].split('/').next().unwrap_or_default();
+    let err = ErrorValue::new("IOError", format!("cannot create '{}': on Windows that makes \\{top} at the top of the drive, a folder other users can write to", shown_path(path)));
+    let _ = err.hint.set(hint.into());
     Some(err)
 }
 
@@ -1618,6 +1658,7 @@ fn json_stringify(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> 
 fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
     shell_shorthand("read", &path)?;
+    let path = verbatim_parts(&path);
     let binary = bool_arg(&args[1], "read_file", "binary")?;
     let bytes = match read_path(&path) {
         Ok(Some(b)) => b,
@@ -1683,6 +1724,7 @@ fn read_path(path: &str) -> std::io::Result<Option<Vec<u8>>> {
 fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "write_file", "path")?;
     shell_shorthand("write", &path)?;
+    let path = verbatim_parts(&path);
     let bytes: &[u8] = match &args[1] {
         Value::Str(s) => s.as_bytes(),
         Value::Bytes(b) => b,
@@ -1731,6 +1773,7 @@ fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     }
     // `exists("~/.config/x")` would be false for a file that is there: refused as in the others.
     shell_shorthand("check", &path)?;
+    let path = verbatim_parts(&path);
     Ok(Value::Bool(std::fs::metadata(&*path).is_ok()))
 }
 
@@ -1738,6 +1781,7 @@ fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "list_dir", "path")?;
     shell_shorthand("list", &path)?;
+    let path = verbatim_parts(&path);
     let failed = |e: std::io::Error| file_error("list", &path, &e);
     let entries = match std::fs::read_dir(&*path) {
         Ok(rd) => rd,
@@ -1768,6 +1812,7 @@ fn list_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "make_dir", "path")?;
     shell_shorthand("create", &path)?;
+    let path = verbatim_parts(&path);
     // Windows: `/c/Users/me/out`, Git Bash's spelling, would make `\c\Users\me\out` on this
     // drive, where nothing else finds it, and WSL's `/mnt/c/…` `\mnt\c\…`: refused as the missing
     // folder it is (5.10).
@@ -1778,7 +1823,7 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     }
     // Windows: `/tmp/out` would make `\tmp` at the top of the drive, where every user can write.
     let refused = if cfg!(windows) { tmp_refusal(&path, &|tmp| std::path::Path::new(tmp).is_dir()) } else { None };
-    if let Some(err) = refused {
+    if let Some(err) = refused.or_else(|| linux_dir_refusal(&path)) {
         return Err(Flow::Error(Rc::new(err)));
     }
     match std::fs::create_dir_all(&*path) {
@@ -1814,6 +1859,7 @@ fn whole_tree_error(e: &std::io::Error) -> bool {
 fn remove_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "remove_file", "path")?;
     shell_shorthand("remove", &path)?;
+    let path = verbatim_parts(&path);
     match std::fs::remove_file(&*path) {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("remove", &path, &e),
@@ -1894,6 +1940,9 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let Some(Value::Str(name)) = items.first() else {
         return value_error("exec() argument 'argv' must not be empty");
     };
+    // Windows: `f"${script_dir()}/tool.exe"` in a script run by its `\\?\` path (2.1).
+    let written = verbatim_parts(name);
+    let name: &str = &written;
     let input = match &args[1] {
         Value::Null => None,
         Value::Str(s) => Some(s.as_bytes().to_vec()),
@@ -1903,11 +1952,11 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let lookup = Lookup::from_env();
     argv[0] = match first_program(name, &lookup) {
         Some(p) => p.into_os_string(),
-        None if is_drive_relative(std::path::Path::new(&**name)) => {
+        None if is_drive_relative(std::path::Path::new(name)) => {
             return io_error(format!("exec: cannot start '{name}': a drive-relative path: write it relative to the working directory, or absolute"));
         }
         None if name.contains(['/', '\\']) => {
-            let p: std::path::PathBuf = lookup.cwd.join(&**name).components().collect();
+            let p: std::path::PathBuf = lookup.cwd.join(name).components().collect();
             if p.is_dir() {
                 return io_error(format!("exec: cannot start '{name}': it is a folder, not a program"));
             }
@@ -1930,7 +1979,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
                 if unset { format!("exec: cannot start '{name}': not found, as PATH isn't set: set it, or give the program's full path") } else { format!("exec: cannot start '{name}': not found on PATH") },
             );
             // Ubuntu and macOS have python3 and no python.
-            let python3 = (&**name == "python" && !unset).then(|| first_program("python3", &lookup)).flatten();
+            let python3 = (name == "python" && !unset).then(|| first_program("python3", &lookup)).flatten();
             // Windows' own shells run a program in the current folder by its bare name; V2
             // looks only on PATH, as a Unix shell does (5.10).
             let here = first_program(&format!("./{name}"), &lookup).and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
@@ -1965,7 +2014,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let is_cmd = std::path::Path::new(&argv[0]).file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
     let raw_tail = cfg!(windows) && is_cmd && argv.len() >= 3 && argv[argv.len() - 2].to_str().is_some_and(|s| s.eq_ignore_ascii_case("/c") || s.eq_ignore_ascii_case("/k"));
     // On Unix the program sees the name as written (`ls`), as from a shell (7.5).
-    let ran = process::run_captured_as(&argv, Some(std::ffi::OsStr::new(&**name)), utf8.as_slice(), None, input, raw_tail);
+    let ran = process::run_captured_as(&argv, Some(std::ffi::OsStr::new(name)), utf8.as_slice(), None, input, raw_tail);
     // A signal that came while the program ran (its own `kill $PPID` too) ends the run here.
     stop_if_interrupted();
     let c = match ran {
@@ -2356,6 +2405,14 @@ mod tests {
         assert_eq!(dotted_name("run.v2 ").map(|d| d.0).as_deref(), Some("a Windows file name can't end in a dot or a space ('run.v2 ' would be 'run.v2')"));
         for fine in ["./run.v2", "../x.v2", r"\\?\C:\x\run.v2.", r"\\.\C:\x.", "C:x.v2"] {
             assert!(dotted_name(fine).is_none(), "{fine}");
+        }
+        // The review: such a script's script_dir() is a \\?\ path, where Windows reads no / or ..
+        assert_eq!(verbatim_parts(r"\\?\C:\x\dots./data.csv"), r"\\?\C:\x\dots.\data.csv");
+        assert_eq!(verbatim_parts(r"\\?\C:\x\dots.\./..\top.txt"), r"\\?\C:\x\top.txt");
+        assert_eq!(verbatim_parts(r"\\?\UNC\srv\share\a/../b/"), r"\\?\UNC\srv\share\b");
+        assert_eq!(verbatim_parts(r"\\?\C:\x\..\.."), r"\\?\C:\");
+        for kept in [r"\\?\C:\x\notes.txt ", "C:/x/../y", r"\\.\C:/x", "./a/../b"] {
+            assert!(matches!(verbatim_parts(kept), std::borrow::Cow::Borrowed(k) if k == kept), "{kept}");
         }
     }
 

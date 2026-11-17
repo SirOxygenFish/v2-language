@@ -481,11 +481,12 @@ pub fn is_bidi_format(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
-/// A character of U+F000 to U+F0FF, where WSL puts a character of a Linux name that a Windows
-/// name can't hold (U+F000 plus its code: U+F03A for `:`, U+F03F for `?`), as Windows shows such
-/// a name (2.1, 5.10).
+/// A character WSL puts for one of a Linux name that a Windows name can't hold, U+F000 plus its
+/// code, as Windows shows such a name (2.1, 5.10): U+F001 to U+F01F for the control characters,
+/// and U+F022, U+F02A, U+F03A, U+F03C, U+F03E, U+F03F, U+F05C and U+F07C for `" * : < > ? \ |`.
+/// The rest of U+F000 to U+F0FF is other private use (Font Awesome's icons in Nerd Fonts).
 pub fn is_stand_in(c: char) -> bool {
-    matches!(c, '\u{F000}'..='\u{F0FF}')
+    matches!(c as u32, 0xF001..=0xF01F | 0xF022 | 0xF02A | 0xF03A | 0xF03C | 0xF03E | 0xF03F | 0xF05C | 0xF07C)
 }
 
 /// The OS error text without Rust's ` (os error N)` suffix.
@@ -523,7 +524,9 @@ mod tests {
         // 2.1, 5.10 (round 21): Windows shows a Linux `mod:x.v2` as `mod\u{f03a}x.v2`, whose
         // stand-in shows as nothing or as another character; without `\\?\`, `run.v2.` is `run.v2`.
         assert_eq!(shown_path("case/mod\u{f03a}x.v2"), "case/mod\\u{f03a}x.v2");
-        assert_eq!(shown_path("\u{efff}\u{f100}"), "\u{efff}\u{f100}");
+        assert_eq!(shown_path("a\u{f001}\u{f05c}\u{f07c}b"), "a\\u{f001}\\u{f05c}\\u{f07c}b");
+        // The review of round 21: only what WSL makes; Nerd Fonts put icons beside them.
+        assert_eq!(shown_path("\u{f000}\u{f023}lock \u{f07b} folder\u{f0ff}"), "\u{f000}\u{f023}lock \u{f07b} folder\u{f0ff}");
         let strip = |p: &str| strip_verbatim(Path::new(p)).to_string_lossy().into_owned();
         assert_eq!(strip(r"\\?\C:\x\run.v2."), r"\\?\C:\x\run.v2.");
         assert_eq!(strip(r"\\?\UNC\srv\share\dir \m.v2"), r"\\?\UNC\srv\share\dir \m.v2");
