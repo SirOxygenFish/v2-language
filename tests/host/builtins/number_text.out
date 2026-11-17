@@ -74,3 +74,17 @@ ValueError | invalid float: '1٬234٫5'
   hint: the text has U+066C and U+066B, the Arabic thousands and decimal separators: float(x.replace("٬", "").replace("٫", "."))
 1000 0 0 1234
 1234.5 1234.5
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("\u061c", "").replace("٬", "").replace("٫", ".")) }
+the text has a minus sign U+2212, as Intl writes it: x = x.replace("−", "-") changes it; then float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("\u200e", "").replace("٬", "").replace("٫", ".")) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("\u200e", "").replace("٬", "").replace("٫", ".")) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("\u200f", "").replace("٬", "").replace("٫", ".")) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace(",", "")) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace(",", "")) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x.replace(",", "")) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace(",", "")) }
+int() reads digits without spaces between them: int(x.replace(" ", ""))
+null
+null
+123
