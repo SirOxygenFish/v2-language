@@ -1,0 +1,10 @@
+// platform: windows
+// Round 20 (INTERNALS 5.10): input that isn't UTF-8 from a program that runs v2 and reads what it
+// says (no console shows the hint): the hint is for that program, not cmd.exe's chcp.
+try {
+    let line = input()
+    print(line)
+} catch (e) {
+    print(e.type)
+    print(e.hint)
+}

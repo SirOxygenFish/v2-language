@@ -1,0 +1,11 @@
+// platform: unix
+// Round 20 (DOCS 3.11, INTERNALS 5.10): on Linux and macOS exit() takes an i32; past that, the
+// ValueError's hint names the range, and the 0-255 a shell sees.
+for code in [2147483648, -2147483649] {
+    try {
+        exit(code)
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        print(e.hint)
+    }
+}
