@@ -1500,9 +1500,10 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     }
     match std::fs::create_dir_all(&*path) {
         Ok(()) => Ok(Value::Null),
-        // A root that can't be made (a drive or share that isn't there) is `create_dir_all`'s own
-        // "failed to create whole tree": the root's own reason instead (5.10), the last ancestor's.
-        // Other errors without an OS code (a NUL in the path) are Rust's true reason, kept.
+        // A root that can't be made (a drive or share that isn't there) is, in some Rust versions,
+        // `create_dir_all`'s own "failed to create whole tree" (newer ones give the OS's reason):
+        // the root's own reason instead (5.10), the last ancestor's. Other errors without an OS
+        // code (a NUL in the path) are Rust's true reason, kept.
         Err(e) if whole_tree_error(&e) => {
             let e = match std::path::Path::new(&*path).ancestors().last().map(std::fs::metadata) {
                 Some(Err(root)) => root,
@@ -1997,10 +1998,16 @@ mod tests {
         // either, and is the true reason; create_dir_all's for a root it can't make is replaced.
         let nul = std::fs::create_dir_all("a\0b").unwrap_err();
         assert!(nul.raw_os_error().is_none() && !whole_tree_error(&nul), "{nul}");
-        // Windows: a drive that isn't there (every letter is a local drive elsewhere).
+        // Windows: a drive that isn't there (every letter is a local drive elsewhere). Rust 1.91's
+        // create_dir_all gives its own error there, newer ones (CI's stable) the OS's: either way
+        // what make_dir says is the drive's (unreachable_root), and nothing is left without a reason.
         if let Some(letter) = ('D'..='Z').rev().find(|&l| drive_type(l) == NO_DRIVE) {
-            let e = std::fs::create_dir_all(format!(r"{letter}:\v2-r19-no-drive\x")).unwrap_err();
-            assert!(whole_tree_error(&e), "{e}");
+            let path = format!(r"{letter}:\v2-r19-no-drive\x");
+            let e = std::fs::create_dir_all(&path).unwrap_err();
+            assert!(whole_tree_error(&e) || e.raw_os_error().is_some(), "{e}");
+            let root = std::path::Path::new(&path).ancestors().last().map(std::fs::metadata);
+            assert!(matches!(root, Some(Err(ref r)) if r.raw_os_error().is_some()), "{root:?}");
+            assert_eq!(unreachable_root(&path, &e).as_deref(), Some(&*format!("there is no drive {letter}: (is it plugged in or connected?)")));
         }
     }
 
