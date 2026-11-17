@@ -1,0 +1,5 @@
+py False False False False (80, 24) None None
+js false false false false undefined undefined undefined undefined
+ok
+{ a: 1 }
+end

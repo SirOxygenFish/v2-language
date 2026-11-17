@@ -168,6 +168,81 @@ fn restore_terminal() {
     }
 }
 
+/// Whether V2's stdout (`fd` 1) or stderr (2) is a terminal, and then its size (columns, rows; 0
+/// when the terminal doesn't say), which `init` passes on to the blocks (9.3, 9.9). Unix: isatty
+/// and TIOCGWINSZ; Windows: a console, its window.
+pub fn terminal_size(fd: i32) -> Option<(u16, u16)> {
+    #[cfg(unix)]
+    // SAFETY: isatty and TIOCGWINSZ only read the descriptor's state, into a zeroed struct.
+    unsafe {
+        if libc::isatty(fd) != 1 {
+            return None;
+        }
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws as *mut libc::winsize) != 0 {
+            return Some((0, 0));
+        }
+        Some((ws.ws_col, ws.ws_row))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO};
+        let h = if fd == 1 { std::io::stdout().as_raw_handle() } else { std::io::stderr().as_raw_handle() };
+        // SAFETY: the standard handle stays open for the process; each call fills its out-parameter.
+        unsafe {
+            let mut mode = 0;
+            if GetConsoleMode(h, &mut mode) == 0 {
+                return None;
+            }
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(h, &mut info) == 0 {
+                return Some((0, 0));
+            }
+            let w = info.srWindow;
+            let span = |a: i16, b: i16| u16::try_from(i32::from(b) - i32::from(a) + 1).unwrap_or(0);
+            Some((span(w.Left, w.Right), span(w.Top, w.Bottom)))
+        }
+    }
+}
+
+/// Windows: the modes of stdout's and stderr's consoles before v2 turned on VT processing, put back
+/// at every exit (6.5).
+#[cfg(windows)]
+static CONSOLE_MODES: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+
+/// Windows, at startup: stdout's and stderr's consoles get `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, so
+/// the escape sequences of colors and live displays render in conhost too (6.5, 9.9).
+#[cfg(windows)]
+fn console_vt_on() {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    // Both modes first: stdout and stderr are often one console, which the first change alters.
+    // SAFETY: plain calls on the standard handles; each fills its out-parameter.
+    let modes: Vec<(u32, u32)> = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            let mut mode = 0;
+            (GetConsoleMode(GetStdHandle(kind), &mut mode) != 0).then_some((kind, mode))
+        })
+        .collect();
+    for &(kind, mode) in &modes {
+        // SAFETY: as above; a Windows without VT processing refuses the flag, which changes nothing.
+        unsafe { SetConsoleMode(GetStdHandle(kind), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) };
+    }
+    let _ = CONSOLE_MODES.set(modes);
+}
+
+/// Windows, at every exit (the end of the run, an interrupt, a closed pipe): the consoles get back
+/// the modes they had when v2 started (6.5).
+#[cfg(windows)]
+pub fn restore_console() {
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode};
+    for &(kind, mode) in CONSOLE_MODES.get().into_iter().flatten() {
+        // SAFETY: plain calls on the standard handles with the modes they had.
+        unsafe { SetConsoleMode(GetStdHandle(kind), mode) };
+    }
+}
+
 /// Unix: end by the signal that came, as a program without a handler does, so the shell sees a
 /// process killed by SIGINT (shown as 130, SIGTERM 143, SIGHUP 129) and stops a loop of v2 runs
 /// on one Ctrl+C, which it doesn't for a plain exit 130 (6.5). SIGQUIT leaves no core file.
@@ -222,8 +297,10 @@ pub fn remove_run_dir(dir: &std::path::Path) {
 }
 
 /// `_exit` on Unix (no atexit handlers, no C stdio flushing); on Windows Rust's exit is
-/// `ExitProcess`.
+/// `ExitProcess`, after the consoles get their modes back.
 fn hard_exit(code: i32) -> ! {
+    #[cfg(windows)]
+    restore_console();
     #[cfg(unix)]
     // SAFETY: `_exit` ends the process; nothing here relies on cleanup.
     unsafe {
@@ -516,6 +593,8 @@ impl Watchdog {
         default_sigchld();
         #[cfg(unix)]
         remember_terminal();
+        #[cfg(windows)]
+        console_vt_on();
         if ensure_thread() {
             install_interrupt_handler();
         }
