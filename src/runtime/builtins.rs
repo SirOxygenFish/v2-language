@@ -756,7 +756,7 @@ fn unreachable_root(path: &str, e: &std::io::Error) -> Option<String> {
         return drive_problem(letter, drive_type(letter), e);
     }
     let unc = p.strip_prefix(r"\\").filter(|r| !r.starts_with(['?', '.']))?;
-    if let Some(why) = wsl_root(unc, e) {
+    if let Some(why) = wsl_share(unc, e) {
         return Some(why);
     }
     let mut parts = unc.split('\\');
@@ -764,15 +764,27 @@ fn unreachable_root(path: &str, e: &std::io::Error) -> Option<String> {
     network_error(e).then(|| format!(r"the share \\{}\{} can't be reached (is that computer on and connected, and is the share's name right?)", shown_path(server), shown_path(share)))
 }
 
+/// Windows: `wsl_share` for `path` as written (`/` or `\`, `\\?\UNC\` too), for the file builtins,
+/// an import and FILE that failed with `e` (5.10, 6.4, 19.1).
+pub(crate) fn wsl_root(path: &str, e: &std::io::Error) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let p = path.replace('/', "\\");
+    let unc = p.strip_prefix(r"\\?\UNC\").or_else(|| p.strip_prefix(r"\\").filter(|r| !r.starts_with(['?', '.'])))?;
+    wsl_share(unc, e)
+}
+
 /// A `\\wsl.localhost` or `\\wsl$` path (`unc`, what follows its `\\`, with `\`) that names no
 /// WSL distribution, or one that isn't there, which Windows says as "The user name or password is
-/// incorrect" (ERROR_LOGON_FAILURE) or ERROR_BAD_NET_NAME: what to say instead (5.10).
-fn wsl_root(unc: &str, e: &std::io::Error) -> Option<String> {
+/// incorrect" (ERROR_LOGON_FAILURE) or as a network's error (`network_error`: ERROR_BAD_NET_NAME,
+/// under load ERROR_NETNAME_DELETED too): what to say instead (5.10).
+fn wsl_share(unc: &str, e: &std::io::Error) -> Option<String> {
     let mut parts = unc.split('\\');
     let server = parts.next().filter(|s| s.eq_ignore_ascii_case("wsl.localhost") || s.eq_ignore_ascii_case("wsl$"))?;
     match parts.next().filter(|d| !d.is_empty()) {
         None => Some(format!(r"\\{server} needs a WSL distribution's name after it, as in \\{server}\Ubuntu: wsl --list --quiet shows them")),
-        Some(distro) if matches!(e.raw_os_error(), Some(1326 | 67)) => Some(format!("there is no WSL distribution named {}: wsl --list --quiet shows them", shown_path(distro))),
+        Some(distro) if e.raw_os_error() == Some(1326) || network_error(e) => Some(format!("there is no WSL distribution named {}: wsl --list --quiet shows them", shown_path(distro))),
         Some(_) => None,
     }
 }
@@ -1558,7 +1570,7 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "read_file", "path")?;
     shell_shorthand("read", &path)?;
     let binary = bool_arg(&args[1], "read_file", "binary")?;
-    wsl_special(&path)?;
+    wsl_special("read", &path)?;
     let bytes = match read_path(&path) {
         Ok(Some(b)) => b,
         // More than a str or bytes holds: a huge file, or a device that never ends (/dev/zero).
@@ -1598,16 +1610,18 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     }
 }
 
-/// Windows: `read_file` of a pipe or a device WSL made (`module::WslFile::Special`, seen through
-/// \\wsl.localhost), refused before it is opened: Windows takes it for a file, and a read would
-/// wait 10 s for a pipe's writer (leaving WSL's file server waiting too) or read Linux's device
-/// (1 GiB of `/dev/zero`) (5.10).
-fn wsl_special(path: &str) -> Exec<()> {
+/// Windows: `read_file` or `write_file` (`verb` `read` or `write`) of a pipe or a device WSL made
+/// (`module::WslFile::Special`, seen through \\wsl.localhost), refused before it is opened:
+/// Windows takes it for a file, and opening a pipe would wait 10 s for its other end (leaving
+/// WSL's file server waiting too), a read of a device read Linux's (1 GiB of `/dev/zero`) (5.10).
+/// One look at the path's attributes (`wsl_file`), and only on a share (`on_a_share`).
+fn wsl_special(verb: &str, path: &str) -> Exec<()> {
     if !on_a_share(path) || super::module::wsl_file(std::path::Path::new(path)) != Some(super::module::WslFile::Special) {
         return Ok(());
     }
-    let err = ErrorValue::new("IOError", format!("cannot read '{}': it is a pipe or a device, not a file", shown_path(path)));
-    let _ = err.hint.set("Windows can't read WSL's pipes and devices: run V2 inside WSL".into());
+    let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': it is a pipe or a device, not a file", shown_path(path)));
+    let how = if verb == "read" { "read" } else { "write to" };
+    let _ = err.hint.set(format!("Windows can't {how} WSL's pipes and devices: run V2 inside WSL").into());
     Err(Flow::Error(Rc::new(err)))
 }
 
@@ -1685,6 +1699,7 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         "/dev/stderr" | "/dev/fd/2" | "/proc/self/fd/2" if cfg!(unix) => return to_stderr(it, bytes),
         _ => {}
     }
+    wsl_special("write", &path)?;
     let r = if append {
         std::fs::OpenOptions::new().append(true).create(true).open(&*path).and_then(|mut f| f.write_all(bytes))
     } else {
@@ -2434,14 +2449,16 @@ mod tests {
         // \\wsl$\NAME when there is no such distribution; a bare \\wsl.localhost names none.
         let no = "there is no WSL distribution named no-such: wsl --list --quiet shows them";
         let err = std::io::Error::from_raw_os_error;
-        assert_eq!(wsl_root(r"wsl.localhost\no-such\x.txt", &err(1326)).as_deref(), Some(no));
-        assert_eq!(wsl_root(r"WSL$\no-such", &err(67)).as_deref(), Some(no));
+        assert_eq!(wsl_share(r"wsl.localhost\no-such\x.txt", &err(1326)).as_deref(), Some(no));
+        assert_eq!(wsl_share(r"WSL$\no-such", &err(67)).as_deref(), Some(no));
+        // Under load \\wsl$ says ERROR_NETNAME_DELETED instead (the review of round 21).
+        assert_eq!(wsl_share(r"wsl$\no-such\x.txt", &err(64)).as_deref(), Some(no));
         let bare = r"\\wsl.localhost needs a WSL distribution's name after it, as in \\wsl.localhost\Ubuntu: wsl --list --quiet shows them";
-        assert_eq!(wsl_root("wsl.localhost", &err(161)).as_deref(), Some(bare));
-        assert_eq!(wsl_root(r"wsl.localhost\", &err(1326)).as_deref(), Some(bare));
+        assert_eq!(wsl_share("wsl.localhost", &err(161)).as_deref(), Some(bare));
+        assert_eq!(wsl_share(r"wsl.localhost\", &err(1326)).as_deref(), Some(bare));
         // Another failure in a distribution that is there, and another server, are not this.
-        assert_eq!(wsl_root(r"wsl.localhost\Ubuntu\x.txt", &err(3)), None);
-        assert_eq!(wsl_root(r"srv\docs\x.txt", &err(1326)), None);
+        assert_eq!(wsl_share(r"wsl.localhost\Ubuntu\x.txt", &err(3)), None);
+        assert_eq!(wsl_share(r"srv\docs\x.txt", &err(1326)), None);
         // read_file looks for WSL's pipes only on a share or a network drive (a look costs a
         // local read a quarter more): by the path, or a relative one by the current folder.
         assert_eq!(on_a_share(r"\\wsl.localhost\Ubuntu\fifo"), cfg!(windows));
@@ -2454,6 +2471,13 @@ mod tests {
             assert_eq!(unreachable_root("//wsl.localhost/no-such/x.txt", &err(1326)).as_deref(), Some(no));
             assert_eq!(unreachable_root(r"\\?\UNC\wsl$\no-such\x.txt", &err(67)).as_deref(), Some(no));
             assert_eq!(unreachable_root("//WSL$/", &err(67)).as_deref(), Some(r"\\WSL$ needs a WSL distribution's name after it, as in \\WSL$\Ubuntu: wsl --list --quiet shows them"));
+            // The whole path, as an import and FILE give it (review of round 21).
+            assert_eq!(wsl_root("//wsl.localhost/no-such/m.v2", &err(1326)).as_deref(), Some(no));
+            assert_eq!(wsl_root(r"\\?\UNC\wsl.localhost\no-such\m.v2", &err(1326)).as_deref(), Some(no));
+            assert_eq!(wsl_root(r"\\wsl.localhost", &err(161)).as_deref(), Some(bare));
+            assert_eq!(wsl_root(r"C:\no-such\m.v2", &err(1326)), None);
+        } else {
+            assert_eq!(wsl_root("//wsl.localhost/no-such/m.v2", &err(1326)), None, "a Linux path");
         }
     }
 }
