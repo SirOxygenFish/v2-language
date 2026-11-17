@@ -6912,6 +6912,269 @@ fn a_module_reached_through_a_share_and_its_drive_path_is_one_module() {
     }
 }
 
+/// A folder in the WSL distribution that `V2_TEST_WSL_DISTRO` names, for the Windows v2 on its
+/// \\wsl.localhost share (INTERNALS 22.2): made with wsl.exe under `V2_TEST_WSL_DIR` (else
+/// /tmp), and removed, its pipes opened first, so no reader of one is left waiting. `None`, and
+/// the test skips, when the variable isn't set: Windows CI has no distribution.
+#[cfg(windows)]
+struct WslDir {
+    distro: String,
+    linux: String,
+    share: PathBuf,
+}
+
+/// The WSL distribution `V2_TEST_WSL_DISTRO` names, or `None` with the test's SKIP line.
+#[cfg(windows)]
+fn wsl_distro(test: &str) -> Option<String> {
+    let distro = std::env::var("V2_TEST_WSL_DISTRO").ok().filter(|d| !d.is_empty());
+    if distro.is_none() {
+        let _ = writeln!(std::io::stderr(), "SKIP {test} (V2_TEST_WSL_DISTRO names no WSL distribution)");
+    }
+    distro
+}
+
+/// wsl.exe for `distro`, as root when `root`, in a console of its own: wsl.exe sets the console's
+/// code page, which the tests running beside it read (exec_windows.v2's chcp).
+#[cfg(windows)]
+fn wsl_exe(distro: &str, root: bool) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-d", distro]).creation_flags(CREATE_NO_WINDOW);
+    if root {
+        cmd.args(["-u", "root"]);
+    }
+    cmd
+}
+
+#[cfg(windows)]
+impl WslDir {
+    fn new(test: &str) -> Option<WslDir> {
+        let distro = wsl_distro(test)?;
+        let base = std::env::var("V2_TEST_WSL_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let linux = format!("{}/v2-{test}-{}", base.trim_end_matches('/'), std::process::id());
+        let share = PathBuf::from(format!(r"\\wsl.localhost\{distro}{}", linux.replace('/', "\\")));
+        let dir = WslDir { distro, linux, share };
+        dir.sh(&format!("rm -rf '{0}' && mkdir -p '{0}'", dir.linux), false);
+        Some(dir)
+    }
+
+    /// `script` run by sh in the distribution, in the folder once it is there; as root when
+    /// `root` (mknod needs it).
+    fn sh(&self, script: &str, root: bool) {
+        let script = format!("cd '{}' 2>/dev/null; {script}", self.linux);
+        let out = self.wsl(&script, root).expect("run wsl.exe");
+        assert!(out.status.success(), "{script}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// wsl.exe running `script` with sh.
+    fn wsl(&self, script: &str, root: bool) -> std::io::Result<Output> {
+        wsl_exe(&self.distro, root).args(["-e", "sh", "-c", script]).stdin(Stdio::null()).output()
+    }
+
+    fn write(&self, rel: &str, text: &str) {
+        let p = self.share.join(rel.replace('/', "\\"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// `v2 ARGS` in the folder, with a fresh home on this computer.
+    fn v2(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let home = TempHome::new();
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(&self.share).env_remove("MSYSTEM").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        let text = |b: &[u8]| normalize(&String::from_utf8_lossy(b));
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WslDir {
+    fn drop(&mut self) {
+        // A pipe opened for reading and writing at once never waits, and gives a reader waiting on
+        // it (an open from Windows that the share passed on) its end.
+        let script = format!("for p in $(find '{0}' -type p); do : <> \"$p\"; done; rm -rf '{0}'", self.linux);
+        let _ = self.wsl(&script, true);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn linux_symlinks_on_wsls_share_are_named_as_such() {
+    // DOCS 3.10, 3.11, 19.1 (round 21): through \\wsl.localhost a Linux symlink is a reparse point
+    // Windows can't follow (IO_REPARSE_TAG_LX_SYMLINK) wherever it points, and the share doesn't
+    // give its target: named so, with what works, never "a link to something that isn't there"
+    // with del advice. /dev/stdin keeps its Windows hint there, and a package in node_modules
+    // that is such a link says so, not "a folder of your own".
+    let Some(wsl) = WslDir::new("linux_symlinks_on_wsls_share_are_named_as_such") else { return };
+    wsl.write("links/target.v2", "print(\"target runs\")\n");
+    wsl.write("links/realdir/f.txt", "f\n");
+    wsl.sh("ln -s target.v2 links/rel.v2 && ln -s realdir links/dirlink && ln -s nowhere.v2 links/broken.v2", false);
+    let fix = "use the path it points to (ls -l in WSL shows it), or run V2 inside WSL";
+    let lx = "is a Linux (WSL) symlink, which Windows can't follow";
+    wsl.write(
+        "main.v2",
+        "for p in [\"links/rel.v2\", \"links/broken.v2\", \"links/dirlink/f.txt\"] {\n    try { read_file(p) } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n\
+         try { list_dir(\"links/dirlink\") } catch (e) { print(e.message + \" | \" + e.hint) }\n\
+         try { import \"./links/rel.v2\" as r } catch (e) { print(e.message + \" | \" + e.hint) }\n\
+         for p in [\"/dev/stdin\", \"/dev/stdout\"] {\n    try { write_file(p, \"x\") } catch (e) { print(e.hint) }\n}\n",
+    );
+    let (code, stdout, stderr) = wsl.v2(&["main.v2"]);
+    let dev = "/dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)";
+    let want = format!(
+        "cannot read 'links/rel.v2': it {lx} | {fix}\ncannot read 'links/broken.v2': it {lx} | {fix}\ncannot read 'links/dirlink/f.txt': 'links/dirlink' {lx} | {fix}\n\
+         cannot list 'links/dirlink': it {lx} | {fix}\ncannot import './links/rel.v2': it {lx} | {fix}\n{dev}\n{dev}\n"
+    );
+    assert_eq!((code, stdout.as_str()), (Some(0), want.as_str()), "{stderr}");
+    // FILE, and v2 check of an import of it.
+    let (code, _, stderr) = wsl.v2(&[r"links\rel.v2"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.starts_with("v2: cannot find 'rel.v2' in ") && stderr.ends_with(&format!("\n'rel.v2' {lx}: {fix}\n")), "{stderr}");
+    let (code, _, stderr) = wsl.v2(&[r"links\dirlink\x.v2"]);
+    assert_eq!((code, stderr), (Some(2), format!("v2: cannot find 'links\\dirlink\\x.v2'\n'links\\dirlink' {lx}: {fix}\n")));
+    wsl.write("imp.v2", "import \"./links/rel.v2\" as r\n");
+    let (code, stdout, stderr) = wsl.v2(&["check", "imp.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check imp.v2: 1 file, 1 error\n"), "{stderr}");
+    assert!(stderr.contains(&format!("ImportError: cannot import './links/rel.v2': it {lx}\n")) && stderr.contains(&format!("hint: {fix}\n")), "{stderr}");
+    if needs("js", "linux_symlinks_on_wsls_share_are_named_as_such") {
+        wsl.write("localpkg/index.js", "module.exports.hello = () => \"hi\"\n");
+        wsl.sh("mkdir -p node_modules && ln -s ../localpkg node_modules/localpkg", false);
+        wsl.write("npm.v2", "@import { hello } from js.localpkg\nprint(hello())\n");
+        let (code, _, stderr) = wsl.v2(&["npm.v2"]);
+        assert_eq!(code, Some(1), "{stderr}");
+        assert!(stderr.contains(&format!("node_modules\\localpkg' {lx}: {fix}\n")), "{stderr}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_module_on_wsls_share_runs_once_however_the_share_is_spelled() {
+    // DOCS 3.10, 6.4 (round 21): \\wsl$ and \\wsl.localhost are one share, a server and a share
+    // are read in any case, and the share gives no file IDs to find one file by.
+    let Some(wsl) = WslDir::new("a_module_on_wsls_share_runs_once_however_the_share_is_spelled") else { return };
+    wsl.write("lib/util.v2", "print(\"util runs\")\nfunc v() { return 1 }\n");
+    let (dollar, upper) = (format!("//wsl$/{}{}", wsl.distro, wsl.linux), format!("//WSL.LOCALHOST/{}{}", wsl.distro.to_uppercase(), wsl.linux));
+    wsl.write("main.v2", &format!("import \"./lib/util.v2\" as a\nimport \"{dollar}/lib/util.v2\" as b\nimport \"{upper}/lib/util.v2\" as c\nprint(a.v(), b.v(), c.v())\n"));
+    let (code, stdout, stderr) = wsl.v2(&["main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "util runs\n1 1 1\n"), "{stderr}");
+    let (code, stdout, stderr) = wsl.v2(&["check", "main.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "check main.v2: 2 files, 0 errors\n"), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn wsls_pipes_and_devices_on_its_share_are_refused_unread() {
+    // DOCS 3.10, 3.11, 19.1 (round 21): Windows takes WSL's FIFO or device node for a file; a read
+    // of the FIFO waited 10 s (and left a thread of WSL's file server waiting), and /dev/null's
+    // node ran as an empty script. Their reparse tags say what they are, before anything is read.
+    let Some(wsl) = WslDir::new("wsls_pipes_and_devices_on_its_share_are_refused_unread") else { return };
+    wsl.sh("mkfifo fifo.v2 && mknod null.v2 c 1 3", true);
+    let start = Instant::now();
+    for file in ["fifo.v2", "null.v2"] {
+        let (code, stdout, stderr) = wsl.v2(&[file]);
+        assert_eq!((code, stdout.as_str(), stderr), (Some(2), "", format!("v2: '{file}' is a pipe or a device, not a file: V2 runs scripts saved as .v2 files\n")));
+    }
+    wsl.write("imp.v2", "import \"./fifo.v2\" as f\n");
+    let (code, _, stderr) = wsl.v2(&["imp.v2"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.starts_with("imp.v2:1:1: ImportError: cannot import './fifo.v2': it is a pipe or a device, not a file\n"), "{stderr}");
+    let (code, stdout, stderr) = wsl.v2(&["check", "imp.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check imp.v2: 1 file, 1 error\n"), "{stderr}");
+    wsl.write("read.v2", "for p in [\"fifo.v2\", \"null.v2\"] {\n    try { read_file(p) } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n");
+    let (code, stdout, stderr) = wsl.v2(&["read.v2"]);
+    let hint = "Windows can't read WSL's pipes and devices: run V2 inside WSL";
+    let want = format!("cannot read 'fifo.v2': it is a pipe or a device, not a file | {hint}\ncannot read 'null.v2': it is a pipe or a device, not a file | {hint}\n");
+    assert_eq!((code, stdout.as_str()), (Some(0), want.as_str()), "{stderr}");
+    // write_file too, appending or not (the review of round 21): a write's open waited as long.
+    wsl.write(
+        "write.v2",
+        "for p in [\"fifo.v2\", \"null.v2\"] {\n    for add in [false, true] {\n        try { write_file(p, \"x\", append: add) } catch (e) { print(e.message + \" | \" + e.hint) }\n    }\n}\n",
+    );
+    let (code, stdout, stderr) = wsl.v2(&["write.v2"]);
+    let hint = "Windows can't write to WSL's pipes and devices: run V2 inside WSL";
+    let want = ["fifo.v2", "fifo.v2", "null.v2", "null.v2"].map(|f| format!("cannot write '{f}': it is a pipe or a device, not a file | {hint}\n")).concat();
+    assert_eq!((code, stdout.as_str()), (Some(0), want.as_str()), "{stderr}");
+    assert!(start.elapsed() < Duration::from_secs(9), "{:?}: a read or write of the pipe was tried", start.elapsed());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_linux_symlink_wsl_made_on_a_drive_is_named_as_such() {
+    // DOCS 3.10, 3.11, 19.1 (the review of round 21): WSL's ln -s under /mnt/c makes a Linux
+    // symlink there too, which Windows can't follow, and on some folders can't even open (the temp
+    // folder here: os error 1920), when its folder's listing still has its tag. In the temp folder
+    // and in the build's, which have one kind each here.
+    let Some(distro) = wsl_distro("a_linux_symlink_wsl_made_on_a_drive_is_named_as_such") else { return };
+    /// The folder and the WSL link in it, the link removed through WSL (Windows may not open it).
+    struct Made(String, PathBuf);
+    impl Drop for Made {
+        fn drop(&mut self) {
+            wsl_sh(&self.0, "rm -f \"$(wslpath -u \"$1\")\"", &self.1.join("l.v2"));
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let home = TempHome::new();
+    let build = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("v2-lxdrive-{}", std::process::id()));
+    std::fs::create_dir_all(&build).unwrap();
+    let fix = "use the path it points to (ls -l in WSL shows it), or run V2 inside WSL";
+    let lx = "is a Linux (WSL) symlink, which Windows can't follow";
+    let made = [home.0.clone(), build].map(|at| Made(distro.clone(), PathBuf::from(real_path(&at))));
+    for Made(_, d) in &made {
+        std::fs::write(d.join("t.v2"), "print(\"t runs\")\n").unwrap();
+        std::fs::write(d.join("main.v2"), "try { read_file(\"l.v2\") } catch (e) { print(e.message + \" | \" + e.hint) }\ntry { import \"./l.v2\" as m } catch (e) { print(e.message + \" | \" + e.hint) }\n").unwrap();
+        assert!(wsl_sh(&distro, "ln -s t.v2 \"$(wslpath -u \"$1\")\"", &d.join("l.v2")), "ln -s in {}", d.display());
+        let (code, stdout, stderr) = run_in_home(d, &["main.v2"], &[]);
+        let want = format!("cannot read 'l.v2': it {lx} | {fix}\ncannot import './l.v2': it {lx} | {fix}\n");
+        assert_eq!((code, stdout.as_str()), (Some(0), want.as_str()), "{}: {stderr}", d.display());
+        let (code, _, stderr) = run_in_home(d, &["l.v2"], &[]);
+        assert_eq!((code, stderr), (Some(2), format!("v2: cannot find 'l.v2'\nit {lx}: {fix}\n")), "{}", d.display());
+    }
+}
+
+/// `script` run by sh in the WSL distribution `distro` as root, with `arg` as its `$1`.
+#[cfg(windows)]
+fn wsl_sh(distro: &str, script: &str, arg: &Path) -> bool {
+    wsl_exe(distro, true).args(["-e", "sh", "-c", script, "sh"]).arg(arg).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success())
+}
+
+#[cfg(windows)]
+#[test]
+fn a_wsl_distribution_that_isnt_there_is_named() {
+    // 5.10, 6.4, 19.1 (round 21 and its review): Windows says "The user name or password is
+    // incorrect" for one through \\wsl.localhost, and a bare \\wsl.localhost names none: in the
+    // file functions, an import, v2 FILE and v2 check FILE.
+    if wsl_distro("a_wsl_distribution_that_isnt_there_is_named").is_none() {
+        return;
+    }
+    let home = TempHome::new();
+    let main = "for p in [\"//wsl.localhost/v2-no-such-distro/x.txt\", \"//wsl$/v2-no-such-distro/x.txt\", \"//wsl.localhost\"] {\n    try { read_file(p) } catch (e) { print(e.message) }\n}\n";
+    std::fs::write(home.0.join("main.v2"), main).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["main.v2"], &[]);
+    let no = "there is no WSL distribution named v2-no-such-distro: wsl --list --quiet shows them";
+    let want = format!(
+        "cannot read '//wsl.localhost/v2-no-such-distro/x.txt': {no}\ncannot read '//wsl$/v2-no-such-distro/x.txt': {no}\n\
+         cannot read '//wsl.localhost': \\\\wsl.localhost needs a WSL distribution's name after it, as in \\\\wsl.localhost\\Ubuntu: wsl --list --quiet shows them\n"
+    );
+    assert_eq!((code, stdout.as_str()), (Some(0), want.as_str()), "{stderr}");
+    std::fs::write(home.0.join("imp.v2"), "import \"//wsl.localhost/v2-no-such-distro/m.v2\" as m\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["imp.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.starts_with(&format!("imp.v2:1:1: ImportError: cannot import '//wsl.localhost/v2-no-such-distro/m.v2': {no}\n")), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["check", "imp.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(1), "check imp.v2: 1 file, 1 error\n"), "{stderr}");
+    assert!(stderr.contains(&format!("ImportError: cannot import '//wsl.localhost/v2-no-such-distro/m.v2': {no}\n")), "{stderr}");
+    let file = r"\\wsl.localhost\v2-no-such-distro\x.v2";
+    for args in [vec![file], vec!["check", file], vec![r"\\wsl$\v2-no-such-distro\x.v2"]] {
+        let (code, _, stderr) = run_in_home(&home.0, &args, &[]);
+        let shown = args.last().unwrap();
+        assert_eq!((code, stderr), (Some(2), format!("v2: cannot find '{shown}'\n{no}\n")), "{args:?}");
+    }
+    let (code, _, stderr) = run_in_home(&home.0, &[r"\\wsl.localhost"], &[]);
+    let bare = r"\\wsl.localhost needs a WSL distribution's name after it, as in \\wsl.localhost\Ubuntu: wsl --list --quiet shows them";
+    assert_eq!((code, stderr), (Some(2), format!("v2: cannot find '\\\\wsl.localhost'\n{bare}\n")));
+}
+
 #[test]
 fn a_new_file_that_got_a_deleted_modules_id_is_another_module() {
     // 6.4 (round 19): a module is looked up by its file's ID only while the loaded path still has
