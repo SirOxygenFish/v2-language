@@ -530,7 +530,9 @@ says `input line 1 is not valid UTF-8`.** It decodes and encodes what passes thr
 the console's old code page. Run
 `[Console]::OutputEncoding = $OutputEncoding = [Text.UTF8Encoding]::new()` first in that window,
 or use PowerShell 7; and read a file with `Get-Content -Encoding UTF8 file.txt`, as 5.1 reads one
-without a byte-order mark in the old code page. In cmd.exe, run `chcp 65001` first. On Linux and
+without a byte-order mark in the old code page. In cmd.exe, run `chcp 65001` first. V2's standard
+input, output and error are UTF-8 on every OS, whatever the console's code page, so a program that
+runs v2 reads and sends UTF-8 (in Python, `encoding="utf-8"`). On Linux and
 macOS, V2 and its blocks always read and write UTF-8, whatever `LANG` says: use a UTF-8 locale
 (`C.UTF-8`, `de_DE.UTF-8`), or convert with `iconv`.
 

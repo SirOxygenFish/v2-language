@@ -632,7 +632,7 @@ bigger come from the languages you embed.
 | `args()`                                | command-line arguments after the script name                |
 | `sleep(seconds)`                        | wait (an int or float ≥ 0); Ctrl+C still stops the program  |
 | `time()`                                | seconds since 1970-01-01 UTC, as a float                    |
-| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; `code` is a 32-bit signed int (else a `ValueError`); on Linux and macOS, and in Git Bash on Windows, a shell sees only 0-255 (`exit(256)` reads as 0), so use 0-255 for a code a shell checks |
+| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; `code` is a 32-bit signed int, on Windows also up to 4294967295, as `exec` gives a crashed program's code (else a `ValueError`); on Linux and macOS, and in Git Bash on Windows, a shell sees only 0-255 (`exit(256)` reads as 0), so use 0-255 for a code a shell checks |
 | `error(type, message, data = null)`     | make an error value                                         |
 | `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
 | `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
@@ -663,8 +663,8 @@ file function, `exists` too: a name that ends in a dot or a space, which Windows
 On Windows a drive that isn't there (an unplugged USB drive) is said as such, `there is no drive Q:`,
 and so is a network drive or share that can't be reached; a write to a read-only file says how to make it
 writable (`attrib -r`; `chmod u+w` on Linux and macOS); and `/tmp`, Linux's and macOS's temp folder,
-gets `getenv("TEMP")` (`make_dir("/tmp/x")` is refused there, as it would make `C:\tmp`, which
-every user can write to).
+gets `getenv("TEMP")` where the drive has no `\tmp` folder (`make_dir("/tmp/x")` is refused there, as it would make `C:\tmp`, which
+every user can write to; an existing `C:\tmp` is used as any folder is).
 Paths are taken as written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path whose first part is one is an
 `IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
 in paths`, `./~` for a folder really named so), and on Linux and macOS so is another user's home
@@ -697,7 +697,9 @@ U+FFFD; UTF-16 output, with a byte order mark or, on Windows, as `cmd /u` and `w
 is read as UTF-16; on Windows, other output that isn't UTF-8 is read in the console's code page
 first, as `cmd` and other console programs write it). A non-zero
 `code` is not an error; on
-Linux and macOS a program killed by a signal has `code` 128 + the signal number. A program that
+Linux and macOS a program killed by a signal has `code` 128 + the signal number; on Windows a
+crashed program's `code` is Windows' unsigned 32-bit one, 3221225477 (0xC0000005) for an access
+violation, which `exit` takes, so `exit(r.code)` passes it on. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>` (`there is no such file` for a
 path that isn't there, with the Windows spelling of a Git Bash path, as for the file functions).
 For cmd.exe, the one string after `/c` (or `/k`) is a command line, passed as written, as cmd reads what you type: `exec(["cmd", "/c", "cd /d \"my dir\" && dir"])`. It runs in V2's working

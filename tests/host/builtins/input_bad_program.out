@@ -1,0 +1,2 @@
+IOError
+the program that sends v2 its input must send UTF-8 (in Python, encoding="utf-8")
