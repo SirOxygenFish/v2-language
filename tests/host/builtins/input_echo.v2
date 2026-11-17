@@ -1,0 +1,13 @@
+// input(prompt, echo: false) with standard input a pipe reads the line as input() does, with no
+// line break after it (that one is for a terminal, which doesn't show the Enter); echo is a bool,
+// else a TypeError before the prompt shows (DOCS 3.11, INTERNALS 5.10).
+let secret = input("Password: ", echo: false)
+print(f"[${secret}]")
+print(input("again: ", false))
+try {
+    input("never shown: ", echo: "no")
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+print(input(echo: true))
+print(input(echo: false))

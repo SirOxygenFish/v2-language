@@ -2968,6 +2968,73 @@ fn an_interrupt_gives_the_terminal_back() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn input_without_echo_hides_what_is_typed() {
+    // DOCS 3.11, INTERNALS 5.10 (round 22, L3): input(prompt, echo: false) on a terminal turns echo
+    // off before the prompt and keeps line input; the line comes back as typed, and a line break
+    // goes after it where the prompt went; the terminal's settings are back after Enter (the next
+    // input() shows what is typed) and after Ctrl+C.
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    let home = TempHome::new();
+    std::fs::write(home.0.join("ask.v2"), "let pw = input(\"Password: \", echo: false)\nprint(f\"got [${pw}]\")\nprint(f\"name [${input(\"Name: \")}]\")\n").unwrap();
+    std::fs::write(home.0.join("stop.v2"), "input(\"Password: \", echo: false)\nprint(\"not reached\")\n").unwrap();
+    for (file, typed) in [("ask.v2", "s3cret\n"), ("stop.v2", "\x03")] {
+        let mut pty = Pty::open();
+        let before = pty.flags();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg(file).current_dir(&home.0);
+        pty.attach(&mut cmd);
+        let mut child = cmd.spawn().expect("start v2");
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let stop = |child: &mut Child, why: &str, seen: &[u8]| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{file}: {why}: {}", String::from_utf8_lossy(seen).escape_debug());
+        };
+        if !pty.read_until(&mut seen, deadline, |s| find(s, b"Password: ").is_some()) {
+            stop(&mut child, "no prompt", &seen);
+        }
+        let asking = pty.flags();
+        if asking != [before[0], before[1], before[2], before[3] & !libc::ECHO] || asking[3] & libc::ICANON == 0 {
+            stop(&mut child, &format!("echo isn't off alone while it waits ({before:?} became {asking:?})"), &seen);
+        }
+        pty.master.write_all(typed.as_bytes()).unwrap();
+        let mut after = None;
+        if file == "ask.v2" {
+            if !pty.read_until(&mut seen, deadline, |s| find(s, b"Name: ").is_some()) {
+                stop(&mut child, "no second prompt", &seen);
+            }
+            after = Some(pty.flags());
+            pty.master.write_all(b"ada\n").unwrap();
+        }
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                stop(&mut child, "v2 didn't end", &seen);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // The last line, or after Ctrl+C the cursor shown again (6.5).
+        let end: &[u8] = if file == "ask.v2" { b"name [ada]\r\n" } else { b"\x1b[?25h" };
+        pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| find(s, end).is_some());
+        let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
+        if file == "ask.v2" {
+            assert!(status.success(), "{shown}");
+            assert_eq!(after, Some(before), "the settings weren't back after Enter: {shown}");
+            // Nothing typed shows but the second answer; v2's "\n" reaches the screen as "\r\n".
+            assert_eq!(shown, "Password: \\r\\ngot [s3cret]\\r\\nName: ada\\r\\nname [ada]\\r\\n");
+        } else {
+            assert_interrupted(&status, SIGINT, &shown);
+            assert!(find(&seen, b"not reached").is_none(), "{shown}");
+        }
+        assert_eq!(pty.flags(), before, "{file}: the terminal's settings weren't put back: {shown}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn the_readmes_way_to_leave_a_job_running_returns_at_once() {

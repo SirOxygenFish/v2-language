@@ -104,6 +104,9 @@ fn die(w: &Watch) -> ! {
     // Once nothing draws on it any more.
     #[cfg(unix)]
     restore_terminal();
+    // Windows: the console shows what is typed again after Ctrl+C in `input(echo: false)`.
+    #[cfg(windows)]
+    crate::runtime::builtins::echo_back();
     if let Some(dir) = &w.run_dir {
         remove_run_dir(dir);
     }
