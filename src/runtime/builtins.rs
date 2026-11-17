@@ -1294,10 +1294,10 @@ fn number_hint(t: &str, int: bool) -> Option<String> {
     } else if int && lead.parse::<i64>().is_err() && lead.parse::<f64>().is_ok() {
         Some(format!("int() reads whole numbers, as in 13: for {lead}, use float(x), or int(float(x)) to drop what is after the point"))
     } else if t.chars().any(|c| c.is_numeric() && !c.is_ascii_digit()) {
-        // `١٢٣`, `１２`: digits of another script, which Python reads; with U+066B, a point there,
-        // and without U+066C (`١٬٢٣٤`, ar-EG's thousands), which Python refuses.
-        let g = if t.contains('\u{66b}') { "float" } else { f };
-        let replaces = arabic_marks(t).1;
+        // `١٢٣`, `１２`: digits of another script, which Python reads once what it refuses is out
+        // (`other_digits`); with a point or U+066B, as `float`.
+        let g = if t.contains(['.', '\u{66b}']) { "float" } else { f };
+        let replaces = other_digits(t);
         Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {g}(x{replaces}) }}"))
     } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() && !t[lead.len()..].chars().any(char::is_numeric) {
         Some(format!("{f}() reads the number alone, without other text: '{lead}' would work"))
@@ -1374,6 +1374,30 @@ fn arabic_marks(t: &str) -> (String, String) {
         replaces.push_str(".replace(\"\u{66b}\", \".\")");
     }
     (t.replace('\u{66c}', "").replace('\u{66b}', "."), replaces)
+}
+
+/// The replaces that make `t`, in digits of another script, text Python's `float()` reads (5.10):
+/// the bidi marks Intl writes before a sign (U+061C ar-EG, U+200E fa-IR and ps-AF, U+200F ckb),
+/// as Python escapes since they are invisible; ASCII commas between thousands (`১,২৩৪.৫` bn-BD;
+/// `comma_groups`); and `arabic_marks`' U+066C and U+066B.
+fn other_digits(t: &str) -> String {
+    let mut replaces: String = ['\u{61c}', '\u{200e}', '\u{200f}'].into_iter().filter(|&c| t.contains(c)).map(|c| format!(".replace(\"\\u{:04x}\", \"\")", c as u32)).collect();
+    if comma_groups(t) {
+        replaces.push_str(".replace(\",\", \"\")");
+    }
+    replaces + &arabic_marks(t).1
+}
+
+/// Whether the ASCII commas in `t` are between thousands, as bn, mr, ne and my write them with
+/// their digits (`১,২৩৪.৫`, the Indian `১২,৩৪,৫৬৭.৫`): each after a digit, two or three digits
+/// to the next, three after the last, none after the point (a point or U+066B). A decimal comma
+/// (`৩,৫`) is not, so taking the commas out never turns 3.5 into 35.
+fn comma_groups(t: &str) -> bool {
+    let (whole, part) = t.split_once(['.', '\u{66b}']).unwrap_or((t, ""));
+    let mut groups = whole.split(',');
+    let first = groups.next().unwrap_or_default();
+    let rest: Vec<usize> = groups.map(|g| if g.chars().all(char::is_numeric) { g.chars().count() } else { 0 }).collect();
+    first.chars().last().is_some_and(char::is_numeric) && !part.contains(',') && rest.last() == Some(&3) && rest.iter().all(|n| (2..=3).contains(n))
 }
 
 /// A character as a V2 string writes it in a hint: an invisible space as its escape (`\u{a0}`).
