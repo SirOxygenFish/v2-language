@@ -215,6 +215,10 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String
         }
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // `größe.v2` copied from a Mac, its `ö` an `o` plus an accent: it looks like the name typed.
+    if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name) {
+        return twin;
+    }
     // `v2 mein spiel.v2`, `v2 my mod [v1].v2 arg`: the shell split a name with spaces; the
     // longest run of the words after FILE that makes a file's name.
     if let Some(joined) = (1..=rest.len()).rev().map(|k| rest[..k].join(" ")).find(|n| folder.join(format!("{name} {n}")).is_file()) {
@@ -223,15 +227,18 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String
     if path.extension().is_none() && folder.join(format!("{name}.v2")).is_file() {
         return format!("did you mean '{file}.v2'?");
     }
-    // `v2 doctr`, `v2 chek x.v2`: a command, misspelled.
-    if let Some(command) = did_you_mean(&word, ["check", "doctor", "cache"]).filter(|_| plain) {
+    // `v2 doctr`, `v2 chek x.v2`: a command, misspelled; `v2 CHECK x.v2`, in another case.
+    let commands = ["check", "doctor", "cache"];
+    let cased = commands.into_iter().find(|c| *c == word);
+    if let Some(command) = cased.or_else(|| did_you_mean(&word, commands)).filter(|_| plain) {
         let rest = match (command, next) {
             ("check", Some(script)) => format!(" {}", quoted(script)),
             ("check", None) => " FILE".to_string(),
             ("cache", _) => " clean".to_string(),
             _ => String::new(),
         };
-        return format!("did you mean 'v2 {command}{rest}'?");
+        let case = if cased.is_some() { " (commands are lower case)" } else { "" };
+        return format!("did you mean 'v2 {command}{rest}'?{case}");
     }
     // Notepad saves `hello` as hello.txt: whether FILE was hello or hello.v2, it becomes hello.v2.
     let stem = name.strip_suffix(".v2").unwrap_or(&name);
@@ -423,10 +430,31 @@ mod tests {
         assert_eq!(hint("doctr", None).unwrap(), "did you mean 'v2 doctor'?");
         assert_eq!(hint("chek", Some("x.v2")).unwrap(), "did you mean 'v2 check x.v2'?");
         assert_eq!(hint("cahce", None).unwrap(), "did you mean 'v2 cache clean'?");
+        // A command in another case (round 20): commands are lower case.
+        assert_eq!(hint("CHECK", Some("echo.v2")).unwrap(), "did you mean 'v2 check echo.v2'? (commands are lower case)");
+        assert_eq!(hint("Doctor", None).unwrap(), "did you mean 'v2 doctor'? (commands are lower case)");
+        assert_eq!(hint("CACHE", Some("clean")).unwrap(), "did you mean 'v2 cache clean'? (commands are lower case)");
         assert_eq!(hint("run", Some("my file.v2")).unwrap(), "there is no 'run' command: to run my file.v2, type: v2 \"my file.v2\"");
         assert_eq!(hint("help", None).unwrap(), "for help, type: v2 --help");
         assert_eq!(hint("version", None).unwrap(), "for the version, type: v2 --version");
         assert_eq!(hint("install", None).unwrap(), "'install' isn't a V2 command; the commands are check, doctor and cache clean (see v2 --help)");
+    }
+
+    #[test]
+    fn a_name_in_another_unicode_form_is_named() {
+        // 19.1 (round 20): `größe.v2` copied from a Mac (decomposed) for `größe.v2` as typed, and
+        // a decomposed name given for a composed file. macOS's file system finds one by the other.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let d = temp("unicode");
+        std::fs::write(d.join("gro\u{308}\u{df}e.v2"), "").unwrap();
+        std::fs::write(d.join("caf\u{e9}.v2"), "").unwrap();
+        let hint = |f: &str| entry_error(&d.join(f).to_string_lossy(), &[], "v2").expect("missing").lines().nth(1).unwrap().to_string();
+        let how = "decomposed Unicode (letters plus combining accents, as macOS writes names)";
+        assert_eq!(hint("gr\u{f6}\u{df}e.v2"), format!("there is a 'gro\u{308}\u{df}e.v2' whose name looks the same but is written in {how}: rename it"));
+        assert_eq!(hint("cafe\u{301}.v2"), format!("there is a 'caf\u{e9}.v2' whose name looks the same, but the name given is written in {how}: type it again"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

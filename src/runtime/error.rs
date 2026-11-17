@@ -122,17 +122,20 @@ fn osa(a: &[char], b: &[char]) -> usize {
 
 /// The closest candidate, compared lower-cased, if within 1 for a name of up to 5 chars, else
 /// `min(3, (len + 2) / 3)`; of
-/// candidates as close, the first that starts with the name, else the first.
+/// candidates as close, the first that starts with the name, else the first. One that is the
+/// name typed without its accents (`grosse` for `größe`, `buyut` for `büyüt`) is as close as one
+/// that differs only in case.
 pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let target: Vec<char> = name.to_lowercase().chars().collect();
     let limit = if target.len() <= 5 { 1 } else { 3usize.min(target.len().div_ceil(3)) };
+    let plain = folded(name);
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {
         if c == name {
             continue;
         }
         let cand: Vec<char> = c.to_lowercase().chars().collect();
-        let d = osa(&target, &cand);
+        let d = if !(name.is_ascii() && c.is_ascii()) && folded(c) == plain { 0 } else { osa(&target, &cand) };
         // A suggestion keeps some of the name: `y` isn't a typo of `f`.
         let prefix = cand.starts_with(&target);
         let better = |(bd, b): (usize, &str)| d < bd || (d == bd && prefix && !b.to_lowercase().starts_with(&*name.to_lowercase()));
@@ -141,6 +144,22 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
         }
     }
     best.map(|(_, c)| c)
+}
+
+/// A name as a keyboard without its accents types it (5.9): its NFD form without the combining
+/// diacritics (U+0300 to U+036F), lower-cased, with `ß` as `ss` and `ı` as `i`, so `größe` and
+/// `grosse`, `büyüt` and `buyut`, `İzmir` and `izmir` are one.
+pub fn folded(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out = String::with_capacity(name.len());
+    for c in name.nfd().filter(|c| !('\u{300}'..='\u{36f}').contains(c)).flat_map(char::to_lowercase) {
+        match c {
+            'ß' => out.push_str("ss"),
+            'ı' => out.push('i'),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -464,6 +483,20 @@ mod tests {
         // A tie goes to the one that starts with the name, whatever the order.
         assert_eq!(did_you_mean("stat", ["star", "stats", "stats2"]), Some("stats"));
         assert_eq!(did_you_mean("stat", ["start", "star"]), Some("start"));
+    }
+
+    #[test]
+    fn did_you_mean_takes_a_name_typed_without_its_accents() {
+        // 5.9 (round 20): ß as ss and two accents in a short name were past the distance.
+        assert_eq!(did_you_mean("grosse", ["größe", "grob"]), Some("größe"));
+        assert_eq!(did_you_mean("buyut", ["büyüt"]), Some("büyüt"));
+        assert_eq!(did_you_mean("izmir", ["İzmir"]), Some("İzmir"));
+        assert_eq!(did_you_mean("yardim", ["Yardım"]), Some("Yardım"));
+        // Decomposed (as macOS writes names) or not, the same letters.
+        assert_eq!(did_you_mean("cafe", ["cafe\u{301}"]), Some("cafe\u{301}"));
+        assert_eq!(folded("Straße"), "strasse");
+        // Other letters still count: no accent makes `buyuk` `büyüt`.
+        assert_eq!(did_you_mean("buyuk", ["büyüt"]), None);
     }
 
     fn sm_with(text: &str) -> (SourceMap, FileId) {

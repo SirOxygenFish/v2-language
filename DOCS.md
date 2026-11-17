@@ -364,7 +364,8 @@ py.unicodedata`, then `normalize("NFC", s)`, makes one form). JavaScript counts 
 its `.length` and `indexOf` count UTF-16 units, so an index from JavaScript isn't one in V2.
 Case and order are the same in every language (`"İ".lower()` is `"i̇"`, and `sort` puts `Ç` after
 `z`): for a language's own, use a @js block, as in `names.sort(new Intl.Collator("tr").compare)`
-and `s.toLocaleUpperCase("tr")`.
+and `s.toLocaleUpperCase("tr")`; numbers and dates its way too, as in
+`@js(x) { x.toLocaleString("de-DE", {minimumFractionDigits: 2}) }` (`1.234,50` for `1234.5`).
 
 String methods:
 
@@ -588,7 +589,9 @@ print(util.slug("Hello World"))    // hello-world
   file, or a folder on the way, a Windows junction too) says that and what fixes it, in a run and
   in `v2 check`; a file V2 may not read gives the system's reason (`Access is denied`). A path
   whose letters differ from the file's name only in case (`./Util.v2` for `util.v2`) works on
-  Windows and macOS, with a note, since Linux won't find it.
+  Windows and macOS, with a note, since Linux won't find it. A missing module's error names the
+  file of its folder you probably meant (`did you mean './Util.v2'?`, on Linux for the wrong case
+  too), or one whose name looks the same but is written as macOS writes names (decomposed Unicode).
 - A module runs once, the first time it is imported; later imports reuse it, also when they reach
   it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`).
 - `util` is a dict of the module's exported names, taken when the module finishes running.
@@ -620,7 +623,7 @@ bigger come from the languages you embed.
 | `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it; one that holds more than 1 GiB (`/dev/zero` too) is an `IOError` that says to read it in pieces in a block |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME`, or one Windows would read as another, is refused, below) |
-| `list_dir(path)`                        | sorted list of the names in a folder; one name that isn't UTF-8 fails the whole call, an `IOError` (rename that file, or list the names as bytes with `os.listdir` in a `@py` block, as its hint shows) |
+| `list_dir(path)`                        | list of the names in a folder, sorted by code point as `sort()` sorts strings (`LC_ALL=C ls`'s order, not your locale's); one name that isn't UTF-8 fails the whole call, an `IOError` (rename that file, or list the names as bytes with `os.listdir` in a `@py` block, as its hint shows) |
 | `make_dir(path)`                        | create a folder and any missing parents; an existing folder is fine |
 | `remove_file(path)`                     | delete a file (not a folder), a read-only one too, on every OS, as `rm` does |
 | `script_dir()`                          | absolute path of the folder of the `.v2` file containing the call |
