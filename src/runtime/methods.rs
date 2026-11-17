@@ -47,7 +47,7 @@ pub static BYTES_METHODS: &[MethodDef] = &[
         let b = the_bytes(r);
         match std::str::from_utf8(b) {
             Ok(s) => Ok(Value::str(s)),
-            Err(e) => value_error(format!("invalid UTF-8 at byte offset {}", e.valid_up_to())).inspect_err(|f| utf8_only("bytes.decode", f)),
+            Err(e) => value_error(format!("invalid UTF-8 at byte offset {}", e.valid_up_to())).inspect_err(|f| utf8_only("bytes.decode", f, false)),
         }
     }),
     m("hex", NONE, |_, r, _, _| {
@@ -61,11 +61,13 @@ pub static BYTES_METHODS: &[MethodDef] = &[
 
 /// `b.decode("latin-1")`, `s.encode(encoding: "cp1254")`, and bytes that aren't UTF-8: V2's own
 /// read and write UTF-8 only, a block any encoding (5.4). The hint for `method`'s ArityError or
-/// ValueError.
-pub(crate) fn utf8_only(method: &str, f: &Flow) {
-    let hint = match method {
-        "bytes.decode" => "V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode(\"cp1254\") }",
-        "str.encode" => "V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode(\"cp1254\") }",
+/// ValueError; `utf8` when the call named UTF-8 (`names_utf8`), which needs no argument.
+pub(crate) fn utf8_only(method: &str, f: &Flow, utf8: bool) {
+    let hint = match (method, utf8) {
+        ("bytes.decode", true) => "V2's decode() reads UTF-8: write b.decode()",
+        ("str.encode", true) => "V2's encode() writes UTF-8: write s.encode()",
+        ("bytes.decode", _) => "V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode(\"cp1254\") }",
+        ("str.encode", _) => "V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode(\"cp1254\") }",
         _ => return,
     };
     if let Flow::Error(e) = f {
@@ -73,6 +75,17 @@ pub(crate) fn utf8_only(method: &str, f: &Flow) {
             let _ = e.hint.set(hint.into());
         }
     }
+}
+
+/// Whether a call's one argument, by position or as `encoding:`, is `"utf-8"` or `"utf8"` in any
+/// case, as in `b.decode("utf-8")` (`utf8_only`).
+pub(crate) fn names_utf8(pos: &[Value], named: &crate::runtime::call::Named) -> bool {
+    let only = match (pos, named.as_slice()) {
+        ([v], []) => v,
+        ([], [(k, v)]) if &**k == "encoding" => v,
+        _ => return false,
+    };
+    matches!(only, Value::Str(s) if s.eq_ignore_ascii_case("utf-8") || s.eq_ignore_ascii_case("utf8"))
 }
 
 pub static LIST_METHODS: &[MethodDef] = &[
