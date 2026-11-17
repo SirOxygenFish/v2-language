@@ -31,6 +31,9 @@ fn entry_lines(file: &str, rest: &[&str], command: &str) -> Option<Vec<String>> 
     if file == "/?" {
         return Some(vec!["'/?' isn't a V2 command".into(), "for help, type: v2 --help".into()]);
     }
+    if let Some(lines) = dotted_file(file, command) {
+        return Some(lines);
+    }
     let path = Path::new(file);
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => Some(folder_message(file, path, command)),
@@ -52,6 +55,10 @@ fn entry_lines(file: &str, rest: &[&str], command: &str) -> Option<Vec<String>> 
 fn other_message(file: &str, path: &Path, rest: &[&str], command: &str, e: &std::io::Error) -> Option<Vec<String>> {
     if let Some(link) = crate::runtime::module::link_problem(path) {
         return Some(vec![format!("cannot find '{file}'"), link_line(file, path, &link)]);
+    }
+    // Windows: `v2 q?.v2` for a Linux q?.v2 that WSL made, which Windows shows as q\u{f03f}.v2.
+    if let Some(twin) = crate::runtime::module::stand_in_twin(file) {
+        return Some(vec![format!("cannot find '{file}'"), noted(format!("did you mean '{twin}'?"), &twin)]);
     }
     if !cfg!(windows) || !file.contains(['*', '?']) || e.kind() == std::io::ErrorKind::PermissionDenied {
         return None;
@@ -142,14 +149,22 @@ fn missing_message(file: &str, path: &Path, rest: &[&str], command: &str) -> Vec
     if let Some(link) = crate::runtime::module::link_problem(path) {
         return vec![format!("cannot find '{file}'"), link_line(file, path, &link)];
     }
-    // Windows: Git Bash's `/c/Users/…` pasted into cmd or PowerShell, which read it as `\c\…` on
-    // this drive; the file builtins say the same (5.10).
-    if let Some(drive_path) = git_bash_path(file) {
-        let letter = &file[1..2];
+    // Windows: Git Bash's `/c/Users/…` (or WSL's `/mnt/c/…`) pasted into cmd or PowerShell, which
+    // read it as `\c\…` on this drive; the file builtins say the same (5.10).
+    if let Some((written, drive_path, whose)) = crate::runtime::builtins::unix_drive(file) {
         return vec![
             format!("cannot find '{file}'"),
-            format!("on Windows, /{}/… is Git Bash's spelling of {}:/…: run {command} {}", letter.to_ascii_lowercase(), letter.to_ascii_uppercase(), quoted(&drive_path)),
+            format!("on Windows, {}/… is {whose} spelling of {}/…: run {command} {}", written.to_ascii_lowercase(), &drive_path[..2], quoted(&drive_path)),
         ];
+    }
+    // Windows: a Linux path (`/root/proj/main.v2`), which is WSL's.
+    if let Some(hint) = crate::runtime::builtins::linux_path_hint(file) {
+        return vec![format!("cannot find '{file}'"), hint];
+    }
+    // Windows: `v2 mod:x.v2` for a Linux mod:x.v2 that WSL made, which Windows shows as
+    // mod\u{f03a}x.v2.
+    if let Some(twin) = crate::runtime::module::stand_in_twin(file) {
+        return vec![format!("cannot find '{file}'"), noted(format!("did you mean '{twin}'?"), &twin)];
     }
     // A folder on the way that isn't there: say so, with the one it probably meant.
     if !folder.is_dir() {
@@ -277,9 +292,9 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: 
             None => close.to_string(),
         };
         if suggestion.contains(' ') {
-            return format!("did you mean \"{suggestion}\"? a name with a space goes in quotes: v2 \"{suggestion}\"");
+            return noted(format!("did you mean \"{suggestion}\"? a name with a space goes in quotes: v2 \"{suggestion}\""), &suggestion);
         }
-        return format!("did you mean '{suggestion}'?");
+        return noted(format!("did you mean '{suggestion}'?"), &suggestion);
     }
     files_there(folder)
 }
@@ -287,12 +302,41 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: 
 /// The last hint for a missing FILE: the folder's `.v2` files, sorted, five at most, that it has
 /// none, or that V2 can't list it (a deny on the folder), with the OS's reason (19.1).
 fn files_there(folder: &Path) -> String {
+    let listed = |scripts: &[String], more: &str| {
+        let note = scripts.iter().find_map(|s| crate::runtime::module::stand_in_note(s)).map(|n| format!("; {n}")).unwrap_or_default();
+        format!("the .v2 files there: {}{more}{note}", scripts.join(", "))
+    };
     match v2_files(folder) {
         Err(e) => format!("V2 can't list that folder: {} (check the name, or the folder's permissions)", os_message(&e)),
         Ok(scripts) if scripts.is_empty() => "there are no .v2 files there: cd to the folder that holds your script, or give its full path".into(),
-        Ok(scripts) if scripts.len() <= 5 => format!("the .v2 files there: {}", scripts.join(", ")),
-        Ok(scripts) => format!("the .v2 files there: {}, …", scripts[..5].join(", ")),
+        Ok(scripts) if scripts.len() <= 5 => listed(&scripts, ""),
+        Ok(scripts) => listed(&scripts[..5], ", …"),
     }
+}
+
+/// `line`, a did-you-mean of `name`, with `module::stand_in_note` after it when `name` holds a
+/// stand-in of WSL's (`q\u{f03f}.v2`), which Windows shows for a Linux name's `?` (19.1).
+fn noted(line: String, name: &str) -> String {
+    match crate::runtime::module::stand_in_note(name) {
+        Some(note) => format!("{line} {note}"),
+        None => line,
+    }
+}
+
+/// Windows: FILE with a part that ends in a dot or a space, which Windows would read as another
+/// file (`run.v2.` as `run.v2`), refused as the file builtins refuse it (5.10): then the `\\?\` way
+/// to a file of that name when it is there (WSL and Macs make them), else the file Windows reads
+/// when that is there, else the folder's `.v2` files (19.1).
+fn dotted_file(file: &str, command: &str) -> Option<Vec<String>> {
+    let (why, there) = crate::runtime::builtins::dotted_name(file)?;
+    let what = if command == "v2" { "run" } else { "check" };
+    let plain = crate::runtime::module::without_dots(file);
+    let next = match there {
+        Some(v) => format!(r"one of that name is there (WSL and Macs can make one): {what} it by its full path with \\?\ in front: {command} {}", quoted(&v)),
+        None if Path::new(file).is_file() => format!("did you mean '{plain}'?"),
+        None => files_there(Path::new(&plain).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))),
+    };
+    Some(vec![format!("cannot read '{file}': {why}"), next])
 }
 
 /// The `.v2` files directly in `folder`, sorted, or why the folder can't be listed.
@@ -305,21 +349,6 @@ fn v2_files(folder: &Path) -> std::io::Result<Vec<String>> {
         .collect();
     names.sort();
     Ok(names)
-}
-
-/// Windows: `/c/Users/me/x.v2`, Git Bash's spelling of `C:/Users/me/x.v2` (one letter after the
-/// first `/`, a drive that exists, and no folder `\c` on this drive), as `C:/Users/me/x.v2`;
-/// the file builtins' `msys_hint` reads it the same way (5.10).
-fn git_bash_path(file: &str) -> Option<String> {
-    let b = file.as_bytes();
-    if !cfg!(windows) || b.first() != Some(&b'/') || !b.get(1).is_some_and(u8::is_ascii_alphabetic) || !matches!(b.get(2), None | Some(b'/')) {
-        return None;
-    }
-    let drive = format!("{}:", (b[1] as char).to_ascii_uppercase());
-    if !Path::new(&format!("{drive}/")).is_dir() || Path::new(&file[..2]).exists() {
-        return None;
-    }
-    Some(format!("{drive}{}", if file.len() > 2 { &file[2..] } else { "/" }))
 }
 
 /// A folder as messages show it: absolute, without Windows's `\\?\`.

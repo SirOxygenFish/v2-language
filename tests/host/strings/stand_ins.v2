@@ -1,0 +1,3 @@
+// WSL shows a Linux name's : or ? to Windows as U+F03A or U+F03F, which show as nothing or as
+// another character: in a list (list_dir's), they show as escapes (INTERNALS 5.10, round 21).
+print(["mod\u{f03a}x.v2", "q\u{f03f}.v2", "\u{f000}\u{f0ff}", "\u{efff}\u{f100}"])
