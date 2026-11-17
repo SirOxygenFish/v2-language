@@ -1,0 +1,79 @@
+// requires: py
+// platform: unix
+// A forked child whose threads print at once (a multiprocessing worker with a thread pool): what
+// each print wrote comes out once, none lost or doubled, as the unfinished line is held under the
+// stream's lock (review of round 21; INTERNALS 9.9). Two threads' prints may share a line, as in
+// Python itself (print writes its text and its end apart). The child's fds 1 and 2 go to a file,
+// which the block then reads; a tiny switch interval makes the threads switch inside a write, as
+// free-threaded Python does anyway.
+@py {
+    import os, re, sys, tempfile, threading, time
+    with tempfile.TemporaryFile() as f:
+        pid = os.fork()
+        if pid == 0:
+            os.dup2(f.fileno(), 1)
+            os.dup2(f.fileno(), 2)
+            sys.setswitchinterval(1e-6)
+
+            def work(t):
+                for n in range(2000):
+                    print("t%d n%d %s" % (t, n, "y" * 20))
+
+            ts = [threading.Thread(target=work, args=(t,)) for t in range(8)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            sys.stdout.flush()
+            os._exit(0)
+        os.waitpid(pid, 0)
+        f.seek(0)
+        text = f.read().decode()
+    found = re.findall(r"t\d n\d+ y{20}", text)
+    left = re.sub(r"t\d n\d+ y{20}|\n", "", text)
+    print(len(found), "prints,", len(set(found)), "different,", text.count("\n"), "line ends,", repr(left), "else")
+}
+// A forked child that forks again while one of its threads holds the stream's lock, with a line
+// unfinished: the grandchild has a lock of its own and leaves that line to the child.
+@py {
+    import os, sys, tempfile, threading, time
+    with tempfile.TemporaryFile() as f:
+        pid = os.fork()
+        if pid == 0:
+            os.dup2(f.fileno(), 1)
+            os.dup2(f.fileno(), 2)
+            print("partial", end="")
+            held, done = threading.Event(), threading.Event()
+
+            def hold():
+                with sys.stdout._lock:
+                    held.set()
+                    done.wait()
+
+            holder = threading.Thread(target=hold)
+            holder.start()
+            held.wait()
+            g = os.fork()
+            if g == 0:
+                print("grandchild")
+                sys.stdout.flush()
+                os._exit(0)
+            stuck = True
+            for _ in range(200):
+                if os.waitpid(g, os.WNOHANG)[0]:
+                    stuck = False
+                    break
+                time.sleep(0.05)
+            if stuck:
+                os.kill(g, 9)
+                os.waitpid(g, 0)
+            done.set()
+            holder.join()
+            print(" end", "(the grandchild was stuck)" if stuck else "")
+            sys.stdout.flush()
+            os._exit(0)
+        os.waitpid(pid, 0)
+        f.seek(0)
+        text = f.read().decode()
+    print(repr(text))
+}

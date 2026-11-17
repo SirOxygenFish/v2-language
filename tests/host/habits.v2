@@ -50,3 +50,6 @@ try_it(func() { print(xs.count(1)) })
 try_it(func() { xs.clear() })
 try_it(func() { print("ab".ljust(5)) })
 try_it(func() { print(d.keys) })
+// Round 21 (L9): the block does what was called.
+try_it(func() { print("7".zfill(3)) })
+try_it(func() { print("ab".swapcase()) })
