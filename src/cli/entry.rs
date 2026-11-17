@@ -175,7 +175,7 @@ fn missing_message(file: &str, path: &Path, rest: &[&str], command: &str) -> Vec
         };
         return vec![format!("cannot find '{file}'"), hint];
     }
-    vec![first, missing_hint(file, path, &folder, rest)]
+    vec![first, missing_hint(file, path, &folder, rest, command)]
 }
 
 /// A path as messages show it, made absolute against the current folder and with `.` and `..`
@@ -196,7 +196,7 @@ fn absolute_shown(p: &Path) -> String {
 
 /// The one hint for a missing FILE: the command it looks like, the file it probably meant, or
 /// what is there.
-fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String {
+fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: &str) -> String {
     let next = rest.first().copied();
     let word = file.to_ascii_lowercase();
     let plain = !file.contains(['/', '\\']) && path.extension().is_none();
@@ -218,10 +218,14 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str]) -> String
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     // `größe.v2` copied from a Mac, its `ö` an `o` plus an accent: it looks like the name typed
-    // (or like NAME`.v2`, for `v2 größe`).
-    let with_v2 = || if path.extension().is_none() { crate::runtime::module::unicode_twin(folder, &format!("{name}.v2")) } else { None };
-    if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name).or_else(with_v2) {
+    // (or like NAME`.v2`, for `v2 größe`, which also lacks the .v2: the run that works then).
+    if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name) {
         return twin;
+    }
+    if path.extension().is_none() {
+        if let Some(twin) = crate::runtime::module::unicode_twin(folder, &format!("{name}.v2")) {
+            return format!("{twin}, and run {command} {}", quoted(&crate::runtime::module::composed_v2(file, &name)));
+        }
     }
     // `v2 mein spiel.v2`, `v2 my mod [v1].v2 arg`: the shell split a name with spaces; the
     // longest run of the words after FILE that makes a file's name.
@@ -495,8 +499,17 @@ mod tests {
         let how = "decomposed Unicode (letters plus combining accents, as macOS writes names)";
         let x = format!("{folder}/x.v2");
         assert_eq!(hint(&x), format!("there is no folder {}: there is a '{folder_nfd}' whose name looks the same but is written in {how}: rename it", d.join(folder).display()));
-        assert_eq!(hint(file), format!("there is a '{file_nfd}.v2' whose name looks the same but is written in {how}: rename it"));
-        // Renamed as the note says: found, and `v2 größe_çalış` gets the .v2 it lacks.
+        // FILE without its .v2 (third pass): the note ends with the run that works once renamed.
+        let with_v2 = quoted(&format!("{}.v2", at(file)));
+        assert_eq!(hint(file), format!("there is a '{file_nfd}.v2' whose name looks the same but is written in {how}: rename it, and run v2 {with_v2}"));
+        let checked = entry_error(&at(file), &[], "v2 check").unwrap();
+        assert!(checked.ends_with(&format!(": rename it, and run v2 check {with_v2}")), "{checked}");
+        // A decomposed name given for a composed `naïve.v2`: the run, with the name composed.
+        std::fs::write(d.join("na\u{ef}ve.v2"), "").unwrap();
+        let composed = quoted(&format!("{}.v2", at("na\u{ef}ve")));
+        assert_eq!(hint("nai\u{308}ve"), format!("there is a 'na\u{ef}ve.v2' whose name looks the same, but the name given is written in {how}: type it again, and run v2 {composed}"));
+        assert!(entry_error(&at("na\u{ef}ve.v2"), &[], "v2").is_none());
+        // Renamed as the notes say: found, and the run they name works.
         std::fs::rename(d.join(folder_nfd), d.join(folder)).unwrap();
         std::fs::rename(d.join(format!("{file_nfd}.v2")), d.join(format!("{file}.v2"))).unwrap();
         assert!(entry_error(&at(&x), &[], "v2").is_none());
