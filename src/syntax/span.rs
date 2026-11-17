@@ -162,9 +162,7 @@ pub fn read_hint(e: &std::io::Error) -> Option<&'static str> {
 /// file's 128-bit ID on Windows (`FILE_ID_INFO`; the older 64-bit index isn't unique on ReFS, a
 /// Dev Drive's file system), the device and inode elsewhere. Two canonical paths can name one
 /// file (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`), so a module is looked up
-/// by it too (6.4). An ID of all zeros or all ones (some network redirectors give one) is none,
-/// and so is one on a volume of serial number 0, as WSL's share reports, where inodes of two
-/// distributions could meet.
+/// by it too (6.4). An ID of all zeros or all ones (some network redirectors give one) is none.
 pub fn file_identity(path: &Path) -> Option<(u64, u128)> {
     #[cfg(windows)]
     {
@@ -181,7 +179,7 @@ pub fn file_identity(path: &Path) -> Option<(u64, u128)> {
             return None;
         }
         let id = u128::from_le_bytes(info.FileId.Identifier);
-        (id != 0 && id != u128::MAX && info.VolumeSerialNumber != 0).then_some((info.VolumeSerialNumber, id))
+        (id != 0 && id != u128::MAX).then_some((info.VolumeSerialNumber, id))
     }
     #[cfg(unix)]
     {
