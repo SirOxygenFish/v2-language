@@ -1,0 +1,26 @@
+// requires: py js
+// Blocks answer for where V2's output goes (DOCS 4.6, INTERNALS 9.9; round 22, L0-L2): here stdout
+// and stderr are pipes, so nothing is a terminal, and shutil falls back to 80 x 24. On a terminal
+// (tests/run.rs blocks_see_v2s_terminal) the same program sees it.
+@py {
+    import os, shutil, sys
+    def size(fd):
+        try:
+            return tuple(os.get_terminal_size(fd))
+        except OSError:
+            return None
+    print("py", sys.stdout.isatty(), sys.stderr.isatty(), os.isatty(1), os.isatty(2), tuple(shutil.get_terminal_size()), size(1), size(2))
+}
+@js {
+    const tty = require("tty")
+    const o = process.stdout, e = process.stderr
+    console.log(`js ${o.isTTY} ${e.isTTY} ${tty.isatty(1)} ${tty.isatty(2)} ${o.columns} ${o.rows} ${e.columns} ${typeof o.clearLine}`)
+    if (o.isTTY) {
+        o.clearLine(0)
+        o.cursorTo(0)
+        o.write(`bar ${o.getWindowSize().join("x")} ${o.getColorDepth()} ${o.hasColors()}\n`)
+    }
+    console.log(tty.isatty(1) ? "\x1b[32mok\x1b[39m" : "ok")
+    console.log({ a: 1 })
+}
+print("end")
