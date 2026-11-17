@@ -1,0 +1,4 @@
+// WSL shows a Linux name's : or ? to Windows as U+F03A or U+F03F, which show as nothing or as
+// another character: in a list (list_dir's), they show as escapes (INTERNALS 5.10, round 21). The
+// rest of U+F000 to U+F0FF is other private use, Nerd Fonts' icons too: as it is (the review).
+print(["mod\u{f03a}x.v2", "q\u{f03f}.v2", "a\u{f001}\u{f05c}\u{f07c}b", "\u{f07b} folder", "\u{f023}lock\u{f000}\u{f0ff}"])

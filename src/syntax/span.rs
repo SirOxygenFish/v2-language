@@ -203,7 +203,7 @@ impl SourceMap {
 
     /// Read, validate and normalize a file (3.1). A path that is already loaded returns its id.
     pub fn load(&mut self, path: &Path) -> Result<FileId, LoadError> {
-        let canonical = std::fs::canonicalize(path)
+        let canonical = canonicalize(path)
             .map_err(|e| LoadError::Io(format!("cannot read '{}': {}", shown_path(&path.to_string_lossy()), os_message(&e)), read_hint(&e)))?;
         let canonical = strip_verbatim(&canonical);
         // `v2 x.v2` in a folder whose name isn't UTF-8: script_dir() and messages couldn't name
@@ -378,8 +378,57 @@ pub fn absolute_clean(path: &Path) -> PathBuf {
     clean
 }
 
+/// `fs::canonicalize`, and on Windows, where that fails though the file opens (a file on WSL's
+/// share whose name holds a stand-in, `is_stand_in`: Windows can't normalize its name), the path
+/// the file was opened by, from its handle, so imports and FILE reach it as `read_file` does
+/// (6.4, 19.1).
+pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    let e = match std::fs::canonicalize(path) {
+        Ok(p) => return Ok(p),
+        Err(e) => e,
+    };
+    // ERROR_FILE_NOT_FOUND, which GetFinalPathNameByHandleW gives for such a name.
+    #[cfg(windows)]
+    if e.raw_os_error() == Some(2) {
+        if let Some(p) = opened_path(path) {
+            return Ok(p);
+        }
+    }
+    Err(e)
+}
+
+/// Windows: the path a file is opened by (`FILE_NAME_OPENED`), `\\?\` in front, or `None` when
+/// it doesn't open.
+#[cfg(windows)]
+fn opened_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_OPENED};
+    // No access to the data, and folders too (`FILE_FLAG_BACKUP_SEMANTICS`), as canonicalize opens.
+    let f = std::fs::OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path).ok()?;
+    let mut buf = vec![0u16; 512];
+    loop {
+        // SAFETY: a buffer of the length given, for a handle that `f` keeps open during the call.
+        let n = unsafe { GetFinalPathNameByHandleW(f.as_raw_handle(), buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_OPENED) } as usize;
+        match n {
+            0 => return None,
+            n if n < buf.len() => return Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))),
+            // Too small: `n` is the length it needs.
+            n => buf.resize(n, 0),
+        }
+    }
+}
+
+/// `p` without `\\?\` (`\\?\UNC\` becomes `\\`), but as it is when a part ends in a dot or a
+/// space (WSL and Macs make such names), which Windows would drop without it: `\\?\C:\x\run.v2.`
+/// names `run.v2.`, `C:\x\run.v2.` names `run.v2` (2.1, 5.10).
 pub fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
+    let rest = s.strip_prefix(r"\\?\UNC\").or_else(|| s.strip_prefix(r"\\?\"));
+    if rest.is_some_and(|r| r.split('\\').any(|part| !matches!(part, "" | "." | "..") && (part.ends_with('.') || part.ends_with(' ')))) {
+        return p.to_path_buf();
+    }
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
     } else if let Some(rest) = s.strip_prefix(r"\\?\") {
@@ -392,7 +441,7 @@ pub fn strip_verbatim(p: &Path) -> PathBuf {
 /// Relative to the current directory with `/` separators when inside it, else absolute, with
 /// control characters escaped (2.1).
 pub fn display_path(canonical: &Path) -> Rc<str> {
-    if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
+    if let Ok(cwd) = std::env::current_dir().and_then(|d| canonicalize(&d)) {
         let cwd = strip_verbatim(&cwd);
         // Relative to a filesystem root (`cd /`), a path would only lose its first `/`.
         if cwd.parent().is_some() {
@@ -410,7 +459,8 @@ pub fn display_path(canonical: &Path) -> Rc<str> {
 /// A path or a file name as messages show it: control characters escaped (`\n`, `\r`, `\t`, the
 /// others as `\u{1b}`), and the bidi formatting characters too (`\u{202e}`), so a name can't
 /// split a message, act on the terminal or reorder the line, and the line break that `"C:\new"`
-/// holds shows as written (2.1, 5.10). Text with none comes back as it is.
+/// holds shows as written (2.1, 5.10); WSL's stand-ins too (`\u{f03a}`, `is_stand_in`), which
+/// show as nothing or as another character. Text with none comes back as it is.
 pub fn shown_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
@@ -418,7 +468,7 @@ pub fn shown_path(path: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || is_bidi_format(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if c.is_control() || is_bidi_format(c) || is_stand_in(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
             c => out.push(c),
         }
     }
@@ -429,6 +479,14 @@ pub fn shown_path(path: &str) -> String {
 /// reorder the text after them on screen (2.1, 2.4).
 pub fn is_bidi_format(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A character WSL puts for one of a Linux name that a Windows name can't hold, U+F000 plus its
+/// code, as Windows shows such a name (2.1, 5.10): U+F001 to U+F01F for the control characters,
+/// and U+F022, U+F02A, U+F03A, U+F03C, U+F03E, U+F03F, U+F05C and U+F07C for `" * : < > ? \ |`.
+/// The rest of U+F000 to U+F0FF is other private use (Font Awesome's icons in Nerd Fonts).
+pub fn is_stand_in(c: char) -> bool {
+    matches!(c as u32, 0xF001..=0xF01F | 0xF022 | 0xF02A | 0xF03A | 0xF03C | 0xF03E | 0xF03F | 0xF05C | 0xF07C)
 }
 
 /// The OS error text without Rust's ` (os error N)` suffix.
@@ -459,6 +517,21 @@ mod tests {
         assert_eq!(shown_path("\u{202a}\u{202d}\u{2066}\u{2069}"), "\\u{202a}\\u{202d}\\u{2066}\\u{2069}");
         // Text in a right-to-left script and its marks stay as they are.
         assert_eq!(shown_path("\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{200f}.v2"), "\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{200f}.v2");
+    }
+
+    #[test]
+    fn wsls_stand_ins_show_escaped_and_dotted_names_keep_their_verbatim_prefix() {
+        // 2.1, 5.10 (round 21): Windows shows a Linux `mod:x.v2` as `mod\u{f03a}x.v2`, whose
+        // stand-in shows as nothing or as another character; without `\\?\`, `run.v2.` is `run.v2`.
+        assert_eq!(shown_path("case/mod\u{f03a}x.v2"), "case/mod\\u{f03a}x.v2");
+        assert_eq!(shown_path("a\u{f001}\u{f05c}\u{f07c}b"), "a\\u{f001}\\u{f05c}\\u{f07c}b");
+        // The review of round 21: only what WSL makes; Nerd Fonts put icons beside them.
+        assert_eq!(shown_path("\u{f000}\u{f023}lock \u{f07b} folder\u{f0ff}"), "\u{f000}\u{f023}lock \u{f07b} folder\u{f0ff}");
+        let strip = |p: &str| strip_verbatim(Path::new(p)).to_string_lossy().into_owned();
+        assert_eq!(strip(r"\\?\C:\x\run.v2."), r"\\?\C:\x\run.v2.");
+        assert_eq!(strip(r"\\?\UNC\srv\share\dir \m.v2"), r"\\?\UNC\srv\share\dir \m.v2");
+        assert_eq!(strip(r"\\?\C:\x\run.v2"), r"C:\x\run.v2");
+        assert_eq!(strip(r"\\?\UNC\srv\share\.\x.v2"), r"\\srv\share\.\x.v2");
     }
 
     #[test]
