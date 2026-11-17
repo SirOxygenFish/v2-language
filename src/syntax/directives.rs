@@ -672,9 +672,10 @@ impl<'a> DirParser<'a> {
 
 /// Whether `ascii`, an input method's form typed with the method off (3.2), fits where the
 /// directive's lexer stopped, after `toks`, `depth` braces deep, with `after` left on the line:
-/// so typing it gets the directive further. In the list a name's `_`, a quote, `,`, `*` and `}`;
-/// the list's `{` right after the word; after an @import's list `from`'s `@`, then a selector's
-/// `.`, quotes and `_`; `#` where the comment leaves the directive whole.
+/// so typing it gets the directive further. In the list a name's `_`, a quote, `,`, `$` (its own
+/// hint says to quote it), `}`, and @export's `*`; the list's `{` right after the word; after an
+/// @import's list `from`'s `@`, then a selector's `.` and `_`, and a quote after a module path's
+/// dot (`py."os.path"`); `#` where the comment leaves the directive whole.
 fn fits(ascii: char, toks: &[DTok], depth: i32, after: &str) -> bool {
     let last = toks.last().map(|t| &t.kind);
     let from = |k: &DK| matches!(k, DK::Kw(w) if &**w == "from");
@@ -682,8 +683,11 @@ fn fits(ascii: char, toks: &[DTok], depth: i32, after: &str) -> bool {
     let segment = matches!(last, Some(DK::Name(_) | DK::At(_) | DK::Str(_)));
     match ascii {
         '{' => toks.len() == 1,
-        ',' | '*' | '}' => depth > 0,
-        '"' | '\'' | '_' => depth > 0 || selector && (last.is_some_and(from) || last == Some(&DK::Dot)),
+        ',' | '}' | '$' => depth > 0,
+        '*' => depth > 0 && toks.first().is_some_and(|t| t.kind == DK::Export),
+        '_' => depth > 0 || selector && (last.is_some_and(from) || last == Some(&DK::Dot)),
+        // A quoted part only after a module path's dot: `py."os.path"`, not `from "x"` or `@py."x"`.
+        '"' | '\'' => depth > 0 || selector && last == Some(&DK::Dot) && toks.len() >= 2 && matches!(toks[toks.len() - 2].kind, DK::Name(_)),
         '@' => selector && last.is_some_and(from),
         '.' => selector && segment,
         // In a list that goes on below, after an @export's list, after an @import's selector.
@@ -1117,6 +1121,7 @@ mod tests {
             (in_js("@import { f } from @py\u{200B}"), "delete it".to_string(), in_js("@import { f } from @py")),
             (in_js("@import { join } from py.\u{201C}os.path\u{201D}"), "use a straight quote: \" or '".to_string(), in_js("@import { join } from py.\"os.path\"")),
             (in_js("@import { join } from py\u{FF0E}os.path"), input('.'), in_js("@import { join } from py.os.path")),
+            (in_js("@import { join } from py.\u{FF02}os.path\""), input('"'), in_js("@import { join } from py.\"os.path\"")),
             (in_js("@import { f } from @py \u{FF03} the function"), input('#'), in_js("@import { f } from @py # the function")),
             (in_py("@export { f } \u{FF03} x"), input('#'), in_py("@export { f } # x")),
             (in_py("@export {\n        f, \u{FF03} the function\n        g\n    }"), input('#'), in_py("@export {\n        f, # the function\n        g\n    }")),
@@ -1152,6 +1157,16 @@ mod tests {
         }
         assert_eq!(both(&in_js("@import { f } \u{FF20}py")).1, hint);
         assert_eq!(both(&in_js("@import { f } from py.\u{FF03}")).1, hint);
+        // The fourth review: `＄` in a list leads to `$`'s own hint, which says to quote it; `＊`
+        // is @export's only, and a quote only after a module path's dot.
+        let quote = "write a name that isn't a V2 name in quotes";
+        assert_eq!(both(&in_js("@import { \u{FF04}x } from @py")).1, input('$'));
+        assert!(both(&in_js("@import { $x } from @py")).1.starts_with(quote));
+        assert_eq!(both(&in_py("@export { \u{FF04}x }")).1, input('$'));
+        assert!(both(&in_py("@export { $x }")).1.starts_with(quote));
+        for line in ["@import { \u{FF0A} } from @py", "@import { f } from \u{FF02}x\"", "@import { f } from @py.\u{FF02}x\""] {
+            assert_eq!(both(&in_js(line)).1, hint, "{line:?}");
+        }
     }
 
     #[test]
