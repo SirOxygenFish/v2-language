@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use super::ast::*;
 use super::directives;
-use super::lexer::{format_hint, KWARGS_HINT, LABEL_HINT, MERGE_HINT, ONLY_FIXED};
+use super::lexer::{decimal_comma_hint, format_hint, KWARGS_HINT, LABEL_HINT, MERGE_HINT, ONLY_FIXED};
 use super::span::{SourceMap, Span};
 use super::token::{BraceKind, FPartTok, Kw, Op, Tok, Token};
 use super::Diag;
@@ -95,14 +95,8 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         {
             return Some("an index takes one key: write x[a][b], or, for a pandas or numpy handle, do it in a block, as in @py(df) { df.loc[r, \"col\"] }".into())
         }
-        // `let preis = 2,50`: a decimal comma.
-        Some(Tok::Op(Op::Comma))
-            if after_let
-                && matches!(tok(1), Some(Tok::Int(_)))
-                && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Int(_)) && t.span.lo == at.hi && toks[i - 1].span.hi == at.lo) =>
-        {
-            return Some("decimal numbers use a point: 2.50, not 2,50".into())
-        }
+        // `let preis = 19,99`, `x = 2,5`, `if x > 2,5 {`: a decimal comma where one expression ends.
+        Some(Tok::Op(Op::Comma)) if decimal_comma(toks, i, sm).is_some() => return decimal_comma(toks, i, sm),
         Some(Tok::Op(Op::Comma)) if after_let => return Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()),
         Some(Tok::Op(Op::Comma)) if after_return => return Some("V2 returns one value: return a list, as in return [a, b]".into()),
         Some(Tok::Kw(Kw::For)) if matches!(opener, Some(Tok::Op(Op::LBracket))) => {
@@ -217,6 +211,19 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
         _ => return None,
     };
     Some(hint)
+}
+
+/// The `,` at `toks[i]` between two int literals, with no space on either side (`19,99`): a
+/// decimal comma, and the hint that writes the number with a point (2.4).
+fn decimal_comma(toks: &[Token], i: usize, sm: &SourceMap) -> Option<String> {
+    let (a, comma, b) = (toks.get(i.checked_sub(1)?)?, toks.get(i)?, toks.get(i + 1)?);
+    let ints = matches!((&a.tok, &comma.tok, &b.tok), (Tok::Int(_), Tok::Op(Op::Comma), Tok::Int(_)));
+    if !ints || a.span.hi != comma.span.lo || comma.span.hi != b.span.lo {
+        return None;
+    }
+    let text = &sm.file(a.span.file).text;
+    let digits = |t: &Token| text.get(t.span.lo as usize..t.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_'));
+    Some(decimal_comma_hint(digits(a)?, digits(b)?))
 }
 
 /// Python's `from os.path import join, exists as e` as V2 writes it:
@@ -1835,7 +1842,12 @@ impl<'a> Parser<'a> {
                         return Err(Diag::new(ONLY_FIXED, colon).hint(format_hint(spec, written)));
                     }
                     if !matches!(sub.peek(), Tok::RBrace) || sub.pos + 1 != sub.toks.len() {
-                        return Err(Diag::new(format!("expected `}}` to close the ${{…}}, found {}", sub.peek()), sub.span()));
+                        let d = Diag::new(format!("expected `}}` to close the ${{…}}, found {}", sub.peek()), sub.span());
+                        // `${3,5:.2f}`: a decimal comma.
+                        return Err(match decimal_comma(&sub.toks, sub.pos, self.sm) {
+                            Some(h) => d.hint(h),
+                            None => d,
+                        });
                     }
                     out.push(FPart::Expr { expr, fixed });
                 }
@@ -2046,6 +2058,23 @@ extern "m" as m { double cos(double x); }
         let id = sm.add(std::path::PathBuf::from("t.v2"), "t.v2".into(), src);
         let toks = super::super::lexer::lex(&sm, id).unwrap();
         parse_program(&sm, toks).unwrap_err()
+    }
+
+    #[test]
+    fn a_decimal_comma_gets_the_number_with_a_point() {
+        // 2.4 (round 20): `19,99` with no spaces where one expression ends, in the user's number.
+        let hint = |src: &str| diag(src).hint;
+        let point = |n: &str| Some(format!("decimal numbers use a point: write {}, not {n}", n.replace(',', ".")));
+        assert_eq!(hint("let preis = 19,99"), point("19,99"));
+        assert_eq!(hint("let x = 1\nx = 2,5"), point("2,5"));
+        assert_eq!(hint("let x = 1\nif x > 2,5 { print(1) }"), point("2,5"));
+        assert_eq!(hint("print(f\"${3,5:.2f}\")"), point("3,5"));
+        assert_eq!(hint("print(f\"${1_000,5}\")"), point("1_000,5"));
+        assert_eq!(hint("func f() {\n    return 2,5\n}"), point("2,5"));
+        // With a space it is a list of values, and a tuple keeps its own hint.
+        assert_eq!(hint("let x = 1\nif x > 2, 5 { print(1) }"), None);
+        assert_eq!(hint("let p = (2,5)").as_deref(), Some("V2 has no tuples: write a list, as in [1, 2]"));
+        assert!(parse_str("print(round(2,5))").is_ok());
     }
 
     #[test]

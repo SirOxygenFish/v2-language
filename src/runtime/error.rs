@@ -147,13 +147,13 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
 // Rendering (2.4)
 
 /// The source line under `span` with a caret, indented 4. Leading whitespace is removed, tabs
-/// print as one space, other control characters as their visible symbols, and lines over 120
-/// chars are cut to a window around the caret.
+/// print as one space, other control characters as their visible symbols, bidi formatting
+/// characters escaped (`\u{202e}`), and lines over 120 chars are cut to a window around the caret.
 pub fn excerpt(sm: &SourceMap, span: Span) -> String {
     let line = sm.line_text(span.file, span.line);
     let removed = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-    let chars: Vec<char> = line.chars().skip(removed).map(visible).collect();
-    let mut caret = (span.col as usize).saturating_sub(1 + removed);
+    let col = (span.col as usize).saturating_sub(1 + removed);
+    let (chars, mut caret) = visible_line(line.chars().skip(removed), col);
     let mut text: String = chars.iter().collect();
     if chars.len() > 120 {
         let start = caret.saturating_sub(60).min(chars.len() - 120);
@@ -303,6 +303,25 @@ fn visible(c: char) -> char {
         '\u{80}'..='\u{9F}' => '\u{FFFD}',
         c => c,
     }
+}
+
+/// An excerpt's characters as `visible` shows them, a bidi formatting character as `\u{202e}` so
+/// it can't reorder the line (2.4), and where the char at index `col` of `line` went.
+fn visible_line(line: impl Iterator<Item = char>, col: usize) -> (Vec<char>, usize) {
+    let (mut chars, mut caret, mut count) = (Vec::new(), None, 0);
+    for (k, c) in line.enumerate() {
+        if k == col {
+            caret = Some(chars.len());
+        }
+        if crate::syntax::span::is_bidi_format(c) {
+            chars.extend(format!("\\u{{{:x}}}", c as u32).chars());
+        } else {
+            chars.push(visible(c));
+        }
+        count = k + 1;
+    }
+    let caret = caret.unwrap_or(chars.len() + col.saturating_sub(count));
+    (chars, caret)
 }
 
 fn split_message(message: &str) -> (&str, Vec<&str>) {
@@ -527,6 +546,20 @@ mod tests {
         let (sm, id) = sm_with("let a = 1\u{1B}[31m\t\u{0}\u{7F}\u{85}\n");
         let d = Diag::new("unexpected character U+001B", sm.span(id, 9, 10));
         assert_eq!(render_diag(&sm, &d), "main.v2:1:10: SyntaxError: unexpected character U+001B\n    let a = 1\u{241B}[31m \u{2400}\u{2421}\u{FFFD}\n             ^\n");
+    }
+
+    #[test]
+    fn excerpts_escape_bidi_controls() {
+        // A bidi override can't reorder the line shown (2.4, round 20): it prints as \u{202e}, and
+        // the caret moves past what it became. Past the line's end the caret stays past it.
+        let (sm, id) = sm_with("let a = \"\u{202E}x\u{2066}\" + nope\n");
+        let at = "let a = \"\u{202E}x\u{2066}\" + ".len() as u32;
+        let d = Diag::new("x", sm.span(id, at, at + 4));
+        let shown = "let a = \"\\u{202e}x\\u{2066}\" + nope";
+        assert_eq!(render_diag(&sm, &d), format!("main.v2:1:17: SyntaxError: x\n    {shown}\n    {}^\n", " ".repeat(shown.len() - 4)));
+        let (sm, id) = sm_with("x\u{202E}\n");
+        let d = Diag::new("x", sm.span(id, 4, 4));
+        assert_eq!(render_diag(&sm, &d), format!("main.v2:1:3: SyntaxError: x\n    x\\u{{202e}}\n{}^\n", " ".repeat(4 + 9)));
     }
 
     #[test]

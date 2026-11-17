@@ -368,8 +368,9 @@ pub fn display_path(canonical: &Path) -> Rc<str> {
 }
 
 /// A path or a file name as messages show it: control characters escaped (`\n`, `\r`, `\t`, the
-/// others as `\u{1b}`), so a name can't split a message or act on the terminal, and the line
-/// break that `"C:\new"` holds shows as written (2.1, 5.10). Text with none comes back as it is.
+/// others as `\u{1b}`), and the bidi formatting characters too (`\u{202e}`), so a name can't
+/// split a message, act on the terminal or reorder the line, and the line break that `"C:\new"`
+/// holds shows as written (2.1, 5.10). Text with none comes back as it is.
 pub fn shown_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
@@ -377,11 +378,17 @@ pub fn shown_path(path: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if c.is_control() || is_bidi_format(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
             c => out.push(c),
         }
     }
     out
+}
+
+/// The bidi embeddings, overrides and isolates (U+202A to U+202E, U+2066 to U+2069), which
+/// reorder the text after them on screen (2.1, 2.4).
+pub fn is_bidi_format(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// The OS error text without Rust's ` (os error N)` suffix.
@@ -403,6 +410,15 @@ mod tests {
         let mut m = SourceMap::new();
         let id = m.add(PathBuf::from("t.v2"), "t.v2".into(), text);
         (m, id)
+    }
+
+    #[test]
+    fn shown_paths_escape_controls_and_bidi_formatting() {
+        // 2.1 (round 20): embeddings, overrides and isolates would reorder a name on screen.
+        assert_eq!(shown_path("rapor\u{202e}fdp.exe\u{1b}\n"), "rapor\\u{202e}fdp.exe\\u{1b}\\n");
+        assert_eq!(shown_path("\u{202a}\u{202d}\u{2066}\u{2069}"), "\\u{202a}\\u{202d}\\u{2066}\\u{2069}");
+        // Text in a right-to-left script and its marks stay as they are.
+        assert_eq!(shown_path("\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{200f}.v2"), "\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{200f}.v2");
     }
 
     #[test]
