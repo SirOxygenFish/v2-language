@@ -33,15 +33,17 @@ it is loaded automatically into every session and every subagent.
   newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
   base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  Rounds 1 to 18 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds: round 19 next. Rounds run as workflows:
+  `C:\tmp` and `C:\var` are round 19's test leftovers (the safety check refused their removal; the
+  owner was asked to delete them): leave them; tmp_on_windows_points_to_temp skips while there.
+  Rounds 1 to 19 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds: round 20 next. Rounds run as workflows:
   two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
   implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
   the reviews' issues, then mine on the second reviews'. A worktree may start from main, not
   v2-reboot: give agents the base commit and have them check it. (Round 19's prompts:
-  scratchpad/newcomer/prompt-*-r19.md, made by scratchpad/make19.py and setup_round19.py; its
-  distro v2new24s, where
-  paths.sh's noexec cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
+  scratchpad/newcomer/prompt-*-r19.md, made by scratchpad/make19.py and setup_round19.py; round
+  20 takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
+  cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
   line endings). A swap-out proof in WSL: `touch` the restored files after the rsync, as rsync -a
@@ -121,7 +123,7 @@ it is loaded automatically into every session and every subagent.
   errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
   raw until Phase 3 (17.1). `unexpanded(text)`: the shell variable (`%X%`, `$X`) a hint names.
 - `syntax/`: `span` (SourceMap, FileId, display_path; `shown_path`, the one escaper of control
-  characters in printed paths), `lexer`, `scan` (block bodies, profiles,
+  characters in printed paths; `same_file`: one module per file identity), `lexer`, `scan` (block bodies, profiles,
   `canonical_tag`), `directives` (@export/@import, dedent), `resolve` (layouts, `Loc`, after
   `check`, in `parse_file`, the entry path and `parse_str`), `parser` (MAX_DEPTH 256, expression
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
@@ -141,8 +143,9 @@ it is loaded automatically into every session and every subagent.
   collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
-  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`), `error` (ErrorValue, Flow, `fail`,
-  rendering, did_you_mean), `module` (import graph, `locate`, `shown`). A builtin returns
+  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`), `error` (ErrorValue, Flow, `fail`,
+  rendering, did_you_mean), `module` (import graph, `locate`, `shown`; `link_problem`/`link_error`:
+  links that lead nowhere or in a loop, 3.10). A builtin returns
   `fail(..)`; the caller places it at the call site.
 - `Flow { Error, Return, Break, Continue, Exit }`, `Exec<T> = Result<T, Flow>`. Interrupts are
   never a Flow.
@@ -165,7 +168,8 @@ it is loaded automatically into every session and every subagent.
 - `engines/spec.rs` (py/js/ts table, `Version`, `too_old`: Python 3.10+, one Node rule for js
   and ts: 22.13+, not 23.0/23.1), `engines/resolve.rs` (`Lookup`, `find_program`,
   `Prober`/`RealProber`, `ProbeCache` (usable entries only) + `CacheMode`, `Resolver`,
-  `ResolvedEngine`, `NotFound`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
+  `ResolvedEngine`, `NotFound`; venvs, 7.6: `venv_mismatch`, `activated_venv_problem`, `venv_stamps`
+  in the cache key), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
   `engine_available`; `later_language`: tags of Phases 2-3 say "not in this version yet", drop
   each row when its engine registers). Uncaught EngineNotFound exits 3.
 - `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders; `hello` = vep, version, pid,
@@ -174,7 +178,7 @@ it is loaded automatically into every session and every subagent.
   engine with `protocol_fds` (js): the protocol on two pipes named in `V2_VEP_FDS`, fd 0 null,
   fd 1 the host's stderr),
   `worker_command(e, adapter)`, handshake, `request` re-entrant loop serving reverse calls with
-  the timer paused, `shutdown_sessions`: one reader thread per worker, so readers are
+  the timer paused, `wrapper_note`/`conda_run_advice` (8.4), `shutdown_sessions`: one reader thread per worker, so readers are
   `Box<dyn Read + Send>`; a worker `err` may only use 9.6's kinds, others become ForeignError).
   Session state stays Handshaking until `init`'s `ret`. Reaping a child also drops its timers
   (`process::unregister`). `session/tests.rs`: scripted workers over `std::io::pipe()` or as a
@@ -204,7 +208,7 @@ it is loaded automatically into every session and every subagent.
   saw), `exec_import` (V2 level: `import_waits`, `wait_import`, or `resolve_import`), `settle`,
   `module_unit` (ids, py name check) + `import_module` (one `module` frame), `inner_imports`
   (13.7 entries: same-session `{as,unit,name,route}`, the real object once that unit has loaded, or
-  routes), `call_route`/`resolve_route`,
+  routes), `call_route`/`resolve_route`, hints: `npm_hint` (+ `block_module_hint`), `pip_for`/`install_line`,
   `export()` builds Proxies. units.rs: `Export {name, value, func}`, `wire_unit`.
   Adapters: py `do_module`/`module_attr`/`UnitStub`/`RouteFunction`; js `doModule` (resolve
   first; TLA via import() only for the module itself)/`moduleAttr`/`unitStub` (a Proxy)/`routeStub`.

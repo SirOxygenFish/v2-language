@@ -668,8 +668,15 @@ fn conda_run_without_no_capture_output_is_named() {
         assert_eq!(wrapper_note("py", &argv(words), false, false), general, "{words:?}");
     }
     // micromamba's run (mamba 2's too) passes them through and has no --no-capture-output: no
-    // advice for py (the second review of round 19). Node in a conda environment (Windows).
-    assert_eq!(wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"]), false, false), general);
+    // advice for py (the second review of round 19), but mamba 1 hands run to conda's, so after a
+    // failure mamba gets conda's advice for that case (the third). Node in a conda environment
+    // (Windows).
+    let x = if cfg!(windows) { "envs\\x\\python.exe" } else { "envs/x/bin/python" };
+    assert_eq!(
+        wrapper_note("py", &argv(&["/opt/mamba", "run", "-n", "x", "python"]), false, false),
+        format!("{general}; if this is mamba 1, whose run is conda's, it passes them through only with --no-capture-output: add it after run, or name the environment's python ({x} in mamba's folder) in [engines.py] command")
+    );
+    assert_eq!(wrapper_note("py", &argv(&["/opt/mamba", "run", "--no-capture-output", "-n", "x", "python"]), false, false), general);
     assert_eq!(wrapper_note("py", &argv(&["micromamba", "run", "-p", "/envs/x", "python"]), false, false), general);
     assert!(wrapper_note("js", &argv(&["conda", "run", "-n", "web", "node"]), false, false).ends_with("; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"));
     // Its hello came (capture mode writes it when the program has ended): not "without a word".

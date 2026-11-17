@@ -144,7 +144,7 @@ fn wrapper_note(id: &str, argv: &[OsString], fds: bool, hello: bool) -> String {
     } else {
         format!("; it ended without a word to V2, which talks to the program over {over}: a command that runs it through another program must {must}")
     };
-    if let Some(advice) = conda_run_advice(id, argv, fds) {
+    if let Some(advice) = conda_run_advice(id, argv, fds, true) {
         note.push_str(&format!("; {advice}"));
     }
     note
@@ -164,16 +164,17 @@ fn channel(fds: bool) -> (&'static str, &'static str) {
 /// A command that runs the program with `conda run` (`mamba run`, `micromamba run`), from its words
 /// alone (8.4, 19.2): what to write instead. `conda run` passes standard input and output through
 /// only with `--no-capture-output` (or `--live-stream`); micromamba's `run` (mamba 2's too) passes
-/// them through and has no such option, so py through it gets no advice. With `fds` (js on Unix)
-/// each of them closes the two pipes, so only naming the environment's node works. `None` for any
-/// other command.
-fn conda_run_advice(id: &str, argv: &[OsString], fds: bool) -> Option<String> {
+/// them through and has no such option, so py through it gets no advice, but for `mamba` after a
+/// failure (`failed`): mamba 1 hands `run` to conda's. With `fds` (js on Unix) each of them closes
+/// the two pipes, so only naming the environment's node works. `None` for any other command.
+fn conda_run_advice(id: &str, argv: &[OsString], fds: bool, failed: bool) -> Option<String> {
     let words: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let stem = |w: &str| Path::new(w).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let at = words.iter().position(|w| matches!(stem(w).as_str(), "conda" | "mamba" | "micromamba"))?;
     let run = words.iter().skip(at + 1).position(|w| w == "run").map(|i| i + at + 1)?;
     let tool = stem(&words[at]);
-    let passed = tool != "conda" || words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream");
+    let captures = tool == "conda" || (tool == "mamba" && failed);
+    let passed = !captures || words[run + 1..].iter().any(|w| w == "--no-capture-output" || w == "--live-stream");
     if passed && !fds {
         return None;
     }
@@ -191,6 +192,8 @@ fn conda_run_advice(id: &str, argv: &[OsString], fds: bool) -> Option<String> {
     Some(if fds {
         let even = if tool == "conda" { ", even with --no-capture-output" } else { "" };
         format!("{tool} run closes them{even}: name the environment's {program}{place} in [engines.{id}] command")
+    } else if tool == "mamba" {
+        format!("if this is mamba 1, whose run is conda's, it passes them through only with --no-capture-output: add it after run, or name the environment's {program}{place} in [engines.{id}] command")
     } else {
         format!("{tool} run passes them through only with --no-capture-output: add it after run, or name the environment's {program}{place} in [engines.{id}] command")
     })
@@ -203,7 +206,7 @@ pub(crate) fn conda_run_note(e: &ResolvedEngine) -> Option<String> {
         return None;
     }
     let fds = cfg!(unix) && e.spec.protocol_fds;
-    let advice = conda_run_advice(&e.spec.id, &e.argv, fds)?;
+    let advice = conda_run_advice(&e.spec.id, &e.argv, fds, false)?;
     Some(format!("V2 talks to the program over {}, and {advice}", channel(fds).0))
 }
 

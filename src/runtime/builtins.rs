@@ -2019,6 +2019,19 @@ mod tests {
         }
         assert_eq!(drive_problem('Z', REMOTE_DRIVE, &std::io::Error::from_raw_os_error(3)), None, "a folder that isn't there");
         assert_eq!(drive_problem('Q', NO_DRIVE, &std::io::Error::from_raw_os_error(3)).as_deref(), Some("there is no drive Q: (is it plugged in or connected?)"));
+        // Each way of writing a drive's path is read as that drive, \\?\ and a small letter too
+        // (the third review): a letter that isn't there, and the message has no hint.
+        if let Some(letter) = ('D'..='Z').rev().find(|&l| drive_type(l) == NO_DRIVE) {
+            let none = format!("there is no drive {letter}: (is it plugged in or connected?)");
+            let small = letter.to_ascii_lowercase();
+            for path in [format!(r"{letter}:\v2-r19\out.csv"), format!(r"\\?\{letter}:\v2-r19\out.csv"), format!("{small}:/v2-r19/out.csv"), format!("{small}:out.csv")] {
+                let e = std::io::Error::from_raw_os_error(3);
+                assert_eq!(unreachable_root(&path, &e).as_deref(), Some(none.as_str()), "{path}");
+                let Err(Flow::Error(err)) = file_error::<()>("write", &path, &e) else { panic!("{path}") };
+                assert_eq!(&*err.message, format!("cannot write '{}': {none}", shown_path(&path)));
+                assert!(err.hint.get().is_none(), "{:?}", err.hint.get());
+            }
+        }
         // The current drive is a local one: a network error on a path there isn't the drive's.
         let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
         assert_eq!(cwd.as_bytes().get(1), Some(&b':'), "{cwd}");
