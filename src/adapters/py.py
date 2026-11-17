@@ -9,6 +9,7 @@ if __name__ == "__main__":
     # 1. Every stdlib module the adapter uses, before any project folder is on sys.path (14.3).
     import sys, os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback
     import linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit
+    import errno
 
     if os.name == "nt":
         import msvcrt, ctypes
@@ -95,6 +96,51 @@ if __name__ == "__main__":
             return None
 
     sys.meta_path.append(BlockNames)
+
+    class AfterImport:
+        """Changes made to a module when it is first imported, not at startup, where importing it
+        would cost every run its time (shutil pulls in bz2 and lzma): `hooks` maps a module's name
+        to a function given the module once it has run (9.9)."""
+
+        hooks = {}
+
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            hook = cls.hooks.get(name)
+            if hook is None:
+                return None
+            for finder in sys.meta_path:
+                find = getattr(finder, "find_spec", None) if finder is not cls else None
+                spec = find(name, path, target) if find is not None else None
+                if spec is not None:
+                    break
+            else:
+                return None
+            real = spec.loader
+            if real is None or not hasattr(real, "exec_module"):
+                return spec
+
+            class Loader:
+                def create_module(self, spec):
+                    return real.create_module(spec)
+
+                def exec_module(self, module):
+                    real.exec_module(module)
+                    hook(module)
+
+                def __getattr__(self, attr):
+                    return getattr(real, attr)
+
+            spec.loader = Loader()
+            return spec
+
+    def after_import(name, hook):
+        if name in sys.modules:
+            hook(sys.modules[name])
+        else:
+            AfterImport.hooks[name] = hook
+
+    sys.meta_path.insert(0, AfterImport)
 
     # ----------------------------------------------------------------------------------------
     # Errors
@@ -326,16 +372,25 @@ if __name__ == "__main__":
             return True
 
         def isatty(self):
-            return False
+            # Where V2 writes this stream: a terminal or not (9.9).
+            return _terminals[self._stream] is not None
 
         def fileno(self):
             # stderr is fd 2. stdout is V2's, with no descriptor here: fd 1 is stderr, and
-            # console-aware libraries (click) would write to it (9.9).
+            # console-aware libraries (click) would write to it (9.9). What to do instead depends
+            # on who asks: subprocess (stdout=sys.stdout) or anyone else, such as curses.
             if self._fd == 2:
                 return 2
-            raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor: leave stdout= out "
-                                          "(the output then goes to stderr), or capture it (capture_output=True, text=True) "
-                                          "and print(r.stdout), or use V2's exec([…])")
+            try:
+                caller = sys._getframe(1).f_globals.get("__name__")
+            except (AttributeError, ValueError):
+                caller = None
+            if caller in ("subprocess", "os"):
+                raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor: leave stdout= out "
+                                              "(the output then goes to stderr), or capture it (capture_output=True, text=True) "
+                                              "and print(r.stdout), or use V2's exec([…])")
+            raise io.UnsupportedOperation("fileno: a block has no terminal of its own: full-screen libraries such as curses "
+                                          "can't run in a block")
 
         @property
         def line_buffering(self):
@@ -450,6 +505,55 @@ if __name__ == "__main__":
             raise OSError("getpass can't ask in a block: a block has no terminal, and V2's input() owns standard input; ask in V2 and pass the answer in as a block arg")
 
         getpass.getpass = no_getpass
+
+    # Which of V2's stdout and stderr are terminals, and their (columns, rows), from init (9.3): a
+    # block's sys.stdout and sys.stderr, os.isatty(1) and (2) and the terminal sizes answer for
+    # where V2 writes them, as Python's own would there, so colors and live bars show on a terminal
+    # and stay out of a file (9.9, DOCS 4.6). The size is the one at the worker's start.
+    _terminals = {"stdout": None, "stderr": None}
+    _os_isatty = os.isatty
+    _os_terminal_size = os.get_terminal_size
+
+    def _terminal_of(fd):
+        """V2's stream behind a block's fd 1 or 2 (or None for another fd), and its size."""
+        if isinstance(fd, int) and fd in (1, 2):
+            return True, _terminals["stdout" if fd == 1 else "stderr"]
+        return False, None
+
+    def isatty(fd):
+        ours, size = _terminal_of(fd)
+        return size is not None if ours else _os_isatty(fd)
+
+    def get_terminal_size(fd=1):
+        ours, size = _terminal_of(fd)
+        if not ours:
+            return _os_terminal_size(fd)
+        if size is None:
+            raise OSError(errno.ENOTTY, os.strerror(errno.ENOTTY))
+        return os.terminal_size(size)
+
+    def shutil_terminal_size(fallback=(80, 24)):
+        """shutil.get_terminal_size, with V2's stdout as the terminal it asks about."""
+        def env(name):
+            try:
+                return int(os.environ[name])
+            except (KeyError, ValueError):
+                return 0
+        columns, lines = env("COLUMNS"), env("LINES")
+        if columns <= 0 or lines <= 0:
+            size = _terminals["stdout"] or fallback
+            columns = columns if columns > 0 else size[0] or fallback[0]
+            lines = lines if lines > 0 else size[1] or fallback[1]
+        return os.terminal_size((columns, lines))
+
+    os.isatty = isatty
+    os.get_terminal_size = get_terminal_size
+    after_import("shutil", lambda m: setattr(m, "get_terminal_size", shutil_terminal_size))
+    if os.name == "nt":
+        # colorama (tqdm, click and others call its init) would turn a block's ANSI codes into
+        # console calls on the worker's console handle, out of order with the text, which goes to
+        # V2 as frames: V2 turned on VT processing for its consoles, so the codes pass through.
+        after_import("colorama.ansitowin32", lambda m: setattr(m, "winapi_test", lambda: False))
 
     _streams = (Output("stdout", 1), Output("stderr", 2))
     sys.stdout, sys.stderr = _streams
@@ -1482,6 +1586,11 @@ if __name__ == "__main__":
             while root in sys.path:
                 sys.path.remove(root)
             sys.path.insert(0, root)
+        terminals = m.get("terminals")
+        for name in _terminals:
+            size = terminals.get(name) if isinstance(terminals, dict) else None
+            if isinstance(size, list) and len(size) == 2 and all(isinstance(n, int) and n >= 0 for n in size):
+                _terminals[name] = tuple(size)
         return {"value": None}
 
     def do_load(m):

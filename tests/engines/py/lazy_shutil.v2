@@ -1,0 +1,10 @@
+// requires: py
+// shutil isn't imported as the worker starts (it pulls in bz2 and lzma, a few ms every run): its
+// get_terminal_size is V2's from the block's first import of it on, here with stdout a pipe, so
+// the fallback (INTERNALS 9.9; round 22, the second review, issue 5).
+@py {
+    import sys
+    print("shutil at the start:", "shutil" in sys.modules)
+    import shutil
+    print("shutil's own:", shutil.get_terminal_size.__module__ == "shutil", tuple(shutil.get_terminal_size((81, 25))))
+}

@@ -2,12 +2,17 @@
 // stderr: child says hi
 // A block's sys.stdin and sys.stderr have their descriptors (0, the null device, and 2), so a
 // child given them reads nothing and writes to stderr; sys.stdout is V2's and has none, which
-// fileno() says plainly, with what to write instead (DOCS 4.6, INTERNALS 9.9; round 21, L6).
+// fileno() says plainly: to subprocess with what to write instead, to any other caller (a terminal
+// library) that a block has no terminal (DOCS 4.6, INTERNALS 9.9; round 21, L6; round 22, L6).
 @py {
     import io, subprocess, sys
     child = "import sys; print('child says hi', file=sys.stderr); print(len(sys.stdin.read()))"
     r = subprocess.run([sys.executable, "-c", child], stdin=sys.stdin, stderr=sys.stderr, stdout=subprocess.PIPE)
     print(r.returncode, r.stdout.decode().strip())
+    try:
+        subprocess.run([sys.executable, "-c", "print('not run')"], stdout=sys.stdout)
+    except io.UnsupportedOperation as e:
+        print("stdout=:", e)
     try:
         sys.stdout.fileno()
     except io.UnsupportedOperation as e:

@@ -800,8 +800,13 @@ fn init_is_the_project_root_and_the_minimums_hold() {
         let init = w.recv_t("init");
         let mut keys: Vec<&String> = init.as_object().unwrap().keys().collect();
         keys.sort();
-        assert_eq!(keys, ["caps", "id", "project_root", "t"], "init carries the project root and the host's caps (9.3)");
+        assert_eq!(keys, ["caps", "id", "project_root", "t", "terminals"], "init carries the project root, the host's caps and V2's terminals (9.3)");
         assert_eq!(init["caps"], json!([]), "this host announces no optional caps yet");
+        // Each of V2's stdout and stderr: [columns, rows] when it is a terminal, else null (9.9).
+        for (name, fd) in [("stdout", 1), ("stderr", 2)] {
+            let want = crate::engines::process::terminal_size(fd).map_or(Json::Null, |(c, r)| json!([c, r]));
+            assert_eq!(init["terminals"][name], want, "{name}");
+        }
         w.ret(&init, Json::Null);
         w.recv_t("bye");
     });
