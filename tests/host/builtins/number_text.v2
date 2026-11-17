@@ -76,3 +76,7 @@ hint_of(func() => int("\u{966},\u{967}\u{968}\u{969}"))
 for t in ["\u{967}.\u{968}\u{969}\u{96a}", "\u{ed1}.\u{ed2}\u{ed3}\u{ed4}", "\u{17e1}.\u{17e2}\u{17e3}\u{17e4}", "\u{967}.\u{968}\u{969}\u{96a}.\u{96b}\u{96c}\u{96d}", "\u{967}\u{968}.\u{96b}", "\u{966}.\u{967}\u{968}\u{969}", "\u{661}\u{66c}\u{662}\u{663}\u{664}\u{66b}\u{665}"] {
     hint_of(func() => int(t))
 }
+// The fifth look at round 20: a sign after the bidi mark Intl writes (ar-u-nu-deva, ar-EG):
+// the first group is read past both, so the commas still go.
+hint_of(func() => int("\u{200e}-\u{967},\u{968}\u{969}\u{96a}.\u{96b}"))
+hint_of(func() => int("\u{61c}-\u{661},\u{662}\u{663}\u{664},\u{665}\u{666}\u{667}"))
