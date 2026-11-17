@@ -602,7 +602,11 @@ impl Interp {
             return Err(self.raise(depth_error(), at));
         }
         // Where V2's output goes, as it is now: a resize later isn't passed on (9.9).
-        let init = vep::init(0, &root, [process::terminal_size(1), process::terminal_size(2)]);
+        let terminals = [process::terminal_size(1), process::terminal_size(2)];
+        if terminals.iter().any(Option::is_some) {
+            process::TOLD_TERMINAL.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let init = vep::init(0, &root, terminals);
         match self.exchange(s, init, startup, at) {
             Ok(_) => {
                 self.sessions[s].state = State::Ready;
