@@ -4356,6 +4356,377 @@ fn tmp_on_windows_points_to_temp() {
     assert_eq!(lines[9..], [temp("/var/tmp", "getenv(\"TEMP\") + \"/x\""), "false false".into()], "{stdout}");
 }
 
+/// A V2 string literal of `s` as V2's hints write one: `\` doubled, `"` escaped, and WSL's
+/// stand-ins (U+F000 to U+F0FF) as `\u{f03a}`.
+#[cfg(windows)]
+fn v2_literal(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{F000}'..='\u{F0FF}' => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(windows)]
+#[test]
+fn a_colon_is_refused_after_a_share_as_after_a_drive() {
+    // INTERNALS 5.10 (round 21): after \\server\share\ a ':' wasn't refused, so write_file made an
+    // empty 'log 10' with the data in a hidden stream, while //server/share/ was refused. Every
+    // spelling is refused now, reads too; when WSL made a Linux name with ':' (mod\u{f03a}x.v2 to
+    // Windows), the hint names it, and the call it shows reads it.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("mod\u{f03a}x.v2"), "colon module").unwrap();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    let share = real.as_bytes().get(1) == Some(&b':') && Path::new(&unc).is_dir();
+    let mut paths = vec!["log 10:30.txt".to_string(), format!("{real}/sub:x.txt")];
+    if share {
+        paths.extend([format!(r"{unc}\log 10:30.txt"), format!("{unc}/log 10:30.txt"), format!("{}/log 10:30.txt", unc.replace('\\', "/"))]);
+    } else {
+        let _ = writeln!(std::io::stderr(), "SKIP the share part of a_colon_is_refused_after_a_share_as_after_a_drive (no \\\\localhost share)");
+    }
+    let mut src = SHOW.to_string();
+    for p in &paths {
+        src.push_str(&format!("show(func() => write_file({0}, \"important\"))\nshow(func() => read_file({0}))\n", v2_literal(p)));
+    }
+    let twins = if share { vec!["mod:x.v2".to_string(), format!(r"{unc}\mod:x.v2")] } else { vec!["mod:x.v2".to_string()] };
+    for p in &twins {
+        src.push_str(&format!("show(func() => read_file({}))\n", v2_literal(p)));
+    }
+    std::fs::write(home.0.join("c.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["c.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let mut want = Vec::new();
+    for p in &paths {
+        for verb in ["write", "read"] {
+            want.push(format!("cannot {verb} '{p}': a Windows file name can't have ':' in it"));
+            want.push("use another character, as in 12-30 for a time".to_string());
+        }
+    }
+    for p in &twins {
+        want.push(format!("cannot read '{p}': a Windows file name can't have ':' in it"));
+        let call = v2_literal(&p.replace("mod:x", "mod\u{f03a}x"));
+        want.push(format!("WSL made one of that name, which Windows shows with \\u{{f03a}} for ':': reach it as read_file({call}), or rename it in WSL"));
+    }
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
+    // Nothing was written: no 'log 10' or 'sub' with a hidden stream.
+    let mut names: Vec<String> = std::fs::read_dir(&home.0).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["c.v2", "mod\u{f03a}x.v2"]);
+    // The call the hint shows reads the file.
+    std::fs::write(home.0.join("r.v2"), "print(read_file(\"mod\\u{f03a}x.v2\"))\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["r.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "colon module\n"), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn names_wsl_made_with_stand_ins_are_offered_escaped() {
+    // DOCS 3.11, INTERNALS 6.4, 19.1 (round 21): WSL shows a Linux q?.v2 to Windows as
+    // q\u{f03f}.v2, whose stand-in printed as nothing: "did you mean './q.v2'?", which doesn't
+    // work. An import or FILE of q?.v2 now gets the name escaped, with what its stand-in is, and
+    // so does the listing of a folder's .v2 files; list_dir's names print escaped; an import by
+    // the stand-in works.
+    let note = "\\u{f03f} is how Windows shows the '?' of the Linux name 'q?.v2': rename it in WSL";
+    let files = [
+        ("q\u{f03f}.v2", "func who() { return \"q\" }\n"),
+        ("imp.v2", "import \"./q?.v2\" as m\n"),
+        ("ok.v2", "import \"./q\\u{f03f}.v2\" as m\nprint(m.who(), list_dir(\".\").filter(func(n) => n.starts_with(\"q\")))\n"),
+        ("odd\u{f03a}dir/main.v2", "print(1)\n"),
+    ];
+    let (code, stdout, stderr, home) = run_with_files(&files, &["imp.v2"]);
+    let message = "ImportError: cannot find module './q?.v2' (looked for q?.v2) — did you mean './q\\u{f03f}.v2'?";
+    assert_eq!(code, Some(1), "{stdout}{stderr}");
+    assert!(stderr.starts_with(&format!("imp.v2:1:1: {message}\n")) && stderr.contains(&format!("  hint: {note}\n")), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["check", "imp.v2"], &[]);
+    assert_eq!(code, Some(1), "{stdout}");
+    assert!(stderr.starts_with(&format!("imp.v2:1:1: {message}\n")) && stderr.contains(&format!("  hint: {note}\n")), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["ok.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "q [\"q\\u{f03f}.v2\"]\n"), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["q?.v2"], &[]);
+    assert_eq!((code, stderr.as_str()), (Some(2), format!("v2: cannot find 'q?.v2'\ndid you mean 'q\\u{{f03f}}.v2'? {note}\n").as_str()));
+    let (code, _, stderr) = run_in_home(&home.0, &["zzzzzz.v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.ends_with(&format!("\nthe .v2 files there: imp.v2, ok.v2, q\\u{{f03f}}.v2; {note}\n")), "{stderr}");
+    // The review of round 21: the did-you-mean of a folder on the way that isn't there too.
+    let (code, _, stderr) = run_in_home(&home.0, &[r"odd-dir\main.v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    let colon = "\\u{f03a} is how Windows shows the ':' of the Linux name 'odd:dir': rename it in WSL";
+    assert!(stderr.starts_with("v2: cannot find 'odd-dir\\main.v2'\nthere is no folder "), "{stderr}");
+    assert!(stderr.ends_with(&format!("odd-dir: did you mean 'odd\\u{{f03a}}dir'? {colon}\n")), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_script_run_by_its_verbatim_path_reaches_the_files_beside_it() {
+    // The review of round 21 (DOCS 3.11, INTERNALS 2.1): a script in a folder whose name ends in a
+    // dot, run by its \\?\ path as the refusal of `v2 dots./sd.v2` says, has a \\?\ script_dir(),
+    // where Windows reads no / and no ..: read_file(f"${script_dir()}/data.csv") said "The
+    // filename, directory name, or volume label syntax is incorrect". The file builtins and exec
+    // read a \\?\ path's / as \ and take out its . and .. parts.
+    let home = TempHome::new();
+    let v = |name: &str| format!(r"\\?\{}\{name}", home.0.display());
+    std::fs::create_dir(v("dots.")).unwrap();
+    std::fs::write(v(r"dots.\data.csv"), "a,b").unwrap();
+    std::fs::write(home.0.join("top.txt"), "top").unwrap();
+    let exe = v2_literal(&format!(r"\\?\{}/v2.exe", Path::new(BIN).parent().unwrap().display()));
+    let src = format!(
+        "let d = script_dir()\nprint(d.starts_with(\"\\\\\\\\?\\\\\"), read_file(f\"${{d}}/data.csv\"), exists(f\"${{d}}/data.csv\"))\n\
+         print(read_file(f\"${{d}}/./../top.txt\"), exists(f\"${{d}}/../top.txt\"))\nwrite_file(f\"${{d}}/out.txt\", \"w\")\nmake_dir(f\"${{d}}/sub/deeper\")\n\
+         print(list_dir(f\"${{d}}/\"), list_dir(f\"${{d}}/sub\"))\nremove_file(f\"${{d}}/out.txt\")\nprint(exists(f\"${{d}}/out.txt\"))\n\
+         let r = exec([{exe}, \"--version\"])\nprint(r.code, r.stdout.trim())\n"
+    );
+    std::fs::write(v(r"dots.\sd.v2"), src).unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &[r"dots.\sd.v2"], &[]);
+    let start = r"one of that name is there (WSL and Macs can make one): run it by its full path with \\?\ in front: v2 ";
+    let path = stderr.lines().nth(1).and_then(|l| l.strip_prefix(start)).map(|p| p.trim_matches('"').to_string()).unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(code, Some(2), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &[&path], &[]);
+    let version = format!("0 v2 {} (VEP/1)", env!("CARGO_PKG_VERSION"));
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["true a,b true", "top true", "[\"data.csv\", \"out.txt\", \"sd.v2\", \"sub\"] [\"deeper\"]", "false", &version], "{stderr}");
+    assert_eq!(code, Some(0), "{stderr}");
+    std::fs::remove_dir_all(v("dots.")).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_script_or_import_whose_name_ends_in_a_dot_is_refused() {
+    // INTERNALS 6.4, 19.1 (round 21): Windows drops a dot or a space at the end of a name, so
+    // `v2 run.v2.` ran run.v2 and import "./dotm.v2." loaded dotm.v2, without a word. Both are
+    // refused, as the file builtins refuse such a name; when a file of that name is there (WSL
+    // and Macs make them), the run, check or import the message shows reaches it.
+    let home = TempHome::new();
+    let v = |name: &str| format!(r"\\?\{}\{name}", home.0.display());
+    for (name, text) in [
+        ("run.v2", "print(\"I am run.v2\")\n"),
+        ("run.v2.", "print(\"I am run.v2.\")\n"),
+        ("dotm.v2", "func who() { return \"plain\" }\n"),
+        ("dotm.v2.", "func who() { return \"dotted\" }\n"),
+        ("plain.v2", "func who() { return \"plain.v2\" }\n"),
+    ] {
+        std::fs::write(v(name), text).unwrap();
+    }
+    std::fs::create_dir(v("lib.")).unwrap();
+    std::fs::write(v(r"lib.\m.v2"), "import \"./sib.v2\" as s\nimport \"../plain.v2\" as p\nfunc who() { return s.v() + \" \" + p.who() }\n").unwrap();
+    std::fs::write(v(r"lib.\sib.v2"), "func v() { return \"sib\" }\n").unwrap();
+    let why = |name: &str, kept: &str| format!("a Windows file name can't end in a dot or a space ('{name}' would be '{kept}')");
+    // FILE: the \\?\ path of the file that is there, which runs and checks it.
+    let shown_path = |line: &str, start: &str| -> String {
+        let rest = line.strip_prefix(start).unwrap_or_else(|| panic!("{line}"));
+        let path = rest.trim_matches('"').to_string();
+        assert!(path.starts_with(r"\\?\") && path.ends_with(r"\run.v2."), "{path}");
+        path
+    };
+    let (code, _, stderr) = run_in_home(&home.0, &["run.v2."], &[]);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!((code, lines.len(), lines[0]), (Some(2), 2, format!("v2: cannot read 'run.v2.': {}", why("run.v2.", "run.v2")).as_str()), "{stderr}");
+    let path = shown_path(lines[1], r"one of that name is there (WSL and Macs can make one): run it by its full path with \\?\ in front: v2 ");
+    let (code, stdout, stderr) = run_in_home(&home.0, &[&path], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "I am run.v2.\n"), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["check", "run.v2."], &[]);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!((code, lines.len()), (Some(2), 2), "{stderr}");
+    let path = shown_path(lines[1], r"one of that name is there (WSL and Macs can make one): check it by its full path with \\?\ in front: v2 check ");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["check", &path], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.ends_with("run.v2.: 1 file, 0 errors\n"), "{stdout}");
+    // Only Windows' reading of it there: that file; neither: the folder's .v2 files.
+    let (code, _, stderr) = run_in_home(&home.0, &["plain.v2 "], &[]);
+    assert_eq!((code, stderr.as_str()), (Some(2), format!("v2: cannot read 'plain.v2 ': {}\ndid you mean 'plain.v2'?\n", why("plain.v2 ", "plain.v2")).as_str()));
+    let (code, _, stderr) = run_in_home(&home.0, &["gone.v2."], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.ends_with("\nthe .v2 files there: dotm.v2, plain.v2, run.v2\n"), "{stderr}");
+    // Imports: a module's own name that ends in a dot is no .v2 file; a folder's is reached by
+    // the \\?\ path the hint shows, its own imports too.
+    let src = format!(
+        "{SHOW}show(func() {{\n    import \"./dotm.v2.\" as m\n    return m.who()\n}})\nshow(func() {{\n    import \"./plain.v2.\" as m\n    return m.who()\n}})\n\
+         show(func() {{\n    import \"./lib./m.v2\" as m\n    return m.who()\n}})\n"
+    );
+    std::fs::write(home.0.join("imp.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["imp.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    let want = [
+        format!("cannot import './dotm.v2.': {}", why("dotm.v2.", "dotm.v2")),
+        "one of that name is there (WSL and Macs can make one), but a module's name ends in .v2: rename it".into(),
+        format!("cannot import './plain.v2.': {} — did you mean './plain.v2'?", why("plain.v2.", "plain.v2")),
+        "null".into(),
+        format!("cannot import './lib./m.v2': {}", why("lib.", "lib")),
+    ];
+    assert_eq!(lines[..want.len().min(lines.len())], want, "{stdout}");
+    let start = r"one of that name is there (WSL and Macs can make one): reach it by its full path with \\?\ in front, as in import ";
+    let import = lines[want.len()].strip_prefix(start).and_then(|r| r.strip_suffix(" as m")).unwrap_or_else(|| panic!("{stdout}"));
+    std::fs::write(home.0.join("lib.v2"), format!("import {import} as m\nprint(m.who())\n")).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["lib.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "sib plain.v2\n"), "{stderr}");
+    for name in ["run.v2.", "dotm.v2.", r"lib.\m.v2", r"lib.\sib.v2"] {
+        std::fs::remove_file(v(name)).unwrap();
+    }
+    std::fs::remove_dir(v("lib.")).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_and_linux_paths_get_the_windows_way() {
+    // DOCS 3.11, INTERNALS 5.10, 19.1 (round 21): /mnt/c/… pasted from WSL said only "there is no
+    // folder C:\mnt", and make_dir would have made it at the top of the drive; /root/… and /home/…
+    // said nothing of WSL; exec(["ls"]) only "not found on PATH". Runs only where the current
+    // drive has none of those folders, and removes what a broken build makes.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let drive = real[..2].to_string();
+    let tops = ["mnt", "root", "home", "usr"].map(|t| PathBuf::from(format!(r"{drive}\{t}")));
+    if real.as_bytes().get(1) != Some(&b':') || tops.iter().any(|t| t.exists()) {
+        let _ = writeln!(std::io::stderr(), "SKIP wsl_and_linux_paths_get_the_windows_way ({drive} has \\mnt, \\root, \\home or \\usr)");
+        return;
+    }
+    let _left = Leftovers::new(&tops);
+    let (letter, upper) = (real[..1].to_ascii_lowercase(), real[..1].to_ascii_uppercase());
+    let rest = real[3..].replace('\\', "/");
+    let mnt = format!("/mnt/{letter}/{rest}");
+    std::fs::write(home.0.join("data.txt"), "here").unwrap();
+    std::fs::write(home.0.join("x.v2"), "print(\"x ran\")\n").unwrap();
+    let q = |s: &str| serde_json::to_string(s).unwrap();
+    // make_dir only once the hint shows the path is read as WSL's, or a probe that can make
+    // nothing was refused (below), so a broken build makes nothing.
+    let src = format!(
+        "func hint(f) {{\n    try {{\n        f()\n        print(\"no error\")\n    }} catch (e) {{\n        print(e.hint)\n    }}\n}}\n\
+         hint(func() => read_file({md}))\nhint(func() => exec([{mp}]))\nhint(func() => read_file(\"/root/proj/main.v2\"))\n\
+         hint(func() => write_file(\"/home/me/x.txt\", \"x\"))\nhint(func() => exec([\"/usr/bin/python3\", \"x.py\"]))\nhint(func() => exec([\"ls\", \"-la\"]))\n\
+         let h = null\ntry {{\n    read_file({mn})\n}} catch (e) {{\n    h = e.hint\n}}\nif h != null && \"WSL's\" in h {{\n    hint(func() => make_dir({mn}))\n}}\n\
+         let m = null\ntry {{\n    make_dir(\"/root/v2\\u{{0}}probe\")\n}} catch (e) {{\n    m = e.message\n}}\nprint(m)\n\
+         if m != null && \"top of the drive\" in m {{\n    hint(func() => make_dir(\"/root/proj/out\"))\n}}\n",
+        md = q(&format!("{mnt}/data.txt")),
+        mp = q(&format!("{mnt}/prog.exe")),
+        mn = q(&format!("{mnt}/new/dir")),
+    );
+    std::fs::write(home.0.join("w.v2"), src).unwrap();
+    // A PATH without Git's Linux tools.
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())).join("System32");
+    let (code, stdout, stderr) = run_in_home(&home.0, &["w.v2"], &[("PATH", system.as_os_str())]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let spelling = |end: &str| format!("on Windows, /mnt/{letter}/… is WSL's spelling of {upper}:/…: write {}", q(&format!("{upper}:/{rest}/{end}")));
+    let linux = r"a Linux path: from Windows, WSL's files are \\wsl.localhost\<distro>\…";
+    let want = [
+        spelling("data.txt"),
+        spelling("prog.exe"),
+        linux.into(),
+        linux.into(),
+        linux.into(),
+        r#"run Linux programs with exec(["wsl.exe", "-e", "ls", "-la"])"#.into(),
+        spelling("new/dir"),
+        // The review of round 21: make_dir would make \root at the top of the drive. A NUL in the
+        // path stops create_dir_all before it makes anything, so the real make_dir runs only once
+        // this one was refused.
+        r"cannot create '/root/v2\u{0}probe': on Windows that makes \root at the top of the drive, a folder other users can write to".into(),
+        linux.into(),
+    ];
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
+    assert!(tops.iter().all(|t| !t.exists()), "nothing at the top of the drive");
+    // FILE: the run it says works.
+    let file = format!("{mnt}/x.v2");
+    let (code, _, stderr) = run_in_home(&home.0, &[&file], &[]);
+    let start = format!("v2: cannot find '{file}'\non Windows, /mnt/{letter}/… is WSL's spelling of {upper}:/…: run v2 ");
+    assert_eq!(code, Some(2), "{stderr}");
+    let run = stderr.strip_prefix(&start).map(|r| r.trim_end().trim_matches('"').to_string()).unwrap_or_else(|| panic!("{stderr}"));
+    let (code, stdout, stderr) = run_in_home(&home.0, &[&run], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "x ran\n"), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["check", &file], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("is WSL's spelling of") && stderr.contains(": run v2 check "), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["/root/proj/main.v2"], &[]);
+    assert_eq!((code, stderr.as_str()), (Some(2), format!("v2: cannot find '/root/proj/main.v2'\n{linux}\n").as_str()));
+}
+
+#[cfg(windows)]
+#[test]
+fn names_on_wsls_share_are_reached_as_read_file_reaches_them() {
+    // Round 21 (DOCS 3.10, 3.11; INTERNALS 5.10, 6.4, 19.1) on WSL's share, which Windows CI
+    // doesn't have: set V2_TEST_WSL_DISTRO to a distro's name (and V2_TEST_WSL_DIR to a folder
+    // of it for the test's own folder, /tmp when unset). A Linux mod:x.v2 is mod\u{f03a}x.v2 to
+    // Windows, whose name canonicalize couldn't normalize, so imports and FILE failed where
+    // read_file read it; \\wsl.localhost\…\a:b was read and written, //wsl.localhost/…/a:b
+    // refused; `v2 run.v2.` ran run.v2.
+    let Some(distro) = std::env::var("V2_TEST_WSL_DISTRO").ok().filter(|d| !d.is_empty()) else {
+        let _ = writeln!(std::io::stderr(), "SKIP names_on_wsls_share_are_reached_as_read_file_reaches_them (V2_TEST_WSL_DISTRO isn't set)");
+        return;
+    };
+    let dir = format!("{}/v2-test-{}", std::env::var("V2_TEST_WSL_DIR").unwrap_or_else(|_| "/tmp".into()).trim_end_matches('/'), std::process::id());
+    // A Linux path (Git Bash would turn /root into C:/Program Files/Git/root), from / in WSL.
+    assert!(dir.starts_with('/') && !dir.contains(['\'', ':']), "V2_TEST_WSL_DIR must be a Linux folder: {dir}");
+    let in_wsl = |script: &str| Command::new("wsl.exe").args(["-d", &distro, "--cd", "/", "-e", "sh", "-c", script]).stdout(Stdio::null()).status().unwrap().success();
+    assert!(in_wsl(&format!("mkdir -p '{dir}/case' '{dir}/odd:dir'")), "mkdir in {distro}");
+    // Removed in WSL at the end, after a failed assertion too.
+    struct Gone<'a>(&'a dyn Fn(&str) -> bool, String);
+    impl Drop for Gone<'_> {
+        fn drop(&mut self) {
+            (self.0)(&format!("rm -rf '{}'", self.1));
+        }
+    }
+    let _gone = Gone(&in_wsl, dir.clone());
+    let share = PathBuf::from(format!(r"\\wsl.localhost\{distro}{}", dir.replace('/', "\\")));
+    let pua = |s: &str| s.replace(':', "\u{f03a}");
+    for (name, text) in [
+        ("case/mod:x.v2", "func who() { return \"colon\" }\n"),
+        ("odd:dir/main.v2", "import \"./m.v2\" as m\nprint(m.v())\n"),
+        ("odd:dir/m.v2", "func v() { return 7 }\n"),
+        ("imp.v2", "import \"./case/mod\\u{f03a}x.v2\" as a\nimport \"./case/mod:x.v2\" as b\nprint(a.who(), b.who())\n"),
+        ("run.v2", "print(\"I am run.v2\")\n"),
+    ] {
+        std::fs::write(share.join(pua(name)), text).unwrap();
+    }
+    std::fs::write(format!(r"\\?\UNC{}\run.v2.", &share.to_string_lossy()[1..]), "print(\"I am run.v2.\")\n").unwrap();
+    assert!(in_wsl(&format!("test -f '{dir}/case/mod:x.v2' && test -f '{dir}/run.v2.'")), "the Linux names");
+    let run = |args: &[&str]| {
+        let tmp = TempHome::new();
+        let mut cmd = v2_command(&tmp.0);
+        cmd.args(args).current_dir(&share).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    // Imports and FILE by the stand-in, and by ':', as read_file reads them.
+    assert_eq!(run(&["imp.v2"]), (Some(0), "colon colon\n".into(), String::new()));
+    for main in [pua("odd:dir\\main.v2"), "odd:dir\\main.v2".to_string()] {
+        assert_eq!(run(&[&main]), (Some(0), "7\n".into(), String::new()), "{main}");
+        let (code, stdout, stderr) = run(&["check", &main]);
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(stdout.ends_with(": 2 files, 0 errors\n"), "{stdout}");
+    }
+    // A ':' after the share is refused with either slash, and the hint's call reads the file.
+    let at = share.to_string_lossy().into_owned();
+    let src = format!(
+        "{SHOW}show(func() => read_file({0}))\nshow(func() => read_file({1}))\nshow(func() => write_file({2}, \"x\"))\n",
+        v2_literal(&format!(r"{at}\case\mod:x.v2")),
+        v2_literal(&format!("{}/case/mod:x.v2", at.replace('\\', "/"))),
+        v2_literal(&format!(r"{at}\new:x.txt")),
+    );
+    std::fs::write(share.join("rw.v2"), src).unwrap();
+    let (code, stdout, stderr) = run(&["rw.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 6, "{stdout}");
+    let hint = |path: &str| format!("WSL made one of that name, which Windows shows with \\u{{f03a}} for ':': reach it as read_file({}), or rename it in WSL", v2_literal(&pua(path)));
+    assert_eq!(lines[1], hint(&format!(r"{at}\case\mod:x.v2")), "{stdout}");
+    assert_eq!(lines[3], hint(&format!("{}/case/mod:x.v2", at.replace('\\', "/"))), "{stdout}");
+    assert_eq!(lines[5], "use another character, as in 12-30 for a time", "{stdout}");
+    assert!(!in_wsl(&format!("test -e '{dir}/new:x.txt'")), "nothing written");
+    std::fs::write(share.join("rd.v2"), format!("print(read_file({}))\n", v2_literal(&pua(&format!(r"{at}\case\mod:x.v2"))))).unwrap();
+    assert_eq!(run(&["rd.v2"]), (Some(0), "func who() { return \"colon\" }\n\n".into(), String::new()));
+    // `v2 run.v2.`: refused, and the run it shows runs run.v2.
+    let (code, _, stderr) = run(&["run.v2."]);
+    let start = r"one of that name is there (WSL and Macs can make one): run it by its full path with \\?\ in front: v2 ";
+    let path = stderr.lines().nth(1).and_then(|l| l.strip_prefix(start)).map(|p| p.trim_matches('"').to_string()).unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(path.starts_with(r"\\?\UNC\wsl.localhost\"), "{path}");
+    assert_eq!(run(&[&path]), (Some(0), "I am run.v2.\n".into(), String::new()));
+}
+
 #[test]
 fn make_dir_with_a_nul_gives_the_true_reason() {
     // Round 19 review (INTERNALS 5.10): make_dir took every error without an OS code for
