@@ -952,11 +952,11 @@ impl<'a> Parser<'a> {
                 self.check_dup_param(&params, &n)?;
                 rest = Some(n);
             } else {
-                // Python's `def f(*args)`.
-                let star = self.at_op(Op::Star).then(|| match self.peek_at(1) {
-                    Tok::Ident(w) => w.to_string(),
-                    _ => "args".into(),
-                });
+                // Python's `def f(*args)`; its keyword-only `*` alone (`def f(a, *, b)`) isn't one.
+                let star = match (self.peek(), self.peek_at(1)) {
+                    (Tok::Op(Op::Star), Tok::Ident(w)) => Some(w.to_string()),
+                    _ => None,
+                };
                 let n = self.expect_name("a parameter name").map_err(|d| match &star {
                     Some(rest) => d.hint(format!("V2 collects extra arguments with ...{rest}")),
                     None => d,
@@ -2169,6 +2169,8 @@ extern "m" as m { double cos(double x); }
         assert_eq!(diag("func f(*args) {\n}").message, "expected a parameter name, found `*`");
         assert_eq!(hint("func f(*args) {\n}"), "V2 collects extra arguments with ...args");
         assert_eq!(hint("let f = func(a, *rest) => a"), "V2 collects extra arguments with ...rest");
+        // Python's keyword-only `*` alone isn't a rest parameter (review of round 21).
+        assert_eq!(diag("func f(a, *, b) {\n}").hint, None);
         assert_eq!(hint("if x > 1:\n    print(x)"), "V2 puts a block in { }, not after a colon: if x > 1 { ... }");
         assert_eq!(hint("let f = function(x) {\n    return x\n}"), "V2 writes an anonymous function as func(x) { ... }");
         // Python's f-string braces, and the import forms.
