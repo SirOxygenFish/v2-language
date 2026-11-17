@@ -35,18 +35,18 @@ it is loaded automatically into every session and every subagent.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
   `C:\tmp` and `C:\var` are round 19's test leftovers (the safety check refused their removal; the
   owner was asked to delete them): leave them; tmp_on_windows_points_to_temp skips while there.
-  Rounds 1 to 21 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds (again on 2026-11-17): round 22 next.
+  Rounds 1 to 22 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds (again on 2026-11-17): round 23 next.
   With workflows off, a round runs as Agent calls (worktree isolation, run_in_background), each
   implementer reviewed by another agent and sent the review by SendMessage. Round 20's reviews
   needed four passes after the first fixes; stop a chain once its issues are nits. Rounds run as workflows:
   two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
   implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
   the reviews' issues, then mine on the second reviews'. A worktree may start from main, not
-  v2-reboot: give agents the base commit and have them check it. (Round 21's prompts:
-  scratchpad/newcomer/prompt-*-r21.md, made by scratchpad/setup_round21.py (distros v2new24u, and
+  v2-reboot: give agents the base commit and have them check it. (Round 23's prompts:
+  scratchpad/newcomer/prompt-*-r23.md, made by scratchpad/setup_round23.py (distro v2new24w; round 21's
   v2win21 for the Windows agent's WSL side; WSL-share tests: V2_TEST_WSL_DISTRO=v2win21, set from
-  PowerShell or Python, never Git Bash); round 22 takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
+  PowerShell or Python, never Git Bash); each round takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
   cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
@@ -147,7 +147,7 @@ it is loaded automatically into every session and every subagent.
   collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
-  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`), `error` (ErrorValue, Flow, `fail`,
+  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`; `write_stderr` (a closed stderr is 141); `input(echo: false)`: `EchoOff`, Unix `ECHO_SAVED`/`background`/`echo_around_stop` (Ctrl+Z), Windows `ECHO_MODE`/`echo_back`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`; `link_problem`/`link_error`:
   links that lead nowhere or in a loop, 3.10; `unicode_twin`/`folder_twin`: a Mac's decomposed names;
   `nearby_module`: an import's did-you-mean). Number hints: builtins' `number_text`, `between_thousands`. A builtin returns
@@ -168,13 +168,13 @@ it is loaded automatically into every session and every subagent.
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
   the run dir), `take_interrupts`/`spawn_helper` (Unix: only the interpreter thread takes
   SIGINT/TERM/HUP/QUIT; **start every helper thread with `spawn_helper`**), parking (`allow_parking`, `Watch::due_to_park`; a thread per trim; debug builds
-  take `V2_TEST_PARK_MS`). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
+  take `V2_TEST_PARK_MS`), the terminal (6.5: `remember_terminal`/`restore_terminal` only when stdout is a terminal or `TERMINAL_CHANGED`, `show_cursor`, `cursor_back` + `TOLD_TERMINAL`, `terminal_size` for init's `terminals`; Windows `console_vt_on`/`restore_console`). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
   timers must hold `engines::process::tests::serial()`** (the watchdog is global).
 - `engines/spec.rs` (py/js/ts table, `Version`, `too_old`: Python 3.10+, one Node rule for js
   and ts: 22.13+, not 23.0/23.1), `engines/resolve.rs` (`Lookup`, `find_program`,
   `Prober`/`RealProber`, `ProbeCache` (usable entries only) + `CacheMode`, `Resolver`,
   `ResolvedEngine`, `NotFound`; venvs, 7.6: `venv_mismatch`, `activated_venv_problem`, `venv_stamps`
-  in the cache key), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
+  in the cache key; `clip_middle`, `venv_maker` (the remake line from the base Python), `PthPython` (embeddable), `unused_venv`, `made_elsewhere`, `npm_fix`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
   `engine_available`; `later_language`: tags of Phases 2-3 say "not in this version yet", drop
   each row when its engine registers). Uncaught EngineNotFound exits 3.
 - `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders; `hello` = vep, version, pid,
@@ -199,8 +199,8 @@ it is loaded automatically into every session and every subagent.
   config. `adapters/py.py` (embedded
   via `adapters/mod.rs`, `for_session(key)`): the whole Python worker; its internals are module
   globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
-  HANDLERS). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
-  JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`.
+  HANDLERS; `AfterImport` changes shutil and colorama at their first import; `stdlib_hint`). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
+  JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`; `seeTerminal` gives process.stdout/stderr V2's terminal (9.9).
 - `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`, `plain_way`: the block for a date or Decimal), `CallableTable` (Values: functions
   and other sessions' callable handles, keyed by Rc address), and the host's handle ops on
   `Interp`: `handle_getattr/setattr/getitem/setitem/len/str/value/call/iter/next`; `foreign_call`
@@ -226,7 +226,8 @@ it is loaded automatically into every session and every subagent.
   path; a temp folder too deep on Windows: its 8.3 name via `choose`, else `temp_problem`); main
   removes it.
 - `tests/run.rs`: `requires:` → one `engine_available` probe per run; SKIP, or FAIL under
-  `V2_TEST_REQUIRE`. `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
+  `V2_TEST_REQUIRE`. `Pty` (Unix: `wait`/`reap` keep reading, as macOS holds a session leader's exit until its
+  output is read; `flags` through the master, as macOS revokes the slave). `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
   tests. `tests/v2.toml` is comment-only (it just stops the upward config search).
 - `ffi/`: `cdecl` (C declarations; `parse_definition_head` waits for 15.3 (roadmap 2.3)),
   `types` (CType, Sig), `call` (libffi smoke test).
