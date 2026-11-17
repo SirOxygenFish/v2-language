@@ -464,6 +464,19 @@ impl File {
     }
 }
 
+/// What iconv's line converts for a `v2.toml` at `path` that isn't UTF-8 (2.1, 18.5): the file
+/// is found from the script's folder up (18.1), so one outside the current folder is named by
+/// its path, with `new.toml` beside it.
+fn iconv_files(path: &Path) -> String {
+    let here = std::env::current_dir().ok().map(|d| absolute_clean(&d));
+    if path.parent().is_some_and(|p| Some(p) == here.as_deref()) {
+        return "v2.toml > new.toml && mv new.toml v2.toml".to_string();
+    }
+    let word = |p: &Path| crate::cli::shell_word(&crate::syntax::span::shown_path(&p.display().to_string()));
+    let (file, new) = (word(path), word(&path.with_file_name("new.toml")));
+    format!("{file} > {new} && mv {new} {file}")
+}
+
 /// The project's `v2.toml`, in the file's order: its structure, known sections and keys, keys
 /// that apply, and each value's type (18.2, 18.5). A built-in `command` that `V2_ENGINE_<TAG>`
 /// replaces is not validated (18.3).
@@ -475,7 +488,7 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
         // iconv's line names this file (2.1).
         let why = match crate::syntax::span::not_utf8_named(e.as_bytes()) {
             Some(m) => m.trim_start_matches("file is not valid UTF-8").to_string(),
-            None => format!(": {}", crate::syntax::span::older_encoding("v2.toml > new.toml && mv new.toml v2.toml")),
+            None => format!(": {}", crate::syntax::span::older_encoding(&iconv_files(path))),
         };
         ConfigError(format!("{shown}: config error: the file is not valid UTF-8{why}"))
     })?;
@@ -973,16 +986,23 @@ mod tests {
         std::fs::write(d.join("v2.toml"), bytes).unwrap();
         let e = load_from(&d, vars(&[])).unwrap_err().0;
         assert!(e.ends_with("v2.toml: config error: the file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"), "{e}");
-        // An older encoding: off Windows, iconv's line names v2.toml, not old.v2 (round 20).
+        // An older encoding: off Windows, iconv's line names this v2.toml, not old.v2 (round 20),
+        // by its path, as the tests' folder isn't the file's (tests/run.rs runs it in both).
         std::fs::write(d.join("v2.toml"), b"# Gr\xfc\xdfe\n").unwrap();
         let e = load_from(&d, vars(&[])).unwrap_err().0;
         let want = if cfg!(windows) {
             "v2.toml: config error: the file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8".to_string()
         } else {
             let (page, name) = crate::syntax::span::locale_code_page();
-            format!("v2.toml: config error: the file is not valid UTF-8: it may be in an older encoding, such as {name}: save it as UTF-8, as in iconv -f {page} -t utf-8 v2.toml > new.toml && mv new.toml v2.toml, then check the text")
+            let word = |name: &str| crate::cli::shell_word(&d.join(name).display().to_string());
+            let (file, new) = (word("v2.toml"), word("new.toml"));
+            format!("v2.toml: config error: the file is not valid UTF-8: it may be in an older encoding, such as {name}: save it as UTF-8, as in iconv -f {page} -t utf-8 {file} > {new} && mv {new} {file}, then check the text")
         };
         assert!(e.ends_with(&want), "{e}");
+        assert_eq!(iconv_files(&std::env::current_dir().unwrap().join("v2.toml")), "v2.toml > new.toml && mv new.toml v2.toml");
+        if cfg!(unix) {
+            assert_eq!(iconv_files(Path::new("/my proj/v2.toml")), "\"/my proj/v2.toml\" > \"/my proj/new.toml\" && mv \"/my proj/new.toml\" \"/my proj/v2.toml\"");
+        }
         // cmd's `set V2_ENGINE_PY="C:\…\python.exe"` keeps its quotes; one pair is taken off (18.4).
         let exe = if cfg!(windows) { "C:\\Python 3\\python.exe" } else { "/opt/python 3/bin/python3" };
         let cfg = project_env("quoted", "", &[("V2_ENGINE_PY", &format!("\"{exe}\""))]).unwrap();

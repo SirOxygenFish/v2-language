@@ -2,3 +2,9 @@ Güße
 b"\xfeehir"
 float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("٫", ".")) }
 12.5
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("٬", "").replace("٫", ".")) }
+1234.5
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("٬", "").replace("٫", ".")) }
+1234.5
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x.replace("٬", "")) }
+1234

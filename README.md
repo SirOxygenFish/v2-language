@@ -620,7 +620,7 @@ Node reads no `tsconfig.json`, so a `"paths"` alias needs a relative path instea
 JSX: compile `.tsx` and `.jsx` files first.
 
 **Does V2 leave files around?** No. Temporary files go to a private folder in your temp directory
-and are removed when V2 exits (if V2 was killed, the next script that runs a block removes
+and are removed when V2 exits (if V2 was killed, a later script that runs a block removes
 them); caches live in
 `~/.v2/cache`. Nothing is written to your project.
 
