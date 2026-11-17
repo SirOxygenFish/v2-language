@@ -10,7 +10,8 @@ try {
 } catch (e) {
     print(e.type, "|", e.message)
 }
-// One character that changes: its code point alone. A block without a label imports without from.
+// One character that changes: its code point alone. A block without a label is imported from @py
+// (DOCS 6.2; round 20's review).
 try {
     @py {
         ﬁle = 1
@@ -28,6 +29,30 @@ try {
 }
 @import { hello as ｈｅｌｌｏ } from q
 print(ｈｅｌｌｏ())
+@py {
+    ﬁle = 1
+    @export { file }
+}
+@import { file as ﬁle } from @py
+print(ﬁle)
+// Only a block whose top level, read as Python reads names, defines that name (an assignment
+// too) gets that wording; else the plain message (round 20's review).
+try {
+    @py s {
+        x = 1
+        @export { ｈｅｌｌｏ }
+    }
+} catch (e) {
+    print(e.message)
+}
+try {
+    @py t {
+        ｗｏｒｌｄ: int = 2
+        @export { ｗｏｒｌｄ }
+    }
+} catch (e) {
+    print(e.message.split(", which ")[1])
+}
 // An export one accent away gets its did-you-mean (5.9).
 @py r {
     def büyüt(s):
