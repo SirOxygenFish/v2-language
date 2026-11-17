@@ -1073,7 +1073,27 @@ impl Interp {
             return Ok(v);
         }
         let (pos, named) = self.args(args, env)?;
-        self.call_value(&f, pos, named, callee.span)
+        self.call_value(&f, pos, named, callee.span).inspect_err(|flow| self.decimal_comma_args(flow, &f, args))
+    }
+
+    /// `sleep(0,5)`: an `ArityError` of a builtin given more arguments than it takes, two of them
+    /// int literals around a `,` with no space, a decimal comma (2.4). `round(2,5)` is a call.
+    #[cold]
+    fn decimal_comma_args(&self, flow: &Flow, f: &Value, args: &[Arg]) {
+        let (Flow::Error(e), Value::Func(c)) = (flow, f) else { return };
+        let Callable::Builtin(def) = &**c else { return };
+        if &*e.kind != "ArityError" || def.params.iter().any(|p| p.rest) || args.len() <= def.params.len() {
+            return;
+        }
+        for pair in args.windows(2) {
+            let [Arg::Pos(a @ Expr { kind: ExprKind::Int(_), .. }), Arg::Pos(b @ Expr { kind: ExprKind::Int(_), .. })] = pair else { continue };
+            let text = &self.sm.file(a.span.file).text;
+            let digits = |x: &Expr| text.get(x.span.lo as usize..x.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_'));
+            if let (Some(","), Some(whole), Some(fraction)) = (text.get(a.span.hi as usize..b.span.lo as usize), digits(a), digits(b)) {
+                let _ = e.hint.set(crate::syntax::lexer::decimal_comma_hint(whole, fraction).into());
+                return;
+            }
+        }
     }
 
     /// `a op b`, with the int cases `ops::binop` would reach anyway done here. Overflow goes on to
@@ -1317,7 +1337,7 @@ impl Interp {
                     return Ok(Some(v));
                 }
                 let (pos, named) = self.args(args, env)?;
-                Ok(Some(self.call_value(&f, pos, named, at)?))
+                Ok(Some(self.call_value(&f, pos, named, at).inspect_err(|flow| self.decimal_comma_args(flow, &f, args))?))
             }
             _ => Ok(Some(self.eval(e, env)?)),
         }

@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: decimal_comma.v2:6:9: SyntaxError: expected {, found `,`
+// stderr: hint: decimal numbers use a point: write 2.5, not 2,5
+// A decimal comma where one expression ends gets the number with a point (INTERNALS 2.4).
+let x = 3
+if x > 2,5 { print(1) }

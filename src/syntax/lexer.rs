@@ -665,7 +665,12 @@ impl<'a> Lexer<'a> {
         let start = self.src[..self.pos].rfind('\n').map_or(0, |i| i + 1);
         let line = self.src[start..].lines().next().unwrap_or_default().trim();
         if c == '`' && line.starts_with("```") && line[3..].chars().all(|c| c.is_ascii_alphanumeric()) {
-            hint = Some("```v2 and ``` mark an example in a Markdown file: copy only the lines between them");
+            hint = Some("```v2 and ``` mark an example in a Markdown file: copy only the lines between them".into());
+        }
+        // `１２`: the whole full-width run, as ASCII.
+        let run = full_width_run(self.rest());
+        if run.chars().count() > 1 {
+            hint = Some(format!("type {run} with the input method off"));
         }
         // `${x:#x}`, `${x:£>8}`: a format's own character.
         if self.in_format(self.pos) {
@@ -799,7 +804,11 @@ impl<'a> Lexer<'a> {
             }
         }
         if int_part.len() > 1 && int_part.starts_with('0') {
-            return Err(Diag::new("a number can't start with 0 (leading zeros)", span));
+            let d = Diag::new("a number can't start with 0 (leading zeros)", span);
+            return Err(match self.decimal_comma_before(m.pos) {
+                Some(whole) if !is_float => d.hint(decimal_comma_hint(&whole, text)),
+                _ => d,
+            });
         }
         let clean = text.replace('_', "");
         if is_float {
@@ -813,6 +822,15 @@ impl<'a> Lexer<'a> {
         } else {
             self.push_int(clean.parse::<u64>().ok(), m)
         }
+    }
+
+    /// `0,05`: the int literal and `,` right before byte `at`, with no space between, a
+    /// decimal comma's whole part (2.4).
+    fn decimal_comma_before(&self, at: usize) -> Option<String> {
+        let [.., a, comma] = &self.toks[..] else { return None };
+        let adjacent = comma.span.hi as usize == at && a.span.hi == comma.span.lo;
+        let whole = self.src.get(a.span.lo as usize..a.span.hi as usize)?;
+        (adjacent && matches!((&a.tok, &comma.tok), (Tok::Int(_), Tok::Op(Op::Comma))) && whole.bytes().all(|c| c.is_ascii_digit() || c == b'_')).then(|| whole.to_string())
     }
 
     fn push_int(&mut self, value: Option<u64>, m: Mark) -> Result<(), Diag> {
@@ -1580,25 +1598,46 @@ impl<'a> Lexer<'a> {
 /// `_` only between two digits (3.4).
 /// A character as `unexpected character …` names it (3.2), with a hint for the ones that come
 /// from copying code out of a web page, a chat or a word processor: invisible ones by code point,
-/// look-alikes of a quote, a minus or a space with what to type instead.
-pub fn shown_char(c: char) -> (String, Option<&'static str>) {
+/// look-alikes of a quote, a minus or a space with what to type instead, and an input method's
+/// full-width forms with their ASCII ones.
+pub fn shown_char(c: char) -> (String, Option<String>) {
     let code = format!("U+{:04X}", c as u32);
+    let hint = |h: &str| Some(h.to_string());
     match c {
-        '\u{00A0}' | '\u{2007}' | '\u{202F}' => (format!("{code} (a no-break space)"), Some("type a plain space instead")),
-        '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => (format!("{code} (an invisible zero-width character)"), Some("delete it")),
-        '\u{0000}' => (format!("{code} (a NUL byte)"), Some("is this a text file? V2 scripts are plain UTF-8 text")),
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' => (format!("{code} (a no-break space)"), hint("type a plain space instead")),
+        '\u{3000}' => (format!("{code} (an ideographic space)"), hint("type a plain space instead")),
+        '\u{1680}' | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200A}' | '\u{205F}' => (format!("{code} (a Unicode space)"), hint("type a plain space instead")),
+        '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => (format!("{code} (an invisible zero-width character)"), hint("delete it")),
+        '\u{0000}' => (format!("{code} (a NUL byte)"), hint("is this a text file? V2 scripts are plain UTF-8 text")),
         '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => {
-            (format!("'{c}' (a curly quote)"), Some("use a straight quote: \" or '"))
+            (format!("'{c}' (a curly quote)"), hint("use a straight quote: \" or '"))
         }
-        '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), Some("use a plain minus sign: -")),
-        '\u{00D7}' | '\u{22C5}' | '\u{00B7}' => (format!("'{c}' (a multiplication sign)"), Some("multiply with *: 5 * 3")),
-        '\u{00F7}' | '\u{2236}' => (format!("'{c}' (a division sign)"), Some("divide with /: 6 / 3")),
-        '`' => ("'`'".to_string(), Some("V2 writes a template string as f\"text ${x}\"")),
+        '\u{300C}'..='\u{300F}' => (format!("'{c}' (a corner quote)"), hint("use a straight quote: \" or '")),
+        '\u{FF01}'..='\u{FF5E}' => {
+            let ascii = full_width_run(&c.to_string());
+            (format!("'{c}' (a full-width '{ascii}' from an input method)"), Some(format!("type {ascii} with the input method off")))
+        }
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => (format!("'{c}' (a dash)"), hint("use a plain minus sign: -")),
+        '\u{00D7}' | '\u{22C5}' | '\u{00B7}' => (format!("'{c}' (a multiplication sign)"), hint("multiply with *: 5 * 3")),
+        '\u{00F7}' | '\u{2236}' => (format!("'{c}' (a division sign)"), hint("divide with /: 6 / 3")),
+        '`' => ("'`'".to_string(), hint("V2 writes a template string as f\"text ${x}\"")),
         // `copy con file` and old editors end a file with Ctrl+Z.
-        '\u{001A}' => (format!("{code} (Ctrl+Z, an old end-of-file mark)"), Some("delete it: V2 files end where their text ends")),
+        '\u{001A}' => (format!("{code} (Ctrl+Z, an old end-of-file mark)"), hint("delete it: V2 files end where their text ends")),
         c if c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') => (code, None),
         c => (format!("'{c}'"), None),
     }
+}
+
+/// `19,99` where one number goes (`let preis = 19,99`, `sleep(0,5)`): the hint that writes it
+/// with a point (2.4).
+pub fn decimal_comma_hint(whole: &str, fraction: &str) -> String {
+    format!("decimal numbers use a point: write {whole}.{fraction}, not {whole},{fraction}")
+}
+
+/// The ASCII form of the full-width forms (U+FF01 to U+FF5E) that start `text`: `１２` is `12`
+/// (3.2). Empty when it starts with none.
+fn full_width_run(text: &str) -> String {
+    text.chars().map_while(|c| matches!(c, '\u{FF01}'..='\u{FF5E}').then(|| char::from_u32(c as u32 - 0xFEE0)).flatten()).collect()
 }
 
 fn check_underscores(digits: &str) -> Result<(), &'static str> {
@@ -1939,9 +1978,29 @@ let n = names
         assert_eq!(err("\u{0}"), "unexpected character U+0000 (a NUL byte)");
         assert_eq!(err("x = 1\u{1B}[31m"), "unexpected character U+001B");
         assert_eq!(err("\u{202E}"), "unexpected character U+202E");
-        assert_eq!(shown_char('\u{201C}').1, Some("use a straight quote: \" or '"));
-        assert_eq!(shown_char('\u{A0}').1, Some("type a plain space instead"));
+        assert_eq!(shown_char('\u{201C}').1.as_deref(), Some("use a straight quote: \" or '"));
+        assert_eq!(shown_char('\u{A0}').1.as_deref(), Some("type a plain space instead"));
         assert_eq!(shown_char('$'), ("'$'".to_string(), None));
+    }
+
+    #[test]
+    fn input_method_characters_are_named() {
+        // A Japanese or Chinese input method left on (round 20): its space by code point, its
+        // full-width forms with their ASCII ones, its corner quotes as quotes (3.2).
+        let both = |src: &str| {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            let d = lex(&sm, id).unwrap_err();
+            (d.message, d.hint.unwrap_or_default())
+        };
+        let pair = |m: &str, h: &str| (m.to_string(), h.to_string());
+        assert_eq!(both("let x = 1\u{3000}+ 2"), pair("unexpected character U+3000 (an ideographic space)", "type a plain space instead"));
+        assert_eq!(both("let x = 1\u{2003}+ 2"), pair("unexpected character U+2003 (a Unicode space)", "type a plain space instead"));
+        assert_eq!(both("print\u{FF08}\"a\"\u{FF09}"), pair("unexpected character '\u{FF08}' (a full-width '(' from an input method)", "type ( with the input method off"));
+        assert_eq!(both("print(1\u{FF0C} 2)"), pair("unexpected character '\u{FF0C}' (a full-width ',' from an input method)", "type , with the input method off"));
+        assert_eq!(both("let x = \u{FF11}\u{FF12}"), pair("unexpected character '\u{FF11}' (a full-width '1' from an input method)", "type 12 with the input method off"));
+        assert_eq!(both("print(\u{300C}hello\u{300D})"), pair("unexpected character '\u{300C}' (a corner quote)", "use a straight quote: \" or '"));
+        assert_eq!(both("\"\u{65E5}\" \u{FF0B} 1"), pair("unexpected character '\u{FF0B}' (a full-width '+' from an input method)", "type + with the input method off"));
     }
 
     #[test]
@@ -2077,6 +2136,16 @@ let n = names
         assert_eq!(kinds("9223372036854775808"), "9223372036854775808 EOF");
         assert_eq!(err("9223372036854775809"), "integer literal does not fit in 64 bits");
         assert_eq!(err("007"), "a number can't start with 0 (leading zeros)");
+        // `0,05`: a decimal comma before it (2.4).
+        let hint = |src: &str| {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            lex(&sm, id).unwrap_err().hint
+        };
+        assert_eq!(hint("let rabatt = 0,05").as_deref(), Some("decimal numbers use a point: write 0.05, not 0,05"));
+        assert_eq!(hint("sleep(0,05)").as_deref(), Some("decimal numbers use a point: write 0.05, not 0,05"));
+        assert_eq!(hint("f(0, 05)"), None);
+        assert_eq!(hint("f(x,05)"), None);
         assert_eq!(err("0b101"), "V2 has only decimal and 0x hex integer literals");
         assert_eq!(err("0o17"), "V2 has only decimal and 0x hex integer literals");
         assert_eq!(err("12abc"), "a number can't be followed directly by a letter");

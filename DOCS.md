@@ -559,9 +559,11 @@ main.v2:4:9: ValueError: port out of range: 99999
 ```
 
 The location is where the error was first thrown; rethrowing with `throw e` keeps it. The report
-starts on a line of its own, also after `print("x", end: "")`. Control characters in a file's
-name print escaped there and in every message (`\n`, `\u{1b}`), as `e.file` holds it, so a name
-can't split a line or act on the terminal.
+starts on a line of its own, also after `print("x", end: "")`. Control characters and the bidi
+characters that reorder text on screen (U+202A to U+202E, U+2066 to U+2069) in a file's name
+print escaped there and in every message (`\n`, `\u{1b}`, `\u{202e}`), as `e.file` holds it, so a
+name can't split a line, act on the terminal or show reversed; in the source line under the
+header, a bidi character prints as `\u{202e}` too.
 
 ### 3.10 Modules
 

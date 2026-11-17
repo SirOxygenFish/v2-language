@@ -1,0 +1,3 @@
+ArityError decimal numbers use a point: write 19.99, not 19,99
+ArityError null
+2
