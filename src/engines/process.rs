@@ -130,15 +130,25 @@ fn remember_terminal() {
     let _ = TERMINAL.set(saved);
 }
 
+/// Set while v2 itself has changed the terminal's settings and not yet put them back (input read
+/// with echo off): the interrupt path then puts them back whatever stdout is (6.5).
+pub(crate) static TERMINAL_CHANGED: AtomicBool = AtomicBool::new(false);
+
 /// Unix, on the interrupt path: a block stopped on the spot never ran the code that undoes what it
 /// did to the terminal (echo turned off, a live display's hidden cursor), so the terminal gets back
 /// the settings it had when v2 started, and stdout or stderr, when one is a terminal, gets
-/// `ESC[?25h` (the cursor shown). Only while v2 is that terminal's foreground job: a background
-/// one would change the settings of the shell that now reads it. From a thread of its own, at most
-/// 100 ms, as a terminal whose output is stopped (Ctrl+S) blocks the write (6.5).
+/// `ESC[?25h` (the cursor shown). Only when v2's stdout is a terminal, as v2 is then what the
+/// screen shows (in `v2 x.v2 | less` the pager has put the terminal in a mode of its own, and Ctrl+C
+/// reaches it too), or when `TERMINAL_CHANGED` is set; and only while v2 is that terminal's
+/// foreground job: a background one would change the settings of the shell that now reads it.
+/// From a thread of its own, at most 100 ms, as a terminal whose output is stopped (Ctrl+S) blocks
+/// the write (6.5).
 #[cfg(unix)]
 fn restore_terminal() {
     let Some(saved) = TERMINAL.get().filter(|s| !s.is_empty()) else { return };
+    if !saved.iter().any(|(fd, _)| *fd == 1) && !TERMINAL_CHANGED.load(Ordering::SeqCst) {
+        return;
+    }
     let (done, finished) = std::sync::mpsc::channel();
     let writer = spawn_helper(std::thread::Builder::new(), move || {
         // SAFETY: plain calls on the standard descriptors with the settings tcgetattr gave; SIGTTOU
