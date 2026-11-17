@@ -30,3 +30,13 @@ x = x.replace("−", "-")
 print(float("\u{2212}5".replace("−", "-")), float(x.replace(",", ".")), float("12\u{66b}5".replace("٫", ".")))
 // Never "'1' would work" when digits follow.
 try_it(func() => int("12a34"))
+// The second review of round 20: Intl's de-CH apostrophe U+2019, U+066C between thousands with
+// ASCII digits, and a first group that starts with 0, which is no thousand.
+for t in ["1\u{2019}000", "0.123", "0,123", "1\u{66c}234"] {
+    try_it(func() => int(t))
+}
+for t in ["1\u{2019}234.5", "1\u{66c}234\u{66b}5"] {
+    try_it(func() => float(t))
+}
+print(int("1\u{2019}000".replace("’", "")), int(float("0.123")), int(float("0,123".replace(",", "."))), int("1\u{66c}234".replace("٬", "")))
+print(float("1\u{2019}234.5".replace("’", "")), float("1\u{66c}234\u{66b}5".replace("٬", "").replace("٫", ".")))
