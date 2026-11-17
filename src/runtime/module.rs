@@ -387,6 +387,12 @@ pub fn link_error(verb: &str, path: &str) -> Option<crate::runtime::error::Error
 }
 
 fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, ImportFailure> {
+    // `\\wsl.localhost` (or `\\wsl$`) with no distribution's name: a server without a share, which
+    // `Path` reads as a folder at the top of this drive, so it is looked at as written, with the
+    // error Windows gives for it (ERROR_BAD_PATHNAME) (DOCS 3.10).
+    if let Some(why) = crate::runtime::builtins::wsl_root(spec, &std::io::Error::from_raw_os_error(161)) {
+        return Err((format!("cannot import '{spec}': {why}"), None));
+    }
     let p = Path::new(spec);
     if matches!(p.components().next(), Some(std::path::Component::Prefix(_))) && !p.has_root() {
         return Err((format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"), None));
@@ -1003,6 +1009,23 @@ mod tests {
         std::fs::write(&f, "").unwrap();
         assert!(!reparse_point(&std::fs::metadata(&f).unwrap()) && wsl_file(&f).is_none());
         let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn an_import_of_a_bare_wsl_server_says_to_name_a_distribution() {
+        // DOCS 3.10 (the second review of round 21): `Path` takes `\\wsl.localhost` without a share
+        // for a folder at the top of this drive, so the import looked for C:\wsl.localhost.
+        let mut sm = SourceMap::new();
+        let main = sm.add(std::env::temp_dir().join("main.v2"), "main.v2".into(), "");
+        for (spec, server) in [(r"\\wsl.localhost", "wsl.localhost"), (r"\\wsl.localhost\", "wsl.localhost"), ("//wsl.localhost/", "wsl.localhost"), (r"\\wsl$", "wsl$")] {
+            let got = locate(&sm, main, spec).err().map(|(m, _)| m);
+            if cfg!(windows) {
+                let want = format!(r"cannot import '{spec}': \\{server} needs a WSL distribution's name after it, as in \\{server}\Ubuntu: wsl --list --quiet shows them");
+                assert_eq!(got.as_deref(), Some(want.as_str()));
+            } else {
+                assert!(got.is_some_and(|m| !m.contains("WSL")), "{spec}: a Linux path");
+            }
+        }
     }
 
     #[test]
