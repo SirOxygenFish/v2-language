@@ -591,7 +591,8 @@ print(util.slug("Hello World"))    // hello-world
   whose letters differ from the file's name only in case (`./Util.v2` for `util.v2`) works on
   Windows and macOS, with a note, since Linux won't find it. A missing module's error names the
   file of its folder you probably meant (`did you mean './Util.v2'?`, on Linux for the wrong case
-  too), or one whose name looks the same but is written as macOS writes names (decomposed Unicode).
+  too), or a file or a folder on the way whose name looks the same but is written as macOS writes
+  names (decomposed Unicode).
 - A module runs once, the first time it is imported; later imports reuse it, also when they reach
   it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`).
 - `util` is a dict of the module's exported names, taken when the module finishes running.
