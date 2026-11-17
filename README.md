@@ -334,7 +334,8 @@ More of V2, in short:
   that exists) is refused rather than read or made as a folder named `~` (`./~` reaches a folder
   that is really named so).
 - **Strings** have `split`, `lines` (Windows and old Mac line endings too), `upper`, `lower`, `replace`, `trim`,
-  `starts_with`, `ends_with` and `index_of`; **lists** `push`, `pop`, `insert`,
+  `starts_with`, `ends_with` and `index_of` (`upper`, `lower` and `sort` are the same in every
+  locale: for a language's own, see [DOCS 3.5](DOCS.md#35-strings)); **lists** `push`, `pop`, `insert`,
   `sort(key: f, reverse: true)` and `reverse` (they change the list and return `null`), `map` and
   `filter` (they return new lists), `join`, `index_of`, `get(i, default)` (the default past the
   end, where `xs[i]` is an `IndexError`) and `copy`;

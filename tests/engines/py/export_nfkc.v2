@@ -1,0 +1,41 @@
+// requires: py
+// An @export name that Python reads in its NFKC form, so the block defines another name, says
+// which name to export and how to import it (INTERNALS 12.2, round 20), as block args do.
+try {
+    @py p {
+        def ｈｅｌｌｏ():
+            return "hi"
+        @export { ｈｅｌｌｏ }
+    }
+} catch (e) {
+    print(e.type, "|", e.message)
+}
+// One character that changes: its code point alone. A block without a label imports without from.
+try {
+    @py {
+        ﬁle = 1
+        @export { ﬁle }
+    }
+} catch (e) {
+    print(e.message.split(" (")[1])
+    print(e.message.split(" import it as ")[1])
+}
+// What the message says works.
+@py q {
+    def ｈｅｌｌｏ():
+        return "hi"
+    @export { hello }
+}
+@import { hello as ｈｅｌｌｏ } from q
+print(ｈｅｌｌｏ())
+// An export one accent away gets its did-you-mean (5.9).
+@py r {
+    def büyüt(s):
+        return s.upper()
+    @export { büyüt }
+}
+try {
+    @import { buyut } from r
+} catch (e) {
+    print(e.type, "|", e.message)
+}

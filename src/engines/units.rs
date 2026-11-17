@@ -346,12 +346,32 @@ impl Interp {
         // Only a definition's reply lists missing names (12.2); an action's are ignored.
         if let (Some(missing), Some(ex)) = (reply.missing.first(), b.directives.exports.as_ref()) {
             let span = ex.items.iter().find(|i| i.text == *missing).map_or(ex.at.unwrap_or(at), |i| i.span);
-            let msg = format!("@export lists '{missing}' but {} does not define it", self.block_name(b));
+            let msg = self.missing_export(b, missing, &engine.spec.id);
             return Err(self.raise(error("ImportError", msg), span));
         }
         let unit: Rc<str> = unit.into();
         let exports = reply.exports.into_iter().map(|(name, v)| super::imports::export(s, &unit, name, v)).collect();
         Ok((if want_value { reply.value } else { Value::Null }, exports))
+    }
+
+    /// 12.2's message for an `@export` name block `b` (of engine `lang`) doesn't define. Python
+    /// reads a name in its NFKC form, so a block that defines `ｈｅｌｌｏ` defines `hello`: that
+    /// name, with the code points of the first character that changes (`(U+FF48 …)`: more change).
+    fn missing_export(&self, b: &EngineBlock, missing: &str, lang: &str) -> String {
+        use unicode_normalization::UnicodeNormalization;
+        let read: String = missing.nfkc().collect();
+        let name = read.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && read.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if lang != "py" || read == missing || !name {
+            return format!("@export lists '{missing}' but {} does not define it", self.block_name(b));
+        }
+        let changed: Vec<char> = missing.chars().filter(|&c| std::iter::once(c).nfkc().ne(std::iter::once(c))).collect();
+        let points = match changed.as_slice() {
+            [] => missing.chars().map(|c| format!("U+{:04X}", c as u32)).collect::<Vec<_>>().join(" "),
+            [one] => format!("U+{:04X}", *one as u32),
+            [first, ..] => format!("U+{:04X} …", *first as u32),
+        };
+        let from = b.label.as_ref().map(|l| format!(" from {}", l.text)).unwrap_or_default();
+        format!("@export lists '{missing}' ({points}), which Python reads as '{read}': export {read}, and import it as @import {{ {read} as {missing} }}{from}")
     }
 
     /// The session of `e`'s engine, started at its first use (8.2, 8.3); a ts block starts the
