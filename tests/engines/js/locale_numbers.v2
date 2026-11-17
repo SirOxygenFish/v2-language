@@ -40,3 +40,28 @@ print(@py(x) { float(x.replace(",", "")) })
 x = @js { (1234567).toLocaleString("mr-IN") }
 hint_of(func() => int(x))
 print(@py(x) { int(x.replace(",", "")) })
+// The fourth pass of round 20: each block followed gives the number or an error from Python,
+// never a wrong number. A decimal comma before three digits stays (0.123 and 1234.567 with
+// opt-in digits), and so does a point int() can't tell from one between thousands (1234 in
+// de-DE-u-nu-deva, lo-LA-u-nu-laoo, km-KH-u-nu-khmr); a point that can't be one reads as float.
+func follow(f) {
+    try { print(f()) } catch (e) { print(e.foreign_type, e.message) }
+}
+for c in [["de-DE-u-nu-deva", 0.123], ["fr-u-nu-beng", 0.123], ["lo-LA-u-nu-laoo", 0.123], ["km-KH-u-nu-khmr", 0.123], ["es-u-nu-deva", 1234.567], ["pt-PT-u-nu-beng", 1234.567]] {
+    x = @js(c) { c[1].toLocaleString(c[0]) }
+    hint_of(func() => float(x))
+    follow(func() => @py(x) { float(x) })
+}
+for loc in ["de-DE-u-nu-deva", "lo-LA-u-nu-laoo", "km-KH-u-nu-khmr"] {
+    x = @js(loc) { (1234).toLocaleString(loc) }
+    hint_of(func() => int(x))
+    follow(func() => @py(x) { int(x) })
+}
+for n in [12.5, 0.123] {
+    x = @js(n) { n.toLocaleString("mr-IN") }
+    hint_of(func() => int(x))
+    follow(func() => @py(x) { float(x) })
+}
+x = @js { (-1234.5).toLocaleString("mr-IN") }
+hint_of(func() => int(x))
+follow(func() => @py(x) { float(x.replace(",", "")) })

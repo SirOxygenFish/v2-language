@@ -88,3 +88,20 @@ int() reads digits without spaces between them: int(x.replace(" ", ""))
 null
 null
 123
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace(",", "")) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("٬", "").replace("٫", ".")) }

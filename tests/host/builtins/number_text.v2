@@ -61,3 +61,18 @@ hint_of(func() => int("0 123"))
 hint_of(func() => int("0\u{2019}123"))
 hint_of(func() => float("0,123.5"))
 print(int("0 123".replace(" ", "")))
+// The fourth pass of round 20, as Node's toLocaleString writes them (locale_numbers.v2 follows
+// them): a decimal comma before three digits stays, after a zero of any script (de-DE-u-nu-deva,
+// fr-u-nu-beng, lo-LA-u-nu-laoo and km-KH-u-nu-khmr 0.123; the double-struck zero, right after
+// the bold digits, and Brahmi's, after its twenty numbers, but not a double-struck one) or after
+// four digits (es-u-nu-deva and pt-PT-u-nu-beng 1234.567).
+for t in ["\u{966},\u{967}\u{968}\u{969}", "\u{9e6},\u{9e7}\u{9e8}\u{9e9}", "\u{ed0},\u{ed1}\u{ed2}\u{ed3}", "\u{17e0},\u{17e1}\u{17e2}\u{17e3}", "\u{1d7d8},\u{1d7d9}\u{1d7da}\u{1d7db}", "\u{11066},\u{11067}\u{11068}\u{11069}", "\u{1d7d9},\u{1d7da}\u{1d7db}\u{1d7dc}", "\u{967}\u{968}\u{969}\u{96a},\u{96b}\u{96c}\u{96d}", "\u{9e7}\u{9e8}\u{9e9}\u{9ea},\u{9eb}\u{9ec}\u{9ed}"] {
+    hint_of(func() => float(t))
+}
+// For int(), a point that can be between thousands keeps the block int (de-DE-u-nu-deva,
+// lo-LA-u-nu-laoo and km-KH-u-nu-khmr 1234, de-DE-u-nu-deva 1234567); one that can't, or U+066B,
+// makes it float (mr-IN 12.5 and 0.123, ar-EG 1234.5).
+hint_of(func() => int("\u{966},\u{967}\u{968}\u{969}"))
+for t in ["\u{967}.\u{968}\u{969}\u{96a}", "\u{ed1}.\u{ed2}\u{ed3}\u{ed4}", "\u{17e1}.\u{17e2}\u{17e3}\u{17e4}", "\u{967}.\u{968}\u{969}\u{96a}.\u{96b}\u{96c}\u{96d}", "\u{967}\u{968}.\u{96b}", "\u{966}.\u{967}\u{968}\u{969}", "\u{661}\u{66c}\u{662}\u{663}\u{664}\u{66b}\u{665}"] {
+    hint_of(func() => int(t))
+}
