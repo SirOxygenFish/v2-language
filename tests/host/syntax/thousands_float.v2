@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: thousands_float.v2:5:15: SyntaxError: a number can't start with 0 (leading zeros)
+// stderr: hint: numbers are written without thousands commas: 1000000.50 or 1_000_000.50
+// A float literal may be the last group of thousands (INTERNALS 2.4): the thousands reading alone.
+let total = 1,000,000.50
+print(total)

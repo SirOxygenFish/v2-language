@@ -815,7 +815,7 @@ impl<'a> Lexer<'a> {
         if int_part.len() > 1 && int_part.starts_with('0') {
             let d = Diag::new("a number can't start with 0 (leading zeros)", span);
             let before = self.comma_groups_before(m.pos);
-            let hint = if before.is_empty() || is_float { None } else { decimal_comma_hint(&[before, vec![text], self.comma_groups_after()].concat()) };
+            let hint = if before.is_empty() { None } else { decimal_comma_hint(&[before, vec![text], self.comma_groups_after()].concat()) };
             return Err(match hint {
                 Some(h) => d.hint(h),
                 None => d,
@@ -835,16 +835,15 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// `0,05`, `1,000`: the int literals before byte `at`, each with a `,` after it and no space
-    /// between, as written: a decimal comma's whole part, or thousands (2.4). Empty for none.
+    /// `0,05`, `1,000`: the number literals before byte `at`, each with a `,` after it and no
+    /// space between, as written: a decimal comma's whole part, or thousands (2.4). Empty for none.
     fn comma_groups_before(&self, mut at: usize) -> Vec<&str> {
         let mut groups = Vec::new();
         let mut toks = &self.toks[..];
         while let [rest @ .., a, comma] = toks {
             let adjacent = comma.span.hi as usize == at && a.span.hi == comma.span.lo;
-            let digits = self.src.get(a.span.lo as usize..a.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_'));
-            match digits {
-                Some(whole) if adjacent && matches!((&a.tok, &comma.tok), (Tok::Int(_), Tok::Op(Op::Comma))) => groups.insert(0, whole),
+            match self.src.get(a.span.lo as usize..a.span.hi as usize) {
+                Some(group) if adjacent && matches!((&a.tok, &comma.tok), (Tok::Int(_) | Tok::Float(_), Tok::Op(Op::Comma))) => groups.insert(0, group),
                 _ => break,
             }
             at = a.span.lo as usize;
@@ -853,15 +852,14 @@ impl<'a> Lexer<'a> {
         groups
     }
 
-    /// `1,000,000` read up to its first `000`: the `,000` groups after it, as written (2.4).
+    /// `1,000,000` read up to its first `000`: the literals after it joined the same way, each as
+    /// written up to a character no number holds (`,000.50`; `,000e5` and `,0x1F`, which
+    /// `decimal_comma_hint` takes as no number) (2.4).
     fn comma_groups_after(&self) -> Vec<&str> {
         let mut groups = Vec::new();
         let mut r = self.rest();
-        while let Some(after) = r.strip_prefix(',') {
-            let n = after.find(|c: char| !(c.is_ascii_digit() || c == '_')).unwrap_or(after.len());
-            if n == 0 || after[n..].starts_with(|c: char| c == '.' || is_ident_continue(c)) {
-                break;
-            }
+        while let Some(after) = r.strip_prefix(',').filter(|a| a.starts_with(|c: char| c.is_ascii_digit())) {
+            let n = after.find(|c: char| !(c == '.' || is_ident_continue(c))).unwrap_or(after.len());
             groups.push(&after[..n]);
             r = &after[n..];
         }
@@ -1664,22 +1662,32 @@ pub fn shown_char(c: char) -> (String, Option<String>) {
 }
 
 /// `19,99`, `1,500`, `1,000,000` where one number goes (`let preis = 19,99`, `sleep(0,5)`): the
-/// digit groups as written, a `,` with no space between each (2.4). Two groups are a decimal
-/// comma, written with a point; a first group of one to three digits that doesn't start with 0,
-/// then groups of exactly three, may be thousands, so that hint names both readings (only the
-/// thousands one past one comma). `None` for another run (`1,5,0`).
+/// number literals as written, a `,` with no space between each (2.4). Two int groups are a
+/// decimal comma, written with a point; a first group of one to three digits that doesn't start
+/// with 0, then groups of exactly three, may be thousands, so that hint names both readings (only
+/// the thousands one past one comma). A float literal may be the last of those groups
+/// (`1,234,567.89`), for the thousands reading alone. `None` for another run (`1,5,0`, `19,99.5`).
 pub fn decimal_comma_hint(groups: &[&str]) -> Option<String> {
     let digits = |g: &str| !g.is_empty() && g.bytes().all(|c| c.is_ascii_digit());
-    let thousands = match groups {
-        [first, rest @ ..] => {
-            !rest.is_empty() && first.len() <= 3 && digits(first) && !first.starts_with('0') && rest.iter().all(|g| g.len() == 3 && digits(g))
-        }
+    let int = |g: &str| !g.is_empty() && g.bytes().all(|c| c.is_ascii_digit() || c == b'_');
+    let (&last, before) = groups.split_last()?;
+    // `567.89`: a float's whole part is a group too; `0x1F` and `1e5` are no group.
+    let (whole, point) = match last.split_once('.') {
+        Some((whole, fraction)) if digits(fraction) => (whole, true),
+        Some(_) => return None,
+        None => (last, false),
+    };
+    if !before.iter().all(|g| int(g)) || !int(whole) {
+        return None;
+    }
+    let thousands = match before {
+        [first, rest @ ..] => first.len() <= 3 && digits(first) && !first.starts_with('0') && rest.iter().chain([&whole]).all(|g| g.len() == 3 && digits(g)),
         [] => false,
     };
     match groups {
         _ if thousands => {
             let decimal = match groups {
-                [whole, fraction] => format!(" (a decimal one has a point: {whole}.{})", match fraction.trim_end_matches('0') {
+                [whole, fraction] if !point => format!(" (a decimal one has a point: {whole}.{})", match fraction.trim_end_matches('0') {
                     "" => "0",
                     f => f,
                 }),
@@ -1687,6 +1695,7 @@ pub fn decimal_comma_hint(groups: &[&str]) -> Option<String> {
             };
             Some(format!("numbers are written without thousands commas: {} or {}{decimal}", groups.concat(), groups.join("_")))
         }
+        _ if point => None,
         [whole, fraction] => Some(format!("decimal numbers use a point: write {whole}.{fraction}, not {whole},{fraction}")),
         _ => None,
     }
@@ -2231,6 +2240,14 @@ let n = names
         assert_eq!(hint("let x = 0,050").as_deref(), Some("decimal numbers use a point: write 0.050, not 0,050"));
         assert_eq!(hint("let x = 1234,050").as_deref(), Some("decimal numbers use a point: write 1234.050, not 1234,050"));
         assert_eq!(hint("print(1,05,2)"), None);
+        // Round 20: a float literal ends a run as its last group, for the thousands reading
+        // alone; a run that goes on past one, or ends in another literal, is no number.
+        assert_eq!(hint("let total = 1,000,000.50").unwrap(), format!("{thousands}: 1000000.50 or 1_000_000.50"));
+        assert_eq!(hint("let x = 1,500,000.50").unwrap(), format!("{thousands}: 1500000.50 or 1_500_000.50"));
+        assert_eq!(hint("print(1,000.5)").unwrap(), format!("{thousands}: 1000.5 or 1_000.5"));
+        for no_number in ["let x = 1,05.5", "let x = 1,000.5,000", "let x = 1,000e5", "let x = 1,000,000e5", "let x = 1,000,0x1F", "let x = 1.5,000", "let x = 1.5,234,000"] {
+            assert_eq!(hint(no_number), None, "{no_number}");
+        }
         assert_eq!(err("0b101"), "V2 has only decimal and 0x hex integer literals");
         assert_eq!(err("0o17"), "V2 has only decimal and 0x hex integer literals");
         assert_eq!(err("12abc"), "a number can't be followed directly by a letter");

@@ -1,9 +1,10 @@
 // exit: 1
-// stderr: decimal_comma_args.v2:16:1: ArityError: sleep() takes 1 positional argument but 2 were given
+// stderr: decimal_comma_args.v2:21:1: ArityError: sleep() takes 1 positional argument but 2 were given
 // stderr: hint: decimal numbers use a point: write 0.5, not 0,5
 // A decimal comma (INTERNALS 2.4): `0,5` gives a builtin two arguments, and the ArityError's hint
 // writes the number with a point; with a space nothing is said, and round(2,5) is a call.
-// Three digits after the `,` may be thousands (1,500), and more groups of three are.
+// Three digits after the `,` may be thousands (1,500), and more groups of three are; a float
+// literal may be their last (1,234,567.89), and the numbers the hint writes are that number.
 func hint_of(f) {
     try { f() } catch (e) { print(e.type, e.hint) }
 }
@@ -12,5 +13,9 @@ hint_of(func() { print(len(1, 2)) })
 hint_of(func() { print(len(1,500)) })
 hint_of(func() { print(len(1,500,250)) })
 hint_of(func() { print(len(0,500)) })
+hint_of(func() { print(len(1,234,567.89)) })
+hint_of(func() { sleep(1,234,567.89) })
+hint_of(func() { print(len(19,99.5)) })
+print(1234567.89, 1_234_567.89, 1000000.50, 1_000_000.50)
 print(round(2,5))
 sleep(0,5)
