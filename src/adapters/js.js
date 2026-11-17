@@ -16,6 +16,7 @@ const { MAX_STRING_LENGTH } = require('buffer').constants;
 const url = require('url');
 const util = require('util');
 const child_process = require('child_process');
+const tty = require('tty');
 
 v8.setFlagsFromString('--expose-gc');
 const gc = vm.runInNewContext('gc');
@@ -543,6 +544,26 @@ function withOptions(fn, at, fork) {
 }
 for (const [name, at] of [['spawn', 2], ['spawnSync', 2], ['execFile', 2], ['execFileSync', 2], ['fork', 2], ['exec', 1], ['execSync', 1]]) {
   child_process[name] = withOptions(child_process[name], at, name === 'fork');
+}
+
+// Which of V2's stdout and stderr are terminals, as [columns, rows], from init (9.3): fds 1 and 2,
+// process.stdout and process.stderr answer for where V2 writes them, as Node's own would there,
+// so colors and live bars show on a terminal and stay out of a file (9.9, DOCS 4.6). The size is
+// the one at the worker's start.
+const terminals = { stdout: null, stderr: null };
+const rawIsatty = tty.isatty;
+tty.isatty = function isatty(fd) {
+  if (fd === 1 || fd === 2) return terminals[fd === 1 ? 'stdout' : 'stderr'] !== null;
+  return rawIsatty(fd);
+};
+function seeTerminal(w, [columns, rows]) {
+  // tty.WriteStream's own methods, which write their escape sequences with w.write.
+  w.isTTY = true;
+  w.columns = columns;
+  w.rows = rows;
+  for (const name of ['getColorDepth', 'hasColors', 'cursorTo', 'moveCursor', 'clearLine', 'clearScreenDown', 'getWindowSize']) {
+    w[name] = tty.WriteStream.prototype[name];
+  }
 }
 Module.syncBuiltinESMExports();
 
@@ -1681,7 +1702,15 @@ function castHint(e, source) {
   }
 }
 
-function doInit() {
+function doInit(m) {
+  const given = m.terminals !== null && typeof m.terminals === 'object' ? m.terminals : {};
+  for (const [name, w] of [['stdout', stdoutStream], ['stderr', stderrStream]]) {
+    const size = given[name];
+    if (Array.isArray(size) && size.length === 2 && size.every((n) => Number.isInteger(n) && n >= 0)) {
+      terminals[name] = size;
+      seeTerminal(w, size);
+    }
+  }
   return { value: null };
 }
 

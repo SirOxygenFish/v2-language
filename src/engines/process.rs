@@ -133,15 +133,25 @@ fn remember_terminal() {
     let _ = TERMINAL.set(saved);
 }
 
+/// Set while v2 itself has changed the terminal's settings and not yet put them back (input read
+/// with echo off): the interrupt path then puts them back whatever stdout is (6.5).
+pub(crate) static TERMINAL_CHANGED: AtomicBool = AtomicBool::new(false);
+
 /// Unix, on the interrupt path: a block stopped on the spot never ran the code that undoes what it
 /// did to the terminal (echo turned off, a live display's hidden cursor), so the terminal gets back
 /// the settings it had when v2 started, and stdout or stderr, when one is a terminal, gets
-/// `ESC[?25h` (the cursor shown). Only while v2 is that terminal's foreground job: a background
-/// one would change the settings of the shell that now reads it. From a thread of its own, at most
-/// 100 ms, as a terminal whose output is stopped (Ctrl+S) blocks the write (6.5).
+/// `ESC[?25h` (the cursor shown). Only when v2's stdout is a terminal, as v2 is then what the
+/// screen shows (in `v2 x.v2 | less` the pager has put the terminal in a mode of its own, and Ctrl+C
+/// reaches it too), or when `TERMINAL_CHANGED` is set; and only while v2 is that terminal's
+/// foreground job: a background one would change the settings of the shell that now reads it.
+/// From a thread of its own, at most 100 ms, as a terminal whose output is stopped (Ctrl+S) blocks
+/// the write (6.5).
 #[cfg(unix)]
 fn restore_terminal() {
     let Some(saved) = TERMINAL.get().filter(|s| !s.is_empty()) else { return };
+    if !saved.iter().any(|(fd, _)| *fd == 1) && !TERMINAL_CHANGED.load(Ordering::SeqCst) {
+        return;
+    }
     let (done, finished) = std::sync::mpsc::channel();
     let writer = spawn_helper(std::thread::Builder::new(), move || {
         // SAFETY: plain calls on the standard descriptors with the settings tcgetattr gave; SIGTTOU
@@ -168,6 +178,81 @@ fn restore_terminal() {
     });
     if writer.is_ok() {
         let _ = finished.recv_timeout(Duration::from_millis(100));
+    }
+}
+
+/// Whether V2's stdout (`fd` 1) or stderr (2) is a terminal, and then its size (columns, rows; 0
+/// when the terminal doesn't say), which `init` passes on to the blocks (9.3, 9.9). Unix: isatty
+/// and TIOCGWINSZ; Windows: a console, its window.
+pub fn terminal_size(fd: i32) -> Option<(u16, u16)> {
+    #[cfg(unix)]
+    // SAFETY: isatty and TIOCGWINSZ only read the descriptor's state, into a zeroed struct.
+    unsafe {
+        if libc::isatty(fd) != 1 {
+            return None;
+        }
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws as *mut libc::winsize) != 0 {
+            return Some((0, 0));
+        }
+        Some((ws.ws_col, ws.ws_row))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO};
+        let h = if fd == 1 { std::io::stdout().as_raw_handle() } else { std::io::stderr().as_raw_handle() };
+        // SAFETY: the standard handle stays open for the process; each call fills its out-parameter.
+        unsafe {
+            let mut mode = 0;
+            if GetConsoleMode(h, &mut mode) == 0 {
+                return None;
+            }
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(h, &mut info) == 0 {
+                return Some((0, 0));
+            }
+            let w = info.srWindow;
+            let span = |a: i16, b: i16| u16::try_from(i32::from(b) - i32::from(a) + 1).unwrap_or(0);
+            Some((span(w.Left, w.Right), span(w.Top, w.Bottom)))
+        }
+    }
+}
+
+/// Windows: the modes of stdout's and stderr's consoles before v2 turned on VT processing, put back
+/// at every exit (6.5).
+#[cfg(windows)]
+static CONSOLE_MODES: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+
+/// Windows, at startup: stdout's and stderr's consoles get `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, so
+/// the escape sequences of colors and live displays render in conhost too (6.5, 9.9).
+#[cfg(windows)]
+fn console_vt_on() {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    // Both modes first: stdout and stderr are often one console, which the first change alters.
+    // SAFETY: plain calls on the standard handles; each fills its out-parameter.
+    let modes: Vec<(u32, u32)> = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            let mut mode = 0;
+            (GetConsoleMode(GetStdHandle(kind), &mut mode) != 0).then_some((kind, mode))
+        })
+        .collect();
+    for &(kind, mode) in &modes {
+        // SAFETY: as above; a Windows without VT processing refuses the flag, which changes nothing.
+        unsafe { SetConsoleMode(GetStdHandle(kind), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) };
+    }
+    let _ = CONSOLE_MODES.set(modes);
+}
+
+/// Windows, at every exit (the end of the run, an interrupt, a closed pipe): the consoles get back
+/// the modes they had when v2 started (6.5).
+#[cfg(windows)]
+pub fn restore_console() {
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode};
+    for &(kind, mode) in CONSOLE_MODES.get().into_iter().flatten() {
+        // SAFETY: plain calls on the standard handles with the modes they had.
+        unsafe { SetConsoleMode(GetStdHandle(kind), mode) };
     }
 }
 
@@ -225,8 +310,10 @@ pub fn remove_run_dir(dir: &std::path::Path) {
 }
 
 /// `_exit` on Unix (no atexit handlers, no C stdio flushing); on Windows Rust's exit is
-/// `ExitProcess`.
+/// `ExitProcess`, after the consoles get their modes back.
 fn hard_exit(code: i32) -> ! {
+    #[cfg(windows)]
+    restore_console();
     #[cfg(unix)]
     // SAFETY: `_exit` ends the process; nothing here relies on cleanup.
     unsafe {
@@ -519,6 +606,8 @@ impl Watchdog {
         default_sigchld();
         #[cfg(unix)]
         remember_terminal();
+        #[cfg(windows)]
+        console_vt_on();
         if ensure_thread() {
             install_interrupt_handler();
         }
