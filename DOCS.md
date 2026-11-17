@@ -712,7 +712,16 @@ can't start raises `IOError: exec: cannot start 'gitt': <reason>` (`there is no 
 path that isn't there, with the Windows spelling of a Git Bash path, as for the file functions).
 For cmd.exe, the one string after `/c` (or `/k`) is a command line, passed as written, as cmd reads what you type: `exec(["cmd", "/c", "cd /d \"my dir\" && dir"])`. It runs in V2's working
 directory and environment (plus `PYTHONIOENCODING=utf-8` when that isn't set, so a Python program
-writes UTF-8, which V2 reads), with no timeout. `exec` returns when the program exits, and what the
+writes UTF-8, which V2 reads), with no timeout. cmd.exe can't work in a `\\server\share` folder,
+such as a project in WSL opened as `\\wsl.localhost\Ubuntu\…`, and would run in `C:\Windows`: there
+`exec` raises `IOError` instead of starting it or a `.bat` or `.cmd` file (`npm.cmd`), which cmd.exe
+runs. Run the program itself, or
+`exec(["cmd", "/c", "pushd \"\\\\wsl.localhost\\Ubuntu\\home\\ann\\p\" && npm run build"])` (a
+`pushd` or `cd /d` to an absolute folder; a relative one is looked for in `C:\Windows`). For the
+same reason an engine command that is a `.bat` or `.cmd` is `EngineNotFound` there, and one
+found on `PATH` (pyenv-win's `python.bat` shim) is passed over for the next; `v2 doctor` there
+says so.
+`exec` returns when the program exits, and what the
 program started is stopped then, or on Ctrl+C; only a process that escapes that
 ([chapter 16](#16-security-and-trust)) and keeps the outputs open makes `exec` wait until it closes
 them.
@@ -990,8 +999,8 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 - If `[python] venv` is set, that virtual environment's Python and packages are used
   ([14](#14-project-file-v2toml)). A conda environment isn't one: run `v2` where it is activated,
   or name its `python` in `[engines.py] command`. A `conda run` command there needs
-  `--no-capture-output` after `run`, as V2 talks to Python over its input and output; doctor
-  and the error say so.
+  `--no-capture-output` after `run`, as V2 talks to Python over its input and output; without it
+  doctor shows py `broken`, and its note and the error say so.
 - Where Python modules are found: [chapter 7](#7-importing-foreign-packages).
 - Named arguments become Python keyword arguments: `plot(xs, color: "red")`.
 - If a Python function returns a coroutine, V2 waits for it (see [8.4](#84-rules) for the one
@@ -1985,7 +1994,11 @@ that may hang, use the language's own timeout, which you can retry: `urlopen(url
 `fetch(url, { signal: AbortSignal.timeout(5000) })`.
 
 `V2_ENGINE_PY` wins over `[python] venv`. Setting both `[python] venv` and `[engines.py] command`
-in `v2.toml` is a configuration error: keep one.
+in `v2.toml` is a configuration error: keep one. So a project used from Windows and from Linux
+(code in WSL) keeps a venv for each system: `venv` names one, and `V2_ENGINE_PY` the other's
+python; a venv the other system made is kept, and the message says how to make this system's.
+On Windows a command names a Windows program (`python.exe`): a Linux one, on WSL's share or run
+through `wsl.exe`, can't run V2's worker, and doctor and the error say so.
 
 `venv` names a virtual environment, a folder with a `pyvenv.cfg` (as `python -m venv` and `uv venv`
 make); name another Python's program in `[engines.py] command` instead ([chapter 5](#5-engines)
