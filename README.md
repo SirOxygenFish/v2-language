@@ -312,7 +312,7 @@ ForeignError ZeroDivisionError division by zero
 | `open(f).read()`, `fs.readFileSync(f, "utf8")` | `read_file(f)`, and `write_file(f, text)`  |
 | `sys.exit(1)`, `process.exit(1)`          | `exit(1)`                                       |
 | `sys.argv`, `process.argv`                | `args()` (what follows the file: `v2 x.v2 a b`); `args().get(0, "out.txt")` for one that may be missing |
-| `input()`                                 | `input()` (`null` at the end of input); a number: `int(input("Age: "))` |
+| `input()`, `getpass.getpass()`            | `input()` (`null` at the end of input); a number: `int(input("Age: "))`; a password, not shown as it is typed: `input("Password: ", echo: false)` |
 
 More of V2, in short:
 
