@@ -1499,7 +1499,13 @@ fn make_dir(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         return Err(Flow::Error(Rc::new(err)));
     }
     match std::fs::create_dir_all(&*path) {
-        Ok(()) => Ok(Value::Null),
+        // Newer Rust's create_dir_all stops at a root it can't make without an error (`Z:/` on a
+        // drive that isn't there): the folder must be there now, else the OS's reason for it.
+        Ok(()) if path.is_empty() || std::path::Path::new(&*path).is_dir() => Ok(Value::Null),
+        Ok(()) => {
+            let e = std::fs::metadata(&*path).err().unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound));
+            file_error("create", &path, &e)
+        }
         // A root that can't be made (a drive or share that isn't there) is, in some Rust versions,
         // `create_dir_all`'s own "failed to create whole tree" (newer ones give the OS's reason):
         // the root's own reason instead (5.10), the last ancestor's. Other errors without an OS

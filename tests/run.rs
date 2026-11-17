@@ -5083,10 +5083,12 @@ fn an_activated_venv_gets_its_own_install_line_until_its_python_stops_running() 
             std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         }
     }
-    let problem = format!("the activated venv {} (VIRTUAL_ENV) has a python that doesn't run (No Python at '", venv.display());
+    // The launcher's own words follow: Python 3.11's "No Python at '…'", 3.13's "did not find
+    // executable at '…'" (CI's).
+    let problem = format!("the activated venv {} (VIRTUAL_ENV) has a python that doesn't run (", venv.display());
     let (code, _, stderr) = run_in_home(&home.0, &["proj/m.v2"], &env);
     assert_eq!(code, Some(1), "{stderr}");
-    assert!(stderr.contains(&format!("hint: {problem}")) && stderr.contains("so V2 can't use it: make the venv again, "), "{stderr}");
+    assert!(stderr.contains(&format!("hint: {problem}")) && stderr.contains("nonexistent_r19") && stderr.contains("so V2 can't use it: make the venv again, "), "{stderr}");
     assert!(!stderr.contains("pip") && !stderr.contains("which V2 isn't using"), "{stderr}");
     let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &env);
     assert_eq!(code, Some(0), "{stderr}");
