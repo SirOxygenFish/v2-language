@@ -1295,8 +1295,10 @@ fn number_hint(t: &str, int: bool) -> Option<String> {
         Some(format!("int() reads whole numbers, as in 13: for {lead}, use float(x), or int(float(x)) to drop what is after the point"))
     } else if t.chars().any(|c| c.is_numeric() && !c.is_ascii_digit()) {
         // `١٢٣`, `１２`: digits of another script, which Python reads once what it refuses is out
-        // (`other_digits`); with a point or U+066B, as `float`.
-        let g = if t.contains(['.', '\u{66b}']) { "float" } else { f };
+        // (`other_digits`). For `int()`, U+066B makes the block `float`, and so does a point that
+        // can't be between thousands (`between_thousands`): `१.२३४` is 1234 in de-DE-u-nu-deva, so
+        // it stays `int`, which Python refuses instead of reading 1.234.
+        let g = if t.contains('\u{66b}') || t.contains('.') && !between_thousands(t, '.') { "float" } else { f };
         let replaces = other_digits(t);
         Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {g}(x{replaces}) }}"))
     } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() && !t[lead.len()..].chars().any(char::is_numeric) {
@@ -1379,25 +1381,37 @@ fn arabic_marks(t: &str) -> (String, String) {
 /// The replaces that make `t`, in digits of another script, text Python's `float()` reads (5.10):
 /// the bidi marks Intl writes before a sign (U+061C ar-EG, U+200E fa-IR and ps-AF, U+200F ckb),
 /// as Python escapes since they are invisible; ASCII commas between thousands (`১,২৩৪.৫` bn-BD;
-/// `comma_groups`); and `arabic_marks`' U+066C and U+066B.
+/// `between_thousands`); and `arabic_marks`' U+066C and U+066B.
 fn other_digits(t: &str) -> String {
     let mut replaces: String = ['\u{61c}', '\u{200e}', '\u{200f}'].into_iter().filter(|&c| t.contains(c)).map(|c| format!(".replace(\"\\u{:04x}\", \"\")", c as u32)).collect();
-    if comma_groups(t) {
+    if between_thousands(t, ',') {
         replaces.push_str(".replace(\",\", \"\")");
     }
     replaces + &arabic_marks(t).1
 }
 
-/// Whether the ASCII commas in `t` are between thousands, as bn, mr, ne and my write them with
-/// their digits (`১,২৩৪.৫`, the Indian `১২,৩৪,৫৬৭.৫`): each after a digit, two or three digits
-/// to the next, three after the last, none after the point (a point or U+066B). A decimal comma
-/// (`৩,৫`) is not, so taking the commas out never turns 3.5 into 35.
-fn comma_groups(t: &str) -> bool {
-    let (whole, part) = t.split_once(['.', '\u{66b}']).unwrap_or((t, ""));
-    let mut groups = whole.split(',');
-    let first = groups.next().unwrap_or_default();
-    let rest: Vec<usize> = groups.map(|g| if g.chars().all(char::is_numeric) { g.chars().count() } else { 0 }).collect();
-    first.chars().last().is_some_and(char::is_numeric) && !part.contains(',') && rest.last() == Some(&3) && rest.iter().all(|n| (2..=3).contains(n))
+/// Whether the marks `mark` (a comma or a point) in `t`, in digits of another script, can be
+/// between thousands, as `grouped_hint` reads ASCII ones: after the sign and bidi marks one to
+/// three digits, the first not a zero (`zero_digit`), two or three digits to each next mark (the
+/// Indian grouping), three after the last, none in the decimal part (after U+066B or the other of
+/// `,` and `.`). So the commas bn, mr, ne and my write with their digits (`১,২৩৪.৫`,
+/// `১২,৩৪,৫৬৭.৫`) are, and a decimal comma (`৩,৫`, `০,১২৩`, `১২৩৪,৫৬৭`) is not: taking it out
+/// would turn 0.123 into 123.
+fn between_thousands(t: &str, mark: char) -> bool {
+    let (whole, part) = t.split_once(|c| c != mark && matches!(c, ',' | '.' | '\u{66b}')).unwrap_or((t, ""));
+    let mut groups = whole.split(mark);
+    let first = groups.next().unwrap_or_default().trim_start_matches(['+', '-', '\u{61c}', '\u{200e}', '\u{200f}']);
+    let digits = |g: &str| if g.chars().all(char::is_numeric) { g.chars().count() } else { 0 };
+    let rest: Vec<usize> = groups.map(digits).collect();
+    (1..=3).contains(&digits(first)) && !first.starts_with(zero_digit) && !part.contains(mark) && rest.last() == Some(&3) && rest.iter().all(|n| (2..=3).contains(n))
+}
+
+/// Whether `c` is the zero of its script's digits (`0`, `०`, `০`, `໐`): Unicode encodes decimal
+/// digits in runs of ten from zero, so it is a numeric character after numeric ones in tens or
+/// none (the math digits run on, ten after ten; Brahmi's follow its twenty numbers).
+fn zero_digit(c: char) -> bool {
+    let before = (1..=c as u32).map_while(|n| char::from_u32(c as u32 - n).filter(|p| p.is_numeric())).count();
+    c.is_numeric() && before % 10 == 0
 }
 
 /// A character as a V2 string writes it in a hint: an invisible space as its escape (`\u{a0}`).
