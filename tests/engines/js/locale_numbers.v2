@@ -1,13 +1,19 @@
 // requires: js py
-// Numbers as Intl writes them, for de-CH with U+2019 between thousands and for ar-EG with U+066C
-// and U+066B: float()'s hint, followed, reads them (INTERNALS 5.10, the second review of round 20).
+// Numbers as Intl writes them, for de-CH with an apostrophe between thousands and for ar-EG with
+// U+066C and U+066B: float()'s hint, followed, reads them (INTERNALS 5.10, the second review of
+// round 20). de-CH's is U+2019 in the ICU data of the Node builds on Windows and CI and an ASCII
+// one in newer data (Homebrew's node@22): the hint names the one there.
 let x = @js { (1234.5).toLocaleString("de-CH") }
+let mark = "'"
+if "’" in x {
+    mark = "’"
+}
 try {
     float(x)
 } catch (e) {
-    print(e.hint)
+    print("float(x.replace(\"" + mark + "\", \"\"))" in e.hint)
 }
-print(float(x.replace("’", "")))
+print(float(x.replace(mark, "")))
 x = @js { (1234.5).toLocaleString("ar-EG") }
 try {
     float(x)

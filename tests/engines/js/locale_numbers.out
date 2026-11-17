@@ -1,4 +1,4 @@
-the text has apostrophes (U+2019) between thousands: float(x.replace("’", ""))
+true
 1234.5
 float() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("٬", "").replace("٫", ".")) }
 1234.5
