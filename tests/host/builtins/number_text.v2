@@ -40,3 +40,24 @@ for t in ["1\u{2019}234.5", "1\u{66c}234\u{66b}5"] {
 }
 print(int("1\u{2019}000".replace("’", "")), int(float("0.123")), int(float("0,123".replace(",", "."))), int("1\u{66c}234".replace("٬", "")))
 print(float("1\u{2019}234.5".replace("’", "")), float("1\u{66c}234\u{66b}5".replace("٬", "").replace("٫", ".")))
+// The third pass of round 20: other digits with the bidi mark Intl writes before a sign (ar-EG
+// U+061C, fa-IR U+200E and U+2212, ps-AF U+200E twice, ckb U+200F) and with ASCII commas between
+// thousands (bn-BD, the Indian grouping, mr-IN), taken out in the block (locale_numbers.v2 runs
+// them); a decimal comma, or a comma after the point, stays.
+func hint_of(f) {
+    try { f() } catch (e) { print(e.hint) }
+}
+for t in ["\u{61c}-\u{661}\u{66c}\u{662}\u{663}\u{664}\u{66b}\u{665}", "\u{200e}\u{2212}\u{6f1}\u{66c}\u{6f2}\u{6f3}\u{6f4}\u{66b}\u{6f5}", "\u{200e}-\u{200e}\u{6f1}\u{66c}\u{6f2}\u{6f3}\u{6f4}\u{66b}\u{6f5}", "\u{200f}-\u{661}\u{66c}\u{662}\u{663}\u{664}\u{66b}\u{665}"] {
+    hint_of(func() => float(t))
+}
+for t in ["\u{9e7},\u{9e8}\u{9e9}\u{9ea}.\u{9eb}", "\u{9e7}\u{9e8},\u{9e9}\u{9ea},\u{9eb}\u{9ec}\u{9ed}.\u{9eb}", "\u{9e9},\u{9eb}", "\u{ed1}.\u{ed2}\u{ed3}\u{ed4},\u{ed5}"] {
+    hint_of(func() => float(t))
+}
+for t in ["\u{967},\u{968}\u{969}\u{96a}", "-\u{967},\u{968}\u{969}\u{96a}.\u{96b}"] {
+    hint_of(func() => int(t))
+}
+// A first group that starts with 0 is no thousand in grouped_hint either.
+hint_of(func() => int("0 123"))
+hint_of(func() => int("0\u{2019}123"))
+hint_of(func() => float("0,123.5"))
+print(int("0 123".replace(" ", "")))
