@@ -306,7 +306,8 @@ if __name__ == "__main__":
         def __init__(self, stream, fd):
             self._stream = stream
             self._fd = fd
-            self._held = ""  # a forked child's unfinished line
+            self._held = ""  # a forked child's unfinished line, under _lock (its threads print too)
+            self._lock = threading.RLock()
             self.buffer = BytesOutput(self)
 
         @property
@@ -358,10 +359,11 @@ if __name__ == "__main__":
                 # A forked child writes at the fd level, like any child of a block (9.9), also
                 # through a stream saved before the fork (a logging handler), a whole line per
                 # write, so children printing at once (a Pool) don't split each other's lines.
-                held = self._held + s
-                cut = held.rfind("\n") + 1 if len(held) < FLUSH_AT else len(held)
-                self._held = held[cut:]
-                self._write_fd(held[:cut])
+                with self._lock:
+                    held = self._held + s
+                    cut = held.rfind("\n") + 1 if len(held) < FLUSH_AT else len(held)
+                    self._held = held[cut:]
+                    self._write_fd(held[:cut])
                 return len(s)
             with _out_cond:
                 if threading.get_ident() != DISPATCH:
@@ -378,8 +380,9 @@ if __name__ == "__main__":
             if not forked[0]:
                 flush_out()
                 return
-            held, self._held = self._held, ""
-            self._write_fd(held)
+            with self._lock:
+                held, self._held = self._held, ""
+                self._write_fd(held)
 
         def _write_fd(self, s):
             data = s.encode("utf-8", "backslashreplace")
@@ -448,8 +451,8 @@ if __name__ == "__main__":
 
         getpass.getpass = no_getpass
 
-    sys.stdout = Output("stdout", 1)
-    sys.stderr = Output("stderr", 2)
+    _streams = (Output("stdout", 1), Output("stderr", 2))
+    sys.stdout, sys.stderr = _streams
     sys.stdin = NoInput()
     sys.__stdout__, sys.__stderr__, sys.__stdin__ = sys.stdout, sys.stderr, sys.stdin
 
@@ -460,6 +463,11 @@ if __name__ == "__main__":
         protocol, writes to fds 1 and 2 like any child of a block, fd 1 being stderr, and ends
         as a Python process does (9.9)."""
         forked[0] = True
+        # A lock another thread held at the fork stays held here; a line the parent (a forked
+        # child itself) held is its own to write.
+        for o in _streams:
+            o._lock = threading.RLock()
+            o._held = ""
         for fd in (IN, OUT):
             try:
                 os.close(fd)
@@ -1332,30 +1340,45 @@ if __name__ == "__main__":
                 finally:
                     sys.path[:] = saved
             dist = sys.modules["importlib.metadata"].distribution(name)
-            mods = dist_modules(dist)
+            shown = dist.metadata.get("Name") or name
+            mods = dist_modules(dist, shown)[:3]
             if not mods or name in mods:
                 return None
             listed = mods[0] if len(mods) == 1 else ", ".join(mods[:-1]) + " and " + mods[-1]
             return "%s is installed, and its module%s named %s: @import py.%s as %s" % (
-                dist.metadata.get("Name") or name, " is" if len(mods) == 1 else "s are", listed, mods[0], mods[0])
+                shown, " is" if len(mods) == 1 else "s are", listed, mods[0], mods[0].rsplit(".", 1)[-1])
         except Exception:
             return None
 
-    def dist_modules(dist):
-        """The top-level modules a distribution provides: its top_level.txt's, else the names its
-        RECORD lists (a folder, or a .py, .pyd or .so file), the ones not starting with _ first."""
-        text = dist.read_text("top_level.txt")
-        found = text.split() if text else []
-        for f in () if text else dist.files or ():
-            parts = f.parts
-            if not parts or parts[0] in ("..", "__pycache__") or parts[0].endswith((".dist-info", ".data", ".egg-info")):
-                continue
-            if len(parts) > 1:
-                found.append(parts[0])
-            elif parts[0].endswith((".py", ".pyd", ".so")):
-                found.append(parts[0].split(".")[0])
-        names = sorted({n for n in found if n.isidentifier() and not keyword.iskeyword(n)})
-        return [n for n in names if not n.startswith("_")] or names
+    def dist_modules(dist, shown):
+        """The modules a distribution provides, the closest to its name `shown` first (13.5). From
+        its RECORD: each file's first folder with an __init__.py (in a namespace package, the
+        package: protobuf's is google.protobuf, never google), or a .py or extension module at the
+        top, never a folder of data (bin, lib); without a RECORD, the names in its top_level.txt
+        that are a package or a .py file there. Names with a part starting with _ only when there
+        are no others."""
+        files = [tuple(f.parts) for f in dist.files or ()]
+        found = set()
+        if files:
+            have = set(files)
+            for parts in files:
+                if not parts or parts[0] in ("..", "__pycache__") or parts[0].endswith((".dist-info", ".data", ".egg-info")):
+                    continue
+                dirs, last = parts[:-1], parts[-1]
+                package = next((dirs[:i] for i in range(1, len(dirs) + 1) if dirs[:i] + ("__init__.py",) in have), None)
+                if package is not None:
+                    found.add(package)
+                elif not dirs and (last.endswith((".py", ".pyd")) or (last.endswith(".so") and last.count(".") > 1)):
+                    found.add((last.split(".")[0],))  # libllama.so is a library, x.abi3.so a module
+        else:
+            base = dist.locate_file("")
+            for n in (dist.read_text("top_level.txt") or "").split():
+                if os.path.isfile(os.path.join(base, n, "__init__.py")) or os.path.isfile(os.path.join(base, n + ".py")):
+                    found.add((n,))
+        names = [".".join(p) for p in found if all(x.isidentifier() and not keyword.iskeyword(x) for x in p)]
+        names = [n for n in names if not any(x.startswith("_") for x in n.split("."))] or names
+        key = shown.lower().replace("-", "_").replace(".", "_")
+        return sorted(names, key=lambda n: (osa(key, n.lower().replace(".", "_")), n))
 
     def main_guard(node):
         """`if __name__ == "__main__":` (either way round), which a block's code never passes."""
