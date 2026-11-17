@@ -142,11 +142,13 @@ pub struct LinkProblem {
     /// The path up to and including the link, spelled as the path was.
     pub at: PathBuf,
     /// What a link that leads nowhere names, absolute (`link_target`; `None` when it can't be
-    /// read); `None` for a loop.
+    /// read); `None` for a loop or a Linux symlink.
     target: Option<PathBuf>,
     looped: bool,
     /// A link to a folder (a junction, a directory symlink): Windows removes it with rmdir.
     dir: bool,
+    /// A Linux symlink WSL made (`WslFile::Link`), which Windows can't follow wherever it points.
+    linux: bool,
 }
 
 impl LinkProblem {
@@ -154,6 +156,7 @@ impl LinkProblem {
     /// `name` (`'brokenjunc'`, or `it` for the path itself).
     pub fn problem(&self, name: &str) -> String {
         match (&self.target, self.looped) {
+            _ if self.linux => format!("{name} is a Linux (WSL) symlink, which Windows can't follow"),
             (_, true) => format!("{name} is a link in a loop"),
             (Some(to), false) => format!("{name} is a link to {}, which isn't there", to.display()),
             (None, false) => format!("{name} is a link to something that isn't there"),
@@ -162,8 +165,12 @@ impl LinkProblem {
 
     /// What fixes it, for a message that ends with what to do: `remove the link (rmdir
     /// sub\brokenjunc), or make C:\x\gone`, with `link` the link as typed from the current folder
-    /// (as written, or as messages show it; `remove_command`).
+    /// (as written, or as messages show it; `remove_command`). A Linux symlink is no broken link:
+    /// the path it points to, never its removal (DOCS 3.10); Windows can't read where it points.
     pub fn fix(&self, link: &str) -> String {
+        if self.linux {
+            return "use the path it points to (ls -l in WSL shows it), or run V2 inside WSL".to_string();
+        }
         let remove = remove_command(link, self.dir, std::env::var_os("MSYSTEM").is_some());
         match (&self.target, self.looped) {
             (Some(to), false) => format!("remove the link ({remove}), or make {}", to.display()),
@@ -218,6 +225,108 @@ pub fn is_link_loop(e: &std::io::Error) -> bool {
     return e.raw_os_error() == Some(1921);
 }
 
+/// What WSL made that Windows can't use as a file, by its reparse tag (DOCS 3.10, 3.11): a Linux
+/// symlink (`IO_REPARSE_TAG_LX_SYMLINK`), which Windows can't follow, or a pipe, a socket or a
+/// device (`LX_FIFO`, `AF_UNIX`, `LX_CHR`, `LX_BLK`), which Windows takes for a file: a read of a
+/// pipe through \\wsl.localhost waits 10 s and leaves a thread of WSL's file server waiting for a
+/// writer, and one of a `/dev/zero` node never ends.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WslFile {
+    Link,
+    Special,
+}
+
+/// The `WslFile` a reparse tag names.
+pub fn wsl_tag(tag: u32) -> Option<WslFile> {
+    match tag {
+        0xA000_001D => Some(WslFile::Link),
+        // AF_UNIX, LX_FIFO, LX_CHR, LX_BLK.
+        0x8000_0023..=0x8000_0026 => Some(WslFile::Special),
+        _ => None,
+    }
+}
+
+/// Windows: the `WslFile` that `path` names itself (a link isn't followed). `None` elsewhere.
+pub fn wsl_file(path: &Path) -> Option<WslFile> {
+    reparse_tag(path).and_then(wsl_tag)
+}
+
+/// Windows: the reparse tag of `path` itself: its attributes, then, for a reparse point only, its
+/// tag (`FileAttributeTagInfo`), so another file costs one call and nothing is opened for
+/// reading; a link WSL made on a drive, which Windows may not even open
+/// (`ERROR_CANT_ACCESS_FILE`), has it in its folder's listing (`listed_tag`). `None` elsewhere.
+fn reparse_tag(path: &Path) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileAttributeTagInfo, GetFileAttributesW, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, INVALID_FILE_ATTRIBUTES,
+        };
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.is_empty() || wide.contains(&0) {
+            return None;
+        }
+        wide.push(0);
+        // SAFETY: a NUL-terminated path.
+        let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attrs == INVALID_FILE_ATTRIBUTES || attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            return None;
+        }
+        let f = match std::fs::OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS).open(path) {
+            Ok(f) => f,
+            Err(e) if e.raw_os_error() == Some(1920) => return listed_tag(&wide),
+            Err(_) => return None,
+        };
+        // SAFETY: a zeroed struct of the size given, for a handle that `f` keeps open during the
+        // call.
+        let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32;
+        if unsafe { GetFileInformationByHandleEx(f.as_raw_handle(), FileAttributeTagInfo, (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(), size) } == 0 {
+            return None;
+        }
+        Some(info.ReparseTag)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Windows: the reparse tag that the listing of `wide`'s folder gives it (`FindFirstFileW`'s
+/// `dwReserved0`), `wide` a NUL-terminated path without wildcards.
+#[cfg(windows)]
+fn listed_tag(wide: &[u16]) -> Option<u32> {
+    use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, FILE_ATTRIBUTE_REPARSE_POINT, WIN32_FIND_DATAW};
+    if wide.iter().any(|&c| c == u16::from(b'*') || c == u16::from(b'?')) {
+        return None;
+    }
+    // SAFETY: a zeroed struct that FindFirstFileW fills, for a NUL-terminated path; the handle
+    // is closed at once.
+    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    let h = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+    if h == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return None;
+    }
+    unsafe { FindClose(h) };
+    (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(data.dwReserved0)
+}
+
+/// Whether `m`, a file's metadata, is a reparse point's (Windows' `FILE_ATTRIBUTE_REPARSE_POINT`),
+/// as WSL's pipes and devices are: only such a file needs `wsl_file`'s look.
+pub fn reparse_point(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    return std::os::windows::fs::MetadataExt::file_attributes(m) & 0x400 != 0;
+    #[cfg(not(windows))]
+    {
+        let _ = m;
+        false
+    }
+}
+
 /// The first link on the way to `path`, or `path` itself, that leads nowhere or in a loop: each
 /// part is looked at with `symlink_metadata`, then a link followed with `metadata` (DOCS 3.10).
 /// `None` when every link leads somewhere, or a part can't be looked at (missing, unreadable).
@@ -228,7 +337,12 @@ pub fn link_problem(path: &Path) -> Option<LinkProblem> {
         if !matches!(c, std::path::Component::Normal(_)) {
             continue;
         }
-        let kind = std::fs::symlink_metadata(&at).ok()?.file_type();
+        let kind = match std::fs::symlink_metadata(&at) {
+            Ok(m) => m.file_type(),
+            // A link WSL made on a drive, which Windows may not even look at (1920).
+            Err(_) if wsl_file(&at) == Some(WslFile::Link) => return Some(LinkProblem { at, target: None, looped: false, dir: false, linux: true }),
+            Err(_) => return None,
+        };
         if !kind.is_symlink() {
             continue;
         }
@@ -238,14 +352,25 @@ pub fn link_problem(path: &Path) -> Option<LinkProblem> {
         let dir = false;
         match std::fs::metadata(&at) {
             Ok(_) => {}
+            // A Linux symlink seen through \\wsl.localhost (or made by WSL on a Windows drive),
+            // which Windows can't follow wherever it points: never one that leads nowhere.
+            Err(_) if wsl_file(&at) == Some(WslFile::Link) => return Some(LinkProblem { at, target: None, looped: false, dir, linux: true }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Some(LinkProblem { target: std::fs::read_link(&at).ok().map(|to| link_target(&at, &to)), at, looped: false, dir });
+                return Some(LinkProblem { target: std::fs::read_link(&at).ok().map(|to| link_target(&at, &to)), at, looped: false, dir, linux: false });
             }
-            Err(e) if is_link_loop(&e) => return Some(LinkProblem { at, target: None, looped: true, dir }),
+            Err(e) if is_link_loop(&e) => return Some(LinkProblem { at, target: None, looped: true, dir, linux: false }),
             Err(_) => return None,
         }
     }
     None
+}
+
+/// What to say of `link`, a Linux symlink (`WslFile::Link`) that another program (Windows' Node,
+/// for a package in node_modules) couldn't follow: `'…\node_modules\pkg' is a Linux (WSL)
+/// symlink, which Windows can't follow: use the path it points to (…), or run V2 inside WSL`.
+pub fn wsl_link_line(link: &Path) -> String {
+    let problem = LinkProblem { target: None, at: link.to_path_buf(), looped: false, dir: false, linux: true };
+    shown_path(&format!("{}: {}", problem.problem(&format!("'{}'", link.display())), problem.fix("")))
 }
 
 /// A file builtin's failure on a path through a link that leads nowhere or in a loop (5.10):
@@ -277,7 +402,7 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
         // (ELOOP, Windows' 1921), or the OS's reason, as for FILE (19.1).
         // A link to an anonymous pipe (/dev/stdin from a pipe, /proc/self/fd/0, <(…)) is there
         // to the OS, which follows /proc's links, though canonicalize can't name its target.
-        Err(e) if std::fs::symlink_metadata(&target).is_ok() => {
+        Err(e) if std::fs::symlink_metadata(&target).is_ok() || wsl_file(&target) == Some(WslFile::Link) => {
             if std::fs::metadata(&target).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
                 return Err((format!("cannot import '{spec}': it is a pipe or a device, not a file"), None));
             }
@@ -290,6 +415,10 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
             return Err((message, None));
         }
         Err(e) => {
+            // \\wsl.localhost\NAME\… with no such WSL distribution (DOCS 3.10).
+            if let Some(why) = crate::runtime::builtins::wsl_root(&target.to_string_lossy(), &e) {
+                return Err((format!("cannot import '{spec}': {why}"), None));
+            }
             // A link on the way that leads nowhere or in a loop, a junction too (DOCS 3.10).
             if let Some(link) = link_problem(&target) {
                 let at = shown(&link.at);
@@ -309,8 +438,8 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
         }
     };
     // A pipe or a device (a FIFO, a link to /dev/zero) would never end being read; the entry
-    // FILE is refused the same way (19.1).
-    if std::fs::metadata(&found).is_ok_and(|m| !m.is_dir() && !m.is_file()) {
+    // FILE is refused the same way (19.1). So is one WSL made, which Windows takes for a file.
+    if std::fs::metadata(&found).is_ok_and(|m| (!m.is_dir() && !m.is_file()) || (reparse_point(&m) && wsl_file(&found) == Some(WslFile::Special))) {
         return Err((format!("cannot import '{spec}': it is a pipe or a device, not a file"), None));
     }
     // A folder: one of its .v2 files is what to write (Windows would say "Access is denied").
@@ -856,6 +985,33 @@ mod tests {
                 assert_eq!(remove_command("sub/broken", false, git_bash), "rm sub/broken");
             }
         }
+    }
+
+    #[test]
+    fn wsls_reparse_tags_name_its_links_and_special_files() {
+        // DOCS 3.10, 3.11 (round 21): what Windows shows of WSL's files on \\wsl.localhost.
+        assert_eq!(wsl_tag(0xA000_001D), Some(WslFile::Link));
+        for special in [0x8000_0023, 0x8000_0024, 0x8000_0025, 0x8000_0026] {
+            assert_eq!(wsl_tag(special), Some(WslFile::Special), "{special:x}");
+        }
+        // Windows' own symlinks and junctions (mount points), and no tag, are none of WSL's.
+        for other in [0xA000_000C, 0xA000_0003, 0x8000_0027, 0] {
+            assert_eq!(wsl_tag(other), None, "{other:x}");
+        }
+        // A plain file is no reparse point, so FILE and an import don't look further (the review).
+        let f = std::env::temp_dir().join(format!("v2-plain-{}.v2", std::process::id()));
+        std::fs::write(&f, "").unwrap();
+        assert!(!reparse_point(&std::fs::metadata(&f).unwrap()) && wsl_file(&f).is_none());
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn a_linux_symlink_is_named_as_one() {
+        // DOCS 3.10 (round 21): Windows can't follow it wherever it points, so it is never a link
+        // to something that isn't there, and the fix is never its removal.
+        let lx = LinkProblem { at: PathBuf::from("links/rel.v2"), target: None, looped: false, dir: true, linux: true };
+        assert_eq!(lx.problem("'links/rel.v2'"), "'links/rel.v2' is a Linux (WSL) symlink, which Windows can't follow");
+        assert_eq!(lx.fix("links/rel.v2"), "use the path it points to (ls -l in WSL shows it), or run V2 inside WSL");
     }
 
     #[test]
