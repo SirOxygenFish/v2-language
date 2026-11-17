@@ -271,6 +271,23 @@ fn slashed(p: &Path) -> String {
 /// is installed, so the engine is missing, not broken (7.8).
 const NO_RUNTIME: &str = "a py launcher with no Python installed";
 
+/// The skip reason of a `.bat` or `.cmd` hit (pyenv-win's `shims\python.bat`) while V2's working
+/// folder is a `\\server\share`, where cmd.exe would start the worker in the Windows folder (7.6):
+/// never probed, so never cached, as the verdict depends on the working folder.
+const BATCH_IN_SHARE: &str = r"runs in cmd.exe, which can't work in a \\server\share folder";
+
+/// Windows: a `.bat` or `.cmd` program while the working folder `cwd` is a `\\server\share`.
+fn batch_in_share(program: &Path, cwd: &Path) -> bool {
+    program.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd")) && share_folder(cwd).is_some()
+}
+
+/// What to do when the search passed over a batch file for `BATCH_IN_SHARE` (7.8, 19.2), in place
+/// of repairing the program, which is fine.
+pub fn batch_fix(id: &str, skipped: &[(PathBuf, String)]) -> Option<String> {
+    let (exe, var) = if id == "py" { ("python.exe", "V2_ENGINE_PY") } else { ("node.exe", "V2_ENGINE_JS") };
+    skipped.iter().any(|(_, why)| why == BATCH_IN_SHARE).then(|| format!("name the program itself ({exe}) with {var}, or run v2 from a folder on a drive"))
+}
+
 fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<Duration>) -> Judged {
     match outcome {
         ProbeOutcome::SpawnFailed(msg) => Judged::Skipped(msg.clone()),
@@ -1073,10 +1090,10 @@ impl Resolver<'_> {
         };
         // Windows: a .bat or .cmd (pyenv-win's shim, conda.bat) runs in cmd.exe, which in a
         // \\server\share working folder would start the worker in the Windows folder.
-        let batch = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
+        let batch = batch_in_share(&path, &self.lookup.cwd);
         let mut argv = vec![path.into_os_string()];
         argv.extend(command[1..].iter().map(OsString::from));
-        if batch && share_folder(&self.lookup.cwd).is_some() {
+        if batch {
             let exe = if &*spec.id == "py" { "python.exe" } else { "node.exe" };
             let message = format!(
                 "engine '{}' command '{}' (set by {}) runs in cmd.exe, which {}: name the program itself ({exe}), or run v2 from a folder on a drive",
@@ -1270,6 +1287,13 @@ impl Resolver<'_> {
                 }
                 if self.lookup.xcrun_shims.contains(&hit) && !self.command_line_tools() {
                     skipped.push((hit, "Command Line Tools missing".into()));
+                    continue;
+                }
+                // Windows: pyenv-win's shims\python.bat from a \\server\share folder, where cmd.exe
+                // would start the worker in the Windows folder: installed, but not usable here.
+                if batch_in_share(&hit, &self.lookup.cwd) {
+                    failed = true;
+                    skipped.push((hit, BATCH_IN_SHARE.into()));
                     continue;
                 }
                 let mut argv = vec![hit.clone().into_os_string()];
@@ -1504,6 +1528,9 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
         m.push_str(&format!("\nskipped: {} ({reason})", crate::syntax::span::shown_path(&path.display().to_string())));
     }
     for fix in skipped.iter().filter_map(|(path, reason)| library_fix(path, reason)) {
+        m.push_str(&format!("\nfix: {fix}"));
+    }
+    if let Some(fix) = batch_fix(&spec.id, skipped) {
         m.push_str(&format!("\nfix: {fix}"));
     }
     // Before the install line: NODE_OPTIONS, not Node.js, is the likely cause.
@@ -2786,6 +2813,39 @@ mod tests {
         assert_eq!(p.calls.get(), 0, "no probe");
         let cfg = with_command("py", &[&shim.display().to_string()], ConfigSource::Env("V2_ENGINE_PY".into()));
         assert!(resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_file_on_path_is_passed_over_in_a_share_folder() {
+        // The review of round 21, 7.6: from a \\server\share working folder, pyenv-win's
+        // shims\python.bat is skipped unprobed, like a Store placeholder, and the search goes on;
+        // with nothing else, py doesn't run, and the fix is not to repair Python. From a drive
+        // folder the shim is used.
+        let d = temp("batchpath");
+        let (shims, real) = (d.join("shims"), d.join("Python312"));
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        let shim = shims.join("python.bat");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        let python = exe(&real, "python");
+        let share = PathBuf::from(r"\\wsl.localhost\Ubuntu\home\ann\p");
+        let p = fake(|_| says("Python 3.12.1"));
+        let why = r"runs in cmd.exe, which can't work in a \\server\share folder";
+        let l = Lookup { cwd: share.clone(), ..lookup(&[&shims, &real], None) };
+        let e = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!(e.argv[0], python.as_os_str());
+        assert_eq!(e.skipped, vec![(shim.clone(), why.to_string())]);
+        assert!(p.argvs.borrow().iter().all(|a| a[0] != shim.as_os_str()), "the shim isn't probed: {:?}", p.argvs.borrow());
+        let l = Lookup { cwd: share, ..lookup(&[&shims], None) };
+        let nf = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.status, Status::Broken);
+        assert!(nf.message.starts_with("engine 'py' (Python) was found but doesn't run (see why below)\n"), "{}", nf.message);
+        let fix = "fix: name the program itself (python.exe) with V2_ENGINE_PY, or run v2 from a folder on a drive";
+        assert!(nf.message.contains(&format!("\nskipped: {} ({why})\n{fix}\ninstall: ", shim.display())), "{}", nf.message);
+        assert_eq!(batch_fix("js", &nf.skipped).as_deref(), Some("name the program itself (node.exe) with V2_ENGINE_JS, or run v2 from a folder on a drive"));
+        let e = resolve_with(&Config::default(), &lookup(&[&shims], None), &p, &mut ProbeCache::off(), "py").unwrap();
+        assert_eq!(e.argv[0], shim.as_os_str());
     }
 
     #[cfg(windows)]
