@@ -713,6 +713,11 @@ fn npm_hint(name: &str, dir: &Path, call: Option<&str>) -> String {
         _ => name.to_string(),
     };
     let modules: Vec<PathBuf> = dir.ancestors().map(|d| d.join("node_modules")).filter(|m| m.is_dir()).collect();
+    // A package that is a Linux symlink (npm link, workspaces) seen through \\wsl.localhost, which
+    // Windows' Node can't follow: so, not a folder of the script's own nor a missing package.
+    if let Some(link) = modules.iter().map(|m| m.join(&package)).find(|p| crate::runtime::module::wsl_file(p) == Some(crate::runtime::module::WslFile::Link)) {
+        return crate::runtime::module::wsl_link_line(&link);
+    }
     if package != name && modules.iter().any(|m| m.join(&package).is_dir()) {
         let rest = name[package.len()..].trim_start_matches('/');
         return format!("'{package}' is installed, but has no '{rest}': check the path after '{package}/'");

@@ -591,14 +591,10 @@ pub fn cmd_cant_work() -> String {
 }
 
 /// Windows: a WSL link on a drive (a Linux venv made from WSL under /mnt/c), which Windows can't
-/// even stat (`ERROR_CANT_ACCESS_FILE`), but which its folder lists as a link.
+/// even stat (`ERROR_CANT_ACCESS_FILE`), but which its folder lists as one (`module::wsl_file`).
 fn wsl_link_on_drive(p: &Path) -> bool {
     let cant = std::fs::symlink_metadata(p).err().is_some_and(|e| cfg!(windows) && e.raw_os_error() == Some(1920));
-    let listed = || {
-        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return false };
-        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.file_name().eq_ignore_ascii_case(name) && e.file_type().is_ok_and(|t| t.is_symlink()))
-    };
-    cant && listed()
+    cant && crate::runtime::module::wsl_file(p) == Some(crate::runtime::module::WslFile::Link)
 }
 
 /// A path on WSL's share, `\\wsl.localhost\<distro>\…` or `\\wsl$\<distro>\…` (Windows).

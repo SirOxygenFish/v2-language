@@ -585,9 +585,12 @@ print(util.slug("Hello World"))    // hello-world
 - Paths are relative to the importing file and end in `.v2`. Another kind of file (`data.csv`,
   `helper.py`) is an `ImportError` that says how to use it instead. So is a pipe or a device
   (`cannot import './m.v2': it is a pipe or a device, not a file`, also for a link to
-  `/dev/zero`, and for `/dev/stdin` from a pipe), and a link that leads nowhere or in a loop (the
+  `/dev/zero`, for `/dev/stdin` from a pipe, and on Windows for WSL's, seen through
+  `\\wsl.localhost`), and a link that leads nowhere or in a loop (the
   file, or a folder on the way, a Windows junction too) says that and what fixes it, in a run and
-  in `v2 check`; a file V2 may not read gives the system's reason (`Access is denied`). A path
+  in `v2 check`, as does a Linux symlink seen from Windows, which Windows can't follow (`it is a
+  Linux (WSL) symlink, which Windows can't follow`), and `\\wsl.localhost\NAME\…` when there is no
+  WSL distribution of that name; a file V2 may not read gives the system's reason (`Access is denied`). A path
   whose letters differ from the file's name only in case (`./Util.v2` for `util.v2`) works on
   Windows and macOS, with a note, since Linux won't find it. A missing module's error names the
   file of its folder you probably meant (`did you mean './Util.v2'?`, on Linux for the wrong case
@@ -597,7 +600,8 @@ print(util.slug("Hello World"))    // hello-world
   and a module WSL made from a Linux name with `:` or `?` is reached by its stand-in
   ([3.11](#311-builtins)).
 - A module runs once, the first time it is imported; later imports reuse it, also when they reach
-  it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`).
+  it by another path (a share of a local folder, `\\localhost\C$\…`, and its `C:\…`; `\\wsl$\Ubuntu\…`
+  and `\\wsl.localhost\ubuntu\…`, as Windows reads a share's name in any case).
 - `util` is a dict of the module's exported names, taken when the module finishes running.
   Reassigning a module variable later does not change what importers see — export a function
   if you need the current value.
@@ -650,7 +654,9 @@ Relative paths in the file functions and in `exec` are relative to the folder yo
 changes its working directory (`os.chdir`, `process.chdir`) changes it for its own language only:
 V2's file functions and `exec` keep V2's. Paths go through symbolic links: `script_dir()` is the
 real folder of the script, where the search for `v2.toml` starts too. A link on the way that leads
-nowhere or in a loop (a junction too) is named in the error, with what fixes it. `write_file` replaces a file's
+nowhere or in a loop (a junction too) is named in the error, with what fixes it, and so is a
+Linux symlink seen from Windows through `\\wsl.localhost`, which Windows can't follow; a pipe or a
+device of WSL's there is refused by `read_file` and `write_file` before it is opened (`it is a pipe or a device, not a file`). `write_file` replaces a file's
 contents in place, not all at once: for a file another program reads, write a new file and rename
 it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
@@ -675,7 +681,8 @@ stand-in for it (U+F03A for `:`), which V2 prints as `\u{f03a}`: a path with the
 file (`read_file("mod\u{f03a}x.v2")`, an import, the script), and the hint for the name as Linux
 writes it says so.
 On Windows a drive that isn't there (an unplugged USB drive) is said as such, `there is no drive Q:`,
-and so is a network drive or share that can't be reached; a write to a read-only file says how to make it
+and so is a network drive or share that can't be reached, and a WSL distribution that isn't there
+(`there is no WSL distribution named Ubuntu-22.04: wsl --list --quiet shows them`); a write to a read-only file says how to make it
 writable (`attrib -r`; `chmod u+w` on Linux and macOS); and `/tmp`, Linux's and macOS's temp folder,
 gets `getenv("TEMP")` where the drive has no `\tmp` folder (`make_dir("/tmp/x")` is refused there, as it would make `C:\tmp`, which
 every user can write to; an existing `C:\tmp` is used as any folder is); `make_dir` of another Linux
