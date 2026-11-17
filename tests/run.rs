@@ -3731,7 +3731,8 @@ fn doctor_reports_configured_problems() {
     // 19): macOS's temp folder is a symlink, and Windows' may be an 8.3 short name.
     let real = PathBuf::from(real_path(&home.0));
     let toml = real.join("v2.toml");
-    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing/python.exe").display(), toml.display())), "{stdout}");
+    // On Windows with one separator, not the joined `…\missing/python.exe` (round 21, W7).
+    assert!(stdout.contains(&format!("py: engine 'py' command '{}' not found (set by {})", real.join("missing").join("python.exe").display(), toml.display())), "{stdout}");
     assert!(stdout.contains(&format!("config file: {}", toml.display())), "{stdout}");
 }
 
@@ -4608,7 +4609,14 @@ fn doctor_and_a_js_run_name_a_conda_run_that_cant_work() {
         let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
         assert_eq!(code, Some(0), "{stderr}");
         let rows = doctor_rows(&stdout);
-        assert_eq!((&*rows["py"][0], &*rows["js"][0]), ("ok", "ok"), "{stdout}");
+        // Round 21 (L1): no block can run, so the row is broken and the engine isn't ready (ts
+        // runs on js), and DOCS 15's `grep -q '^ready:.* py'` fails as the scripts would.
+        let status = |told: bool| if told { "broken" } else { "ok" };
+        let js_told = js_note.is_some();
+        assert_eq!((&*rows["py"][0], &*rows["js"][0], &*rows["ts"][0]), (status(py_told), status(js_told), status(js_told)), "{stdout}");
+        let ready: Vec<&str> = [("py", py_told), ("js", js_told), ("ts", js_told)].iter().filter(|(_, told)| !told).map(|(id, _)| *id).collect();
+        assert!(stdout.contains(&format!("\nready: {}\n", if ready.is_empty() { "none".to_string() } else { ready.join(", ") })), "{stdout}");
+        assert_eq!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), js_told, "{stdout}");
         assert_eq!(stdout.contains(&py_note), py_told, "{py}: {stdout}");
         match js_note {
             Some(note) => assert!(stdout.contains(note), "{js}: {stdout}"),
@@ -4627,6 +4635,65 @@ fn doctor_and_a_js_run_name_a_conda_run_that_cant_work() {
         "EngineCrashed: engine 'js' exited during startup (exit code 0); see its error output above, if any; it ended without a word to V2, which talks to the program over its standard input and output: a command that runs it through another program must pass them through; conda run passes them through only with --no-capture-output: add it after run, or name the environment's node in [engines.js] command"
     };
     assert!(stderr.starts_with("j.v2:1:1: ") && stderr.contains(want), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_command_through_wsl_exe_is_told_it_runs_a_linux_python() {
+    // Round 21 (W7), 7.6, 8.4, 19.2: wsl.exe runs a Linux python, which answers --version but
+    // can't open the worker's adapter, a Windows path (exit code 2): doctor's note, and the
+    // run's. This wsl answers --version as Python, then exits as that python does.
+    let home = TempHome::new();
+    let bin = home.0.join("wsl-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wsl = bin.join("wsl.cmd");
+    std::fs::write(&wsl, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.3& exit /b 0)\r\necho python3: can't open file 1>&2\r\nexit /b 2\r\n").unwrap();
+    std::fs::write(home.0.join("v2.toml"), format!("[engines.py]\ncommand = ['{}', '-e', 'python3']\n", wsl.display())).unwrap();
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let note = "wsl.exe runs a Linux python, which the Windows v2 can't use, as its adapter is a Windows path: name a python.exe, or run the Linux v2 inside WSL";
+    let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(doctor_rows(&stdout)["py"][0], "ok", "{stdout}");
+    assert!(stdout.contains(&format!("\n  py: {note}\n")), "{stdout}");
+    let (code, _, stderr) = run_in_home(&home.0, &["s.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("EngineCrashed: engine 'py' exited during startup (exit code 2); see its error output above, if any; {note}\n")), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_refuses_cmd_in_a_share_folder() {
+    // Round 21 (W1), 7.5: cmd.exe can't use a \\server\share working folder (a project in WSL):
+    // it says so on its stderr, works in the Windows folder instead and exits 0. So exec refuses
+    // it, and a batch file it would run, before starting either; other programs run there.
+    // Skipped where the \\localhost share isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP exec_refuses_cmd_in_a_share_folder (no \\\\localhost share)");
+        return;
+    }
+    std::fs::write(home.0.join("build.bat"), "@echo off\r\necho building in %CD%\r\n").unwrap();
+    // The command line to write, as a V2 string: pushd "<folder>" && …
+    let pushd = |then: &str| format!("\"pushd \\\"{}\\\" && {then}\"", unc.replace('\\', r"\\"));
+    // What the hint says, followed: build.bat runs in the folder (pushd maps a drive to the share).
+    let script = format!(
+        "func show(f) {{\n    try {{ f() }} catch (e) {{ print(e.type + \": \" + e.message) }}\n}}\n\
+         show(func() => exec([\"cmd\", \"/c\", \"cd\"]))\nshow(func() => exec([\"./build.bat\"]))\nprint(exec([\"hostname\"]).code)\n\
+         let r = exec([\"cmd\", \"/c\", {}])\nprint(r.code, r.stdout.trim().ends_with(\"{}\"))\n",
+        pushd(r".\\build.bat"),
+        real[2..].replace('\\', r"\\")
+    );
+    std::fs::write(home.0.join("w.v2"), script).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("w.v2").current_dir(&unc).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+    let (stdout, stderr) = (normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let rest = format!("can't work in a \\\\server\\share folder and would run in {windows}: run the program itself, or exec([\"cmd\", \"/c\", {}])", pushd("…"));
+    assert_eq!(stdout, format!("IOError: exec: cmd.exe {rest}\nIOError: exec: build.bat runs in cmd.exe, which {rest}\n0\n0 true\n"), "{stderr}");
 }
 
 #[test]
