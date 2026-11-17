@@ -1,0 +1,26 @@
+// requires: py
+// platform: unix
+// A forked child writes each print whole, its text and its end in one write, so children that
+// print at once don't split each other's lines (round 21, L4; INTERNALS 9.9). Their fds 1 and 2
+// (fd 1 is fd 2 in a block) go to a file here, which the block then reads.
+@py {
+    import multiprocessing as mp
+    import os, re, tempfile
+    import fork_lines
+    with tempfile.TemporaryFile() as f:
+        saved = os.dup(1), os.dup(2)
+        os.dup2(f.fileno(), 1)
+        os.dup2(f.fileno(), 2)
+        try:
+            pool = mp.get_context("fork").Pool(4)
+            done = pool.map(fork_lines.chatty, range(8), chunksize=1)
+            pool.close()
+            pool.join()
+        finally:
+            os.dup2(saved[0], 1)
+            os.dup2(saved[1], 2)
+        f.seek(0)
+        lines = f.read().decode().split("\n")
+    whole = [l for l in lines[:-1] if re.fullmatch(r"child \d \d+ x{40}", l)]
+    print(done, len(whole), "whole lines,", len(lines) - 1 - len(whole), "split,", repr(lines[-1]), "after the last")
+}

@@ -2,7 +2,7 @@
 // stderr: child says hi
 // A block's sys.stdin and sys.stderr have their descriptors (0, the null device, and 2), so a
 // child given them reads nothing and writes to stderr; sys.stdout is V2's and has none, which
-// fileno() says plainly (DOCS 4.6, INTERNALS 9.9).
+// fileno() says plainly, with what to write instead (DOCS 4.6, INTERNALS 9.9; round 21, L6).
 @py {
     import io, subprocess, sys
     child = "import sys; print('child says hi', file=sys.stderr); print(len(sys.stdin.read()))"
@@ -11,5 +11,5 @@
     try:
         sys.stdout.fileno()
     except io.UnsupportedOperation as e:
-        print("no fileno:", "no file descriptor" in str(e))
+        print("no fileno:", e)
 }

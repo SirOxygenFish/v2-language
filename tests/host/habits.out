@@ -38,3 +38,5 @@ TypeError list has no method 'count' — V2 counts with len(xs.filter(func(y) =>
 TypeError list has no method 'clear' — V2 starts over with a new one: xs = [] (or d = {})
 TypeError str has no method 'ljust' — V2 pads with " " * n, as in s + " " * (10 - len(s))
 KeyError key 'keys' not found
+TypeError str has no method 'zfill' — V2's strings don't have it: do it in a block, as in @py(s) { s.zfill(5) }
+TypeError str has no method 'swapcase' — V2's strings don't have it: do it in a block, as in @py(s) { s.swapcase() }
