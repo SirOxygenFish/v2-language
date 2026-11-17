@@ -173,7 +173,15 @@ impl Checker {
 /// (`skipped`): doctor says so, as a broken `[python] venv` would be (19.2).
 fn activated_venv_note(id: &str, skipped: &[(PathBuf, String)]) -> Option<String> {
     let venv = std::env::var_os("VIRTUAL_ENV").filter(|v| id == "py" && !v.is_empty())?;
-    crate::engines::resolve::activated_venv_problem(Path::new(&venv), skipped).map(|problem| format!("py: {problem}"))
+    crate::engines::resolve::activated_venv_problem(Path::new(&venv), skipped, &crate::engines::resolve::Lookup::from_env()).map(|problem| format!("py: {problem}"))
+}
+
+/// Python's embeddable package (7.6), which reads no startup variable: what it does instead, for
+/// doctor's notes (19.2).
+fn embeddable_note(e: &crate::engines::resolve::ResolvedEngine) -> Option<String> {
+    let program = Path::new(e.argv.first()?);
+    let pth = crate::engines::resolve::embeddable(program, e.version).filter(|_| &*e.spec.id == "py")?;
+    Some(format!("py: this is Python's embeddable package: its {pth} decides sys.path (PYTHONPATH is ignored), and it has no pip or venv"))
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -234,13 +242,15 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         let skipped = |list: &[(std::path::PathBuf, String)], notes: &mut Vec<String>| {
             notes.extend(list.iter().map(|(p, why)| format!("{id}: skipped {} ({why})", p.display())));
         };
+        // V2_ENGINE_PY, left set, wins over the project's venv (18.3): said first.
+        notes.extend(crate::engines::resolve::unused_venv(&cfg).filter(|_| id == "py").map(|(_, note)| format!("py: {note}")));
         match reg.resolve(spec) {
             Ok(e) => {
                 let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
                 // Read as it starts, after the version probe: one that is wrong stops every block,
                 // so with one set the program has to start (importing what the worker imports).
                 // So under an address-space limit, which Node.js needs about 1 GB of (8.4).
-                let vars = crate::engines::spec::startup_variables(&id);
+                let vars = crate::engines::resolve::read_at_start(&e);
                 let limit = crate::engines::spec::limit_fix(&id);
                 let host_failed = spec.session_of.as_ref().is_some_and(|h| no_start.contains(&**h));
                 let failure = if (vars.is_empty() && limit.is_none()) || spec.session_of.is_some() { None } else { reg.start_failure(&e) };
@@ -270,6 +280,7 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                 for (name, value) in vars {
                     notes.push(format!("{id}: {name} is set ({value}), which {} reads as it starts", if id == "py" { "Python" } else { "Node.js" }));
                 }
+                notes.extend(embeddable_note(&e));
                 // Windows: wsl.exe, which runs a Linux interpreter (7.6).
                 notes.extend(crate::engines::resolve::linux_interpreter_note(&id, &e.argv).filter(|_| spec.session_of.is_none()).map(|note| format!("{id}: {note}")));
                 match conda {

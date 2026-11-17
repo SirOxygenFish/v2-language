@@ -309,17 +309,15 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<D
                 return Judged::Skipped(NO_RUNTIME.into());
             }
             if *code != Some(0) {
-                // What the program said, first line, so a missing library shows (7.6).
-                let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| {
-                    let cut: String = l.chars().take(160).collect();
-                    format!(": {cut}")
-                });
+                // What the program said, first line, so a missing library shows (7.6); a long one
+                // keeps its end, where a path's last folder is.
+                let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(": {}", clip_middle(l, 160)));
                 return Judged::Skipped(format!("version probe failed ({}){}", ExitInfo { code: *code, signal: None }.describe(), said.unwrap_or_default()));
             }
             let Some((args, pattern)) = &spec.probe else { return Judged::Skipped("no version probe".into()) };
             let Some(version) = pattern.find(output) else {
                 // `V2_ENGINE_JS` naming Python: what it printed says so, and whose version it isn't.
-                let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(" (it printed: {})", l.chars().take(80).collect::<String>()));
+                let said = output.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(" (it printed: {})", clip_middle(l, 80)));
                 let program = if &*spec.id == "js" { "Node.js" } else { &*spec.language };
                 return Judged::Skipped(format!("no {program} version in its {} output{}", args.join(" "), said.unwrap_or_default()));
             };
@@ -329,6 +327,20 @@ fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<D
             }
         }
     }
+}
+
+/// A line a program printed, at most `max` characters: a longer one loses its middle, marked `…`,
+/// so the end of a path in it (the folder that matters) stays (7.6, 19.2).
+fn clip_middle(line: &str, max: usize) -> String {
+    let n = line.chars().count();
+    if n <= max {
+        return line.to_string();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let start: String = line.chars().take(head).collect();
+    let end: String = line.chars().skip(n - tail).collect();
+    format!("{start}…{end}")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -783,8 +795,8 @@ pub fn venv_has_pip(venv: &Path) -> bool {
 }
 
 /// How to make a broken venv again: uv's way for one uv made (`uv sync` in its project, else `uv
-/// venv --clear`), else `python3 -m venv --clear` (`py` on Windows), the path pasteable.
-pub fn remake_venv(venv: &Path) -> String {
+/// venv --clear`), else `-m venv --clear` with `venv_maker`'s Python, the path pasteable.
+pub fn remake_venv(venv: &Path, l: &Lookup) -> String {
     let dir = crate::cli::shell_word(&venv.display().to_string());
     if made_by_uv(venv) {
         return match uv_project(venv) {
@@ -792,8 +804,118 @@ pub fn remake_venv(venv: &Path) -> String {
             None => format!("make the venv again, uv venv --clear {dir}, and install its packages again"),
         };
     }
-    let python = if cfg!(windows) { "py" } else { "python3" };
-    format!("make the venv again, {python} -m venv --clear {dir}, and install its packages again")
+    format!("make the venv again{}, and install its packages again", with_maker(venv_maker(Some(venv), l), ", ", &format!("--clear {dir}")))
+}
+
+/// The Python a venv was made from, as its `pyvenv.cfg`'s `home` (an absolute folder) names it:
+/// `python.exe` there on Windows; elsewhere the first there of `python3`, `python3.X` of the
+/// venv's version and `python`, else `python3` (7.6).
+fn base_python(venv: &Path) -> Option<PathBuf> {
+    let home = pyvenv_value(venv, "home").map(PathBuf::from).filter(|h| h.is_absolute())?;
+    if cfg!(windows) {
+        return Some(home.join("python.exe"));
+    }
+    let versioned = made_with(venv).map(|(major, minor)| format!("python{major}.{minor}"));
+    let names: Vec<PathBuf> = std::iter::once("python3".to_string()).chain(versioned).chain(std::iter::once("python".to_string())).map(|n| home.join(n)).collect();
+    names.iter().find(|p| is_regular_file(p)).or(names.first()).cloned()
+}
+
+/// The Python a message makes a venv with (7.6), as a command's first word to paste: the one
+/// `venv` was made from (`base_python`) while it is there; else `py` (`python3` elsewhere) when
+/// PATH has it; else none, and the message leaves the choice to the user. `venv`: `None` for one
+/// still to make, or one another system made.
+pub fn venv_maker(venv: Option<&Path>, l: &Lookup) -> Option<String> {
+    if let Some(base) = venv.and_then(base_python).filter(|b| is_regular_file(b)) {
+        return Some(pasted_program(&base));
+    }
+    let launcher = if cfg!(windows) { "py" } else { "python3" };
+    first_program(launcher, l).map(|_| launcher.to_string())
+}
+
+/// A program's path as a command's first word: quoted as a shell needs it, and on Windows, when
+/// quoted, after `& `, as PowerShell runs a quoted path only after `&`.
+fn pasted_program(p: &Path) -> String {
+    let word = crate::cli::shell_word(&p.display().to_string());
+    if cfg!(windows) && word.starts_with('"') {
+        format!("& {word}")
+    } else {
+        word
+    }
+}
+
+/// After a verb ("make it again", "(create it"): `{sep}py -m venv {args}` with `venv_maker`'s
+/// Python, else ` with the Python you want{sep}its python.exe -m venv {args}` (`python3` off
+/// Windows) (7.6).
+pub fn with_maker(maker: Option<String>, sep: &str, args: &str) -> String {
+    match maker {
+        Some(python) => format!("{sep}{python} -m venv {args}"),
+        None => format!(" with the Python you want{sep}its {} -m venv {args}", if cfg!(windows) { "python.exe" } else { "python3" }),
+    }
+}
+
+/// A venv whose `pyvenv.cfg`'s `home` names a Python that isn't there any more (it was moved or
+/// uninstalled), so its python can't run (Windows' copied launcher says `No Python at '…'`): what
+/// is wrong and what to do (7.6). `None` while that Python is there, or with no `home`.
+fn base_gone(venv: &Path, l: &Lookup) -> Option<String> {
+    let base = base_python(venv).filter(|b| !is_regular_file(b))?;
+    Some(format!("the Python this venv was made from, {}, isn't there any more: put it back, or {}", base.display(), remake_venv(venv, l)))
+}
+
+/// Python's embeddable package (7.6): a `pythonXY._pth` beside its `python.exe` (`python313._pth`
+/// for 3.13), which decides `sys.path` and makes Python ignore `PYTHONPATH` and `PYTHONHOME`; it
+/// has no pip and no venv module. That file's name. With the probed `version`, only that file is
+/// looked at; else the folder is read.
+pub fn embeddable(python: &Path, version: Option<Version>) -> Option<String> {
+    let dir = python.parent()?;
+    if let Some(v) = version {
+        let name = format!("python{}{}._pth", v.0, v.1);
+        return dir.join(&name).is_file().then_some(name);
+    }
+    let pth = |n: &str| {
+        let lower = n.to_ascii_lowercase();
+        lower.strip_prefix("python").and_then(|r| r.strip_suffix("._pth")).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    };
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).find(|n| pth(n) && dir.join(n).is_file())
+}
+
+/// The startup variables that are set and that the engine's program reads as it starts (8.4,
+/// 19.2): `spec::startup_variables`, but none for Python's embeddable package, which ignores them.
+pub fn read_at_start(e: &ResolvedEngine) -> Vec<(&'static str, String)> {
+    let program = e.argv.first().map(Path::new);
+    if &*e.spec.id == "py" && program.is_some_and(|p| embeddable(p, e.version).is_some()) {
+        return Vec::new();
+    }
+    crate::engines::spec::startup_variables(&e.spec.id)
+}
+
+/// When `V2_ENGINE_PY` wins over the `[python] venv` of the project's `v2.toml` (18.3): that venv,
+/// and what doctor's note (19.2) and an ImportError's hint (13.5) say, `V2_ENGINE_PY is set, so
+/// [python] venv 'C:\p\.venv' (v2.toml) isn't used: to use it, Remove-Item Env:V2_ENGINE_PY`.
+pub fn unused_venv(cfg: &Config) -> Option<(PathBuf, String)> {
+    let command = cfg.engines.get("py")?.command.as_ref()?;
+    let ConfigSource::Env(var) = &command.from else { return None };
+    let venv = cfg.python_venv.as_ref().filter(|v| matches!(v.from, ConfigSource::Project(_)))?;
+    let unset = if cfg!(windows) { format!("Remove-Item Env:{var}") } else { format!("unset {var}") };
+    let shown = crate::syntax::span::shown_path(&venv.value.display().to_string());
+    Some((venv.value.clone(), format!("{var} is set, so [python] venv '{shown}' (v2.toml) isn't used: to use it, {unset}")))
+}
+
+/// A js program that is npm's, not Node.js (`npm.cmd`, `npx`, `corepack`, or another with a
+/// `node.exe` beside it), named where Node.js belongs (7.6): what to name instead, `that is npm,
+/// not Node.js: point it at node.exe in the same folder (C:\node\node.exe)`.
+fn npm_fix(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    let exe = if cfg!(windows) { "node.exe" } else { "node" };
+    let node = path.parent()?.join(exe);
+    let beside = stem != "node" && is_regular_file(&node);
+    if !beside && !["npm", "npx", "corepack"].contains(&stem.as_str()) {
+        return None;
+    }
+    Some(if beside {
+        format!("that is {stem}, not Node.js: point it at {exe} in the same folder ({})", node.display())
+    } else {
+        format!("that is {stem}, not Node.js: point it at Node.js's {exe}")
+    })
 }
 
 /// A venv the other system made, which that system may still use (one project folder used from
@@ -801,8 +923,8 @@ pub fn remake_venv(venv: &Path) -> String {
 /// `python3`) and no `bin/python.exe` (MSYS2's has one), or whose `pyvenv.cfg`'s `home` is a POSIX
 /// path; elsewhere, one with a `Scripts/python.exe`, or a `home` with a drive letter or `\\`.
 /// The rest of the message after the venv's name: where it was made, and a venv for this system
-/// beside it, named in `V2_ENGINE_PY`.
-pub fn foreign_venv(venv: &Path) -> Option<String> {
+/// beside it (made with `venv_maker`'s Python), named in `V2_ENGINE_PY`.
+pub fn foreign_venv(venv: &Path, l: &Lookup) -> Option<String> {
     let home = pyvenv_value(venv, "home").unwrap_or_default();
     let there = |p: PathBuf| std::fs::symlink_metadata(&p).is_ok() || wsl_link_on_drive(&p);
     let made_on = if cfg!(windows) {
@@ -817,14 +939,14 @@ pub fn foreign_venv(venv: &Path) -> Option<String> {
     let this = if cfg!(windows) { "win" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
     let new = venv.parent().unwrap_or(venv).join(format!(".venv-{this}"));
     let word = |p: &Path| crate::cli::shell_word(&p.display().to_string());
-    let (python, set) = if cfg!(windows) {
-        ("py", format!("$env:V2_ENGINE_PY = \"{}\"", new.join("Scripts").join("python.exe").display()))
+    let set = if cfg!(windows) {
+        format!("$env:V2_ENGINE_PY = \"{}\"", new.join("Scripts").join("python.exe").display())
     } else {
-        ("python3", format!("export V2_ENGINE_PY={}", word(&new.join("bin").join("python"))))
+        format!("export V2_ENGINE_PY={}", word(&new.join("bin").join("python")))
     };
     Some(format!(
-        "was made on {made_on}: keep it, make one for this system beside it, {python} -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv ({set}), or run V2 on that system",
-        word(&new)
+        "was made on {made_on}: keep it, make one for this system beside it{}, and name its python in V2_ENGINE_PY, which wins over [python] venv ({set}), or run V2 on that system",
+        with_maker(venv_maker(None, l), ", ", &word(&new))
     ))
 }
 
@@ -859,10 +981,10 @@ fn made_with(venv: &Path) -> Option<(u32, u32)> {
 /// unversioned `python3` that was repointed (`uv python install --default --force`, a release
 /// upgrade, Homebrew), so the packages in its `lib/python3.13` are gone for it. `who` begins the
 /// message.
-fn venv_mismatch(venv: &Path, probed: Version, who: &str) -> Option<String> {
+fn venv_mismatch(venv: &Path, probed: Version, who: &str, l: &Lookup) -> Option<String> {
     let (major, minor) = made_with(venv)?;
     ((major, minor) != (probed.0, probed.1)).then(|| {
-        format!("{who} was made with Python {major}.{minor} (its pyvenv.cfg says so), but its python now runs {} (was Python upgraded?): {}", probed.short(), remake_venv(venv))
+        format!("{who} was made with Python {major}.{minor} (its pyvenv.cfg says so), but its python now runs {} (was Python upgraded?): {}", probed.short(), remake_venv(venv, l))
     })
 }
 
@@ -871,21 +993,26 @@ fn venv_mismatch(venv: &Path, probed: Version, who: &str) -> Option<String> {
 /// probe failed (among `skipped`, the search's: Windows' copied launcher, once the Python it runs
 /// is uninstalled, says `No Python at '…'`). What is wrong and what to do, for doctor's note
 /// (19.2) and an `ImportError`'s hint (13.5); `None` when its python is there and wasn't skipped
-/// for that.
-pub fn activated_venv_problem(venv: &Path, skipped: &[(PathBuf, String)]) -> Option<String> {
+/// for that. `l`: where `venv_maker` looks for `py`.
+pub fn activated_venv_problem(venv: &Path, skipped: &[(PathBuf, String)], l: &Lookup) -> Option<String> {
     let names: &[&str] = if cfg!(windows) { &["Scripts\\python.exe"] } else { &["bin/python3", "bin/python"] };
     let pythons: Vec<PathBuf> = names.iter().map(|n| venv.join(n)).collect();
     let who = format!("the activated venv {} (VIRTUAL_ENV)", crate::syntax::span::shown_path(&venv.display().to_string()));
     if pythons.iter().any(|p| is_regular_file(p)) {
-        return failed_probe_in(venv, skipped).map(|said| format!("{who} has a python that doesn't run ({said}), so V2 can't use it: {}", remake_venv(venv)));
+        let said = failed_probe_in(venv, skipped)?;
+        // Its python is Windows' copied launcher, which can't run once the Python is gone.
+        return Some(match base_gone(venv, l) {
+            Some(gone) => format!("{who} has a python that doesn't run, so V2 can't use it: {gone}"),
+            None => format!("{who} has a python that doesn't run ({said}), so V2 can't use it: {}", remake_venv(venv, l)),
+        });
     }
     Some(match pythons.iter().find_map(|p| dangling_target(p)) {
-        Some(target) => format!("{who} has a python that links to {}, which isn't there (was Python upgraded?), so V2 can't use it: {}", target.display(), remake_venv(venv)),
+        Some(target) => format!("{who} has a python that links to {}, which isn't there (was Python upgraded?), so V2 can't use it: {}", target.display(), remake_venv(venv, l)),
         None if !venv.is_dir() => {
-            let python = if cfg!(windows) { "py" } else { "python3" };
-            format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {python} -m venv {}", crate::cli::shell_word(&venv.display().to_string()))
+            let make = with_maker(venv_maker(None, l), ", ", &crate::cli::shell_word(&venv.display().to_string()));
+            format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again{make}")
         }
-        None => format!("{who} has no {}, so V2 can't use it: {}", if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }, remake_venv(venv)),
+        None => format!("{who} has no {}, so V2 can't use it: {}", if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }, remake_venv(venv, l)),
     })
 }
 
@@ -1009,11 +1136,21 @@ impl Resolver<'_> {
                 } else if origin == Origin::Venv {
                     // A venv's python that doesn't run: the Python it was made with is gone (an
                     // upgrade that removed it: Windows says "No Python at …").
-                    format!("; {}", remake_venv(path.parent().and_then(Path::parent).unwrap_or(&path)))
+                    format!("; {}", remake_venv(path.parent().and_then(Path::parent).unwrap_or(&path), self.lookup))
+                } else if let Some(fix) = (&*spec.id == "js" && reason.starts_with("no Node.js version")).then(|| npm_fix(&path)).flatten() {
+                    // `V2_ENGINE_JS` naming the zip's npm.cmd, beside its node.exe.
+                    format!("; {fix}")
                 } else {
                     String::new()
                 };
-                let mut message = format!("engine '{}' {what} (set by {}) is not usable: {reason}{hint}", spec.id, set_by(from));
+                // A venv whose Python was moved or uninstalled: that Python, by its path, in place
+                // of the launcher's own words (7.6).
+                let venv = path.parent().and_then(Path::parent).unwrap_or(&path);
+                let gone = (origin == Origin::Venv && reason.starts_with("version probe failed (")).then(|| base_gone(venv, self.lookup)).flatten();
+                let mut message = match gone {
+                    Some(gone) => format!("engine '{}' {what} (set by {}) is not usable: {gone}", spec.id, set_by(from)),
+                    None => format!("engine '{}' {what} (set by {}) is not usable: {reason}{hint}", spec.id, set_by(from)),
+                };
                 if let (Judged::TooOld(v, _), Some(min)) = (&other, spec.min_version) {
                     // Worded as for one found on PATH (7.8), with what to do.
                     let found = if *v >= min {
@@ -1135,9 +1272,11 @@ impl Resolver<'_> {
                 if r.contains('\\') { format!("venv = '{r}'") } else { format!("venv = \"{r}\"") }
             };
             let is_venv = |p: &Path| p.join("pyvenv.cfg").is_file();
-            // A command to paste: the path quoted as a shell needs it; the `py` launcher on
-            // Windows (`python` may be the Store's stand-in), `python3` elsewhere.
-            let python = if cfg!(windows) { "py" } else { "python3" };
+            // A command to paste: the path quoted as a shell needs it, made with the Python a venv
+            // was made from, else the `py` launcher on Windows (`python` may be the Store's
+            // stand-in), `python3` elsewhere, when PATH has it, else the one the user wants.
+            let l = self.lookup;
+            let make = |venv: Option<&Path>, sep: &str, args: &str| with_maker(venv_maker(venv, l), sep, args);
             let pasted = |p: &Path| crate::cli::shell_word(&p.display().to_string());
             // `.venv/bin`, `.venv\Scripts`, or a python in one that isn't there: a path inside
             // the virtual environment, whose folder is the one above.
@@ -1174,17 +1313,27 @@ impl Resolver<'_> {
                 let p = p.display().to_string();
                 if p.contains('\\') { format!("[engines.py] command = ['{p}']") } else { format!("[engines.py] command = [\"{p}\"]") }
             };
-            let not_a_venv = |what: &str, py: &Path| {
-                format!("[python] venv '{shown}' is {what}, not a virtual environment: name its python instead, {}, or make a virtual environment with it: {} -m venv .venv", command(py), pasted(py))
+            // Python's embeddable package has no venv module: only its python, as the command.
+            let not_a_venv = |what: &str, py: &Path| match embeddable(py, None) {
+                Some(_) => format!("[python] venv '{shown}' is {what}, not a virtual environment: name its python instead, {}", command(py)),
+                None => format!(
+                    "[python] venv '{shown}' is {what}, not a virtual environment: name its python instead, {}, or make a virtual environment with it: {} -m venv .venv",
+                    command(py),
+                    pasted_program(py)
+                ),
             };
             // The bin (Scripts) folder or the python of a damaged venv: that venv, made again.
             let in_damaged = |what: &str, folder: &Path| {
-                format!("[python] venv '{shown}' is {what} a virtual environment that has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}, and write {}", pasted(folder), write(folder))
+                format!(
+                    "[python] venv '{shown}' is {what} a virtual environment that has no pyvenv.cfg, so it is damaged: make it again{}, and write {}",
+                    make(Some(folder), ", ", &format!("--clear {}", pasted(folder))),
+                    write(folder)
+                )
             };
             // Its python links to one that is gone, as after the system's Python was upgraded.
             let dangling = candidates.iter().find_map(|c| dangling_target(c));
             let message = if let Some(target) = dangling {
-                format!("[python] venv '{shown}' has a python that links to {}, which isn't there (was Python upgraded?): {}", target.display(), remake_venv(venv))
+                format!("[python] venv '{shown}' has a python that links to {}, which isn't there (was Python upgraded?): {}", target.display(), remake_venv(venv, l))
             } else if is_regular_file(venv) {
                 // `.venv/bin/python`, `.venv\Scripts\python.exe`: the interpreter, not its folder.
                 let above = venv.parent().and_then(Path::parent);
@@ -1201,7 +1350,7 @@ impl Resolver<'_> {
             } else if let Some(folder) = inside.filter(|f| is_venv(f)) {
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}", write(folder))
             } else if damaged(venv) {
-                format!("[python] venv '{shown}' has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}", pasted(venv))
+                format!("[python] venv '{shown}' has no pyvenv.cfg, so it is damaged: make it again{}", make(Some(venv), ", ", &format!("--clear {}", pasted(venv))))
             } else if let Some(folder) = inside.filter(|f| damaged(f)) {
                 in_damaged("inside", folder)
             } else if let Some(py) = installed(venv) {
@@ -1215,14 +1364,14 @@ impl Resolver<'_> {
             } else if let Some(py) = inside.and_then(installed) {
                 not_a_venv("a folder of a Python installation", &py)
             } else if let Some(folder) = inside {
-                let create = if !free(folder) { String::new() } else { format!(" (create it: {python} -m venv {})", pasted(folder)) };
+                let create = if !free(folder) { String::new() } else { format!(" (create it{})", make(None, ": ", &pasted(folder))) };
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}{create}", write(folder))
-            } else if let Some(advice) = foreign_venv(venv).filter(|_| is_venv(venv)) {
+            } else if let Some(advice) = foreign_venv(venv, l).filter(|_| is_venv(venv)) {
                 // Made on the other system, which may still use it: kept.
                 format!("[python] venv '{shown}' {advice}")
             } else if is_venv(venv) {
                 // A venv made on another system (`bin` where Windows wants `Scripts`), or damaged.
-                format!("[python] venv '{shown}' has no {want}, so it was made on another system or is damaged: make it again here, {python} -m venv --clear {}", pasted(venv))
+                format!("[python] venv '{shown}' has no {want}, so it was made on another system or is damaged: make it again here{}", make(Some(venv), ", ", &format!("--clear {}", pasted(venv))))
             } else if let Some(var) = crate::config::unexpanded(&shown) {
                 format!("[python] venv '{shown}' has no {want}: V2 doesn't expand {var}: write the path out (a ~ at its start is your home folder)")
             } else if let Some(near) = venv
@@ -1237,9 +1386,9 @@ impl Resolver<'_> {
             {
                 format!("[python] venv '{shown}' has no {want}; there is a virtual environment in {}: did you mean {}?", near.display(), write(&near))
             } else if !free(venv) {
-                format!("[python] venv '{shown}' has no {want}, and it isn't a virtual environment (it has no pyvenv.cfg): write the folder of one, or make one: {python} -m venv .venv")
+                format!("[python] venv '{shown}' has no {want}, and it isn't a virtual environment (it has no pyvenv.cfg): write the folder of one, or make one{}", make(None, ": ", ".venv"))
             } else {
-                format!("[python] venv '{shown}' has no {want} (create it: {python} -m venv {})", pasted(venv))
+                format!("[python] venv '{shown}' has no {want} (create it{})", make(None, ": ", &pasted(venv)))
             };
             // COMMAND: the venv as given when it names a file, not a path inside it (19.2).
             let shown_command = if is_regular_file(venv) { shown.clone() } else { candidates[0].display().to_string() };
@@ -1251,7 +1400,7 @@ impl Resolver<'_> {
         let e = self.usable(spec, vec![exe.clone().into_os_string()], Origin::Venv, &what, from)?;
         // Its python runs, but another Python than the venv's packages are for.
         let who = format!("[python] venv '{}'", crate::syntax::span::shown_path(&venv.display().to_string()));
-        match e.version.and_then(|v| venv_mismatch(venv, v, &who)) {
+        match e.version.and_then(|v| venv_mismatch(venv, v, &who, self.lookup)) {
             Some(message) => Err(NotFound::broken_venv(message, exe.display().to_string())),
             None => Ok(e),
         }
@@ -1307,7 +1456,7 @@ impl Resolver<'_> {
                         // node in a venv's bin, from a pip package, has no say).
                         let who = |venv: &Path| format!("the venv {} on PATH", crate::syntax::span::shown_path(&venv.display().to_string()));
                         let venv = venv_of(&hit).filter(|_| &*spec.id == "py");
-                        if let Some(message) = venv.and_then(|venv| venv_mismatch(&venv, v, &who(&venv))) {
+                        if let Some(message) = venv.and_then(|venv| venv_mismatch(&venv, v, &who(&venv), self.lookup)) {
                             return Err(NotFound { status: Status::Broken, message, command: Some(join(&argv)), from: Some(Origin::Path.label()), skipped });
                         }
                         // A program that didn't answer in time cost this run its wait, and will
@@ -1503,7 +1652,7 @@ pub fn start_failure(prober: &dyn Prober, spec: &EngineSpec, argv: &[OsString]) 
     let lines = || output.lines().map(str::trim).filter(|l| !l.is_empty());
     let raised = output.lines().skip_while(|l| !l.starts_with("Traceback (most recent call last)")).skip(1).find(|l| !l.starts_with(char::is_whitespace) && !l.is_empty());
     let said = raised.map(str::trim).or_else(|| lines().find(|l| l.contains("rror"))).or_else(|| lines().next());
-    let said = said.map(|l| format!(": {}", l.chars().take(160).collect::<String>())).unwrap_or_default();
+    let said = said.map(|l| format!(": {}", clip_middle(l, 160))).unwrap_or_default();
     Some(format!("{} ({}){said}", crate::engines::spec::start_check_failed(&spec.id), ExitInfo { code, signal }.describe()))
 }
 
@@ -1652,12 +1801,13 @@ mod tests {
         let d = temp("goneven");
         let bin = d.join(".venv").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(d.join(".venv").join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        std::fs::write(d.join(".venv").join("pyvenv.cfg"), "home = /nonexistent\n").unwrap();
         std::os::unix::fs::symlink("/nonexistent/python3.99", bin.join("python")).unwrap();
         let cfg = Config { python_venv: Some(Sourced { value: d.join(".venv"), from: project_source() }), ..Config::default() };
         let nf = resolve_with(&cfg, &lookup(&[], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
+        // Round 22 (0): no python3 on PATH, and its Python gone: the one the user wants.
         let want = format!(
-            "[python] venv '{}' has a python that links to /nonexistent/python3.99, which isn't there (was Python upgraded?): make the venv again, python3 -m venv --clear {}, and install its packages again",
+            "[python] venv '{}' has a python that links to /nonexistent/python3.99, which isn't there (was Python upgraded?): make the venv again with the Python you want, its python3 -m venv --clear {}, and install its packages again",
             d.join(".venv").display(),
             d.join(".venv").display()
         );
@@ -1685,13 +1835,18 @@ mod tests {
         // python3 that now runs 3.11, so its packages are gone for it: broken, not ok with a pip
         // line that can't work. FROM says venv (L9).
         let d = temp("mismatch");
-        let (venv, python) = fake_venv(&d, ".venv", "home = /usr/bin\nversion = 3.13.18\n");
+        // Round 22 (0): made again with the Python its home names, which is there.
+        let base = d.join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let base_py = exe(&base, if cfg!(windows) { "python" } else { "python3" });
+        let cfg_text = format!("home = {}\nversion = 3.13.18\n", base.display());
+        let (venv, python) = fake_venv(&d, ".venv", &cfg_text);
         let p = fake(|_| says("Python 3.11.18"));
         let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-        let py = if cfg!(windows) { "py" } else { "python3" };
         let made = |who: String| {
             format!(
-                "{who} was made with Python 3.13 (its pyvenv.cfg says so), but its python now runs 3.11 (was Python upgraded?): make the venv again, {py} -m venv --clear {}, and install its packages again",
+                "{who} was made with Python 3.13 (its pyvenv.cfg says so), but its python now runs 3.11 (was Python upgraded?): make the venv again, {} -m venv --clear {}, and install its packages again",
+                base_py.display(),
                 venv.display()
             )
         };
@@ -1706,7 +1861,7 @@ mod tests {
             assert!(resolve_with(&venv_config(&venv), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").is_ok(), "{cfg}");
         }
         // The same venv found on PATH (an activated one): named by its folder, FROM PATH.
-        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\nversion = 3.13.18\n").unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), &cfg_text).unwrap();
         let bin = python.parent().unwrap();
         let nf = resolve_with(&Config::default(), &lookup(&[bin], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert_eq!(nf.message, made(format!("the venv {} on PATH", venv.display())));
@@ -1738,7 +1893,7 @@ mod tests {
         assert_eq!(nf.from.as_deref(), Some("venv"));
         // Another folder name than .venv: uv sync wouldn't make that one.
         let (other, _) = fake_venv(&d, "env2", "uv = 0.13.8\n");
-        assert_eq!(remake_venv(&other), format!("make the venv again, uv venv --clear {}, and install its packages again", other.display()));
+        assert_eq!(remake_venv(&other, &lookup(&[], None)), format!("make the venv again, uv venv --clear {}, and install its packages again", other.display()));
     }
 
     #[cfg(unix)]
@@ -1759,7 +1914,7 @@ mod tests {
         assert_eq!(nf.message, format!("[python] venv '{}' has a python that links to {gone}, which isn't there (was Python upgraded?): {again}", venv.display()));
         // Activated (VIRTUAL_ENV), the search passes it over: doctor and the hint say so.
         assert_eq!(
-            activated_venv_problem(&venv, &[]),
+            activated_venv_problem(&venv, &[], &lookup(&[], None)),
             Some(format!("the activated venv {} (VIRTUAL_ENV) has a python that links to {gone}, which isn't there (was Python upgraded?), so V2 can't use it: {again}", venv.display()))
         );
     }
@@ -1769,16 +1924,30 @@ mod tests {
         // Round 19 (L4): VIRTUAL_ENV names a venv whose python is missing (or the venv itself).
         let d = temp("activated");
         let (venv, python) = fake_venv(&d, ".venv", "home = x\n");
-        assert_eq!(activated_venv_problem(&venv, &[]), None, "its python is there");
+        let none = lookup(&[], None);
+        assert_eq!(activated_venv_problem(&venv, &[], &none), None, "its python is there");
         std::fs::remove_file(&python).unwrap();
-        let (py, want) = if cfg!(windows) { ("py", r"Scripts\python.exe") } else { ("python3", "bin/python") };
+        let (py, exe_name, want) = if cfg!(windows) { ("py", "python.exe", r"Scripts\python.exe") } else { ("python3", "python3", "bin/python") };
+        // Round 22 (0): py (python3) only when PATH has it, else the Python the user wants.
+        let tools = d.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        exe(&tools, py);
+        let with_py = lookup(&[&tools], None);
         let who = format!("the activated venv {} (VIRTUAL_ENV)", venv.display());
         assert_eq!(
-            activated_venv_problem(&venv, &[]),
+            activated_venv_problem(&venv, &[], &with_py),
             Some(format!("{who} has no {want}, so V2 can't use it: make the venv again, {py} -m venv --clear {}, and install its packages again", venv.display()))
         );
+        assert_eq!(
+            activated_venv_problem(&venv, &[], &none),
+            Some(format!("{who} has no {want}, so V2 can't use it: make the venv again with the Python you want, its {exe_name} -m venv --clear {}, and install its packages again", venv.display()))
+        );
         std::fs::remove_dir_all(&venv).unwrap();
-        assert_eq!(activated_venv_problem(&venv, &[]), Some(format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {py} -m venv {}", venv.display())));
+        assert_eq!(activated_venv_problem(&venv, &[], &with_py), Some(format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again, {py} -m venv {}", venv.display())));
+        assert_eq!(
+            activated_venv_problem(&venv, &[], &none),
+            Some(format!("{who} isn't there, so V2 can't use it: run deactivate, or make it again with the Python you want, its {exe_name} -m venv {}", venv.display()))
+        );
     }
 
     #[test]
@@ -1797,20 +1966,26 @@ mod tests {
         let e = resolve_with(&Config::default(), &lookup(&[python.parent().unwrap(), &other], None), &p, &mut ProbeCache::off(), "py").unwrap();
         assert_eq!((e.origin.clone(), e.argv.clone()), (Origin::Path, vec![found.into_os_string()]));
         assert_eq!(e.skipped, [(python.clone(), format!("version probe failed (exit code 103): {said}"))]);
-        let py = if cfg!(windows) { "py" } else { "python3" };
-        let again = format!("make the venv again, {py} -m venv --clear {}, and install its packages again", venv.display());
+        let exe_name = if cfg!(windows) { "python.exe" } else { "python3" };
+        let again = format!("make the venv again with the Python you want, its {exe_name} -m venv --clear {}, and install its packages again", venv.display());
         let who = format!("the activated venv {} (VIRTUAL_ENV)", venv.display());
-        assert_eq!(activated_venv_problem(&venv, &e.skipped), Some(format!("{who} has a python that doesn't run ({said}), so V2 can't use it: {again}")));
+        let l = lookup(&[], None);
+        // Round 22 (0): on Windows, its home names the Python that isn't there any more.
+        let doesnt_run = |said: &str| match cfg!(windows) {
+            true => format!("{who} has a python that doesn't run, so V2 can't use it: the Python this venv was made from, C:\\nonexistent\\Python311\\python.exe, isn't there any more: put it back, or {again}"),
+            false => format!("{who} has a python that doesn't run ({said}), so V2 can't use it: {again}"),
+        };
+        assert_eq!(activated_venv_problem(&venv, &e.skipped, &l), Some(doesnt_run(said)));
         // A failed probe that printed nothing: its reason.
         let quiet = [(python.clone(), "version probe failed (exit code 103)".to_string())];
-        assert_eq!(activated_venv_problem(&venv, &quiet), Some(format!("{who} has a python that doesn't run (version probe failed (exit code 103)), so V2 can't use it: {again}")));
+        assert_eq!(activated_venv_problem(&venv, &quiet, &l), Some(doesnt_run("version probe failed (exit code 103)")));
         // Not skipped, skipped for another reason (a slow probe may pass next time), or another
         // venv's python: nothing to say.
-        assert_eq!(activated_venv_problem(&venv, &[]), None);
-        assert_eq!(activated_venv_problem(&venv, &[(python.clone(), "version probe timed out (10 s)".to_string())]), None);
+        assert_eq!(activated_venv_problem(&venv, &[], &l), None);
+        assert_eq!(activated_venv_problem(&venv, &[(python.clone(), "version probe timed out (10 s)".to_string())], &l), None);
         let (elsewhere, elsewhere_py) = fake_venv(&d, "env2", "home = x\n");
-        assert_eq!(activated_venv_problem(&venv, &[(elsewhere_py.clone(), format!("version probe failed (exit code 103): {said}"))]), None);
-        assert!(activated_venv_problem(&elsewhere, &[(elsewhere_py, format!("version probe failed (exit code 103): {said}"))]).is_some());
+        assert_eq!(activated_venv_problem(&venv, &[(elsewhere_py.clone(), format!("version probe failed (exit code 103): {said}"))], &l), None);
+        assert!(activated_venv_problem(&elsewhere, &[(elsewhere_py, format!("version probe failed (exit code 103): {said}"))], &l).is_some());
     }
 
     #[test]
@@ -2543,15 +2718,23 @@ mod tests {
         let p = fake(|_| says("Python 3.12.1"));
         let nf = resolve_with(&missing, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
         let want = if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" };
-        let python = if cfg!(windows) { "py" } else { "python3" };
-        assert!(nf.message.starts_with(&format!("[python] venv '{}' has no {want} (create it: {python} -m venv ", venv.display())), "{}", nf.message);
+        // Round 22 (0): no py (python3) on PATH: the Python the user wants.
+        let neutral = if cfg!(windows) { "with the Python you want: its python.exe" } else { "with the Python you want: its python3" };
+        assert!(nf.message.starts_with(&format!("[python] venv '{}' has no {want} (create it {neutral} -m venv ", venv.display())), "{}", nf.message);
         // Round 19 (L9): FROM says venv for a missing one too.
         assert_eq!((nf.command.clone(), nf.from.as_deref()), (Some(venv.join(if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }).display().to_string()), Some("venv")));
         // A folder with a space is quoted, so the command can be pasted (7.6).
         let spaced = d.join("my env");
         let cfg = Config { python_venv: Some(Sourced { value: spaced.clone(), from: project_source() }), ..Config::default() };
         let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-        assert!(nf.message.ends_with(&format!("(create it: {python} -m venv \"{}\")", spaced.display())), "{}", nf.message);
+        assert!(nf.message.ends_with(&format!("(create it {neutral} -m venv \"{}\")", spaced.display())), "{}", nf.message);
+        // With py on PATH (python3 elsewhere), that one.
+        let tools = d.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let launcher = if cfg!(windows) { "py" } else { "python3" };
+        exe(&tools, launcher);
+        let nf = resolve_with(&cfg, &lookup(&[&tools], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.ends_with(&format!("(create it: {launcher} -m venv \"{}\")", spaced.display())), "{}", nf.message);
         let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
         std::fs::create_dir_all(&bin).unwrap();
         let python = exe(&bin, "python");
@@ -2571,7 +2754,7 @@ mod tests {
         assert_eq!(nf.message, format!("[python] venv '{}' {inside} venv = \".venv\"", bin.display()));
         let none = d.join("none").join("bin").join("python");
         let nf = resolve_with(&at(&none), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-        assert_eq!(nf.message, format!("[python] venv '{}' {inside} venv = \"none\" (create it: {} -m venv {})", none.display(), if cfg!(windows) { "py" } else { "python3" }, d.join("none").display()));
+        assert_eq!(nf.message, format!("[python] venv '{}' {inside} venv = \"none\" (create it {neutral} -m venv {})", none.display(), d.join("none").display()));
         // A variable V2 doesn't expand: no venv to create there (18.1).
         let var = d.join("%USERPROFILE%").join(".venv");
         let nf = resolve_with(&at(&var), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
@@ -2594,7 +2777,8 @@ mod tests {
         let d = temp("notvenv");
         let p = fake(|_| says("Python 3.12.1"));
         let at = |v: &Path| Config { python_venv: Some(Sourced { value: v.to_path_buf(), from: project_source() }), ..Config::default() };
-        let (python, created) = if cfg!(windows) { ("py", "\"") } else { ("python3", "'") };
+        // Round 22 (0): no py (python3) on PATH, so the Python the user wants.
+        let (python, created) = if cfg!(windows) { ("with the Python you want, its python.exe", "\"") } else { ("with the Python you want, its python3", "'") };
         let root = d.join("Python311");
         let bin = if cfg!(windows) { root.clone() } else { root.join("bin") };
         std::fs::create_dir_all(&bin).unwrap();
@@ -2625,13 +2809,13 @@ mod tests {
         #[cfg(unix)]
         std::fs::write(bare.join("bin").join("activate"), "").unwrap();
         let nf = resolve_with(&at(&bare), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-        assert_eq!(nf.message, format!("[python] venv '{}' has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}", bare.display(), bare.display()));
+        assert_eq!(nf.message, format!("[python] venv '{}' has no pyvenv.cfg, so it is damaged: make it again {python} -m venv --clear {}", bare.display(), bare.display()));
         assert_eq!((nf.status, nf.from.as_deref()), (Status::Broken, Some("venv")));
         // Its Scripts (bin) folder, or its python (the launcher on Windows), named instead: the
         // same venv made again, never its launcher as a command (round 19, the second review).
         for (v, what) in [(bare_py.parent().unwrap().to_path_buf(), "inside"), (bare_py.clone(), "a file in")] {
             let nf = resolve_with(&at(&v), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-            let want = format!("[python] venv '{}' is {what} a virtual environment that has no pyvenv.cfg, so it is damaged: make it again, {python} -m venv --clear {}, and write venv = ", v.display(), bare.display());
+            let want = format!("[python] venv '{}' is {what} a virtual environment that has no pyvenv.cfg, so it is damaged: make it again {python} -m venv --clear {}, and write venv = ", v.display(), bare.display());
             assert!(nf.message.starts_with(&want) && !nf.message.contains("[engines.py]"), "{}", nf.message);
         }
         // A conda environment (conda-meta), its python at its root on Windows, in bin elsewhere;
@@ -2670,22 +2854,31 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("main.py"), "").unwrap();
         let nf = resolve_with(&at(&src), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-        assert!(nf.message.ends_with(&format!("and it isn't a virtual environment (it has no pyvenv.cfg): write the folder of one, or make one: {python} -m venv .venv")), "{}", nf.message);
+        let colon = python.replacen(", its", ": its", 1);
+        assert!(nf.message.ends_with(&format!("and it isn't a virtual environment (it has no pyvenv.cfg): write the folder of one, or make one {colon} -m venv .venv")), "{}", nf.message);
         // A venv without the python this system needs (made on another one): make it again.
         let other = d.join("wslenv");
         std::fs::create_dir_all(other.join(if cfg!(windows) { "bin" } else { "Scripts" })).unwrap();
         std::fs::write(other.join("pyvenv.cfg"), "home = x\n").unwrap();
         let nf = resolve_with(&at(&other), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
-        assert!(nf.message.ends_with(&format!(", so it was made on another system or is damaged: make it again here, {python} -m venv --clear {}", other.display())), "{}", nf.message);
+        assert!(nf.message.ends_with(&format!(", so it was made on another system or is damaged: make it again here {python} -m venv --clear {}", other.display())), "{}", nf.message);
         // A venv whose python is there but doesn't run: the Python it was made with is gone.
         let old = d.join("oldvenv");
         let bin = old.join(if cfg!(windows) { "Scripts" } else { "bin" });
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(old.join("pyvenv.cfg"), "home = C:\\Python39\n").unwrap();
+        std::fs::write(old.join("pyvenv.cfg"), "home = C:\\nonexistent\\Python39\n").unwrap();
         exe(&bin, "python");
-        let gone = fake(|_| ProbeOutcome::Exited { code: Some(103), output: "No Python at '\"C:\\Python39\\python.exe'".into() });
+        let gone = fake(|_| ProbeOutcome::Exited { code: Some(103), output: "No Python at '\"C:\\nonexistent\\Python39\\python.exe'".into() });
         let nf = resolve_with(&at(&old), &lookup(&[], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
-        assert!(nf.message.ends_with(&format!("; make the venv again, {python} -m venv --clear {}, and install its packages again", old.display())), "{}", nf.message);
+        let again = format!("make the venv again {python} -m venv --clear {}, and install its packages again", old.display());
+        // Round 22 (0): on Windows its home names that Python, by its path (elsewhere C:\... is no
+        // absolute path, so the launcher's words stay).
+        let want = if cfg!(windows) {
+            format!(": the Python this venv was made from, C:\\nonexistent\\Python39\\python.exe, isn't there any more: put it back, or {again}")
+        } else {
+            format!("; {again}")
+        };
+        assert!(nf.message.ends_with(&want), "{}", nf.message);
     }
 
     #[test]
@@ -2714,7 +2907,7 @@ mod tests {
             let want = if cfg!(windows) {
                 let new = d.join(".venv-win");
                 format!(
-                    "[python] venv '{}' was made on {other}: keep it, make one for this system beside it, py -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv ($env:V2_ENGINE_PY = \"{}\"), or run V2 on that system",
+                    "[python] venv '{}' was made on {other}: keep it, make one for this system beside it with the Python you want, its python.exe -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv ($env:V2_ENGINE_PY = \"{}\"), or run V2 on that system",
                     v.display(),
                     crate::cli::shell_word(&new.display().to_string()),
                     new.join("Scripts").join("python.exe").display()
@@ -2722,7 +2915,7 @@ mod tests {
             } else {
                 let new = d.join(if cfg!(target_os = "macos") { ".venv-macos" } else { ".venv-linux" });
                 format!(
-                    "[python] venv '{}' was made on {other}: keep it, make one for this system beside it, python3 -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv (export V2_ENGINE_PY={}), or run V2 on that system",
+                    "[python] venv '{}' was made on {other}: keep it, make one for this system beside it with the Python you want, its python3 -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv (export V2_ENGINE_PY={}), or run V2 on that system",
                     v.display(),
                     crate::cli::shell_word(&new.display().to_string()),
                     crate::cli::shell_word(&new.join("bin").join("python").display().to_string())
@@ -3234,5 +3427,153 @@ mod tests {
         let p = fake(|_| says("Python 3.12.1"));
         let e = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap();
         assert_eq!(e.argv, [python.into_os_string()]);
+    }
+
+    #[test]
+    fn a_long_line_a_program_printed_keeps_its_end() {
+        // Round 22 (0): Windows' launcher names the python.exe it misses at the end of a long
+        // line; cut at 160 characters with no mark, the folder that mattered was lost. Its middle
+        // goes, marked with …, never its end: in a skip reason, in "(it printed: …)", and in
+        // doctor's start check.
+        assert_eq!(clip_middle("short", 160), "short");
+        assert_eq!(clip_middle(&"a".repeat(160), 160), "a".repeat(160));
+        let line = format!("No Python at '\"C:\\Users\\me\\{}\\py312nuget\\tools\\python.exe'", "a".repeat(200));
+        let cut = clip_middle(&line, 160);
+        assert_eq!(cut.chars().count(), 160);
+        assert!(cut.starts_with("No Python at '\"C:\\Users\\me\\aaa") && cut.ends_with("aaa\\py312nuget\\tools\\python.exe'") && cut.contains("a…a"), "{cut}");
+        let py = spec("py");
+        let j = judge(&py, false, &ProbeOutcome::Exited { code: Some(103), output: format!("{line}\r\n") }, None);
+        let reason = j.reason().unwrap_or_default().to_string();
+        assert!(reason.starts_with("version probe failed (exit code 103): No Python at '\"C:\\Users\\me\\") && reason.ends_with("\\py312nuget\\tools\\python.exe'") && reason.contains('…'), "{reason}");
+        let js = spec("js");
+        let j = judge(&js, false, &says(&format!("{}/bin/npm-cli.js", "x".repeat(100))), None);
+        let reason = j.reason().unwrap_or_default();
+        assert!(reason.starts_with("no Node.js version in its --version output (it printed: xxx") && reason.ends_with("x/bin/npm-cli.js)") && reason.contains('…'), "{reason}");
+        let p = fake(|_| ProbeOutcome::Exited { code: Some(1), output: format!("Fatal Python error: init_fs_encoding: {}\\Lib\\encodings missing\n", "b".repeat(200)) });
+        let failed = start_failure(&p, &py, &[OsString::from("python")]).unwrap_or_default();
+        assert!(failed.ends_with("bbb\\Lib\\encodings missing") && failed.contains('…') && failed.contains("(exit code 1): Fatal Python error: init_fs_encoding: bbb"), "{failed}");
+    }
+
+    #[test]
+    fn a_venv_whose_python_was_moved_names_that_python() {
+        // Round 22 (0): a venv made from a portable Python whose folder was then renamed: its
+        // Scripts\python.exe, a copied launcher, says No Python at '…' (exit 103). The message
+        // names the Python its pyvenv.cfg's home names, and makes the venv again with py only when
+        // PATH has py (python3 elsewhere), else with the Python the user wants; with the Python it
+        // was made from while that is there, after & on Windows when quoted.
+        let d = temp("moved");
+        let home = d.join("portable").join("py312nuget").join("tools");
+        let (venv, _) = fake_venv(&d, ".venv", &format!("home = {}\nversion = 3.12.10\n", home.display()));
+        let base = home.join(if cfg!(windows) { "python.exe" } else { "python3" });
+        let said = format!("No Python at '\"{}'", base.display());
+        let gone = fake(move |_| ProbeOutcome::Exited { code: Some(103), output: format!("{said}\n") });
+        let head = format!(
+            "engine 'py' [python] venv '{}' (set by C:/proj/v2.toml) is not usable: the Python this venv was made from, {}, isn't there any more: put it back, or ",
+            venv.display(),
+            base.display()
+        );
+        let exe_name = if cfg!(windows) { "python.exe" } else { "python3" };
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("{head}make the venv again with the Python you want, its {exe_name} -m venv --clear {}, and install its packages again", venv.display()));
+        assert_eq!((nf.status, nf.from.as_deref()), (Status::Broken, Some("venv")));
+        let tools = d.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let launcher = if cfg!(windows) { "py" } else { "python3" };
+        exe(&tools, launcher);
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[&tools], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("{head}make the venv again, {launcher} -m venv --clear {}, and install its packages again", venv.display()));
+        // Put back, in a folder with a space: that Python makes it again (its probe failing for
+        // another reason here), pasteable.
+        let spaced = d.join("my python");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let back = exe(&spaced, if cfg!(windows) { "python" } else { "python3" });
+        std::fs::write(venv.join("pyvenv.cfg"), format!("home = {}\nversion = 3.12.10\n", spaced.display())).unwrap();
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[&tools], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
+        let pasted = if cfg!(windows) { format!("& \"{}\"", back.display()) } else { format!("\"{}\"", back.display()) };
+        assert!(nf.message.ends_with(&format!("; make the venv again, {pasted} -m venv --clear {}, and install its packages again", venv.display())), "{}", nf.message);
+        // A venv with no home line: the launcher's own words, as before.
+        std::fs::write(venv.join("pyvenv.cfg"), "version = 3.12.10\n").unwrap();
+        let nf = resolve_with(&venv_config(&venv), &lookup(&[&tools], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.contains("is not usable: version probe failed (exit code 103): No Python at '") && !nf.message.contains("isn't there any more"), "{}", nf.message);
+    }
+
+    #[test]
+    fn the_embeddable_package_is_known_by_its_pth_file() {
+        // Round 22 (1): python.org's embeddable zip has a pythonXY._pth beside python.exe.
+        let d = temp("embeddable");
+        let py = exe(&d, "python");
+        assert_eq!(embeddable(&py, None), None);
+        std::fs::write(d.join("python313.zip"), "").unwrap();
+        assert_eq!(embeddable(&py, None), None, "the zip of the standard library alone");
+        std::fs::write(d.join("python313._pth"), "python313.zip\n.\n").unwrap();
+        assert_eq!(embeddable(&py, None).as_deref(), Some("python313._pth"));
+        // With the probed version, only that file is looked at.
+        assert_eq!(embeddable(&py, Some(Version(3, 13, 9))).as_deref(), Some("python313._pth"));
+        assert_eq!(embeddable(&py, Some(Version(3, 12, 10))), None);
+    }
+
+    #[test]
+    fn an_embeddable_python_named_as_the_venv_gets_no_venv_command() {
+        // Round 22 (1.1): `[python] venv` naming Python's embeddable package, which has no venv
+        // module: only "name its python instead". Another installation's -m venv command gets &
+        // in front on Windows when quoted (PowerShell rejects "C:\x y\python.exe" -m venv).
+        let d = temp("embed venv");
+        let p = fake(|_| says("Python 3.13.9"));
+        let root = d.join("py313embed");
+        let bin = if cfg!(windows) { root.clone() } else { root.join("bin") };
+        std::fs::create_dir_all(&bin).unwrap();
+        let py = exe(&bin, if cfg!(windows) { "python" } else { "python3" });
+        std::fs::write(bin.join("python313._pth"), "python313.zip\n.\n").unwrap();
+        let command = if cfg!(windows) { format!("[engines.py] command = ['{}']", py.display()) } else { format!("[engines.py] command = [\"{}\"]", py.display()) };
+        let head = format!("[python] venv '{}' is a Python installation, not a virtual environment: name its python instead, {command}", root.display());
+        let nf = resolve_with(&venv_config(&root), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, head);
+        std::fs::remove_file(bin.join("python313._pth")).unwrap();
+        let nf = resolve_with(&venv_config(&root), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        let pasted = if cfg!(windows) { format!("& \"{}\"", py.display()) } else { format!("\"{}\"", py.display()) };
+        assert_eq!(nf.message, format!("{head}, or make a virtual environment with it: {pasted} -m venv .venv"));
+    }
+
+    #[test]
+    fn npm_named_where_node_belongs_says_so() {
+        // Round 22 (5): V2_ENGINE_JS set to the Node zip's npm.cmd, beside its node.exe, prints
+        // npm's version: the message says that is npm and names that node.exe.
+        let d = temp("npmzip");
+        let npm = exe(&d, if cfg!(windows) { "npm.cmd" } else { "npm" });
+        let node = exe(&d, "node");
+        let p = fake(|_| says("10.9.9"));
+        let js = |program: &Path| {
+            let cfg = with_command("js", &[program.to_string_lossy().as_ref()], ConfigSource::Env("V2_ENGINE_JS".into()));
+            resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "js").unwrap_err().message
+        };
+        let exe_name = if cfg!(windows) { "node.exe" } else { "node" };
+        let head = |program: &Path| format!("engine 'js' command '{}' (set by V2_ENGINE_JS) is not usable: no Node.js version in its --version output (it printed: 10.9.9)", program.display());
+        assert_eq!(js(&npm), format!("{}; that is npm, not Node.js: point it at {exe_name} in the same folder ({})", head(&npm), node.display()));
+        // Another program beside node.exe (yarn.cmd): named by its own name.
+        let yarn = exe(&d, if cfg!(windows) { "yarn.cmd" } else { "yarn" });
+        assert_eq!(js(&yarn), format!("{}; that is yarn, not Node.js: point it at {exe_name} in the same folder ({})", head(&yarn), node.display()));
+        // npx with no node beside it (npm's global folder): Node.js's program, by name.
+        let global = temp("npmglobal");
+        let npx = exe(&global, if cfg!(windows) { "npx.cmd" } else { "npx" });
+        assert_eq!(js(&npx), format!("{}; that is npx, not Node.js: point it at Node.js's {exe_name}", head(&npx)));
+        // Another program alone: nothing added.
+        let other = exe(&global, "python3");
+        assert_eq!(js(&other), head(&other));
+    }
+
+    #[test]
+    fn v2_engine_py_over_a_projects_venv_is_named() {
+        // Round 22 (4): V2_ENGINE_PY, left set, wins over the project's [python] venv (18.3):
+        // doctor and the ImportError's hint say so, with how to unset it.
+        let venv = temp("unusedvenv").join(".venv");
+        let mut cfg = with_command("py", &["C:/py/python.exe"], ConfigSource::Env("V2_ENGINE_PY".into()));
+        assert_eq!(unused_venv(&cfg), None, "no venv");
+        cfg.python_venv = Some(Sourced { value: venv.clone(), from: project_source() });
+        let unset = if cfg!(windows) { "Remove-Item Env:V2_ENGINE_PY" } else { "unset V2_ENGINE_PY" };
+        let note = format!("V2_ENGINE_PY is set, so [python] venv '{}' (v2.toml) isn't used: to use it, {unset}", venv.display());
+        assert_eq!(unused_venv(&cfg), Some((venv.clone(), note)));
+        // No variable: the venv is used.
+        let cfg = Config { python_venv: Some(Sourced { value: venv, from: project_source() }), ..Config::default() };
+        assert_eq!(unused_venv(&cfg), None);
     }
 }
