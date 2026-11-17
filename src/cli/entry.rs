@@ -185,7 +185,7 @@ fn missing_message(file: &str, path: &Path, rest: &[&str], command: &str) -> Vec
         // A Mac's `größe` for `größe` as typed comes first: a did-you-mean would look the same.
         let hint = match (crate::runtime::module::unicode_twin(&parent, &name), did_you_mean(&name, folders.iter().map(String::as_str))) {
             (Some(twin), _) => format!("there is no folder {shown}: {twin}"),
-            (None, Some(close)) => format!("there is no folder {shown}: did you mean '{close}'?"),
+            (None, Some(close)) => noted(format!("there is no folder {shown}: did you mean '{close}'?"), close),
             (None, None) => format!("there is no folder {shown}"),
         };
         return vec![format!("cannot find '{file}'"), hint];

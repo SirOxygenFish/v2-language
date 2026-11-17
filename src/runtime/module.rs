@@ -796,6 +796,10 @@ mod tests {
         let want = cfg!(windows).then(|| r"\u{f03f} is how Windows shows the '?' of the Linux name 'q?.v2': rename it in WSL".to_string());
         assert_eq!(note, want);
         assert_eq!(stand_in_note("case/plain.v2"), None);
+        // The review of round 21: a Nerd Font icon of U+F000 to U+F0FF is no stand-in of WSL's.
+        assert_eq!(stand_in_note("\u{f023}lock.v2"), None);
+        let tab = cfg!(windows).then(|| r"\u{f009} is how Windows shows the '\t' of the Linux name 'a\tb.v2': rename it in WSL".to_string());
+        assert_eq!(stand_in_note("a\u{f009}b.v2"), tab);
     }
 
     /// A link to a folder: a junction on Windows (which needs no administrator), else a symlink.

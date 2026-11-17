@@ -665,8 +665,11 @@ A path that Windows would read as another is refused before anything is read or 
 file function, `exists` too: a name with a `:` (`notes 12:30.txt`, a hidden stream of `notes 12` to
 Windows), on a drive or a `\\server\share` path, with either slash; a name that ends in a dot or a space, which Windows drops
 (`remove_file("data.txt.")` would delete `data.txt`); and a device (a bare `CON` or `COM1`, and `NUL`
-in any folder of a drive; on a `\\server\share` path such a name is an ordinary file), where `read_file("CON")` would wait for typed input; when a file of such a name is there
+in any folder, a relative path's too; only in a path written as `\\server\share\…` is such a name an ordinary file), where `read_file("CON")` would wait for typed input; when a file of such a name is there
 (WSL and Macs make them), the hint shows its full path with `\\?\` in front, which reaches it.
+In a path that starts with `\\?\` (a script in a folder whose name ends in a dot, run by its `\\?\`
+path, has such a `script_dir()`), the file functions and `exec` read `/` as `\` and take out `.` and
+`..`, which Windows doesn't do there, so `read_file(f"${script_dir()}/data.csv")` works.
 WSL shows a Linux name with a character Windows names can't hold (`mod:x.v2`) to Windows with a
 stand-in for it (U+F03A for `:`), which V2 prints as `\u{f03a}`: a path with the stand-in reaches the
 file (`read_file("mod\u{f03a}x.v2")`, an import, the script), and the hint for the name as Linux
@@ -675,7 +678,8 @@ On Windows a drive that isn't there (an unplugged USB drive) is said as such, `t
 and so is a network drive or share that can't be reached; a write to a read-only file says how to make it
 writable (`attrib -r`; `chmod u+w` on Linux and macOS); and `/tmp`, Linux's and macOS's temp folder,
 gets `getenv("TEMP")` where the drive has no `\tmp` folder (`make_dir("/tmp/x")` is refused there, as it would make `C:\tmp`, which
-every user can write to; an existing `C:\tmp` is used as any folder is).
+every user can write to; an existing `C:\tmp` is used as any folder is); `make_dir` of another Linux
+path whose top folder the drive doesn't have (`/root/out`, `/home/me/x`) is refused the same way.
 Paths are taken as written: `~`, `%USERPROFILE%` and `$HOME` are a shell's, so a path whose first part is one is an
 `IOError` in every file function, `exists` too (`cannot read '~/notes.txt': V2 doesn't expand ~
 in paths`, `./~` for a folder really named so), and on Linux and macOS so is another user's home

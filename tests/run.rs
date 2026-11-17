@@ -4437,6 +4437,7 @@ fn names_wsl_made_with_stand_ins_are_offered_escaped() {
         ("q\u{f03f}.v2", "func who() { return \"q\" }\n"),
         ("imp.v2", "import \"./q?.v2\" as m\n"),
         ("ok.v2", "import \"./q\\u{f03f}.v2\" as m\nprint(m.who(), list_dir(\".\").filter(func(n) => n.starts_with(\"q\")))\n"),
+        ("odd\u{f03a}dir/main.v2", "print(1)\n"),
     ];
     let (code, stdout, stderr, home) = run_with_files(&files, &["imp.v2"]);
     let message = "ImportError: cannot find module './q?.v2' (looked for q?.v2) — did you mean './q\\u{f03f}.v2'?";
@@ -4452,6 +4453,44 @@ fn names_wsl_made_with_stand_ins_are_offered_escaped() {
     let (code, _, stderr) = run_in_home(&home.0, &["zzzzzz.v2"], &[]);
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.ends_with(&format!("\nthe .v2 files there: imp.v2, ok.v2, q\\u{{f03f}}.v2; {note}\n")), "{stderr}");
+    // The review of round 21: the did-you-mean of a folder on the way that isn't there too.
+    let (code, _, stderr) = run_in_home(&home.0, &[r"odd-dir\main.v2"], &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    let colon = "\\u{f03a} is how Windows shows the ':' of the Linux name 'odd:dir': rename it in WSL";
+    assert!(stderr.starts_with("v2: cannot find 'odd-dir\\main.v2'\nthere is no folder "), "{stderr}");
+    assert!(stderr.ends_with(&format!("odd-dir: did you mean 'odd\\u{{f03a}}dir'? {colon}\n")), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_script_run_by_its_verbatim_path_reaches_the_files_beside_it() {
+    // The review of round 21 (DOCS 3.11, INTERNALS 2.1): a script in a folder whose name ends in a
+    // dot, run by its \\?\ path as the refusal of `v2 dots./sd.v2` says, has a \\?\ script_dir(),
+    // where Windows reads no / and no ..: read_file(f"${script_dir()}/data.csv") said "The
+    // filename, directory name, or volume label syntax is incorrect". The file builtins and exec
+    // read a \\?\ path's / as \ and take out its . and .. parts.
+    let home = TempHome::new();
+    let v = |name: &str| format!(r"\\?\{}\{name}", home.0.display());
+    std::fs::create_dir(v("dots.")).unwrap();
+    std::fs::write(v(r"dots.\data.csv"), "a,b").unwrap();
+    std::fs::write(home.0.join("top.txt"), "top").unwrap();
+    let exe = v2_literal(&format!(r"\\?\{}/v2.exe", Path::new(BIN).parent().unwrap().display()));
+    let src = format!(
+        "let d = script_dir()\nprint(d.starts_with(\"\\\\\\\\?\\\\\"), read_file(f\"${{d}}/data.csv\"), exists(f\"${{d}}/data.csv\"))\n\
+         print(read_file(f\"${{d}}/./../top.txt\"), exists(f\"${{d}}/../top.txt\"))\nwrite_file(f\"${{d}}/out.txt\", \"w\")\nmake_dir(f\"${{d}}/sub/deeper\")\n\
+         print(list_dir(f\"${{d}}/\"), list_dir(f\"${{d}}/sub\"))\nremove_file(f\"${{d}}/out.txt\")\nprint(exists(f\"${{d}}/out.txt\"))\n\
+         let r = exec([{exe}, \"--version\"])\nprint(r.code, r.stdout.trim())\n"
+    );
+    std::fs::write(v(r"dots.\sd.v2"), src).unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &[r"dots.\sd.v2"], &[]);
+    let start = r"one of that name is there (WSL and Macs can make one): run it by its full path with \\?\ in front: v2 ";
+    let path = stderr.lines().nth(1).and_then(|l| l.strip_prefix(start)).map(|p| p.trim_matches('"').to_string()).unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(code, Some(2), "{stderr}");
+    let (code, stdout, stderr) = run_in_home(&home.0, &[&path], &[]);
+    let version = format!("0 v2 {} (VEP/1)", env!("CARGO_PKG_VERSION"));
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["true a,b true", "top true", "[\"data.csv\", \"out.txt\", \"sd.v2\", \"sub\"] [\"deeper\"]", "false", &version], "{stderr}");
+    assert_eq!(code, Some(0), "{stderr}");
+    std::fs::remove_dir_all(v("dots.")).unwrap();
 }
 
 #[cfg(windows)]
@@ -4553,12 +4592,15 @@ fn wsl_and_linux_paths_get_the_windows_way() {
     std::fs::write(home.0.join("data.txt"), "here").unwrap();
     std::fs::write(home.0.join("x.v2"), "print(\"x ran\")\n").unwrap();
     let q = |s: &str| serde_json::to_string(s).unwrap();
-    // make_dir only once the hint shows the path is read as WSL's, so a broken build makes nothing.
+    // make_dir only once the hint shows the path is read as WSL's, or a probe that can make
+    // nothing was refused (below), so a broken build makes nothing.
     let src = format!(
         "func hint(f) {{\n    try {{\n        f()\n        print(\"no error\")\n    }} catch (e) {{\n        print(e.hint)\n    }}\n}}\n\
          hint(func() => read_file({md}))\nhint(func() => exec([{mp}]))\nhint(func() => read_file(\"/root/proj/main.v2\"))\n\
          hint(func() => write_file(\"/home/me/x.txt\", \"x\"))\nhint(func() => exec([\"/usr/bin/python3\", \"x.py\"]))\nhint(func() => exec([\"ls\", \"-la\"]))\n\
-         let h = null\ntry {{\n    read_file({mn})\n}} catch (e) {{\n    h = e.hint\n}}\nif h != null && \"WSL's\" in h {{\n    hint(func() => make_dir({mn}))\n}}\n",
+         let h = null\ntry {{\n    read_file({mn})\n}} catch (e) {{\n    h = e.hint\n}}\nif h != null && \"WSL's\" in h {{\n    hint(func() => make_dir({mn}))\n}}\n\
+         let m = null\ntry {{\n    make_dir(\"/root/v2\\u{{0}}probe\")\n}} catch (e) {{\n    m = e.message\n}}\nprint(m)\n\
+         if m != null && \"top of the drive\" in m {{\n    hint(func() => make_dir(\"/root/proj/out\"))\n}}\n",
         md = q(&format!("{mnt}/data.txt")),
         mp = q(&format!("{mnt}/prog.exe")),
         mn = q(&format!("{mnt}/new/dir")),
@@ -4578,6 +4620,11 @@ fn wsl_and_linux_paths_get_the_windows_way() {
         linux.into(),
         r#"run Linux programs with exec(["wsl.exe", "-e", "ls", "-la"])"#.into(),
         spelling("new/dir"),
+        // The review of round 21: make_dir would make \root at the top of the drive. A NUL in the
+        // path stops create_dir_all before it makes anything, so the real make_dir runs only once
+        // this one was refused.
+        r"cannot create '/root/v2\u{0}probe': on Windows that makes \root at the top of the drive, a folder other users can write to".into(),
+        linux.into(),
     ];
     assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stdout}");
     assert!(tops.iter().all(|t| !t.exists()), "nothing at the top of the drive");
