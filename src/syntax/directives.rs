@@ -379,16 +379,27 @@ impl<'a> DirParser<'a> {
                         (kind, n)
                     }
                     other => {
-                        // `@export { f， g }`: a space, a zero-width character, a quote or an input
-                        // method's form in the list is its slip, with its hint (3.2). Any other
-                        // character, or one outside the list (a docstring's `@export – marks it`),
-                        // gets the @@export one: the line may be the block's own text.
-                        let slip = depth > 0
-                            && matches!(other, '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200D}' | '\u{202F}' | '\u{205F}' | '\u{2060}' | '\u{3000}' | '\u{FEFF}' | '\u{2018}'..='\u{201F}' | '\u{300C}'..='\u{300F}' | '\u{FF01}'..='\u{FF5E}')
-                            && !matches!(other, '\u{FF40}' | '\u{FF5E}');
+                        // `@export { f， g }`: once the directive's `{` is read, a space, a
+                        // zero-width character or a quote is a slip, with its hint (3.2), and so
+                        // is an input method's form whose ASCII fits where it stands; `；` in the
+                        // list gets the comma. Any other character, or one before the `{` (a
+                        // docstring's `@export – marks it`), gets the @@export one: the line may
+                        // be the block's own text.
+                        let opened = depth > 0 || toks.iter().any(|t| t.kind == DK::LBrace);
+                        let after = &rest[len..];
                         let (shown, hint) = crate::syntax::lexer::shown_char(other);
+                        let hint = match other {
+                            '\u{FF1B}' if depth > 0 => Some("separate names with a comma: ,".to_string()),
+                            // `@export ｛f， g｝`: a brace block's braces are ASCII ones, so both go.
+                            '\u{FF5B}' if toks.len() == 1 && after.contains('\u{FF5D}') => Some("type { and } with the input method off".to_string()),
+                            '\u{FF01}'..='\u{FF5E}' => hint.filter(|_| char::from_u32(other as u32 - 0xFEE0).is_some_and(|ascii| fits(ascii, &toks, depth, after))),
+                            '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200D}' | '\u{202F}' | '\u{205F}' | '\u{2060}' | '\u{3000}' | '\u{FEFF}' | '\u{2018}'..='\u{201F}' | '\u{300C}'..='\u{300F}' => {
+                                hint.filter(|_| opened)
+                            }
+                            _ => None,
+                        };
                         let d = Diag::new(format!("unexpected character {shown} in a directive"), span(col, col + len));
-                        let d = match hint.filter(|_| slip) {
+                        let d = match hint {
                             Some(h) => d.hint(h),
                             None => d,
                         };
@@ -656,6 +667,29 @@ impl<'a> DirParser<'a> {
             DK::Name(n) => Ok(Name::new(n, t.span)),
             other => Err(Diag::new(format!("expected {what}, found {}", describe(&other)), t.span)),
         }
+    }
+}
+
+/// Whether `ascii`, an input method's form typed with the method off (3.2), fits where the
+/// directive's lexer stopped, after `toks`, `depth` braces deep, with `after` left on the line:
+/// so typing it gets the directive further. In the list a name's `_`, a quote, `,`, `*` and `}`;
+/// the list's `{` right after the word; after an @import's list `from`'s `@`, then a selector's
+/// `.`, quotes and `_`; `#` where the comment leaves the directive whole.
+fn fits(ascii: char, toks: &[DTok], depth: i32, after: &str) -> bool {
+    let last = toks.last().map(|t| &t.kind);
+    let from = |k: &DK| matches!(k, DK::Kw(w) if &**w == "from");
+    let selector = depth <= 0 && toks.first().is_some_and(|t| t.kind == DK::Import) && toks.iter().any(|t| from(&t.kind));
+    let segment = matches!(last, Some(DK::Name(_) | DK::At(_) | DK::Str(_)));
+    match ascii {
+        '{' => toks.len() == 1,
+        ',' | '*' | '}' => depth > 0,
+        '"' | '\'' | '_' => depth > 0 || selector && (last.is_some_and(from) || last == Some(&DK::Dot)),
+        '@' => selector && last.is_some_and(from),
+        '.' => selector && segment,
+        // In a list that goes on below, after an @export's list, after an @import's selector.
+        '#' if depth > 0 => !after.contains(['}', '\u{FF5D}']),
+        '#' => toks.iter().any(|t| t.kind == DK::RBrace) && (toks.first().is_some_and(|t| t.kind == DK::Export) || selector && segment),
+        _ => false,
     }
 }
 
@@ -1068,6 +1102,56 @@ mod tests {
         for c in ['\u{2013}', '\u{D7}', '\u{F7}', '\u{FF40}', '\u{FF5E}'] {
             assert_eq!(both(&format!("@py {{\n    @export {{ f{c} }}\n    def f(): pass\n}}")).1, export, "{c}");
         }
+        // Round 20d: a slip after the list is one too (`from　@py`); an input method's form only
+        // where its ASCII fits, and `；` in a list gets the comma. Each hint, followed, parses.
+        let in_js = |line: &str| format!("@js {{\n  {line}\n}}");
+        let in_py = |line: &str| format!("@py {{\n    def f(): pass\n    def g(): pass\n    def _g(): pass\n    {line}\n}}");
+        let in_fence = |line: &str| format!("@py ```\n    def f(): pass\n    {line}\n```\n");
+        let space = "type a plain space instead";
+        let input = |c: char| format!("type {c} with the input method off");
+        for (src, said, followed) in [
+            (in_js("@import { f }\u{3000}from @py"), space.to_string(), in_js("@import { f } from @py")),
+            (in_js("@import { f } from\u{3000}@py"), space.to_string(), in_js("@import { f } from @py")),
+            (in_js("@import { f } from\u{A0}@py"), space.to_string(), in_js("@import { f } from @py")),
+            (in_js("@import { f } from \u{FF20}py"), input('@'), in_js("@import { f } from @py")),
+            (in_js("@import { f } from @py\u{200B}"), "delete it".to_string(), in_js("@import { f } from @py")),
+            (in_js("@import { join } from py.\u{201C}os.path\u{201D}"), "use a straight quote: \" or '".to_string(), in_js("@import { join } from py.\"os.path\"")),
+            (in_js("@import { join } from py\u{FF0E}os.path"), input('.'), in_js("@import { join } from py.os.path")),
+            (in_js("@import { f } from @py \u{FF03} the function"), input('#'), in_js("@import { f } from @py # the function")),
+            (in_py("@export { f } \u{FF03} x"), input('#'), in_py("@export { f } # x")),
+            (in_py("@export {\n        f, \u{FF03} the function\n        g\n    }"), input('#'), in_py("@export {\n        f, # the function\n        g\n    }")),
+            (in_py("@export { f\u{FF1B} g }"), "separate names with a comma: ,".to_string(), in_py("@export { f, g }")),
+            (in_py("@export { f, \u{FF3F}g }"), input('_'), in_py("@export { f, _g }")),
+            (in_py("@export { f\u{FF0C} g }"), input(','), in_py("@export { f, g }")),
+            (in_py("@export {f\u{FF0C} g}"), input(','), in_py("@export {f, g}")),
+            (in_fence("@export { \u{FF02}f\" }"), input('"'), in_fence("@export { \"f\" }")),
+            (in_py("@export { \u{FF0A} }"), input('*'), in_py("@export { * }")),
+            // A brace block's own braces are ASCII ones, so the list's two go together; a fence
+            // doesn't count them.
+            (in_py("@export \u{FF5B}f\u{FF0C} g\u{FF5D}"), "type { and } with the input method off".to_string(), in_py("@export {f\u{FF0C} g}")),
+            (in_fence("@export \u{FF5B} f }"), input('{'), in_fence("@export { f }")),
+            (in_fence("@export { f \u{FF5D}"), input('}'), in_fence("@export { f }")),
+        ] {
+            assert_eq!(both(&src).1, said, "{src:?}");
+            if let Err(e) = run(&followed) {
+                assert_eq!(said, "type { and } with the input method off", "{followed:?}: {e}");
+            }
+        }
+        // A form whose ASCII doesn't fit where it stands (a `(`, a `.` or a digit in the list, a
+        // `#` that would hide the `}`), and a slip before the `{`: the @@export hint.
+        for src in [
+            in_py("@export { f\u{FF08}\u{FF09} }"),
+            in_py("@export { f\u{FF0E}g }"),
+            in_py("@export { f, \u{FF11} }"),
+            in_py("@export { f \u{FF03} x }"),
+            in_py("@export { f } \u{FF20}py"),
+            in_py("@export { f } \u{FF1B}"),
+            in_py("@export \u{3000}{ f }"),
+        ] {
+            assert_eq!(both(&src).1, export, "{src:?}");
+        }
+        assert_eq!(both(&in_js("@import { f } \u{FF20}py")).1, hint);
+        assert_eq!(both(&in_js("@import { f } from py.\u{FF03}")).1, hint);
     }
 
     #[test]

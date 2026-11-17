@@ -599,10 +599,10 @@ fn bare_key_hint(text: &str, at: usize, message: &str) -> Option<String> {
         let line = text[..start].lines().rev().map(str::trim).find(|l| l.starts_with('['))?;
         Some(line.trim_start_matches('[').split(']').next()?.split_whitespace().collect::<String>())
     };
-    // What follows the key in its `[…]` (`[ëngines.py]`: `.py`) stays in the suggestion, its
-    // letters folded too (`.pÿ`: `.py`); one still not ASCII then gets none.
+    // What follows the key in its `[…]` (`[ëngines.py]`: `.py`) stays in the suggestion, folded
+    // too (`.pÿ`, `.PY`: `.py`); one still not ASCII then gets none.
     let rest: String = text[hi..].lines().next().unwrap_or_default().split(']').next().unwrap_or_default().split_whitespace().collect();
-    let rest: String = rest.chars().map(|c| if c.is_ascii() { c.to_string() } else { folded_key(&c.to_string()) }).collect();
+    let rest = folded_key(&rest);
     // The suggestion for a known name, given what follows the key.
     type Near = fn(&str, &str) -> String;
     let (known, near): (&[&str], Near) = match head.as_str() {
@@ -624,8 +624,9 @@ fn bare_key_hint(text: &str, at: usize, message: &str) -> Option<String> {
     };
     let folded = folded_key(&text[lo..hi]);
     // `venv\u{200b}`: a did-you-mean of the key read without the character names what the user
-    // sees already; the character's own hint (`delete it`) says what to do.
-    let without = folded_key(&format!("{}{}", &text[lo..at], &text[at + c.len_utf8()..hi]));
+    // sees already; the character's own hint (`delete it`) says what to do. `Venv\u{200b}` keeps
+    // the did-you-mean: deleting it leaves the capital.
+    let without = format!("{}{}", &text[lo..at], &text[at + c.len_utf8()..hi]);
     match known.iter().copied().find(|k| *k == folded).or_else(|| did_you_mean(&folded, known.iter().copied())) {
         Some(k) => Some(match (near(k, &rest), instead) {
             (said, Some(h)) if k == without && said.starts_with("did you mean") => format!("{hint} — {h}"),
@@ -809,10 +810,20 @@ mod tests {
             ("[python]\nve\u{200b}nv = \".venv\"\n", "2:3", format!("U+200B (an invisible zero-width character) {rule} — delete it")),
             ("[engines\u{feff}.py]\n", "1:9", format!("U+FEFF (an invisible zero-width character) {rule} — delete it")),
             ("[engines.ts\u{200b}]\n", "1:12", format!("U+200B (an invisible zero-width character) {rule} — ts runs on the js engine: configure [engines.js]")),
+            // Round 20d: deleting it would leave the capital, so the name meant; an upper-case
+            // rest is folded as well.
+            ("[python]\nVenv\u{200b} = \".venv\"\n", "2:5", format!("U+200B (an invisible zero-width character) {rule} — did you mean 'venv'?")),
+            ("[Engines\u{200b}.py]\n", "1:9", format!("U+200B (an invisible zero-width character) {rule} — did you mean [engines.py]?")),
+            ("[ENG\u{130}NES.PY]\n", "1:5", format!("'\u{130}' (U+0130) {rule} — did you mean [engines.py]?")),
+            ("[ENG\u{130}NES.TS]\n", "1:5", format!("'\u{130}' (U+0130) {rule} — ts runs on the js engine: configure [engines.js]")),
         ];
         for (toml_text, at, hint) in cases {
             let e = project("bareascii", toml_text).unwrap_err().0;
             assert!(e.contains(&format!("v2.toml:{at}: config error: ")) && e.ends_with(&format!("\n  hint: {hint}")), "{toml_text:?}: {e}");
+        }
+        // What those hints name loads.
+        for followed in ["[python]\nvenv = \".venv\"\n", "[engines.py]\ncommand = [\"python3\"]\n", "[engines.js]\ncommand = [\"node\"]\n"] {
+            assert!(project("bareascii", followed).is_ok(), "{followed:?}");
         }
         assert_eq!(folded_key("\u{130}stanbul-\u{15f}\u{131}\u{11f}-\u{142}\u{f8}d\u{17a}-stra\u{df}e-e\u{301}"), "istanbul-sig-lodz-strasse-e");
     }
