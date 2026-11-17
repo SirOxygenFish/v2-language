@@ -284,8 +284,14 @@ fn batch_in_share(program: &Path, cwd: &Path) -> bool {
 /// What to do when the search passed over a batch file for `BATCH_IN_SHARE` (7.8, 19.2), in place
 /// of repairing the program, which is fine.
 pub fn batch_fix(id: &str, skipped: &[(PathBuf, String)]) -> Option<String> {
-    let (exe, var) = if id == "py" { ("python.exe", "V2_ENGINE_PY") } else { ("node.exe", "V2_ENGINE_JS") };
-    skipped.iter().any(|(_, why)| why == BATCH_IN_SHARE).then(|| format!("name the program itself ({exe}) with {var}, or run v2 from a folder on a drive"))
+    skipped.iter().any(|(_, why)| why == BATCH_IN_SHARE).then(|| program_itself(id))
+}
+
+/// Instead of a batch file in a `\\server\share` folder: the program it runs, by its full path (a
+/// bare `python.exe` would be looked for on PATH, which has only the shim), or a drive folder.
+fn program_itself(id: &str) -> String {
+    let named = if id == "py" { r"V2_ENGINE_PY=C:\…\python.exe (for pyenv-win, pyenv which python shows it)" } else { r"V2_ENGINE_JS=C:\…\node.exe" };
+    format!("name the program itself by its full path, as in {named}, or run v2 from a folder on a drive")
 }
 
 fn judge(spec: &EngineSpec, alias: bool, outcome: &ProbeOutcome, limit: Option<Duration>) -> Judged {
@@ -1090,13 +1096,13 @@ impl Resolver<'_> {
         let mut argv = vec![path.into_os_string()];
         argv.extend(command[1..].iter().map(OsString::from));
         if batch {
-            let exe = if &*spec.id == "py" { "python.exe" } else { "node.exe" };
             let message = format!(
-                "engine '{}' command '{}' (set by {}) runs in cmd.exe, which {}: name the program itself ({exe}), or run v2 from a folder on a drive",
+                "engine '{}' command '{}' (set by {}) runs in cmd.exe, which {}: {}",
                 spec.id,
                 shown_program(&argv[0].to_string_lossy()),
                 set_by(from),
-                cmd_cant_work()
+                cmd_cant_work(),
+                program_itself(&spec.id)
             );
             return Err(NotFound::broken(message, join(&argv), from));
         }
@@ -1532,6 +1538,11 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
     // Before the install line: NODE_OPTIONS, not Node.js, is the likely cause.
     if let Some(fix) = probe_fix(&spec.id, skipped, set) {
         m.push_str(&format!("\nfix: {fix}"));
+    }
+    // Only batch files passed over in a \\server\share folder: the program is installed, and the
+    // fix line says how to name it.
+    if !skipped.is_empty() && skipped.iter().all(|(_, why)| why == BATCH_IN_SHARE) {
+        return m;
     }
     let id = &spec.id;
     m.push_str(&format!("\ninstall: {}\nor set [engines.{id}] command in v2.toml, or V2_ENGINE_{}", install_hint(id), id.to_uppercase()));
@@ -2792,13 +2803,16 @@ mod tests {
         std::fs::write(&shim, "@echo off\r\n").unwrap();
         let p = fake(|_| says("Python 3.12.1"));
         let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-        for (id, exe) in [("py", "python.exe"), ("js", "node.exe")] {
+        // The second review of round 21: a bare python.exe would be looked for on PATH, which has
+        // only the shim: its full path.
+        let named = [("py", r"V2_ENGINE_PY=C:\…\python.exe (for pyenv-win, pyenv which python shows it)"), ("js", r"V2_ENGINE_JS=C:\…\node.exe")];
+        for (id, exe) in named {
             let cfg = with_command(id, &[&shim.display().to_string(), "-X"], ConfigSource::Env(format!("V2_ENGINE_{}", id.to_uppercase())));
             for share in [r"\\wsl.localhost\Ubuntu\home\ann\p", r"\\?\UNC\server\share\p"] {
                 let l = Lookup { cwd: PathBuf::from(share), ..lookup(&[], None) };
                 let nf = resolve_with(&cfg, &l, &p, &mut ProbeCache::off(), id).unwrap_err();
                 let want = format!(
-                    "engine '{id}' command '{}' (set by V2_ENGINE_{}) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself ({exe}), or run v2 from a folder on a drive",
+                    "engine '{id}' command '{}' (set by V2_ENGINE_{}) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself by its full path, as in {exe}, or run v2 from a folder on a drive",
                     shim.display(),
                     id.to_uppercase()
                 );
@@ -2837,9 +2851,16 @@ mod tests {
         let nf = resolve_with(&Config::default(), &l, &p, &mut ProbeCache::off(), "py").unwrap_err();
         assert_eq!(nf.status, Status::Broken);
         assert!(nf.message.starts_with("engine 'py' (Python) was found but doesn't run (see why below)\n"), "{}", nf.message);
-        let fix = "fix: name the program itself (python.exe) with V2_ENGINE_PY, or run v2 from a folder on a drive";
-        assert!(nf.message.contains(&format!("\nskipped: {} ({why})\n{fix}\ninstall: ", shim.display())), "{}", nf.message);
-        assert_eq!(batch_fix("js", &nf.skipped).as_deref(), Some("name the program itself (node.exe) with V2_ENGINE_JS, or run v2 from a folder on a drive"));
+        // The second review of round 21: by its full path (a bare python.exe is looked for on PATH,
+        // which has only the shim), and no install line, as Python is installed.
+        let fix = r"fix: name the program itself by its full path, as in V2_ENGINE_PY=C:\…\python.exe (for pyenv-win, pyenv which python shows it), or run v2 from a folder on a drive";
+        assert!(nf.message.ends_with(&format!("\nskipped: {} ({why})\n{fix}", shim.display())), "{}", nf.message);
+        assert_eq!(batch_fix("js", &nf.skipped).as_deref(), Some(r"name the program itself by its full path, as in V2_ENGINE_JS=C:\…\node.exe, or run v2 from a folder on a drive"));
+        // Another program that doesn't run: its install line stays.
+        let fails = fake(|p| if p.extension().is_some_and(|e| e == "exe") { ProbeOutcome::Exited { code: Some(1), output: String::new() } } else { says("Python 3.12.1") });
+        let l = Lookup { cwd: PathBuf::from(r"\\wsl.localhost\Ubuntu\home\ann\p"), ..lookup(&[&shims, &real], None) };
+        let nf = resolve_with(&Config::default(), &l, &fails, &mut ProbeCache::off(), "py").unwrap_err();
+        assert!(nf.message.contains(&format!("\n{fix}\ninstall: ")), "{}", nf.message);
         let e = resolve_with(&Config::default(), &lookup(&[&shims], None), &p, &mut ProbeCache::off(), "py").unwrap();
         assert_eq!(e.argv[0], shim.as_os_str());
     }
