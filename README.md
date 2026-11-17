@@ -386,7 +386,7 @@ More of V2, in short:
   or bytes after what `print` wrote. A program `exec` starts has no terminal, so it can't ask
   for a password (`sudo -n`, ssh keys and git's credential helpers don't need one) or show a
   full-screen program such as `vi`. What it starts stops when it ends: to leave a job running,
-  `exec(["sh", "-c", "setsid -f job > job.log 2>&1 < /dev/null"])` (Linux). Pass values to
+  `exec(["setsid", "-w", "sh", "-c", "job > job.log 2>&1 < /dev/null &"])` (Linux). Pass values to
   `sh -c` as arguments, not inside the command: `exec(["sh", "-c", "cd \"$1\" && make", "sh", dir])`.
 
 `v2 check FILE` checks a script's V2 syntax without running it. The
