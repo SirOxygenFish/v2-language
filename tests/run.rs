@@ -770,6 +770,38 @@ fn a_v2_tomls_iconv_line_names_the_file_it_is_about() {
     assert_eq!(run("other", "../proj/a.v2"), (Some(0), "ok\n".to_string(), String::new()));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pasted_path_keeps_what_sh_expands_in_double_quotes() {
+    // INTERNALS 19.1 (round 20): sh expands $, ` and \ in double quotes, so iconv's line for a
+    // project in the folder a$b converted /…/a/v2.toml. In single quotes it converts that file.
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("other")).unwrap();
+    let iconv = Command::new("iconv").args(["-f", "cp1254", "-t", "utf-8", "/dev/null"]).output();
+    let has_iconv = iconv.is_ok_and(|o| o.status.success());
+    for name in ["a$b", "x`y", "b\\c"] {
+        std::fs::create_dir_all(home.0.join(name)).unwrap();
+        let proj = std::fs::canonicalize(home.0.join(name)).unwrap();
+        std::fs::write(proj.join("v2.toml"), b"# \xc7a\xf0r\xfd\n").unwrap();
+        std::fs::write(proj.join("a.v2"), "print(\"ok\")\n").unwrap();
+        let script = format!("../{name}/a.v2");
+        let run = || v2_command(&home.0).env("LC_ALL", "tr_TR.UTF-8").arg(&script).current_dir(home.0.join("other")).stdin(Stdio::null()).output().unwrap();
+        let quoted = |file: &str| format!("'{}'", proj.join(file).display());
+        let (file, new) = (quoted("v2.toml"), quoted("new.toml"));
+        let line = format!("iconv -f cp1254 -t utf-8 {file} > {new} && mv {new} {file}");
+        let err = String::from_utf8_lossy(&run().stderr).into_owned();
+        assert!(err.ends_with(&format!(": save it as UTF-8, as in {line}, then check the text\n")), "{name}: {err}");
+        if !has_iconv {
+            continue; // no iconv with cp1254 here
+        }
+        let followed = Command::new("sh").arg("-c").arg(&line).current_dir(home.0.join("other")).output().unwrap();
+        assert!(followed.status.success(), "{name}: {}", String::from_utf8_lossy(&followed.stderr));
+        assert_eq!(std::fs::read_to_string(proj.join("v2.toml")).unwrap(), "# Çağrı\n", "{name}");
+        let out = run();
+        assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()), (Some(0), "ok\n".to_string()), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
 /// Run generated source in a fresh temp home; returns (exit code, stdout, stderr).
 fn run_generated(name: &str, src: &str) -> (Option<i32>, String, String) {
     let home = TempHome::new();

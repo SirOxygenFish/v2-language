@@ -3,4 +3,8 @@ ArityError null
 ArityError numbers are written without thousands commas: 1500 or 1_500 (a decimal one has a point: 1.5)
 ArityError numbers are written without thousands commas: 1500250 or 1_500_250
 ArityError decimal numbers use a point: write 0.500, not 0,500
+ArityError numbers are written without thousands commas: 1234567.89 or 1_234_567.89
+ArityError numbers are written without thousands commas: 1234567.89 or 1_234_567.89
+ArityError null
+1234567.89 1234567.89 1000000.5 1000000.5
 2

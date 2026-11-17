@@ -214,19 +214,19 @@ fn habit(toks: &[Token], at: Span, sm: &SourceMap) -> Option<String> {
     Some(hint)
 }
 
-/// The `,` at `toks[i]` between two int literals, with no space on either side (`19,99`): a
-/// decimal comma, or thousands (`1,500`, `1,500,250`: the whole run of them), and the hint for
-/// the number (2.4).
+/// The `,` at `toks[i]` between two number literals, with no space on either side (`19,99`): a
+/// decimal comma, or thousands (`1,500`, `1,500,250`, `1,234,567.89`: the whole run of them), and
+/// the hint for the number (2.4).
 fn decimal_comma(toks: &[Token], i: usize, sm: &SourceMap) -> Option<String> {
     let text = &sm.file(toks.get(i)?.span.file).text;
-    let digits = |t: &Token| match t.tok {
-        Tok::Int(_) => text.get(t.span.lo as usize..t.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_')),
+    let literal = |t: &Token| match t.tok {
+        Tok::Int(_) | Tok::Float(_) => text.get(t.span.lo as usize..t.span.hi as usize),
         _ => None,
     };
     // The `,` at `toks[k]` joins two such literals.
     let joins = |k: usize| match (k.checked_sub(1).and_then(|j| toks.get(j)), toks.get(k), toks.get(k + 1)) {
         (Some(a), Some(comma), Some(b)) => {
-            matches!(comma.tok, Tok::Op(Op::Comma)) && a.span.hi == comma.span.lo && comma.span.hi == b.span.lo && digits(a).is_some() && digits(b).is_some()
+            matches!(comma.tok, Tok::Op(Op::Comma)) && a.span.hi == comma.span.lo && comma.span.hi == b.span.lo && literal(a).is_some() && literal(b).is_some()
         }
         _ => false,
     };
@@ -240,7 +240,7 @@ fn decimal_comma(toks: &[Token], i: usize, sm: &SourceMap) -> Option<String> {
     while joins(last + 2) {
         last += 2;
     }
-    let groups: Vec<&str> = (first - 1..=last + 1).step_by(2).filter_map(|k| digits(&toks[k])).collect();
+    let groups: Vec<&str> = (first - 1..=last + 1).step_by(2).filter_map(|k| literal(&toks[k])).collect();
     decimal_comma_hint(&groups)
 }
 
@@ -2099,6 +2099,12 @@ extern "m" as m { double cos(double x); }
         assert_eq!(hint("let x = 1234,567"), point("1234,567"));
         assert_eq!(hint("let x = 0,500"), point("0,500"));
         assert_eq!(hint("let x = 1,5,2"), Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()));
+        // A float literal ends a run, thousands only; another run with one gets no number hint.
+        assert_eq!(hint("let total = 1,234,567.89"), thousands("1,234,567.89", ""));
+        assert_eq!(hint("let x = 1,234.5"), thousands("1,234.5", ""));
+        for no_number in ["let x = 19,99.5", "let x = 1,234.5,678", "let x = 1.5,234"] {
+            assert_eq!(hint(no_number), Some("V2 declares one name per let: let a = 1, then let b = 2 (or one list, let ab = [1, 2])".into()), "{no_number}");
+        }
         // With a space it is a list of values, and a tuple keeps its own hint.
         assert_eq!(hint("let x = 1\nif x > 2, 5 { print(1) }"), None);
         assert_eq!(hint("let p = (2,5)").as_deref(), Some("V2 has no tuples: write a list, as in [1, 2]"));

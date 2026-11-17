@@ -318,8 +318,12 @@ fn shown_folder(p: &Path) -> String {
 
 /// A word as the user would type it in a shell: in double quotes unless it holds only letters,
 /// digits and `._-+~\/:`, so a pasted `R&D\app.v2` or `it's` works in cmd, PowerShell and sh
-/// (19.1).
+/// (19.1). Off Windows, one with a `$`, `` ` ``, `"`, `\` or `!`, which sh (or bash's history)
+/// reads in double quotes too, goes in single quotes, a `'` in it as `'\''`.
 pub fn shell_word(s: &str) -> String {
+    if !cfg!(windows) && s.contains(['$', '`', '"', '\\', '!']) {
+        return format!("'{}'", s.replace('\'', r"'\''"));
+    }
     if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || "._-+~\\/:".contains(c)) {
         s.to_string()
     } else {
@@ -360,12 +364,24 @@ mod tests {
     #[test]
     fn suggested_commands_are_quoted_for_a_shell() {
         // 19.1: what cmd, PowerShell or sh would split or run (& ; ' and spaces) is quoted.
-        assert_eq!(shell_word(r"R&D\app.v2"), r#""R&D\app.v2""#);
+        assert_eq!(shell_word("R&D/app.v2"), "\"R&D/app.v2\"");
         assert_eq!(shell_word("semi;colon/app.v2"), "\"semi;colon/app.v2\"");
         assert_eq!(shell_word("it's/app.v2"), "\"it's/app.v2\"");
         assert_eq!(shell_word("sub dir/deep.v2"), "\"sub dir/deep.v2\"");
-        assert_eq!(shell_word("C:\\Users\\ME~1\\donn\u{e9}es\\app.v2"), "C:\\Users\\ME~1\\donn\u{e9}es\\app.v2");
         assert_eq!(shell_word("../lib/x-1.2+b.v2"), "../lib/x-1.2+b.v2");
+        if cfg!(windows) {
+            assert_eq!(shell_word(r"R&D\app.v2"), r#""R&D\app.v2""#);
+            assert_eq!(shell_word("C:\\Users\\ME~1\\donn\u{e9}es\\app.v2"), "C:\\Users\\ME~1\\donn\u{e9}es\\app.v2");
+            assert_eq!(shell_word("a$b/v2.toml"), "\"a$b/v2.toml\"");
+        } else {
+            // Round 20: sh reads $, `, " and \ in double quotes, and bash's history a !.
+            assert_eq!(shell_word("/w/a$b/v2.toml"), "'/w/a$b/v2.toml'");
+            assert_eq!(shell_word("/w/x`y/v2.toml"), "'/w/x`y/v2.toml'");
+            assert_eq!(shell_word("/w/b\\c/v2.toml"), "'/w/b\\c/v2.toml'");
+            assert_eq!(shell_word("/w/q\"r/v2.toml"), "'/w/q\"r/v2.toml'");
+            assert_eq!(shell_word("/w/wow!/v2.toml"), "'/w/wow!/v2.toml'");
+            assert_eq!(shell_word("/w/it's $5/v2.toml"), "'/w/it'\\''s $5/v2.toml'");
+        }
     }
 
     fn temp(name: &str) -> PathBuf {
