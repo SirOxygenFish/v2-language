@@ -29,3 +29,19 @@ try {
 } catch (e) {
     print(e.type + ": " + e.message)
 }
+// decode() and encode() are UTF-8 only: the hint says how a block does another encoding, for
+// bytes that aren't UTF-8 and for any argument (round 20).
+func hint(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        print("  hint: " + e.hint)
+    }
+}
+hint(func() => b"G\xfc\xdfe".decode())
+hint(func() => b"x".decode("latin-1"))
+hint(func() => b"x".decode(encoding: "latin-1"))
+hint(func() => b"x".decode(errors: "replace"))
+hint(func() => "ü".encode("cp1254"))
+hint(func() => "ü".encode(encoding: "cp1254"))

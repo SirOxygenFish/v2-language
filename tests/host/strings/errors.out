@@ -16,3 +16,15 @@ TypeError: bytes has no method 'len' — V2 writes len(x)
 TypeError: slice bounds must be int, got str
 TypeError: the :.2f format needs a number, got str
 TypeError: str is immutable
+ValueError: invalid UTF-8 at byte offset 1
+  hint: V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode("cp1254") }
+ArityError: bytes.decode() takes 0 positional arguments but 1 was given
+  hint: V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode("cp1254") }
+ArityError: bytes.decode() got an unexpected argument 'encoding'
+  hint: V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode("cp1254") }
+ArityError: bytes.decode() got an unexpected argument 'errors'
+  hint: V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode("cp1254") }
+ArityError: str.encode() takes 0 positional arguments but 1 was given
+  hint: V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode("cp1254") }
+ArityError: str.encode() got an unexpected argument 'encoding'
+  hint: V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode("cp1254") }

@@ -535,6 +535,27 @@ fn install_line(argv: &[std::ffi::OsString], name: &str) -> String {
     }
 }
 
+/// The package on PyPI that provides the module `name`, for the well-known ones named otherwise
+/// (13.5): `pip install yaml` finds nothing, and `pip install slugify` installs another,
+/// Python 2 package.
+fn pypi_name(name: &str) -> &str {
+    match name {
+        "yaml" => "PyYAML",
+        "PIL" => "Pillow",
+        "cv2" => "opencv-python",
+        "sklearn" => "scikit-learn",
+        "bs4" => "beautifulsoup4",
+        "slugify" => "python-slugify",
+        "dateutil" => "python-dateutil",
+        "docx" => "python-docx",
+        "dotenv" => "python-dotenv",
+        "jwt" => "PyJWT",
+        "serial" => "pyserial",
+        "Crypto" => "pycryptodome",
+        other => other,
+    }
+}
+
 /// `install_line` for a venv without pip whose Python has no ensurepip to add it: Debian and
 /// Ubuntu leave it out without python3-venv, and `python3 -m venv` then stops after making a venv
 /// without pip. That package, then the venv made again. `run`: its python, as pasted.
@@ -620,10 +641,12 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> 
                 ));
             }
         }
+        let package = pypi_name(&name);
         let install = match python {
-            Some(PipFor::Told(argv) | PipFor::OnPath(argv, _)) => format!("if '{name}' isn't misspelled, install it for the Python V2 uses{}", install_line(argv, &name)),
+            Some(PipFor::Told(argv) | PipFor::OnPath(argv, _)) => format!("if '{name}' isn't misspelled, install it for the Python V2 uses{}", install_line(argv, package)),
             // Not another Python's pip: the activated venv, which V2 couldn't use, is the one meant.
             Some(PipFor::Passed(_, problem)) => problem.clone(),
+            None if package != name => format!("if '{name}' isn't misspelled, install its package, {package}, with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps"),
             None => format!("if '{name}' isn't misspelled, install it with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps"),
         };
         // A virtual environment made in the project (the file's folder or up to three above it),
@@ -1984,6 +2007,37 @@ mod tests {
         assert_eq!(hint(&told(&[&venv_python])), format!("{head}, whose venv has no pip: {py} -m ensurepip, then {py} -m pip install tabulate"));
         std::fs::create_dir_all(site_packages.join("pip")).unwrap();
         assert_eq!(hint(&told(&[&venv_python])), format!("{head}: {py} -m pip install tabulate"));
+    }
+
+    #[test]
+    fn the_install_line_names_the_package_on_pypi() {
+        // Round 20 (L14): `pip install yaml` finds nothing; `pip install slugify` installs an
+        // unrelated Python 2 package. Every form of the line names the package.
+        let d = temp("pypi");
+        let told = |argv: &[&Path]| PipFor::Told(argv.iter().map(|p| p.as_os_str().to_os_string()).collect());
+        let hint = |module: &str, p: Option<&PipFor>| missing_package_hint(&format!("No module named '{module}'"), &site(&d), p).unwrap();
+        let python = d.join("python3");
+        assert_eq!(hint("yaml", Some(&told(&[&python]))), format!("if 'yaml' isn't misspelled, install it for the Python V2 uses: {} -m pip install PyYAML", python.display()));
+        assert!(hint("slugify", Some(&told(&[&python]))).ends_with(" -m pip install python-slugify"));
+        assert!(hint("PIL", Some(&told(&[&python]))).ends_with(" -m pip install Pillow"));
+        assert!(hint("Crypto", Some(&told(&[&python]))).ends_with(" -m pip install pycryptodome"));
+        assert_eq!(hint("cv2", Some(&told(&[&d.join("uv"), Path::new("run"), Path::new("python")]))), "if 'cv2' isn't misspelled, install it for the Python V2 uses: uv add opencv-python");
+        // A Python found on PATH: the package by name.
+        assert_eq!(
+            hint("bs4", None),
+            "if 'bs4' isn't misspelled, install its package, beautifulsoup4, with pip for the Python that v2 doctor shows; README.md, \"Python and npm packages\", has the steps"
+        );
+        // Others: the module's name, and no note.
+        assert!(hint("tabulate", Some(&told(&[&python]))).ends_with(" -m pip install tabulate"));
+        assert!(hint("tabulate", None).starts_with("if 'tabulate' isn't misspelled, install it with pip"));
+        // A venv uv made: uv pip install.
+        let venv = d.join(".venv");
+        let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "uv = 0.13.8\n").unwrap();
+        let venv_python = bin.join(if cfg!(windows) { "python.exe" } else { "python" });
+        let shown = crate::cli::shell_word(&venv.display().to_string());
+        assert!(hint("sklearn", Some(&told(&[&venv_python]))).ends_with(&format!(": uv pip install --python {shown} scikit-learn")));
     }
 
     #[test]
