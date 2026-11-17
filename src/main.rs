@@ -273,9 +273,12 @@ fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
     }
 }
 
-/// Flush the standard streams, then end the process with `code`.
+/// Flush the standard streams, then end the process with `code` (Windows: the consoles get their
+/// modes back, 6.5).
 fn exit(code: i32) -> ! {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
+    #[cfg(windows)]
+    engines::process::restore_console();
     process::exit(code)
 }

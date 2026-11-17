@@ -601,7 +601,8 @@ impl Interp {
             self.kill_session(s, DeadReason::Exited { exit: None, during: None, at: Some(at) });
             return Err(self.raise(depth_error(), at));
         }
-        let init = vep::init(0, &root);
+        // Where V2's output goes, as it is now: a resize later isn't passed on (9.9).
+        let init = vep::init(0, &root, [process::terminal_size(1), process::terminal_size(2)]);
         match self.exchange(s, init, startup, at) {
             Ok(_) => {
                 self.sessions[s].state = State::Ready;

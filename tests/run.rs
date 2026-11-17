@@ -2448,22 +2448,29 @@ try {
 /// Windows: put the child in its own process group, so Ctrl+Break can be sent to it alone. The
 /// event travels through a console this process shares with the child; a CI runner may start
 /// the tests without one, so allocate one then, keeping this process's own std handles.
+/// Windows: the test process has a console, which its children share: one made for it (its
+/// standard handles kept) when it has none.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    static CONSOLE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: plain Win32 calls; AllocConsole fails harmlessly when a console is attached.
+    CONSOLE.call_once(|| unsafe {
+        let kinds = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+        let saved = kinds.map(|k| GetStdHandle(k));
+        if AllocConsole() != 0 {
+            for (k, h) in kinds.into_iter().zip(saved) {
+                SetStdHandle(k, h);
+            }
+        }
+    });
+}
+
 fn interruptible(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Console::{AllocConsole, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-        static CONSOLE: std::sync::Once = std::sync::Once::new();
-        // SAFETY: plain Win32 calls; AllocConsole fails harmlessly when a console is attached.
-        CONSOLE.call_once(|| unsafe {
-            let kinds = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
-            let saved = kinds.map(|k| GetStdHandle(k));
-            if AllocConsole() != 0 {
-                for (k, h) in kinds.into_iter().zip(saved) {
-                    SetStdHandle(k, h);
-                }
-            }
-        });
+        attach_console();
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
@@ -2855,11 +2862,13 @@ struct Pty {
 
 #[cfg(unix)]
 impl Pty {
-    fn open() -> Pty {
+    /// A terminal of `columns` x `rows`.
+    fn open(columns: u16, rows: u16) -> Pty {
         use std::os::fd::FromRawFd;
         let (mut master, mut slave) = (-1, -1);
-        // SAFETY: openpty fills two descriptors; no name, settings or size is asked for.
-        let r = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        let mut size = libc::winsize { ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: openpty fills two descriptors; no name or settings are asked for.
+        let r = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::addr_of_mut!(size)) };
         assert_eq!(r, 0, "openpty: {}", std::io::Error::last_os_error());
         for fd in [master, slave] {
             // SAFETY: a plain fcntl on a descriptor this function owns: other tests' children don't
@@ -2931,7 +2940,7 @@ fn an_interrupt_gives_the_terminal_back() {
     for (what, src) in cases {
         let home = TempHome::new();
         std::fs::write(home.0.join("tty.v2"), src).unwrap();
-        let mut pty = Pty::open();
+        let mut pty = Pty::open(80, 24);
         let before = pty.flags();
         let mut cmd = v2_command(&home.0);
         cmd.arg("tty.v2").current_dir(&home.0);
@@ -2970,6 +2979,185 @@ fn an_interrupt_gives_the_terminal_back() {
 
 #[cfg(unix)]
 #[test]
+fn ctrl_c_leaves_a_pagers_terminal_mode_alone() {
+    // DOCS 19.1, INTERNALS 6.5 (round 22, the review of L5): in `v2 x.v2 | less` Ctrl+C reaches the
+    // whole pipeline, and the pager, still running, has the terminal in a mode of its own (no echo,
+    // no line input): v2, whose stdout is the pipe, leaves it as it is and shows no cursor. The
+    // pager here is a Python reader of v2's output that sets that mode once v2 has started.
+    if !needs("py", "ctrl_c_leaves_a_pagers_terminal_mode_alone") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("loop.v2"), "let i = 0\nwhile true {\n    print(i)\n    i += 1\n    sleep(0.1)\n}\n").unwrap();
+    let pager = r#"import os, signal, subprocess, sys, termios
+signal.signal(signal.SIGINT, lambda *a: None)  # as less, which handles Ctrl+C itself
+v2 = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE)
+v2.stdout.readline()  # v2 has started and seen the terminal as it was
+saved = termios.tcgetattr(0)
+raw = termios.tcgetattr(0)
+raw[3] &= ~(termios.ECHO | termios.ICANON)
+termios.tcsetattr(0, termios.TCSANOW, raw)
+os.write(1, b"ready\n")
+v2.stdout.read()
+rc = v2.wait()
+a = termios.tcgetattr(0)
+os.write(1, ("mode echo=%s icanon=%s v2=%s\n" % (bool(a[3] & termios.ECHO), bool(a[3] & termios.ICANON), rc)).encode())
+termios.tcsetattr(0, termios.TCSANOW, saved)
+"#;
+    std::fs::write(home.0.join("pager.py"), pager).unwrap();
+    let mut pty = Pty::open(80, 24);
+    let mut cmd = Command::new("python3");
+    cmd.args(["pager.py", BIN, "loop.v2"]).current_dir(&home.0).env("HOME", &home.0).env_remove("VIRTUAL_ENV");
+    pty.attach(&mut cmd);
+    let mut child = cmd.spawn().expect("start python3");
+    drop(cmd);
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    let mut seen = Vec::new();
+    if !pty.read_until(&mut seen, Instant::now() + Duration::from_secs(30), |s| find(s, b"ready").is_some()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the pager never got ready: {}", String::from_utf8_lossy(&seen).escape_debug());
+    }
+    // Ctrl+C, typed: to the pager and v2 alike.
+    pty.master.write_all(b"\x03").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the pager didn't end after v2 did: {}", String::from_utf8_lossy(&seen).escape_debug());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| find(s, b"v2=").is_some_and(|i| s[i..].contains(&b'\n')));
+    let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
+    assert!(shown.contains("mode echo=False icanon=False v2=-2"), "{shown}");
+    assert!(find(&seen, b"\x1b[?25h").is_none(), "v2 wrote to the pager's terminal: {shown}");
+}
+
+#[cfg(unix)]
+#[test]
+fn blocks_see_v2s_terminal() {
+    // DOCS 4.6, INTERNALS 9.3 and 9.9 (round 22, L0-L2): a block's isatty answers, terminal sizes
+    // and Node's tty methods are those of where V2 writes each stream: both on a 132 x 40 terminal;
+    // stdout to a file (`> out.txt`: no escape codes in it); stderr to a file (`2> e.log`: the
+    // colors stay on the screen). tests/cross/terminal_answers.v2 is the program, and its .out the
+    // answers with neither stream a terminal.
+    if !needs("py", "blocks_see_v2s_terminal") || !needs("js", "blocks_see_v2s_terminal") {
+        return;
+    }
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cross/terminal_answers.v2")).unwrap();
+    let on_screen = |py: &str, js: &str| format!("{py}\n{js}\n\x1b[2K\x1b[1Gbar 132x40 8 true\n\x1b[32mok\x1b[39m\n{{ a: \x1b[33m1\x1b[39m }}\nend\n");
+    let cases = [
+        ("on the terminal", None, on_screen("py True True True True (132, 40) (132, 40) (132, 40)", "js true true true true 132 40 132 function")),
+        ("stdout to a file", Some("out.txt"), "py False True False True (80, 24) None (132, 40)\njs false true false true undefined undefined 132 undefined\nok\n{ a: 1 }\nend\n".to_string()),
+        ("stderr to a file", Some("err.txt"), on_screen("py True False True False (132, 40) (132, 40) None", "js true false true false 132 40 undefined function")),
+    ];
+    for (what, file, want) in cases {
+        let home = TempHome::new();
+        std::fs::write(home.0.join("main.v2"), &src).unwrap();
+        let mut pty = Pty::open(132, 40);
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("main.v2").current_dir(&home.0).env("TERM", "xterm-256color");
+        // What else Node's color depth and shutil's size read.
+        for var in ["COLUMNS", "LINES", "CI", "FORCE_COLOR", "NO_COLOR", "NODE_DISABLE_COLORS", "TMUX", "TERM_PROGRAM", "COLORTERM", "TEAMCITY_VERSION"] {
+            cmd.env_remove(var);
+        }
+        pty.attach(&mut cmd);
+        let redirected = file.map(|f| std::fs::File::create(home.0.join(f)).unwrap());
+        match (file, &redirected) {
+            (Some("out.txt"), Some(f)) => cmd.stdout(f.try_clone().unwrap()),
+            (Some(_), Some(f)) => cmd.stderr(f.try_clone().unwrap()),
+            _ => &mut cmd,
+        };
+        let mut child = cmd.spawn().expect("start v2");
+        drop(cmd);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{what}: v2 didn't end");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut seen = Vec::new();
+        let wait = Duration::from_millis(if file == Some("out.txt") { 200 } else { 2000 });
+        pty.read_until(&mut seen, Instant::now() + wait, |s| s.ends_with(b"end\r\n"));
+        let screen = String::from_utf8_lossy(&seen).replace("\r\n", "\n");
+        let read = |f: &str| std::fs::read_to_string(home.0.join(f)).unwrap();
+        let (got, other) = match file {
+            Some("out.txt") => (read("out.txt"), screen.clone()),
+            Some(f) => (screen.clone(), read(f)),
+            None => (screen.clone(), String::new()),
+        };
+        assert_eq!(status.code(), Some(0), "{what}: {}", other.escape_debug());
+        assert_eq!(got, want, "{what}: {}", got.escape_debug());
+        assert!(!other.contains("Error"), "{what}: {}", other.escape_debug());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes() {
+    // DOCS 4.6, INTERNALS 6.5 and 9.9 (round 22, L0-L2): with stdout on a console and stderr on a
+    // pipe, blocks see a terminal of the console's size on stdout only; while v2 runs the console
+    // has VT processing on (so colors render in conhost), and afterwards its mode is as before.
+    if !needs("py", "a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes") || !needs("js", "a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes") {
+        return;
+    }
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO};
+    attach_console();
+    let console = std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$").expect("the console's screen buffer");
+    let h = console.as_raw_handle();
+    // SAFETY: plain calls on a handle this test owns; each fills its out-parameter.
+    let (mode, size) = unsafe {
+        let mut mode = 0;
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        assert!(GetConsoleMode(h, &mut mode) != 0 && GetConsoleScreenBufferInfo(h, &mut info) != 0, "{}", std::io::Error::last_os_error());
+        let w = info.srWindow;
+        (mode, (i32::from(w.Right) - i32::from(w.Left) + 1, i32::from(w.Bottom) - i32::from(w.Top) + 1))
+    };
+    let src = r#"let py = @py {
+    import ctypes, os, shutil, sys
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateFileW.restype = wintypes.HANDLE
+    h = k.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+    m = wintypes.DWORD()
+    k.GetConsoleMode(wintypes.HANDLE(h), ctypes.byref(m))
+    k.CloseHandle(wintypes.HANDLE(h))
+    f"py {sys.stdout.isatty()} {sys.stderr.isatty()} {os.isatty(1)} {os.isatty(2)} {tuple(shutil.get_terminal_size())} vt {bool(m.value & 4)}"
+}
+let js = @js {
+    const tty = require("tty");
+    `js ${process.stdout.isTTY} ${process.stderr.isTTY} ${tty.isatty(1)} ${tty.isatty(2)} ${process.stdout.columns}x${process.stdout.rows}`
+}
+write_file("answers.txt", f"${py}\n${js}\n")
+"#;
+    let home = TempHome::new();
+    std::fs::write(home.0.join("main.v2"), src).unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("main.v2").current_dir(&home.0).env_remove("COLUMNS").env_remove("LINES");
+    cmd.stdin(Stdio::null()).stdout(console.try_clone().unwrap()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let (c, r) = size;
+    let want = format!("py True False True False ({c}, {r}) vt True\njs true false true false {c}x{r}\n");
+    assert_eq!(std::fs::read_to_string(home.0.join("answers.txt")).unwrap(), want, "{stderr}");
+    let mut after = 0;
+    // SAFETY: as above.
+    unsafe { GetConsoleMode(h, &mut after) };
+    assert_eq!(after, mode, "the console's mode is as it was before v2 ran");
+}
+
+#[cfg(unix)]
+#[test]
 fn input_without_echo_hides_what_is_typed() {
     // DOCS 3.11, INTERNALS 5.10 (round 22, L3): input(prompt, echo: false) on a terminal turns echo
     // off before the prompt and keeps line input; the line comes back as typed, and a line break
@@ -2980,7 +3168,7 @@ fn input_without_echo_hides_what_is_typed() {
     std::fs::write(home.0.join("ask.v2"), "let pw = input(\"Password: \", echo: false)\nprint(f\"got [${pw}]\")\nprint(f\"name [${input(\"Name: \")}]\")\n").unwrap();
     std::fs::write(home.0.join("stop.v2"), "input(\"Password: \", echo: false)\nprint(\"not reached\")\n").unwrap();
     for (file, typed) in [("ask.v2", "s3cret\n"), ("stop.v2", "\x03")] {
-        let mut pty = Pty::open();
+        let mut pty = Pty::open(80, 24);
         let before = pty.flags();
         let mut cmd = v2_command(&home.0);
         cmd.arg(file).current_dir(&home.0);
@@ -3038,9 +3226,11 @@ fn input_without_echo_hides_what_is_typed() {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_readmes_way_to_leave_a_job_running_returns_at_once() {
-    // README (round 22, L4): its line for a job that outlives V2, run as written with `job` a script
-    // that writes job.log 2 s later: exec returns at once (dash, Ubuntu's sh, held exec's pipes
-    // while it waited for the job in the earlier line), and the job outlives V2.
+    // README (round 22, L4 and its review): its line for a job that outlives V2, run as written with
+    // `job` a script that writes job.log 2 s later: exec returns at once (dash, Ubuntu's sh, held
+    // exec's pipes while it waited for the job in the first line), and the job outlives V2 (under
+    // load, `setsid -f` in a shell lost it: the shell ended, and exec's tree with it, before the
+    // forked setsid had left that session; `setsid -w` waits until it has).
     let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
     let flat = readme.split_whitespace().collect::<Vec<_>>().join(" ");
     let line = flat.split_once("to leave a job running, `").and_then(|(_, rest)| rest.split_once('`')).expect("the README's line for a job that outlives V2").0;
