@@ -1332,11 +1332,12 @@ if __name__ == "__main__":
         py.pyyaml, py.PyYAML or py."opencv-python": a distribution this Python has, found by pip's
         normalized name, whose modules are named otherwise (13.5)."""
         try:
-            if "importlib.metadata" not in sys.modules:
+            if "importlib.metadata" not in sys.modules or "importlib.util" not in sys.modules:
                 saved = sys.path[:]
                 sys.path[:] = ORIGINAL_PATH  # the stdlib's modules, not a project file (9.3)
                 try:
                     importlib.import_module("importlib.metadata")
+                    importlib.import_module("importlib.util")
                 finally:
                     sys.path[:] = saved
             dist = sys.modules["importlib.metadata"].distribution(name)
@@ -1351,30 +1352,46 @@ if __name__ == "__main__":
             return None
 
     def dist_modules(dist, shown):
-        """The modules a distribution provides, the closest to its name `shown` first (13.5). From
-        its RECORD: each file's first folder with an __init__.py (in a namespace package, the
-        package: protobuf's is google.protobuf, never google), or a .py or extension module at the
-        top, never a folder of data (bin, lib); without a RECORD, the names in its top_level.txt
-        that are a package or a .py file there. Names with a part starting with _ only when there
-        are no others."""
+        """The modules a distribution provides, the closest to its name `shown` first (13.5): the
+        names of its top_level.txt that Python finds (importlib.util.find_spec asks every finder,
+        a pip install -e one's too, and imports nothing for a top-level name), one whose files the
+        RECORD lists without its __init__.py by what is below it (a namespace: google-auth's
+        google is google.auth and google.oauth2, PyQt5_sip's PyQt5 is PyQt5.sip), and none for a
+        namespace it has no file in; without a top_level.txt (hatchling, scikit-build), its
+        RECORD's: each file's first folder with an __init__.py, or a .py or extension module at
+        the top, never a folder of data (bin, lib) or an editable install's own module
+        (__editable__…). A name with a part starting with _ only when there are no others."""
         files = [tuple(f.parts) for f in dist.files or ()]
-        found = set()
-        if files:
-            have = set(files)
+        files = [p for p in files if p and p[0] not in ("..", "__pycache__") and not p[0].endswith((".dist-info", ".data", ".egg-info"))]
+
+        def module_file(last):
+            return last.endswith((".py", ".pyd")) or (last.endswith(".so") and last.count(".") > 1)  # libllama.so is a library
+
+        found, have = set(), set(files)
+        top = (dist.read_text("top_level.txt") or "").split()
+        for n in top:
+            try:
+                spec = importlib.util.find_spec(n) if n.isidentifier() else None
+            except Exception:
+                spec = None
+            if spec is None:
+                continue
+            mine = [p for p in files if len(p) > 1 and p[0] == n and p[1] != "__pycache__"]
+            if mine and (n, "__init__.py") not in have:
+                below = {(n, p[1]) if len(p) > 2 else (n, p[1].split(".")[0]) for p in mine if len(p) > 2 or module_file(p[1])}
+                found |= below or {(n,)}
+            elif mine or spec.origin not in (None, "namespace"):
+                found.add((n,))
+        if not top:
             for parts in files:
-                if not parts or parts[0] in ("..", "__pycache__") or parts[0].endswith((".dist-info", ".data", ".egg-info")):
+                if parts[0].startswith(("__editable__", "_editable_impl_")):
                     continue
                 dirs, last = parts[:-1], parts[-1]
                 package = next((dirs[:i] for i in range(1, len(dirs) + 1) if dirs[:i] + ("__init__.py",) in have), None)
                 if package is not None:
                     found.add(package)
-                elif not dirs and (last.endswith((".py", ".pyd")) or (last.endswith(".so") and last.count(".") > 1)):
-                    found.add((last.split(".")[0],))  # libllama.so is a library, x.abi3.so a module
-        else:
-            base = dist.locate_file("")
-            for n in (dist.read_text("top_level.txt") or "").split():
-                if os.path.isfile(os.path.join(base, n, "__init__.py")) or os.path.isfile(os.path.join(base, n + ".py")):
-                    found.add((n,))
+                elif not dirs and module_file(last):
+                    found.add((last.split(".")[0],))
         names = [".".join(p) for p in found if all(x.isidentifier() and not keyword.iskeyword(x) for x in p)]
         names = [n for n in names if not any(x.startswith("_") for x in n.split("."))] or names
         key = shown.lower().replace("-", "_").replace(".", "_")
