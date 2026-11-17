@@ -1,0 +1,17 @@
+// requires: js py
+// Numbers as Intl writes them, for de-CH with U+2019 between thousands and for ar-EG with U+066C
+// and U+066B: float()'s hint, followed, reads them (INTERNALS 5.10, the second review of round 20).
+let x = @js { (1234.5).toLocaleString("de-CH") }
+try {
+    float(x)
+} catch (e) {
+    print(e.hint)
+}
+print(float(x.replace("’", "")))
+x = @js { (1234.5).toLocaleString("ar-EG") }
+try {
+    float(x)
+} catch (e) {
+    print(e.hint)
+}
+print(@py(x) { float(x.replace("٬", "").replace("٫", ".")) })

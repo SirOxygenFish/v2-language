@@ -1143,15 +1143,23 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
             if stdin_is_file() {
                 // `v2 x.v2 < data.txt`: no shell setting changes a file's bytes.
                 let _ = err.hint.set(format!("the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with {}", code_page_way()).into());
-            } else if cfg!(windows) && !std::io::stderr().is_terminal() {
-                // No console shows the hint: a program runs v2, and its pipe carries its encoding.
-                let _ = err.hint.set("the program that sends v2 its input must send UTF-8 (in Python, encoding=\"utf-8\")".into());
             } else if cfg!(windows) {
-                // A Windows shell sends its console's old code page unless told otherwise.
-                let _ = err.hint.set("in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run".into());
+                let _ = err.hint.set(piped_input_hint(std::io::stderr().is_terminal()).into());
             }
             Err(Flow::Error(Rc::new(err)))
         }
+    }
+}
+
+/// On Windows, `input()`'s hint for a line from a pipe or a console that isn't UTF-8 (5.10). With
+/// a console on standard error the sender is a shell, which sends its console's old code page
+/// unless told otherwise, or a program run there (Python's `input=` with `text=True` sends its
+/// ANSI code page whatever chcp says); without one, a program runs v2 and reads what it says.
+fn piped_input_hint(console: bool) -> &'static str {
+    if console {
+        "in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run; a program that sends v2 its input must send UTF-8 (in Python, encoding=\"utf-8\")"
+    } else {
+        "the program that sends v2 its input must send UTF-8 (in Python, encoding=\"utf-8\")"
     }
 }
 
@@ -1249,10 +1257,16 @@ fn number_hint(t: &str, int: bool) -> Option<String> {
     } else if t.contains('_') && number(&t.replace('_', "")) {
         // `1_000`: as a V2 literal it works; as text the _ has to go.
         Some(format!("{f}() reads digits without _: {f}(x.replace(\"_\", \"\"))"))
-    } else if t.contains('\u{66b}') && number(&t.replace('\u{66b}', ".")) {
-        // `12٫5`: U+066B, the Arabic decimal separator.
-        let g = if reads(&t.replace('\u{66b}', ".")) { f } else { "float" };
-        Some(format!("the text has U+066B, the Arabic decimal separator: {g}(x.replace(\"\u{66b}\", \".\"))"))
+    } else if t.contains(['\u{66b}', '\u{66c}']) && number(&arabic_marks(t).0) {
+        // `12٫5`, `1٬234٫5`: U+066B, the Arabic decimal separator, and U+066C, its thousands one.
+        let (plain, replaces) = arabic_marks(t);
+        let g = if reads(&plain) { f } else { "float" };
+        let has = match (t.contains('\u{66c}'), t.contains('\u{66b}')) {
+            (true, true) => "U+066C and U+066B, the Arabic thousands and decimal separators",
+            (true, false) => "U+066C, the Arabic thousands separator",
+            _ => "U+066B, the Arabic decimal separator",
+        };
+        Some(format!("the text has {has}: {g}(x{replaces})"))
     } else if let Some(h) = grouped_hint(t, int) {
         Some(h)
     } else if t.chars().any(spaces) && number(&t.replace(spaces, "")) {
@@ -1279,9 +1293,11 @@ fn number_hint(t: &str, int: bool) -> Option<String> {
     } else if int && lead.parse::<i64>().is_err() && lead.parse::<f64>().is_ok() {
         Some(format!("int() reads whole numbers, as in 13: for {lead}, use float(x), or int(float(x)) to drop what is after the point"))
     } else if t.chars().any(|c| c.is_numeric() && !c.is_ascii_digit()) {
-        // `١٢٣`, `１２`: digits of another script, which Python reads; with U+066B, a point there.
-        let x = if t.contains('\u{66b}') { "float(x.replace(\"\u{66b}\", \".\"))".to_string() } else { format!("{f}(x)") };
-        Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {x} }}"))
+        // `١٢٣`, `１２`: digits of another script, which Python reads; with U+066B, a point there,
+        // and without U+066C (`١٬٢٣٤`, ar-EG's thousands), which Python refuses.
+        let g = if t.contains('\u{66b}') { "float" } else { f };
+        let replaces = arabic_marks(t).1;
+        Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {g}(x{replaces}) }}"))
     } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() && !t[lead.len()..].chars().any(char::is_numeric) {
         Some(format!("{f}() reads the number alone, without other text: '{lead}' would work"))
     } else if !t.chars().any(|c| c.is_ascii_digit()) {
@@ -1291,15 +1307,16 @@ fn number_hint(t: &str, int: bool) -> Option<String> {
     }
 }
 
-/// `1 234,5`, `1'234.5`, `1,234.56`: digits in groups of three after the first one to three, one
-/// separator between them (a space, U+00A0, U+202F, U+2009, `'`, a comma or a point), perhaps a
-/// decimal part, as a locale writes a number: what removes the separator (5.10). One point or
-/// comma before three digits and no more (`1.234`) may be a decimal one: `None`.
+/// `1 234,5`, `1’234.5`, `1,234.56`: digits in groups of three after the first one to three, one
+/// separator between them (a space, U+00A0, U+202F, U+2009, `'`, U+2019, a comma or a point),
+/// perhaps a decimal part, as a locale writes a number: what removes the separator (5.10). One
+/// point or comma before three digits and no more (`1.234`) may be a decimal one, and a first
+/// group that starts with 0 (`0.123`) is no locale's: `None`.
 fn grouped_hint(t: &str, int: bool) -> Option<String> {
     let body = t.strip_prefix(['+', '-']).unwrap_or(t);
     let first = body.bytes().take_while(u8::is_ascii_digit).count();
     let sep = body[first..].chars().next()?;
-    if !(1..=3).contains(&first) || !matches!(sep, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}' | '\'' | ',' | '.') {
+    if !(1..=3).contains(&first) || body.starts_with('0') || !matches!(sep, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}' | '\'' | '\u{2019}' | ',' | '.') {
         return None;
     }
     let mut rest = &body[first..];
@@ -1326,6 +1343,7 @@ fn grouped_hint(t: &str, int: bool) -> Option<String> {
         '\u{202f}' => "narrow no-break spaces (U+202F)",
         '\u{2009}' => "thin spaces (U+2009)",
         '\'' => "apostrophes",
+        '\u{2019}' => "apostrophes (U+2019)",
         ',' => "commas",
         _ => "points",
     };
@@ -1334,13 +1352,27 @@ fn grouped_hint(t: &str, int: bool) -> Option<String> {
     Some(format!("the text has {name} between thousands{and}: {f}(x.replace(\"{}\", \"\"){swap})", char_text(sep)))
 }
 
-/// `1.234`, `-1,234`: one point or comma before exactly three digits, and the text without it.
+/// `1.234`, `-1,234`: one point or comma before exactly three digits, and the text without it;
+/// not after a 0 (`0.123`), which is no thousand.
 fn thousands(t: &str) -> Option<(char, String)> {
     let body = t.strip_prefix(['+', '-']).unwrap_or(t);
     let (whole, part) = body.split_once(['.', ','])?;
     let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
     let mark = body[whole.len()..].chars().next()?;
-    ((1..=3).contains(&whole.len()) && digits(whole) && part.len() == 3 && digits(part)).then(|| (mark, t.replacen(mark, "", 1)))
+    ((1..=3).contains(&whole.len()) && digits(whole) && !whole.starts_with('0') && part.len() == 3 && digits(part)).then(|| (mark, t.replacen(mark, "", 1)))
+}
+
+/// `١٬٢٣٤٫٥` (ar-EG, fa-IR): the text with U+066C, the Arabic thousands separator, taken out and
+/// U+066B, the decimal one, as a point, and the replaces a hint writes for that (5.10).
+fn arabic_marks(t: &str) -> (String, String) {
+    let mut replaces = String::new();
+    if t.contains('\u{66c}') {
+        replaces.push_str(".replace(\"\u{66c}\", \"\")");
+    }
+    if t.contains('\u{66b}') {
+        replaces.push_str(".replace(\"\u{66b}\", \".\")");
+    }
+    (t.replace('\u{66c}', "").replace('\u{66b}', "."), replaces)
 }
 
 /// A character as a V2 string writes it in a hint: an invisible space as its escape (`\u{a0}`).
@@ -2124,6 +2156,18 @@ mod tests {
         assert_eq!(child_text("café\n".as_bytes()), "café\n");
         let ints = [1u8, 0, 0, 0, 2, 0, 0, 0];
         assert_eq!(child_text(&ints), String::from_utf8_lossy(&ints));
+    }
+
+    #[test]
+    fn input_from_a_console_names_the_shell_and_a_program() {
+        // The second review of round 20 (INTERNALS 5.10): a program run in a console, with v2's
+        // standard error left there, sends its ANSI code page whatever chcp says, so the shell's
+        // advice gains the program's (tests/host/builtins/input_bad_program.v2 runs the other).
+        assert_eq!(
+            piped_input_hint(true),
+            "in cmd.exe, run chcp 65001 first; for Windows PowerShell 5.1, README.md's Troubleshooting has the line to run; a program that sends v2 its input must send UTF-8 (in Python, encoding=\"utf-8\")"
+        );
+        assert_eq!(piped_input_hint(false), "the program that sends v2 its input must send UTF-8 (in Python, encoding=\"utf-8\")");
     }
 
     #[test]
