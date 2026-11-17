@@ -1068,17 +1068,19 @@ fn a_folder_in_another_unicode_form_says_so() {
     let files = [("main.v2", main.as_str()), (u.as_str(), "let x = 1\n"), (b.as_str(), "let y = 2\n"), (a.as_str(), "a\n")];
     let (code, stdout, stderr, home) = run_with_files(&files, &["main.v2"]);
     assert_eq!(code, Some(0), "{stderr}");
+    // Without its .v2, with the import that works once renamed (round 20, third pass).
+    let with_v2 = format!("{}, and import './{file}.v2'", note(&b));
     assert_eq!(
         stdout,
         format!(
-            "cannot find module './{folder}/u.v2' (looked for {folder}/u.v2) | {}\ncannot find module './{file}' (looked for {file}) | {}\ncannot read '{data}/a.txt': there is no folder '{data}' | {}\ncannot write '{data}/new.txt': there is no folder '{data}' | {}\n",
+            "cannot find module './{folder}/u.v2' (looked for {folder}/u.v2) | {}\ncannot find module './{file}' (looked for {file}) | {with_v2}\ncannot read '{data}/a.txt': there is no folder '{data}' | {}\ncannot write '{data}/new.txt': there is no folder '{data}' | {}\n",
             note(folder_nfd),
-            note(&b),
             note(data_nfd),
             note(data_nfd)
         )
     );
-    // Renamed as the notes say: found, and `./büyüt` gets the .v2 it lacks (6.4).
+    // Renamed as the notes say: found, and `./büyüt` gets the .v2 it lacks (6.4); the import the
+    // note names works (fixed.v2).
     std::fs::rename(home.0.join(folder_nfd), home.0.join(folder)).unwrap();
     std::fs::rename(home.0.join(&b), home.0.join(format!("{file}.v2"))).unwrap();
     std::fs::rename(home.0.join(data_nfd), home.0.join(data)).unwrap();
@@ -1087,6 +1089,15 @@ fn a_folder_in_another_unicode_form_says_so() {
     assert_eq!(stdout, format!("ok\ncannot find module './{file}' (looked for {file}) — did you mean './{file}.v2'? | null\nok\nok\n"));
     std::fs::write(home.0.join("fixed.v2"), format!("import \"./{file}.v2\" as b\nprint(b.y)\n")).unwrap();
     assert_eq!(run_in_home(&home.0, &["fixed.v2"], &[]).1, "2\n");
+    // Written decomposed for a composed `naïve.v2`: the import, with the name composed.
+    std::fs::write(home.0.join("na\u{ef}ve.v2"), "let z = 3\n").unwrap();
+    std::fs::write(home.0.join("typed.v2"), "import \"./nai\u{308}ve\" as n\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["typed.v2"], &[]);
+    assert_eq!(code, Some(1));
+    let hint = "there is a 'na\u{ef}ve.v2' whose name looks the same, but the name given is written in decomposed Unicode (letters plus combining accents, as macOS writes names): type it again, and import './na\u{ef}ve.v2'";
+    assert!(stderr.contains(&format!("\n  hint: {hint}\n")), "{stderr}");
+    std::fs::write(home.0.join("typed.v2"), "import \"./na\u{ef}ve.v2\" as n\nprint(n.z)\n").unwrap();
+    assert_eq!(run_in_home(&home.0, &["typed.v2"], &[]).1, "3\n");
 }
 
 #[test]
