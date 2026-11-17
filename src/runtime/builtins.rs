@@ -700,6 +700,26 @@ fn verbatim_parts(path: &str) -> std::borrow::Cow<'_, str> {
     format!(r"\\?\{}{tail}", kept.join(r"\")).into()
 }
 
+/// Windows: exec's arguments after the program that are `\\?\` paths, as `verbatim_parts` reads
+/// them (`f"${script_dir()}/x.py"` in a script run by its `\\?\` path, which Python can't open
+/// with its `/`); other arguments reach the program as given, and cmd's command line after `/c`
+/// (`raw_tail`) stays as written (2.1, 5.10).
+fn verbatim_arguments(argv: &mut [OsString], raw_tail: bool) {
+    let last = argv.len().saturating_sub(1);
+    for (i, arg) in argv.iter_mut().enumerate().skip(1) {
+        if raw_tail && i == last {
+            continue;
+        }
+        let read = arg.to_str().filter(|s| s.starts_with(r"\\?\")).and_then(|s| match verbatim_parts(s) {
+            std::borrow::Cow::Owned(p) => Some(p),
+            std::borrow::Cow::Borrowed(_) => None,
+        });
+        if let Some(p) = read {
+            *arg = p.into();
+        }
+    }
+}
+
 /// The file builtin whose messages say `cannot {verb}`.
 fn builtin_name(verb: &str) -> &'static str {
     match verb {
@@ -2125,6 +2145,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // for cmd.exe, which reads it as typed; quoted for a program (`\"`), cmd would misread it.
     let is_cmd = std::path::Path::new(&argv[0]).file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
     let raw_tail = cfg!(windows) && is_cmd && argv.len() >= 3 && argv[argv.len() - 2].to_str().is_some_and(|s| s.eq_ignore_ascii_case("/c") || s.eq_ignore_ascii_case("/k"));
+    verbatim_arguments(&mut argv, raw_tail);
     // On Unix the program sees the name as written (`ls`), as from a shell (7.5).
     let ran = process::run_captured_as(&argv, Some(std::ffi::OsStr::new(name)), utf8.as_slice(), None, input, raw_tail);
     // A signal that came while the program ran (its own `kill $PPID` too) ends the run here.
@@ -2566,6 +2587,15 @@ mod tests {
         for kept in [r"\\?\C:\x\notes.txt ", "C:/x/../y", r"\\.\C:/x", "./a/../b"] {
             assert!(matches!(verbatim_parts(kept), std::borrow::Cow::Borrowed(k) if k == kept), "{kept}");
         }
+        // The second review: exec's arguments that are such paths too, but not cmd's command line
+        // after /c, nor another argument.
+        let args = |raw_tail: bool| {
+            let mut argv: Vec<OsString> = ["cmd.exe", r"\\?\C:\x\dots./a.py", "./b/../c", "/c", r"\\?\C:/x & echo y"].map(OsString::from).to_vec();
+            verbatim_arguments(&mut argv, raw_tail);
+            argv.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        assert_eq!(args(true), ["cmd.exe", r"\\?\C:\x\dots.\a.py", "./b/../c", "/c", r"\\?\C:/x & echo y"]);
+        assert_eq!(args(false)[4], r"\\?\C:\x & echo y");
     }
 
     #[test]

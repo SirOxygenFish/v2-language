@@ -674,8 +674,9 @@ Windows), on a drive or a `\\server\share` path, with either slash; a name that 
 in any folder, a relative path's too; only in a path written as `\\server\share\…` is such a name an ordinary file), where `read_file("CON")` would wait for typed input; when a file of such a name is there
 (WSL and Macs make them), the hint shows its full path with `\\?\` in front, which reaches it.
 In a path that starts with `\\?\` (a script in a folder whose name ends in a dot, run by its `\\?\`
-path, has such a `script_dir()`), the file functions and `exec` read `/` as `\` and take out `.` and
-`..`, which Windows doesn't do there, so `read_file(f"${script_dir()}/data.csv")` works.
+path, has such a `script_dir()`), the file functions and `exec` (its program, and each argument that
+starts with `\\?\`; cmd's command line after `/c` stays as written) read `/` as `\` and take out `.`
+and `..`, which Windows doesn't do there, so `read_file(f"${script_dir()}/data.csv")` works.
 WSL shows a Linux name with a character Windows names can't hold (`mod:x.v2`) to Windows with a
 stand-in for it (U+F03A for `:`), which V2 prints as `\u{f03a}`: a path with the stand-in reaches the
 file (`read_file("mod\u{f03a}x.v2")`, an import, the script), and the hint for the name as Linux
