@@ -1342,14 +1342,62 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
 }
 
 /// `input(echo: false)`: while it lives, the terminal on stdin doesn't show what is typed (5.10).
-/// Unix: `ECHO` cleared with `tcsetattr`, line input (`ICANON`) kept; Ctrl+C's path puts the
-/// settings v2 started with back (`restore_terminal`). Windows: `ENABLE_ECHO_INPUT` cleared on the
-/// console input handle, the mode before kept in `ECHO_MODE` for Ctrl+C's path (`echo_back`).
+/// Unix: `ECHO` cleared with `tcsetattr`, line input (`ICANON`) kept, the settings before kept in
+/// `ECHO_SAVED` for Ctrl+Z (`echo_around_stop`) and `TERMINAL_CHANGED` set, so Ctrl+C's path puts
+/// the settings v2 started with back whatever stdout is (`restore_terminal`). Windows:
+/// `ENABLE_ECHO_INPUT` cleared on the console input handle, the mode before kept in `ECHO_MODE` for
+/// Ctrl+C's path (`echo_back`).
 struct EchoOff {
     #[cfg(unix)]
     saved: libc::termios,
     #[cfg(windows)]
     saved: u32,
+}
+
+/// Unix: the settings the terminal had before the live `EchoOff` turned echo off (`None`: none is
+/// live). Its lock is held while they change, so Ctrl+Z and the end of the line don't interleave.
+#[cfg(unix)]
+static ECHO_SAVED: Mutex<Option<libc::termios>> = Mutex::new(None);
+
+/// Unix: whether another process group is the foreground job of the terminal on stdin (a terminal
+/// that isn't v2's controlling one has no jobs, so v2 isn't in its background).
+#[cfg(unix)]
+fn background() -> bool {
+    // SAFETY: plain queries of stdin's terminal and of this process.
+    unsafe {
+        let job = libc::tcgetpgrp(0);
+        job != -1 && job != libc::getpgrp()
+    }
+}
+
+/// Unix, Ctrl+Z (`process::suspend`, 6.5): `stop` stops v2 until it goes on. While `input(echo:
+/// false)` waits, the terminal first gets back the settings it had before, so the shell shows what
+/// is typed while v2 is stopped (dash leaves the terminal as it finds it); once v2 goes on as the
+/// foreground job, echo goes off again (bash has put its own settings back meanwhile). Gone on in
+/// the background (`bg`), v2 waits for the foreground first, stopped by SIGTTOU (`tcdrain`) as its
+/// read would be by SIGTTIN.
+#[cfg(unix)]
+pub fn echo_around_stop(stop: impl FnOnce()) {
+    let live = ECHO_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(saved) = *live else {
+        drop(live);
+        return stop();
+    };
+    let mut quiet = saved;
+    quiet.c_lflag &= !libc::ECHO;
+    // SAFETY: plain calls on stdin with the settings tcgetattr gave.
+    unsafe {
+        if !background() {
+            libc::tcsetattr(0, libc::TCSANOW, &saved);
+        }
+        stop();
+        if background() {
+            libc::tcdrain(0);
+        }
+        if !background() {
+            libc::tcsetattr(0, libc::TCSANOW, &quiet);
+        }
+    }
 }
 
 /// Windows: the console input mode `input(echo: false)` changed, while it is changed
@@ -1367,13 +1415,36 @@ impl EchoOff {
         // SAFETY: tcgetattr fills a zeroed struct for any descriptor, a terminal or not, and
         // tcsetattr gets a copy of what it gave.
         unsafe {
+            use crate::engines::process::TERMINAL_CHANGED;
+            use std::sync::atomic::Ordering::SeqCst;
+            if libc::isatty(0) != 1 {
+                return None;
+            }
+            // In the background (`v2 x.v2 &`, Ctrl+Z then bg) tcdrain stops v2 with SIGTTOU until it
+            // is the foreground job, so the settings read below are the ones the shell gives it, not
+            // its line editor's. Still in the background (SIGTTOU ignored, an orphaned job): read as
+            // plain input, leaving the terminal alone.
+            if background() {
+                libc::tcdrain(0);
+                if background() {
+                    return None;
+                }
+            }
             let mut saved: libc::termios = std::mem::zeroed();
-            if libc::isatty(0) != 1 || libc::tcgetattr(0, &mut saved) != 0 {
+            if libc::tcgetattr(0, &mut saved) != 0 {
                 return None;
             }
             let mut quiet = saved;
             quiet.c_lflag &= !libc::ECHO;
-            (libc::tcsetattr(0, libc::TCSANOW, &quiet) == 0).then_some(EchoOff { saved })
+            let mut live = ECHO_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+            // Set first, so a Ctrl+C right after the change puts it back.
+            TERMINAL_CHANGED.store(true, SeqCst);
+            if libc::tcsetattr(0, libc::TCSANOW, &quiet) != 0 {
+                TERMINAL_CHANGED.store(false, SeqCst);
+                return None;
+            }
+            *live = Some(saved);
+            Some(EchoOff { saved })
         }
         #[cfg(windows)]
         {
@@ -1402,9 +1473,12 @@ impl EchoOff {
 impl Drop for EchoOff {
     fn drop(&mut self) {
         #[cfg(unix)]
-        // SAFETY: stdin gets back the settings tcgetattr gave.
-        unsafe {
-            libc::tcsetattr(0, libc::TCSANOW, &self.saved);
+        {
+            let mut live = ECHO_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: stdin gets back the settings tcgetattr gave.
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.saved) };
+            *live = None;
+            crate::engines::process::TERMINAL_CHANGED.store(false, std::sync::atomic::Ordering::SeqCst);
         }
         #[cfg(windows)]
         {

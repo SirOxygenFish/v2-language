@@ -578,7 +578,8 @@ fn wake() {
 }
 
 /// Ctrl+Z: every child's group stops, then v2 itself, as a shell's job would; when the job goes
-/// on (fg, bg, SIGCONT), so do they, and the calls' clocks skip the time stopped (6.5, 8.5).
+/// on (fg, bg, SIGCONT), so do they, and the calls' clocks skip the time stopped (6.5, 8.5). Around
+/// the stop, `input(echo: false)` gives the terminal its echo back (5.10).
 #[cfg(unix)]
 fn suspend(w: &mut Watch) {
     for (_, kill) in &w.children {
@@ -586,9 +587,9 @@ fn suspend(w: &mut Watch) {
     }
     let stopped = Instant::now();
     // SAFETY: a plain signal to this process; it stops every thread until SIGCONT.
-    unsafe {
+    crate::runtime::builtins::echo_around_stop(|| unsafe {
         libc::raise(libc::SIGSTOP);
-    }
+    });
     for (_, kill) in &w.children {
         kill.signal_group(libc::SIGCONT);
     }
