@@ -95,6 +95,7 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
         builtins::start_line();
         stderrln!("v2: {m}");
     }
+    let ended_early = result.is_err();
     let code = match result {
         Ok(()) => 0,
         Err(Flow::Error(e)) => {
@@ -121,6 +122,10 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     if let (None, Some(m)) = (&flushed, &late) {
         builtins::start_line();
         stderrln!("v2: {m}");
+    }
+    // `exit(n)` or an uncaught error: a block's live display may never have ended (6.5).
+    if ended_early {
+        crate::engines::process::cursor_back();
     }
     match code {
         0 if broken.get() => crate::engines::process::EXIT_BROKEN_PIPE,

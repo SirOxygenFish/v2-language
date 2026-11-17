@@ -9,7 +9,7 @@ if __name__ == "__main__":
     # 1. Every stdlib module the adapter uses, before any project folder is on sys.path (14.3).
     import sys, os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback
     import linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit
-    import errno, shutil
+    import errno
 
     if os.name == "nt":
         import msvcrt, ctypes
@@ -96,6 +96,51 @@ if __name__ == "__main__":
             return None
 
     sys.meta_path.append(BlockNames)
+
+    class AfterImport:
+        """Changes made to a module when it is first imported, not at startup, where importing it
+        would cost every run its time (shutil pulls in bz2 and lzma): `hooks` maps a module's name
+        to a function given the module once it has run (9.9)."""
+
+        hooks = {}
+
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            hook = cls.hooks.get(name)
+            if hook is None:
+                return None
+            for finder in sys.meta_path:
+                find = getattr(finder, "find_spec", None) if finder is not cls else None
+                spec = find(name, path, target) if find is not None else None
+                if spec is not None:
+                    break
+            else:
+                return None
+            real = spec.loader
+            if real is None or not hasattr(real, "exec_module"):
+                return spec
+
+            class Loader:
+                def create_module(self, spec):
+                    return real.create_module(spec)
+
+                def exec_module(self, module):
+                    real.exec_module(module)
+                    hook(module)
+
+                def __getattr__(self, attr):
+                    return getattr(real, attr)
+
+            spec.loader = Loader()
+            return spec
+
+    def after_import(name, hook):
+        if name in sys.modules:
+            hook(sys.modules[name])
+        else:
+            AfterImport.hooks[name] = hook
+
+    sys.meta_path.insert(0, AfterImport)
 
     # ----------------------------------------------------------------------------------------
     # Errors
@@ -503,7 +548,12 @@ if __name__ == "__main__":
 
     os.isatty = isatty
     os.get_terminal_size = get_terminal_size
-    shutil.get_terminal_size = shutil_terminal_size
+    after_import("shutil", lambda m: setattr(m, "get_terminal_size", shutil_terminal_size))
+    if os.name == "nt":
+        # colorama (tqdm, click and others call its init) would turn a block's ANSI codes into
+        # console calls on the worker's console handle, out of order with the text, which goes to
+        # V2 as frames: V2 turned on VT processing for its consoles, so the codes pass through.
+        after_import("colorama.ansitowin32", lambda m: setattr(m, "winapi_test", lambda: False))
 
     _streams = (Output("stdout", 1), Output("stderr", 2))
     sys.stdout, sys.stderr = _streams

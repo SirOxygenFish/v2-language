@@ -617,6 +617,28 @@ fn a_closed_stderr_stops_the_run_quietly() {
 }
 
 #[test]
+fn colorama_passes_a_blocks_escape_codes_through_on_windows() {
+    // INTERNALS 9.9 (round 22, the second review, issue 1): on Windows V2 has VT processing on for
+    // its consoles, and colorama (whose init tqdm, click and others call) would turn a block's escape
+    // codes into console calls on the worker's own handle, out of order with the text: there its
+    // ansitowin32.winapi_test answers False once imported. A colorama next to the script stands for
+    // the real one; on Linux and macOS it is left as it is.
+    if !needs("py", "colorama_passes_a_blocks_escape_codes_through_on_windows") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::create_dir_all(home.0.join("colorama")).unwrap();
+    std::fs::write(home.0.join("colorama").join("__init__.py"), "").unwrap();
+    std::fs::write(home.0.join("colorama").join("ansitowin32.py"), "def winapi_test():\n    return True\n").unwrap();
+    std::fs::write(home.0.join("main.v2"), "@py {\n    from colorama import ansitowin32\n    print(ansitowin32.winapi_test())\n}\n").unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("main.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    let want = if cfg!(windows) { "False\n" } else { "True\n" };
+    assert_eq!((out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)).as_str()), (Some(0), want), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn a_utf16_file_says_to_save_it_as_utf8() {
     // Windows PowerShell 5's `>` writes UTF-16 with a byte-order mark (INTERNALS 2.1).
     let home = TempHome::new();
@@ -2445,11 +2467,8 @@ try {
     assert!(err.contains("A ForeignError\nB 42\nC 5\nD IOError\n"), "{err}");
 }
 
-/// Windows: put the child in its own process group, so Ctrl+Break can be sent to it alone. The
-/// event travels through a console this process shares with the child; a CI runner may start
-/// the tests without one, so allocate one then, keeping this process's own std handles.
 /// Windows: the test process has a console, which its children share: one made for it (its
-/// standard handles kept) when it has none.
+/// standard handles kept) when it has none, as a CI runner may start the tests without one.
 #[cfg(windows)]
 fn attach_console() {
     use windows_sys::Win32::System::Console::{AllocConsole, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
@@ -2466,6 +2485,8 @@ fn attach_console() {
     });
 }
 
+/// Windows: put the child in its own process group, so Ctrl+Break can be sent to it alone. The
+/// event travels through a console this process shares with the child (`attach_console`).
 fn interruptible(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -3037,6 +3058,60 @@ termios.tcsetattr(0, termios.TCSANOW, saved)
 
 #[cfg(unix)]
 #[test]
+fn ends_other_than_the_normal_one_show_the_cursor_again() {
+    // DOCS 4.6, INTERNALS 6.5 (round 22, the second review, issue 3): a block that hid the cursor,
+    // as a live display does, and never showed it again: after exit(n) from a callback, an uncaught
+    // error, or a closed pipe on stderr, v2 (whose stdout is the terminal) shows it; after the
+    // normal end it writes nothing of its own.
+    if !needs("py", "ends_other_than_the_normal_one_show_the_cursor_again") {
+        return;
+    }
+    let hide = "    print(\"\\x1b[?25l\", end=\"\", flush=True)\n";
+    let cases = [
+        ("exit(3)", format!("func stop() {{ exit(3) }}\n@py(stop) {{\n{hide}    stop()\n}}\nprint(\"not reached\")\n"), Some(3), false, true),
+        ("an uncaught error", format!("@py {{\n{hide}    raise ValueError(\"boom\")\n}}\n"), Some(1), false, true),
+        ("a closed stderr", format!("@py {{\n    import sys\n{hide}    while True:\n        print(\"x\", file=sys.stderr)\n}}\n"), Some(141), true, true),
+        ("the normal end", format!("@py {{\n{hide}}}\nprint(\"end\")\n"), Some(0), false, false),
+    ];
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    for (what, src, code, closed_stderr, shown) in cases {
+        let home = TempHome::new();
+        std::fs::write(home.0.join("main.v2"), src).unwrap();
+        let mut pty = Pty::open(80, 24);
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("main.v2").current_dir(&home.0);
+        pty.attach(&mut cmd);
+        if closed_stderr {
+            let (reader, writer) = std::io::pipe().expect("a pipe");
+            drop(reader);
+            cmd.stderr(writer);
+        }
+        let mut child = cmd.spawn().expect("start v2");
+        drop(cmd);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{what}: v2 didn't end");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut seen = Vec::new();
+        let wait = Duration::from_millis(if shown { 2000 } else { 300 });
+        pty.read_until(&mut seen, Instant::now() + wait, |s| find(s, b"\x1b[?25l").is_some_and(|i| find(&s[i..], b"\x1b[?25h").is_some()));
+        let screen = String::from_utf8_lossy(&seen).escape_debug().to_string();
+        assert_eq!(status.code(), code, "{what}: {screen}");
+        let at = find(&seen, b"\x1b[?25l").unwrap_or_else(|| panic!("{what}: the block didn't hide the cursor: {screen}"));
+        assert_eq!(find(&seen[at..], b"\x1b[?25h").is_some(), shown, "{what}: {screen}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn blocks_see_v2s_terminal() {
     // DOCS 4.6, INTERNALS 9.3 and 9.9 (round 22, L0-L2): a block's isatty answers, terminal sizes
     // and Node's tty methods are those of where V2 writes each stream: both on a 132 x 40 terminal;
@@ -3100,6 +3175,92 @@ fn blocks_see_v2s_terminal() {
     }
 }
 
+/// Windows: the test process's console (`attach_console`, a hidden one where the tests run without
+/// a window), one test at a time, with VT processing off and the cursor shown, as conhost starts;
+/// put back as it was when the test ends.
+#[cfg(windows)]
+struct Console {
+    file: std::fs::File,
+    mode: u32,
+    cursor: windows_sys::Win32::System::Console::CONSOLE_CURSOR_INFO,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(windows)]
+impl Console {
+    fn take() -> Console {
+        use windows_sys::Win32::System::Console::{GetConsoleCursorInfo, SetConsoleCursorInfo, CONSOLE_CURSOR_INFO};
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        attach_console();
+        let file = std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$").expect("the console's screen buffer");
+        let (mut mode, mut cursor) = (0, CONSOLE_CURSOR_INFO { dwSize: 25, bVisible: 1 });
+        // SAFETY: plain calls on a handle this test owns; each fills its out-parameter.
+        unsafe {
+            assert_ne!(windows_sys::Win32::System::Console::GetConsoleMode(Self::raw(&file), &mut mode), 0, "{}", std::io::Error::last_os_error());
+            GetConsoleCursorInfo(Self::raw(&file), &mut cursor);
+        }
+        let console = Console { file, mode, cursor, _turn: turn };
+        console.set_mode(mode & !VT);
+        let shown = CONSOLE_CURSOR_INFO { dwSize: cursor.dwSize, bVisible: 1 };
+        // SAFETY: as above.
+        unsafe { SetConsoleCursorInfo(console.handle(), &shown) };
+        console
+    }
+
+    fn raw(file: &std::fs::File) -> windows_sys::Win32::Foundation::HANDLE {
+        std::os::windows::io::AsRawHandle::as_raw_handle(file)
+    }
+
+    fn handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        Self::raw(&self.file)
+    }
+
+    fn mode(&self) -> u32 {
+        let mut mode = 0;
+        // SAFETY: fills its out-parameter.
+        assert_ne!(unsafe { windows_sys::Win32::System::Console::GetConsoleMode(self.handle(), &mut mode) }, 0, "{}", std::io::Error::last_os_error());
+        mode
+    }
+
+    fn set_mode(&self, mode: u32) {
+        // SAFETY: a plain call on this test's handle.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(self.handle(), mode) };
+    }
+
+    fn cursor_shown(&self) -> bool {
+        let mut info = windows_sys::Win32::System::Console::CONSOLE_CURSOR_INFO { dwSize: 0, bVisible: 0 };
+        // SAFETY: fills its out-parameter.
+        unsafe { windows_sys::Win32::System::Console::GetConsoleCursorInfo(self.handle(), &mut info) };
+        info.bVisible != 0
+    }
+
+    /// The console's window: columns and rows.
+    fn size(&self) -> (i32, i32) {
+        // SAFETY: fills a zeroed struct.
+        let mut info: windows_sys::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+        assert_ne!(unsafe { windows_sys::Win32::System::Console::GetConsoleScreenBufferInfo(self.handle(), &mut info) }, 0);
+        let w = info.srWindow;
+        (i32::from(w.Right) - i32::from(w.Left) + 1, i32::from(w.Bottom) - i32::from(w.Top) + 1)
+    }
+
+    fn stdio(&self) -> Stdio {
+        Stdio::from(self.file.try_clone().unwrap())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Console {
+    fn drop(&mut self) {
+        self.set_mode(self.mode);
+        // SAFETY: a plain call on this test's handle.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleCursorInfo(self.handle(), &self.cursor) };
+    }
+}
+
+#[cfg(windows)]
+const VT: u32 = windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
 #[cfg(windows)]
 #[test]
 fn a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes() {
@@ -3109,19 +3270,8 @@ fn a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes() {
     if !needs("py", "a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes") || !needs("js", "a_console_is_v2s_terminal_to_blocks_and_renders_escape_codes") {
         return;
     }
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::Console::{GetConsoleMode, GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO};
-    attach_console();
-    let console = std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$").expect("the console's screen buffer");
-    let h = console.as_raw_handle();
-    // SAFETY: plain calls on a handle this test owns; each fills its out-parameter.
-    let (mode, size) = unsafe {
-        let mut mode = 0;
-        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
-        assert!(GetConsoleMode(h, &mut mode) != 0 && GetConsoleScreenBufferInfo(h, &mut info) != 0, "{}", std::io::Error::last_os_error());
-        let w = info.srWindow;
-        (mode, (i32::from(w.Right) - i32::from(w.Left) + 1, i32::from(w.Bottom) - i32::from(w.Top) + 1))
-    };
+    let console = Console::take();
+    let mode = console.mode();
     let src = r#"let py = @py {
     import ctypes, os, shutil, sys
     from ctypes import wintypes
@@ -3143,17 +3293,101 @@ write_file("answers.txt", f"${py}\n${js}\n")
     std::fs::write(home.0.join("main.v2"), src).unwrap();
     let mut cmd = v2_command(&home.0);
     cmd.arg("main.v2").current_dir(&home.0).env_remove("COLUMNS").env_remove("LINES");
-    cmd.stdin(Stdio::null()).stdout(console.try_clone().unwrap()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null()).stdout(console.stdio()).stderr(Stdio::piped());
     let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
-    let (c, r) = size;
+    let (c, r) = console.size();
     let want = format!("py True False True False ({c}, {r}) vt True\njs true false true false {c}x{r}\n");
     assert_eq!(std::fs::read_to_string(home.0.join("answers.txt")).unwrap(), want, "{stderr}");
-    let mut after = 0;
-    // SAFETY: as above.
-    unsafe { GetConsoleMode(h, &mut after) };
-    assert_eq!(after, mode, "the console's mode is as it was before v2 ran");
+    assert_eq!(console.mode(), mode, "the console's mode is as it was before v2 ran");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_console_gets_its_cursor_and_mode_back_however_v2_ends() {
+    // INTERNALS 6.5 (round 22, the second review, issues 2, 3 and 8): v2's stdout on a console with
+    // VT processing off. Ctrl+Break while the cursor is hidden (as a live display hides it), and
+    // exit(3) from a callback while a block has it hidden: the cursor is shown again before the
+    // console's mode is put back. A closed pipe on stdout, stderr on the console: the mode is put
+    // back on that path too.
+    let console = Console::take();
+    let mode = console.mode();
+    let home = TempHome::new();
+    // Ctrl+Break, with V2 alone: its stdout is the console.
+    std::fs::write(home.0.join("hide.v2"), "print(\"\\x1b[?25l\", end: \"\")\nwrite_file(\"ready\", \"1\")\nwhile true {\n    sleep(0.05)\n}\n").unwrap();
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("hide.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(console.stdio()).stderr(Stdio::piped());
+    interruptible(&mut cmd);
+    let child = cmd.spawn().expect("start v2");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !home.0.join("ready").exists() {
+        assert!(Instant::now() < deadline, "hide.v2 never got ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let hidden = !console.cursor_shown();
+    interrupt(&child);
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(20)).expect("v2 ended after Ctrl+Break");
+    assert_interrupted(&out.status, SIGINT, &String::from_utf8_lossy(&out.stderr));
+    assert!(hidden, "the cursor was hidden while hide.v2 ran (VT processing on)");
+    assert!(console.cursor_shown(), "Ctrl+Break: the cursor is shown again");
+    assert_eq!(console.mode(), mode, "Ctrl+Break: the console's mode is back");
+    // exit(3) from a V2 callback a block called while it had the cursor hidden.
+    if needs("py", "a_console_gets_its_cursor_and_mode_back_however_v2_ends") {
+        let src = "func stop() { exit(3) }\n@py(stop) {\n    print(\"\\x1b[?25l\", end=\"\", flush=True)\n    stop()\n}\nprint(\"not reached\")\n";
+        std::fs::write(home.0.join("exit.v2"), src).unwrap();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("exit.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(console.stdio()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+        assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(console.cursor_shown(), "exit(3): the cursor is shown again");
+        assert_eq!(console.mode(), mode, "exit(3): the console's mode is back");
+    }
+    // A closed pipe on stdout; stderr is the console.
+    std::fs::write(home.0.join("loop.v2"), "for i in 0..100000000 {\n    print(i)\n}\n").unwrap();
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let mut cmd = v2_command(&home.0);
+    cmd.arg("loop.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(writer).stderr(console.stdio());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(30)).unwrap();
+    assert_eq!(out.status.code(), Some(141));
+    assert_eq!(console.mode(), mode, "a closed pipe: the console's mode is back");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_v2_leaves_a_console_mode_it_didnt_set_alone() {
+    // INTERNALS 6.5 (round 22, the second review, issue 4): two v2 runs on one console, as in
+    // `v2 a.v2 | v2 b.v2`. A run that finds VT processing on already records nothing, so when the
+    // first run, ending, turns it off, the second doesn't turn it on again at its end; and a run
+    // puts back the mode it found only while the console still has the mode it set.
+    let console = Console::take();
+    let mode = console.mode();
+    let home = TempHome::new();
+    std::fs::write(home.0.join("wait.v2"), "write_file(\"ready\", \"1\")\nsleep(1)\n").unwrap();
+    let run = |then: u32| {
+        let _ = std::fs::remove_file(home.0.join("ready"));
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("wait.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(console.stdio()).stderr(Stdio::piped());
+        let child = cmd.spawn().expect("start v2");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !home.0.join("ready").exists() {
+            assert!(Instant::now() < deadline, "wait.v2 never got ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // What another program on the console does while this v2 runs.
+        console.set_mode(then);
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(30)).unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+        console.mode()
+    };
+    // VT on before v2 starts; the earlier run turns it off meanwhile.
+    console.set_mode(mode | VT);
+    assert_eq!(run(mode), mode, "a mode v2 didn't set is not put back");
+    // VT off before v2 starts (v2 turns it on); meanwhile the console gets another mode.
+    console.set_mode(mode);
+    let other = mode | VT | windows_sys::Win32::System::Console::DISABLE_NEWLINE_AUTO_RETURN;
+    assert_eq!(run(other), other, "a console whose mode changed after v2 set it keeps that mode");
 }
 
 #[cfg(target_os = "linux")]
