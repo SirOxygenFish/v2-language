@@ -1,0 +1,17 @@
+// A name typed without its accents is suggested, as one in another case is (INTERNALS 5.9,
+// round 20): ß as ss and two accents in a short name were past the distance.
+let größe = 1
+let büyüt = 2
+let yardım = 3
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.message)
+    }
+}
+show(func() => grosse)
+show(func() => buyut)
+show(func() => yardim)
+// Other letters still count.
+show(func() => buyuk)
