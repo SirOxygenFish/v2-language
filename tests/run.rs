@@ -2979,6 +2979,64 @@ fn an_interrupt_gives_the_terminal_back() {
 
 #[cfg(unix)]
 #[test]
+fn ctrl_c_leaves_a_pagers_terminal_mode_alone() {
+    // DOCS 19.1, INTERNALS 6.5 (round 22, the review of L5): in `v2 x.v2 | less` Ctrl+C reaches the
+    // whole pipeline, and the pager, still running, has the terminal in a mode of its own (no echo,
+    // no line input): v2, whose stdout is the pipe, leaves it as it is and shows no cursor. The
+    // pager here is a Python reader of v2's output that sets that mode once v2 has started.
+    if !needs("py", "ctrl_c_leaves_a_pagers_terminal_mode_alone") {
+        return;
+    }
+    let home = TempHome::new();
+    std::fs::write(home.0.join("loop.v2"), "let i = 0\nwhile true {\n    print(i)\n    i += 1\n    sleep(0.1)\n}\n").unwrap();
+    let pager = r#"import os, signal, subprocess, sys, termios
+signal.signal(signal.SIGINT, lambda *a: None)  # as less, which handles Ctrl+C itself
+v2 = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE)
+v2.stdout.readline()  # v2 has started and seen the terminal as it was
+saved = termios.tcgetattr(0)
+raw = termios.tcgetattr(0)
+raw[3] &= ~(termios.ECHO | termios.ICANON)
+termios.tcsetattr(0, termios.TCSANOW, raw)
+os.write(1, b"ready\n")
+v2.stdout.read()
+rc = v2.wait()
+a = termios.tcgetattr(0)
+os.write(1, ("mode echo=%s icanon=%s v2=%s\n" % (bool(a[3] & termios.ECHO), bool(a[3] & termios.ICANON), rc)).encode())
+termios.tcsetattr(0, termios.TCSANOW, saved)
+"#;
+    std::fs::write(home.0.join("pager.py"), pager).unwrap();
+    let mut pty = Pty::open(80, 24);
+    let mut cmd = Command::new("python3");
+    cmd.args(["pager.py", BIN, "loop.v2"]).current_dir(&home.0).env("HOME", &home.0).env_remove("VIRTUAL_ENV");
+    pty.attach(&mut cmd);
+    let mut child = cmd.spawn().expect("start python3");
+    drop(cmd);
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    let mut seen = Vec::new();
+    if !pty.read_until(&mut seen, Instant::now() + Duration::from_secs(30), |s| find(s, b"ready").is_some()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the pager never got ready: {}", String::from_utf8_lossy(&seen).escape_debug());
+    }
+    // Ctrl+C, typed: to the pager and v2 alike.
+    pty.master.write_all(b"\x03").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the pager didn't end after v2 did: {}", String::from_utf8_lossy(&seen).escape_debug());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| find(s, b"v2=").is_some_and(|i| s[i..].contains(&b'\n')));
+    let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
+    assert!(shown.contains("mode echo=False icanon=False v2=-2"), "{shown}");
+    assert!(find(&seen, b"\x1b[?25h").is_none(), "v2 wrote to the pager's terminal: {shown}");
+}
+
+#[cfg(unix)]
+#[test]
 fn blocks_see_v2s_terminal() {
     // DOCS 4.6, INTERNALS 9.3 and 9.9 (round 22, L0-L2): a block's isatty answers, terminal sizes
     // and Node's tty methods are those of where V2 writes each stream: both on a 132 x 40 terminal;
@@ -3101,9 +3159,11 @@ write_file("answers.txt", f"${py}\n${js}\n")
 #[cfg(target_os = "linux")]
 #[test]
 fn the_readmes_way_to_leave_a_job_running_returns_at_once() {
-    // README (round 22, L4): its line for a job that outlives V2, run as written with `job` a script
-    // that writes job.log 2 s later: exec returns at once (dash, Ubuntu's sh, held exec's pipes
-    // while it waited for the job in the earlier line), and the job outlives V2.
+    // README (round 22, L4 and its review): its line for a job that outlives V2, run as written with
+    // `job` a script that writes job.log 2 s later: exec returns at once (dash, Ubuntu's sh, held
+    // exec's pipes while it waited for the job in the first line), and the job outlives V2 (under
+    // load, `setsid -f` in a shell lost it: the shell ended, and exec's tree with it, before the
+    // forked setsid had left that session; `setsid -w` waits until it has).
     let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
     let flat = readme.split_whitespace().collect::<Vec<_>>().join(" ");
     let line = flat.split_once("to leave a job running, `").and_then(|(_, rest)| rest.split_once('`')).expect("the README's line for a job that outlives V2").0;
