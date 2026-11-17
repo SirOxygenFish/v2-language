@@ -472,7 +472,11 @@ fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(),
     let shown = crate::syntax::span::shown_path(&path.display().to_string());
     let bytes = std::fs::read(path).map_err(|e| ConfigError(format!("{shown}: config error: cannot read the file: {}", crate::syntax::span::os_message(&e))))?;
     let text = String::from_utf8(bytes).map_err(|e| {
-        let why = crate::syntax::span::not_utf8_message(e.as_bytes()).trim_start_matches("file is not valid UTF-8");
+        // iconv's line names this file (2.1).
+        let why = match crate::syntax::span::not_utf8_named(e.as_bytes()) {
+            Some(m) => m.trim_start_matches("file is not valid UTF-8").to_string(),
+            None => format!(": {}", crate::syntax::span::older_encoding("v2.toml > new.toml && mv new.toml v2.toml")),
+        };
         ConfigError(format!("{shown}: config error: the file is not valid UTF-8{why}"))
     })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -969,6 +973,16 @@ mod tests {
         std::fs::write(d.join("v2.toml"), bytes).unwrap();
         let e = load_from(&d, vars(&[])).unwrap_err().0;
         assert!(e.ends_with("v2.toml: config error: the file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"), "{e}");
+        // An older encoding: off Windows, iconv's line names v2.toml, not old.v2 (round 20).
+        std::fs::write(d.join("v2.toml"), b"# Gr\xfc\xdfe\n").unwrap();
+        let e = load_from(&d, vars(&[])).unwrap_err().0;
+        let want = if cfg!(windows) {
+            "v2.toml: config error: the file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8".to_string()
+        } else {
+            let (page, name) = crate::syntax::span::locale_code_page();
+            format!("v2.toml: config error: the file is not valid UTF-8: it may be in an older encoding, such as {name}: save it as UTF-8, as in iconv -f {page} -t utf-8 v2.toml > new.toml && mv new.toml v2.toml, then check the text")
+        };
+        assert!(e.ends_with(&want), "{e}");
         // cmd's `set V2_ENGINE_PY="C:\…\python.exe"` keeps its quotes; one pair is taken off (18.4).
         let exe = if cfg!(windows) { "C:\\Python 3\\python.exe" } else { "/opt/python 3/bin/python3" };
         let cfg = project_env("quoted", "", &[("V2_ENGINE_PY", &format!("\"{exe}\""))]).unwrap();

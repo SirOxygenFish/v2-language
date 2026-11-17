@@ -47,7 +47,7 @@ pub static BYTES_METHODS: &[MethodDef] = &[
         let b = the_bytes(r);
         match std::str::from_utf8(b) {
             Ok(s) => Ok(Value::str(s)),
-            Err(e) => value_error(format!("invalid UTF-8 at byte offset {}", e.valid_up_to())),
+            Err(e) => value_error(format!("invalid UTF-8 at byte offset {}", e.valid_up_to())).inspect_err(|f| utf8_only("bytes.decode", f)),
         }
     }),
     m("hex", NONE, |_, r, _, _| {
@@ -58,6 +58,22 @@ pub static BYTES_METHODS: &[MethodDef] = &[
         Ok(Value::Str(s.into()))
     }),
 ];
+
+/// `b.decode("latin-1")`, `s.encode(encoding: "cp1254")`, and bytes that aren't UTF-8: V2's own
+/// read and write UTF-8 only, a block any encoding (5.4). The hint for `method`'s ArityError or
+/// ValueError.
+pub(crate) fn utf8_only(method: &str, f: &Flow) {
+    let hint = match method {
+        "bytes.decode" => "V2's decode() reads UTF-8 only: for another encoding, decode in a block, as in @py(b) { b.decode(\"cp1254\") }",
+        "str.encode" => "V2's encode() writes UTF-8 only: for another encoding, encode in a block, as in @py(s) { s.encode(\"cp1254\") }",
+        _ => return,
+    };
+    if let Flow::Error(e) = f {
+        if matches!(&*e.kind, "ArityError" | "ValueError") {
+            let _ = e.hint.set(hint.into());
+        }
+    }
+}
 
 pub static LIST_METHODS: &[MethodDef] = &[
     m("push", &[ParamSpec::rest("items")], |_, r, a, _| {

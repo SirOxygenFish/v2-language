@@ -693,6 +693,7 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
         let home = TempHome::new();
         std::fs::write(home.0.join("bad.v2"), bytes).unwrap();
         let child = v2_command(&home.0)
+            .env("LC_ALL", "C.UTF-8")
             .arg("bad.v2")
             .current_dir(&home.0)
             .stdin(Stdio::piped())
@@ -710,6 +711,28 @@ fn invalid_utf8_is_a_syntax_error_at_its_line() {
         );
         assert!(out.stdout.is_empty());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn iconvs_line_takes_its_code_page_from_the_locale() {
+    // INTERNALS 3.1 (round 20): from cp1252, iconv garbled a Turkish file without an error. The
+    // line V2 gives, followed, makes a file that prints the text as it was written.
+    let home = TempHome::new();
+    // print("Iğdır şehri") in cp1254. LC_ALL empty counts as unset: LC_CTYPE comes next.
+    std::fs::write(home.0.join("old.v2"), b"print(\"I\xf0d\xfdr \xfeehri\")\n").unwrap();
+    let out = v2_command(&home.0).env("LC_ALL", "").env("LC_CTYPE", "tr_TR.UTF-8").env("LANG", "C").arg("old.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "old.v2:1:9: SyntaxError: file is not valid UTF-8: it may be in an older encoding, such as Windows-1254: save it as UTF-8, as in iconv -f cp1254 -t utf-8 old.v2 > new.v2, then check the text\n"
+    );
+    let iconv = Command::new("iconv").args(["-f", "cp1254", "-t", "utf-8", "old.v2"]).current_dir(&home.0).output();
+    let Some(iconv) = iconv.ok().filter(|o| o.status.success()) else {
+        return; // no iconv with cp1254 here
+    };
+    std::fs::write(home.0.join("new.v2"), iconv.stdout).unwrap();
+    let out = v2_command(&home.0).arg("new.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "Iğdır şehri\n", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// Run generated source in a fresh temp home; returns (exit code, stdout, stderr).
@@ -2158,11 +2181,12 @@ fn interruptible(cmd: &mut Command) {
 }
 
 /// Interrupt `child` the way a terminal does: SIGINT, or Ctrl+Break to its process group.
-/// A .v2 file in an older encoding: what V2 says, which on Linux and macOS names iconv (2.1).
+/// A .v2 file in an older encoding: what V2 says, which on Linux and macOS names iconv (2.1),
+/// with the code page of the locale's language (`LC_ALL=C.UTF-8` here: cp1252).
 const OLDER: &str = if cfg!(windows) {
     "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8"
 } else {
-    "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 or Latin-1: save it as UTF-8, as in iconv -f cp1252 -t utf-8 old.v2 > new.v2"
+    "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 or Latin-1: save it as UTF-8, as in iconv -f cp1252 -t utf-8 old.v2 > new.v2, then check the text"
 };
 
 /// The signal `interrupt` sends (Windows: Ctrl+Break, which has none).
@@ -2700,6 +2724,7 @@ fn check_keeps_file_order_for_files_that_are_not_utf8() {
     std::fs::write(d.join("good.v2"), "let y = 1\nlet y = 2\n").unwrap();
     let check = |file: &str| {
         let child = v2_command(d)
+            .env("LC_ALL", "C.UTF-8")
             .args(["check", file])
             .current_dir(d)
             .stdin(Stdio::null())
@@ -3210,6 +3235,38 @@ fn a_script_in_a_folder_whose_name_isnt_utf8_is_refused() {
     assert_eq!(out.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("is not valid UTF-8, which V2 needs: a folder on the way has a name in another encoding; rename it"), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn names_that_arent_utf8_say_what_to_do() {
+    // Round 20 (L12): FILE's name ends as a folder's does (19.1); a path that args() or getenv()
+    // gave U+FFFD names no file, and the hint says why (5.10).
+    use std::os::unix::ffi::OsStrExt;
+    let home = TempHome::new();
+    let run = |args: &[&std::ffi::OsStr], env: &[(&str, &std::ffi::OsStr)]| {
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(&home.0).stdin(Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let latin = |b: &'static [u8]| std::ffi::OsStr::from_bytes(b);
+    assert_eq!(
+        run(&[latin(b"J\xfcrgen.v2")], &[]),
+        (Some(2), "v2: the file name 'J\u{FFFD}rgen.v2' is not valid UTF-8, which V2 needs: the name is in another encoding; rename it\n".to_string())
+    );
+    std::fs::write(home.0.join("rf.v2"), "print(read_file(args().get(0) ?? getenv(\"DATA\")))\n").unwrap();
+    let hint = |what: &str| format!("  hint: the path holds U+FFFD where {what} wasn't UTF-8: rename the file to a UTF-8 name, or use a UTF-8 locale\n");
+    let (code, stderr) = run(&[latin(b"rf.v2"), latin(b"gr\xfc\xdfe.txt")], &[]);
+    assert!(code == Some(1) && stderr.contains(&hint("an argument")), "{stderr}");
+    let (code, stderr) = run(&[latin(b"rf.v2")], &[("DATA", latin(b"d\xfc.txt"))]);
+    assert!(code == Some(1) && stderr.contains(&hint("an environment variable")), "{stderr}");
+    // A U+FFFD written in the path itself gets no such hint.
+    let (_, stderr) = run(&[latin(b"rf.v2"), latin("x\u{FFFD}.txt".as_bytes())], &[]);
+    assert!(!stderr.contains("hint:"), "{stderr}");
 }
 
 #[cfg(unix)]
