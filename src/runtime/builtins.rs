@@ -2411,14 +2411,28 @@ fn print(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
 /// after `Out` is flushed, so on one stream the text keeps program order (5.10).
 fn to_stderr(it: &mut Interp, bytes: &[u8]) -> Exec<Value> {
     it.out.flush_or_stop();
+    match write_stderr(bytes) {
+        Ok(()) => Ok(Value::Null),
+        Err(e) => io_error(format!("cannot write to stderr: {}", os_message(&e))),
+    }
+}
+
+/// Program text for the host's stderr (`print(stderr: true)`, a block's stderr text, 9.9), written
+/// at once. A reader that went away (`v2 x.v2 2>&1 | head`) stops the run quietly with 141, as on
+/// stdout (6.5); another failure is returned.
+pub fn write_stderr(bytes: &[u8]) -> std::io::Result<()> {
     stop_if_interrupted();
-    let mut err = std::io::stderr().lock();
-    match err.write_all(bytes).and_then(|_| err.flush()) {
+    let r = {
+        let mut err = std::io::stderr().lock();
+        err.write_all(bytes).and_then(|_| err.flush())
+    };
+    match r {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => process::exit_broken_pipe(),
+        Err(e) => Err(e),
         Ok(()) => {
             wrote_stderr(bytes);
-            Ok(Value::Null)
+            Ok(())
         }
-        Err(e) => io_error(format!("cannot write to stderr: {}", os_message(&e))),
     }
 }
 

@@ -67,13 +67,13 @@ pub fn exit_interrupted() -> ! {
     die(&lock())
 }
 
-/// The exit code when stdout's reader went away: 128 + SIGPIPE, what a shell shows for a command
-/// a closed pipe stopped (6.5).
+/// The exit code when stdout's or stderr's reader went away: 128 + SIGPIPE, what a shell shows for
+/// a command a closed pipe stopped (6.5).
 pub const EXIT_BROKEN_PIPE: i32 = 141;
 
-/// stdout's reader went away (`v2 x.v2 | head`): nothing more can be shown, so the run ends at
-/// once and quietly, as for an interrupt but with no output left to write: every child stopped
-/// as a tree, the run dir removed, exit 141 (6.5).
+/// stdout's or stderr's reader went away (`v2 x.v2 | head`, `2>&1 | head`): nothing more can be
+/// shown, so the run ends at once and quietly, as for an interrupt but with no output left to
+/// write: every child stopped as a tree, the run dir removed, exit 141 (6.5).
 pub fn exit_broken_pipe() -> ! {
     let w = lock();
     for (_, kill) in &w.children {
@@ -101,12 +101,71 @@ fn die(w: &Watch) -> ! {
     for (_, kill) in &w.children {
         kill.wait_stopped(deadline);
     }
+    // Once nothing draws on it any more.
+    #[cfg(unix)]
+    restore_terminal();
     if let Some(dir) = &w.run_dir {
         remove_run_dir(dir);
     }
     #[cfg(unix)]
     die_by_signal();
     hard_exit(EXIT_INTERRUPTED)
+}
+
+/// Unix: the settings of stdin, stdout and stderr that were terminals when v2 started (6.5).
+#[cfg(unix)]
+static TERMINAL: OnceLock<Vec<(libc::c_int, libc::termios)>> = OnceLock::new();
+
+/// Unix, at startup: remember the terminal's settings (echo, line input), which the interrupt path
+/// puts back (6.5).
+#[cfg(unix)]
+fn remember_terminal() {
+    let saved = (0..3)
+        .filter_map(|fd| {
+            // SAFETY: tcgetattr fills a zeroed struct for any descriptor, a terminal or not.
+            let mut t: libc::termios = unsafe { std::mem::zeroed() };
+            (unsafe { libc::isatty(fd) == 1 && libc::tcgetattr(fd, &mut t) == 0 }).then_some((fd, t))
+        })
+        .collect();
+    let _ = TERMINAL.set(saved);
+}
+
+/// Unix, on the interrupt path: a block stopped on the spot never ran the code that undoes what it
+/// did to the terminal (echo turned off, a live display's hidden cursor), so the terminal gets back
+/// the settings it had when v2 started, and stdout or stderr, when one is a terminal, gets
+/// `ESC[?25h` (the cursor shown). Only while v2 is that terminal's foreground job: a background
+/// one would change the settings of the shell that now reads it. From a thread of its own, at most
+/// 100 ms, as a terminal whose output is stopped (Ctrl+S) blocks the write (6.5).
+#[cfg(unix)]
+fn restore_terminal() {
+    let Some(saved) = TERMINAL.get().filter(|s| !s.is_empty()) else { return };
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = spawn_helper(std::thread::Builder::new(), move || {
+        // SAFETY: plain calls on the standard descriptors with the settings tcgetattr gave; SIGTTOU
+        // ignored, a race with the shell taking the terminal back can't stop the process.
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            let foreground = |fd| libc::tcgetpgrp(fd) == libc::getpgrp();
+            for (fd, t) in saved.iter().filter(|(fd, _)| foreground(*fd)) {
+                libc::tcsetattr(*fd, libc::TCSANOW, t);
+            }
+            let device = |fd| {
+                let mut st: libc::stat = std::mem::zeroed();
+                (libc::fstat(fd, &mut st) == 0).then_some((st.st_dev, st.st_ino))
+            };
+            let mut shown = None;
+            for fd in [1, 2].into_iter().filter(|fd| saved.iter().any(|(f, _)| f == fd) && foreground(*fd)) {
+                if shown.is_none() || shown != device(fd) {
+                    libc::write(fd, b"\x1b[?25h".as_ptr().cast(), 6);
+                    shown = device(fd);
+                }
+            }
+        }
+        let _ = done.send(());
+    });
+    if writer.is_ok() {
+        let _ = finished.recv_timeout(Duration::from_millis(100));
+    }
 }
 
 /// Unix: end by the signal that came, as a program without a handler does, so the shell sees a
@@ -455,6 +514,8 @@ impl Watchdog {
     /// would end the run, so the OS default stays (6.5).
     pub fn start() -> Watchdog {
         default_sigchld();
+        #[cfg(unix)]
+        remember_terminal();
         if ensure_thread() {
             install_interrupt_handler();
         }

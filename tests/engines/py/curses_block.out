@@ -1,0 +1,1 @@
+ForeignError | UnsupportedOperation | fileno: a block has no terminal of its own: full-screen libraries such as curses can't run in a block

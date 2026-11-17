@@ -916,7 +916,8 @@ same place as V2's `print`, **in program order** — even when output is redirec
 
 One exception: output written *below* the language level — by a Python C extension, `os.system`,
 or a child process a Python/JS block starts — goes to standard error instead, so it can't mix
-into V2's internal communication with the engine.
+into V2's internal communication with the engine. It isn't ordered with the block's own prints:
+it can come before them.
 
 Blocks cannot read standard input: V2's `input()` owns it. Read input in V2 and pass it in as a
 block arg. On Linux and macOS, terminal prompts (git, ssh, sudo, `getpass`) fail at once. On
@@ -2068,8 +2069,8 @@ WSL's files are.
 | `1`       | uncaught error, or a `SyntaxError`; `v2 check` found an error; a run in which Python or JavaScript printed an error V2 couldn't raise (from a timer, a thread, a Promise nobody waits for) |
 | `2`       | usage or configuration error                                             |
 | `3`       | a required engine is missing (uncaught `EngineNotFound`)                 |
-| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped at once (what their open files still buffer is lost, and `atexit` doesn't run), what was printed is still written. On Linux and macOS v2 then ends by that signal, as a program without a handler does, so a shell shows 128 + its number (130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP) and stops a loop of `v2` runs |
-| `141`     | the output's reader went away (`v2 x.v2 \| head`): the run stops quietly, like Ctrl+C but with nothing more to show |
+| `130`     | interrupted (Ctrl+C or the process was told to stop); `finally` blocks don't run, engines are stopped at once (what their open files still buffer is lost, and `atexit` doesn't run), what was printed is still written. On Linux and macOS the terminal gets back the settings it had when v2 started, and its cursor (a block stopped there may have turned echo off or hidden it), and v2 then ends by that signal, as a program without a handler does, so a shell shows 128 + its number (130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP) and stops a loop of `v2` runs |
+| `141`     | the output's reader (standard output or error) went away (`v2 x.v2 \| head`): the run stops quietly, like Ctrl+C but with nothing more to show |
 | `0` for `v2 doctor` | it ran, even when an engine isn't ready (`2` for a configuration error): to fail a CI step without Python, test its summary, `v2 doctor \| grep -q '^ready:.* py'` |
 | `101`     | internal error in V2 itself (a bug — please report it)                   |
 
