@@ -1076,8 +1076,9 @@ impl Interp {
         self.call_value(&f, pos, named, callee.span).inspect_err(|flow| self.decimal_comma_args(flow, &f, args))
     }
 
-    /// `sleep(0,5)`: an `ArityError` of a builtin given more arguments than it takes, two of them
-    /// int literals around a `,` with no space, a decimal comma (2.4). `round(2,5)` is a call.
+    /// `sleep(0,5)`: an `ArityError` of a builtin given more arguments than it takes, two or more
+    /// of them int literals with a `,` and no space between each, a decimal comma or thousands
+    /// (`len(1,500)`; 2.4). `round(2,5)` is a call.
     #[cold]
     fn decimal_comma_args(&self, flow: &Flow, f: &Value, args: &[Arg]) {
         let (Flow::Error(e), Value::Func(c)) = (flow, f) else { return };
@@ -1085,14 +1086,30 @@ impl Interp {
         if &*e.kind != "ArityError" || def.params.iter().any(|p| p.rest) || args.len() <= def.params.len() {
             return;
         }
-        for pair in args.windows(2) {
-            let [Arg::Pos(a @ Expr { kind: ExprKind::Int(_), .. }), Arg::Pos(b @ Expr { kind: ExprKind::Int(_), .. })] = pair else { continue };
-            let text = &self.sm.file(a.span.file).text;
-            let digits = |x: &Expr| text.get(x.span.lo as usize..x.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_'));
-            if let (Some(","), Some(whole), Some(fraction)) = (text.get(a.span.hi as usize..b.span.lo as usize), digits(a), digits(b)) {
-                let _ = e.hint.set(crate::syntax::lexer::decimal_comma_hint(whole, fraction).into());
+        let digits = |arg: &Arg| match arg {
+            Arg::Pos(x @ Expr { kind: ExprKind::Int(_), .. }) => {
+                let text = &self.sm.file(x.span.file).text;
+                text.get(x.span.lo as usize..x.span.hi as usize).filter(|s| s.bytes().all(|c| c.is_ascii_digit() || c == b'_')).map(|s| (x.span, s))
+            }
+            _ => None,
+        };
+        // Each run of such literals, as written.
+        let mut k = 0;
+        while k < args.len() {
+            let mut groups = Vec::new();
+            while let Some((span, s)) = digits(&args[k]) {
+                groups.push(s);
+                let joined = args.get(k + 1).and_then(digits).is_some_and(|(next, _)| self.sm.file(span.file).text.get(span.hi as usize..next.lo as usize) == Some(","));
+                if !joined {
+                    break;
+                }
+                k += 1;
+            }
+            if let Some(hint) = crate::syntax::lexer::decimal_comma_hint(&groups) {
+                let _ = e.hint.set(hint.into());
                 return;
             }
+            k += 1;
         }
     }
 
