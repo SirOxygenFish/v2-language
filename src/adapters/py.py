@@ -330,12 +330,20 @@ if __name__ == "__main__":
 
         def fileno(self):
             # stderr is fd 2. stdout is V2's, with no descriptor here: fd 1 is stderr, and
-            # console-aware libraries (click) would write to it (9.9).
+            # console-aware libraries (click) would write to it (9.9). What to do instead depends
+            # on who asks: subprocess (stdout=sys.stdout) or anyone else, such as curses.
             if self._fd == 2:
                 return 2
-            raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor: leave stdout= out "
-                                          "(the output then goes to stderr), or capture it (capture_output=True, text=True) "
-                                          "and print(r.stdout), or use V2's exec([…])")
+            try:
+                caller = sys._getframe(1).f_globals.get("__name__")
+            except (AttributeError, ValueError):
+                caller = None
+            if caller in ("subprocess", "os"):
+                raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor: leave stdout= out "
+                                              "(the output then goes to stderr), or capture it (capture_output=True, text=True) "
+                                              "and print(r.stdout), or use V2's exec([…])")
+            raise io.UnsupportedOperation("fileno: a block has no terminal of its own: full-screen libraries such as curses "
+                                          "can't run in a block")
 
         @property
         def line_buffering(self):
