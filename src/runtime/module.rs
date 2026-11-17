@@ -419,7 +419,7 @@ fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
     if let Some(twin) = twin.or_else(|| folder_twin(target)) {
         return (String::new(), Some(twin));
     }
-    // `./util.v2/`: the file itself, which Windows and macOS find with a separator after it.
+    // `./util.v2/`: the file itself, which Windows 11 and macOS find with a separator after it.
     let trimmed = trim_separators(spec);
     if trimmed.len() < spec.len() && trimmed.ends_with(name) && folder.join(name).is_file() {
         return (format!(" — did you mean '{trimmed}'?"), None);
