@@ -150,16 +150,18 @@ fn v2_command(home: &Path) -> Command {
     }
     cmd.env_remove("VIRTUAL_ENV");
     // An activated venv's bin (Scripts) folder on the developer's PATH changes which Python the
-    // runs find, and so their hints: left out (the second review of round 19). A test that wants
+    // runs find, and so their hints: left out (the second review of round 19), worked out once
+    // per test process, as WSL's PATH has dozens of /mnt/c folders to look at. A test that wants
     // one sets PATH itself.
-    if let Some(path) = std::env::var_os("PATH") {
+    static PATH_WITHOUT_VENVS: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    let path = PATH_WITHOUT_VENVS.get_or_init(|| {
+        let path = std::env::var_os("PATH")?;
         let all: Vec<PathBuf> = std::env::split_paths(&path).collect();
         let kept: Vec<&PathBuf> = all.iter().filter(|d| !d.parent().is_some_and(|p| p.join("pyvenv.cfg").is_file())).collect();
-        if kept.len() < all.len() {
-            if let Ok(joined) = std::env::join_paths(kept) {
-                cmd.env("PATH", joined);
-            }
-        }
+        if kept.len() < all.len() { std::env::join_paths(kept).ok() } else { None }
+    });
+    if let Some(path) = path {
+        cmd.env("PATH", path);
     }
     cmd.env("HOME", home).env("USERPROFILE", home).env("RUSTUP_HOME", rustup).env("CARGO_HOME", cargo);
     cmd
