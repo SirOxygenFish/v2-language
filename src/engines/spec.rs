@@ -207,13 +207,15 @@ pub fn install_hint(id: &str) -> String {
 }
 
 /// The variables an engine's program reads as it starts, set here: a stale `PYTHONHOME` or a
-/// preload in `NODE_OPTIONS` stops it before V2 sees a version (8.4, 19.2). Values at most 80
-/// characters.
+/// preload in `NODE_OPTIONS` stops it before V2 sees a version (8.4, 19.2). Values whole, as the
+/// wrong folder is often the last, with their control characters escaped, as a path's (2.1).
 pub fn startup_variables(id: &str) -> Vec<(&'static str, String)> {
-    startup_names(id)
-        .iter()
-        .filter_map(|n| std::env::var_os(n).filter(|v| !v.is_empty()).map(|v| (*n, v.to_string_lossy().chars().take(80).collect())))
-        .collect()
+    startup_values(id, |n| std::env::var_os(n))
+}
+
+/// `startup_variables` with the environment read through `get`.
+fn startup_values(id: &str, get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<(&'static str, String)> {
+    startup_names(id).iter().filter_map(|n| get(n).filter(|v| !v.is_empty()).map(|v| (*n, crate::syntax::span::shown_path(&v.to_string_lossy())))).collect()
 }
 
 fn startup_names(id: &str) -> &'static [&'static str] {
@@ -389,6 +391,24 @@ mod tests {
         assert_eq!(startup_fix("py", &one), "python didn't start: PYTHONPATH is set (/old/lib), which it reads as it starts: unset it or fix it");
         let two = [("PYTHONHOME", "/nope".to_string()), ("PYTHONPATH", "/old/lib".to_string())];
         assert_eq!(startup_vars_fix(&two), "PYTHONHOME is set (/nope) and PYTHONPATH is set (/old/lib), which it reads as it starts: unset them or fix them");
+    }
+
+    #[test]
+    fn startup_variables_are_shown_whole_and_escaped() {
+        // Round 22 (3): cut at 80 characters with no mark, a long PYTHONPATH read as another
+        // folder that isn't there; the wrong folder is often its last entry. Whole, its control
+        // characters escaped, as a printed path's (2.1); an empty one is unset.
+        let long = format!("C:\\{};C:\\b\u{1b}[2J", "d".repeat(100));
+        let env = |n: &str| match n {
+            "PYTHONPATH" => Some(std::ffi::OsString::from(&long)),
+            "PYTHONHOME" => Some(std::ffi::OsString::new()),
+            "NODE_OPTIONS" => Some(std::ffi::OsString::from("--max-old-space-size=32")),
+            _ => None,
+        };
+        let shown = format!("C:\\{};C:\\b\\u{{1b}}[2J", "d".repeat(100));
+        assert_eq!(startup_values("py", env), [("PYTHONPATH", shown)]);
+        assert_eq!(startup_values("js", env), [("NODE_OPTIONS", "--max-old-space-size=32".to_string())]);
+        assert!(startup_values("ts", env).is_empty());
     }
 
     #[test]

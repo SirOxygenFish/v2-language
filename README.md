@@ -609,6 +609,9 @@ The variable `V2_ENGINE_PY` (or `V2_ENGINE_JS`) set to a
 program's path does the same while it is set: in PowerShell, for that window,
 `$env:V2_ENGINE_PY = "C:\Program Files\Python313\python.exe"` (and `Remove-Item Env:V2_ENGINE_PY`
 ends it); in a shell, `export V2_ENGINE_PY=/opt/homebrew/bin/python3`.
+A portable Python works the same way; python.org's embeddable zip runs blocks, but has no pip or
+venv and ignores `PYTHONPATH`: for packages, use the full installer (or the nuget package) and a
+venv.
 
 V2 doesn't read `.python-version`, `.nvmrc` or `.tool-versions`. A version manager's shim on PATH
 (pyenv, asdf, fnm) picks the version for the folder you run `v2` from, not the script's folder:

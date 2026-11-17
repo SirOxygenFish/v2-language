@@ -1304,7 +1304,8 @@ With uv, `uv add pandas` in your project (or `uv venv`, then `uv pip install pan
 same `.venv` for that `v2.toml`, and `uv run v2 main.v2` works without one; uv's venvs have no pip.
 
 Python looks in the `.v2` file's folder, the project root, then its normal module path (your
-`PYTHONPATH`, the standard library and installed packages — the venv's, when one is set). The
+`PYTHONPATH`, which python.org's embeddable zip ignores; the standard library; installed packages
+— the venv's, when one is set). The
 project root, the venv and the `v2.toml` are the script's you run: a `.v2` file imported from
 another project uses them too, and only its own folder is added for its `.py` files. A module is
 named by its dotted name from one of these folders (`py.stages.clean` for `stages/clean.py`), not
@@ -2010,8 +2011,9 @@ whole engine for the rest of the run, so later uses of it raise `EngineCrashed`.
 that may hang, use the language's own timeout, which you can retry: `urlopen(url, timeout=5)`,
 `fetch(url, { signal: AbortSignal.timeout(5000) })`.
 
-`V2_ENGINE_PY` wins over `[python] venv`. Setting both `[python] venv` and `[engines.py] command`
-in `v2.toml` is a configuration error: keep one. So a project used from Windows and from Linux
+`V2_ENGINE_PY` wins over `[python] venv` (`v2 doctor` says so while it is set). Setting both
+`[python] venv` and `[engines.py] command` in `v2.toml` is a configuration error: keep one. So a
+project used from Windows and from Linux
 (code in WSL) keeps a venv for each system: `venv` names one, and `V2_ENGINE_PY` the other's
 python; a venv the other system made is kept, and the message says how to make this system's.
 On Windows a command names a Windows program (`python.exe`): a Linux one, on WSL's share or run
@@ -2020,7 +2022,8 @@ through `wsl.exe`, can't run V2's worker, and doctor and the error say so.
 `venv` names a virtual environment, a folder with a `pyvenv.cfg` (as `python -m venv` and `uv venv`
 make); name another Python's program in `[engines.py] command` instead ([chapter 5](#5-engines)
 has conda's way). A venv whose python now runs another Python than the one it was made with
-(after an upgrade) can't find its packages, so V2 stops with what to do: make it again.
+(after an upgrade) can't find its packages, so V2 stops with what to do: make it again. So does
+a venv whose Python was moved or removed, naming that Python: put it back, or make the venv again.
 
 `@ts` blocks run on the js engine, so they are configured in `[engines.js]`: an `[engines.ts]`
 table, or `V2_ENGINE_TS`, is a configuration error. So is an unknown section or key, or a key that

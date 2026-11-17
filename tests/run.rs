@@ -1540,6 +1540,94 @@ fn a_stale_pythonpath_that_breaks_the_workers_imports_is_broken_in_doctor() {
 }
 
 #[test]
+fn an_embeddable_python_and_a_long_pythonpath_in_doctor_and_a_crash() {
+    // Round 22 (1.3, 3, 4), INTERNALS 8.4, 19.2: Python's embeddable package (a python313._pth
+    // beside its python) ignores PYTHONPATH, so doctor says what it reads instead and a crash
+    // doesn't blame the variable; another Python's PYTHONPATH is shown whole (it was cut at 80
+    // characters with no mark), its control characters escaped; V2_ENGINE_PY over the project's
+    // venv is named. A fake Python that answers --version and doctor's -c check, and exits 1 as
+    // a worker: no real Python needed.
+    let home = TempHome::new();
+    let (name, script) = if cfg!(windows) {
+        ("python.bat", "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo Python 3.13.9\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"-c\" exit /b 0\r\nexit /b 1\r\n")
+    } else {
+        ("python3", "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'Python 3.13.9' ;;\n  -c) ;;\n  *) exit 1 ;;\nesac\n")
+    };
+    let program = |folder: &str| {
+        let p = home.0.join(folder).join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, script).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        p
+    };
+    let (embed, full) = (program("embed"), program("full"));
+    std::fs::write(home.0.join("embed").join("python313._pth"), "python313.zip\n.\n").unwrap();
+    std::fs::write(home.0.join("start.v2"), "@py { 1 }\n").unwrap();
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    let long = format!("{}\u{1b}{};end", "d".repeat(100), "e".repeat(20));
+    let shown = format!("{}\\u{{1b}}{};end", "d".repeat(100), "e".repeat(20));
+    let env = |python: &Path| vec![("V2_ENGINE_PY", python.as_os_str().to_owned()), ("PYTHONPATH", std::ffi::OsString::from(&long))];
+    let run = |python: &Path, args: &[&str]| {
+        let env = env(python);
+        let pairs: Vec<(&str, &std::ffi::OsStr)> = env.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
+        run_in_home(&home.0, args, &pairs)
+    };
+    let unset = if cfg!(windows) { "Remove-Item Env:V2_ENGINE_PY" } else { "unset V2_ENGINE_PY" };
+    let unused = format!(".venv' (v2.toml) isn't used: to use it, {unset}\n");
+    let (code, stdout, _) = run(&full, &["doctor"]);
+    assert_eq!((code, doctor_rows(&stdout)["py"][0].as_str()), (Some(0), "ok"), "{stdout}");
+    assert!(stdout.contains(&format!("\n  py: PYTHONPATH is set ({shown}), which Python reads as it starts\n")), "{stdout}");
+    assert!(stdout.contains("\n  py: V2_ENGINE_PY is set, so [python] venv '") && stdout.contains(&unused), "{stdout}");
+    assert!(!stdout.contains("embeddable"), "{stdout}");
+    let (code, _, stderr) = run(&full, &["start.v2"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("exited during startup (exit code 1); see its error output above, if any; PYTHONPATH is set ({shown}), which it reads as it starts: unset it or fix it\n")), "{stderr}");
+    let (code, stdout, _) = run(&embed, &["doctor"]);
+    assert_eq!((code, doctor_rows(&stdout)["py"][0].as_str()), (Some(0), "ok"), "{stdout}");
+    assert!(stdout.contains("\n  py: this is Python's embeddable package: its python313._pth decides sys.path (PYTHONPATH is ignored), and it has no pip or venv\n"), "{stdout}");
+    assert!(!stdout.contains("PYTHONPATH is set") && stdout.contains(&unused), "{stdout}");
+    let (code, _, stderr) = run(&embed, &["start.v2"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("exited during startup (exit code 1); see its error output above, if any\n") && !stderr.contains("PYTHONPATH"), "{stderr}");
+}
+
+#[test]
+fn a_real_embeddable_python_gets_what_works_there() {
+    // Round 22 (1): with V2_TEST_EMBEDDABLE_PY naming the python.exe of python.org's embeddable
+    // zip (CI has none, so it is skipped there): blocks run; a missing package's hint says it
+    // has no pip, a missing standard module (tkinter) that pip can't add it, doctor what it reads
+    // instead of PYTHONPATH, and [python] venv naming its folder offers no -m venv.
+    let Some(python) = std::env::var_os("V2_TEST_EMBEDDABLE_PY").map(PathBuf::from) else {
+        eprintln!("SKIP a_real_embeddable_python_gets_what_works_there: V2_TEST_EMBEDDABLE_PY isn't set");
+        return;
+    };
+    let home = TempHome::new();
+    std::fs::write(home.0.join("ok.v2"), "print(@py { 6 * 7 })\n").unwrap();
+    std::fs::write(home.0.join("pkg.v2"), "@import { naturalsize } from py.zz_humanize_v2\nprint(naturalsize(1))\n").unwrap();
+    std::fs::write(home.0.join("tk.v2"), "@import { Tk } from py.tkinter\nprint(Tk)\n").unwrap();
+    let env = [("V2_ENGINE_PY", python.as_os_str()), ("PYTHONPATH", std::ffi::OsStr::new("nowhere"))];
+    let (code, stdout, stderr) = run_in_home(&home.0, &["ok.v2"], &env);
+    assert_eq!((code, stdout.as_str()), (Some(0), "42\n"), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["pkg.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    let none = "hint: this is Python's embeddable package, which has no pip: for packages, use a full Python (python.org's installer, or the nuget package) and a venv\n";
+    assert!(stderr.contains("ImportError: No module named 'zz_humanize_v2'") && stderr.contains(none), "{stderr}");
+    let (code, _, stderr) = run_in_home(&home.0, &["tk.v2"], &env);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("hint: 'tkinter' is part of Python's standard library, which this Python lacks: pip can't add it; use a full Python\n"), "{stderr}");
+    let (code, stdout, _) = run_in_home(&home.0, &["doctor"], &env);
+    assert_eq!((code, doctor_rows(&stdout)["py"][0].as_str()), (Some(0), "ok"), "{stdout}");
+    assert!(stdout.contains("\n  py: this is Python's embeddable package: its python") && stdout.contains("._pth decides sys.path (PYTHONPATH is ignored), and it has no pip or venv\n"), "{stdout}");
+    assert!(!stdout.contains("PYTHONPATH is set"), "{stdout}");
+    let folder = python.parent().unwrap().display().to_string();
+    std::fs::write(home.0.join("v2.toml"), format!("[python]\nvenv = '{folder}'\n")).unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["ok.v2"], &[]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains("is a Python installation, not a virtual environment: name its python instead, [engines.py] command = ") && !stderr.contains("-m venv"), "{stderr}");
+}
+
+#[test]
 fn a_node_options_that_stops_node_is_named() {
     // Round 18, INTERNALS 7.8, 19.2: a bad option in NODE_OPTIONS stops `node --version`, and a
     // preload that isn't there stops `node -e 0`: doctor and the run name the variable, not a
@@ -6000,11 +6088,16 @@ fn an_activated_venv_gets_its_own_install_line_until_its_python_stops_running() 
         }
     }
     // The launcher's own words follow: Python 3.11's "No Python at '…'", 3.13's "did not find
-    // executable at '…'" (CI's).
-    let problem = format!("the activated venv {} (VIRTUAL_ENV) has a python that doesn't run (", venv.display());
+    // executable at '…'" (CI's). Round 22 (0): on Windows, the Python its home names instead.
+    let problem = if cfg!(windows) {
+        format!("the activated venv {} (VIRTUAL_ENV) has a python that doesn't run, so V2 can't use it: the Python this venv was made from, C:\\nonexistent_r19\\Python311\\python.exe, isn't there any more: put it back, or make the venv again", venv.display())
+    } else {
+        format!("the activated venv {} (VIRTUAL_ENV) has a python that doesn't run (", venv.display())
+    };
     let (code, _, stderr) = run_in_home(&home.0, &["proj/m.v2"], &env);
     assert_eq!(code, Some(1), "{stderr}");
-    assert!(stderr.contains(&format!("hint: {problem}")) && stderr.contains("nonexistent_r19") && stderr.contains("so V2 can't use it: make the venv again, "), "{stderr}");
+    assert!(stderr.contains(&format!("hint: {problem}")) && stderr.contains("nonexistent_r19") && stderr.contains("so V2 can't use it: "), "{stderr}");
+    assert!(cfg!(windows) || stderr.contains("so V2 can't use it: make the venv again, "), "{stderr}");
     assert!(!stderr.contains("pip") && !stderr.contains("which V2 isn't using"), "{stderr}");
     let (code, stdout, stderr) = run_in_home(&home.0, &["doctor"], &env);
     assert_eq!(code, Some(0), "{stderr}");
