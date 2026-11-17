@@ -5096,7 +5096,7 @@ fn an_engine_through_a_batch_file_is_refused_in_a_share_folder() {
     };
     let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let head = format!("engine 'py' command '{}' (set by ", shim.display());
-    let tail = format!("v2.toml) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself (python.exe), or run v2 from a folder on a drive\n");
+    let tail = format!("v2.toml) runs in cmd.exe, which can't work in a \\\\server\\share folder and would run in {windows}: name the program itself by its full path, as in V2_ENGINE_PY=C:\\…\\python.exe (for pyenv-win, pyenv which python shows it), or run v2 from a folder on a drive\n");
     let (code, stdout, stderr) = run(&["doctor"]);
     assert_eq!((code, &*doctor_rows(&stdout)["py"][0]), (Some(0), "broken"), "{stdout}{stderr}");
     let note = stdout.lines().find(|l| l.starts_with("  py: ")).unwrap_or_default();
@@ -5133,7 +5133,7 @@ fn a_batch_file_on_path_is_passed_over_in_a_share_folder() {
         (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
     };
     let skipped = format!("skipped {} (runs in cmd.exe, which can't work in a \\\\server\\share folder)", shim.display());
-    let fix = "fix: name the program itself (python.exe) with V2_ENGINE_PY, or run v2 from a folder on a drive";
+    let fix = r"fix: name the program itself by its full path, as in V2_ENGINE_PY=C:\…\python.exe (for pyenv-win, pyenv which python shows it), or run v2 from a folder on a drive";
     // Only the shim on PATH: doctor's row is broken, with the shim, and the fix isn't a repair.
     let (code, stdout, stderr) = run(&unc, shims.as_os_str(), &["doctor"]);
     assert_eq!(code, Some(0), "{stderr}");
@@ -5143,7 +5143,9 @@ fn a_batch_file_on_path_is_passed_over_in_a_share_folder() {
     let (code, _, stderr) = run(&unc, shims.as_os_str(), &["s.v2"]);
     assert_eq!(code, Some(3), "{stderr}");
     assert!(stderr.contains("EngineNotFound: engine 'py' (Python) was found but doesn't run (see why below)\n"), "{stderr}");
+    // The second review of round 21: no install line, as Python is installed.
     assert!(stderr.contains(&format!("\n    skipped: {} (runs in cmd.exe, which can't work in a \\\\server\\share folder)\n    {fix}\n", shim.display())), "{stderr}");
+    assert!(!stderr.contains("install: ") && !stderr.contains("or set [engines.py]"), "{stderr}");
     // The drive folder: the shim, which answers --version, is used.
     let (_, stdout, stderr) = run(&real, shims.as_os_str(), &["doctor"]);
     assert_eq!(doctor_rows(&stdout)["py"][..2], ["ok".to_string(), shim.display().to_string()], "{stdout}{stderr}");
@@ -5154,6 +5156,14 @@ fn a_batch_file_on_path_is_passed_over_in_a_share_folder() {
         let rows = doctor_rows(&stdout);
         assert!(rows["py"][0] == "ok" && rows["py"][1] != shim.display().to_string(), "{stdout}{stderr}");
         assert!(stdout.contains(&format!("\n  py: {skipped}\n")), "{stdout}");
+        // The fix followed with only the shim on PATH: that Python's python.exe by its full path.
+        let python = rows["py"][1].trim_matches('"').to_string();
+        if python.to_ascii_lowercase().ends_with("python.exe") {
+            let mut cmd = v2_command(&home.0);
+            cmd.arg("s.v2").current_dir(&unc).env("PATH", &shims).env("V2_ENGINE_PY", &python).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+            assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+        }
     }
 }
 
