@@ -1,0 +1,5 @@
+Password: [s3cret]
+again: second
+TypeError | input() argument 'echo' must be a bool, got str
+third
+null
