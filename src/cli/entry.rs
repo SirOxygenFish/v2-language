@@ -34,8 +34,9 @@ fn entry_lines(file: &str, rest: &[&str], command: &str) -> Option<Vec<String>> 
     let path = Path::new(file);
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => Some(folder_message(file, path, command)),
-        // One WSL made (a FIFO through \\wsl.localhost) is a file to Windows: its tag says what it is.
-        Ok(m) if !m.is_file() || crate::runtime::module::wsl_file(path) == Some(crate::runtime::module::WslFile::Special) => {
+        // One WSL made (a FIFO through \\wsl.localhost) is a file to Windows, and a reparse point:
+        // its tag says what it is.
+        Ok(m) if !m.is_file() || (crate::runtime::module::reparse_point(&m) && crate::runtime::module::wsl_file(path) == Some(crate::runtime::module::WslFile::Special)) => {
             Some(vec![format!("'{file}' is a pipe or a device, not a file: V2 runs scripts saved as .v2 files")])
         }
         Ok(m) if m.len() > DATA_LIMIT && path.extension().is_some_and(|x| !x.eq_ignore_ascii_case("v2")) => Some(vec![
@@ -43,6 +44,8 @@ fn entry_lines(file: &str, rest: &[&str], command: &str) -> Option<Vec<String>> 
             format!("to give it to a script, type: v2 SCRIPT.v2 {}", quoted(file)),
         ]),
         Ok(_) => None,
+        // \\wsl.localhost\NAME\… with no such WSL distribution, or no name at all.
+        Err(e) if crate::runtime::builtins::wsl_root(file, &e).is_some() => Some(vec![format!("cannot find '{file}'"), crate::runtime::builtins::wsl_root(file, &e)?]),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(missing_message(file, path, rest, command)),
         Err(e) => other_message(file, path, rest, command, &e),
     }

@@ -589,8 +589,8 @@ print(util.slug("Hello World"))    // hello-world
   `\\wsl.localhost`), and a link that leads nowhere or in a loop (the
   file, or a folder on the way, a Windows junction too) says that and what fixes it, in a run and
   in `v2 check`, as does a Linux symlink seen from Windows, which Windows can't follow (`it is a
-  Linux (WSL) symlink, which Windows can't follow`, with the path it points to when Windows can
-  read it); a file V2 may not read gives the system's reason (`Access is denied`). A path
+  Linux (WSL) symlink, which Windows can't follow`), and `\\wsl.localhost\NAME\…` when there is no
+  WSL distribution of that name; a file V2 may not read gives the system's reason (`Access is denied`). A path
   whose letters differ from the file's name only in case (`./Util.v2` for `util.v2`) works on
   Windows and macOS, with a note, since Linux won't find it. A missing module's error names the
   file of its folder you probably meant (`did you mean './Util.v2'?`, on Linux for the wrong case
@@ -653,7 +653,7 @@ V2's file functions and `exec` keep V2's. Paths go through symbolic links: `scri
 real folder of the script, where the search for `v2.toml` starts too. A link on the way that leads
 nowhere or in a loop (a junction too) is named in the error, with what fixes it, and so is a
 Linux symlink seen from Windows through `\\wsl.localhost`, which Windows can't follow; a pipe or a
-device of WSL's there is refused by `read_file` before it is opened (`it is a pipe or a device, not a file`). `write_file` replaces a file's
+device of WSL's there is refused by `read_file` and `write_file` before it is opened (`it is a pipe or a device, not a file`). `write_file` replaces a file's
 contents in place, not all at once: for a file another program reads, write a new file and rename
 it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
