@@ -15,3 +15,28 @@ try {
     print(e.hint)
 }
 print(@py(x) { float(x.replace("٬", "").replace("٫", ".")) })
+// The third pass of round 20: negatives, with the bidi mark Intl writes before the sign (ar-EG
+// U+061C; fa-IR U+200E and the minus sign U+2212), and the ASCII commas between thousands that
+// bn-BD and mr-IN write with their digits, the Indian grouping too: each hint's block reads them.
+func hint_of(f) {
+    try { f() } catch (e) { print(e.hint) }
+}
+x = @js { (-1234.5).toLocaleString("ar-EG") }
+hint_of(func() => float(x))
+print(@py(x) { float(x.replace("\u061c", "").replace("٬", "").replace("٫", ".")) })
+x = @js { (-1234.5).toLocaleString("fa-IR") }
+hint_of(func() => float(x))
+x = x.replace("−", "-")
+print(@py(x) { float(x.replace("\u200e", "").replace("٬", "").replace("٫", ".")) })
+x = @js { (1234.5).toLocaleString("bn-BD") }
+hint_of(func() => float(x))
+print(@py(x) { float(x.replace(",", "")) })
+x = @js { (-1234.5).toLocaleString("mr-IN") }
+hint_of(func() => float(x))
+print(@py(x) { float(x.replace(",", "")) })
+x = @js { (1234567.5).toLocaleString("bn-BD") }
+hint_of(func() => float(x))
+print(@py(x) { float(x.replace(",", "")) })
+x = @js { (1234567).toLocaleString("mr-IN") }
+hint_of(func() => int(x))
+print(@py(x) { int(x.replace(",", "")) })
