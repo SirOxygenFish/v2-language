@@ -486,6 +486,8 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("/dev/stdin, /dev/stdout and /dev/stderr are Linux's and macOS's: on Windows read standard input with input(), a line at a time, and write with print() and print(…, stderr: true)".into());
     } else if let Some(h) = msys_hint(path).filter(|_| e.kind() == std::io::ErrorKind::NotFound) {
         let _ = err.hint.set(h.into());
+    } else if let Some(h) = unicode_twin_hint(path, e) {
+        let _ = err.hint.set(h.into());
     } else if bad_windows_name(path) {
         let _ = err.hint.set(format!("{BAD_NAME}: choose another name").into());
     } else if tilde && !p.exists() {
@@ -504,6 +506,15 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("the file size limit (ulimit -f) stops it: raise the limit, or write less".into());
     }
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// A file that isn't there under its name, but is in another Unicode form (`daten_ü.csv` copied
+/// from a Mac, its `ü` a `u` plus an accent): `module::unicode_twin`'s hint (5.10).
+fn unicode_twin_hint(path: &str, e: &std::io::Error) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let name = p.file_name()?.to_str().filter(|_| e.kind() == std::io::ErrorKind::NotFound)?;
+    let folder = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    super::module::unicode_twin(folder, name).map(|h| shown_path(&h))
 }
 
 /// Windows: `/c/Users/me/x.txt`, Git Bash's spelling of `C:/Users/me/x.txt` (one letter after
@@ -1679,7 +1690,8 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // for cmd.exe, which reads it as typed; quoted for a program (`\"`), cmd would misread it.
     let is_cmd = std::path::Path::new(&argv[0]).file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
     let raw_tail = cfg!(windows) && is_cmd && argv.len() >= 3 && argv[argv.len() - 2].to_str().is_some_and(|s| s.eq_ignore_ascii_case("/c") || s.eq_ignore_ascii_case("/k"));
-    let ran = process::run_captured(&argv, utf8.as_slice(), None, input, raw_tail);
+    // On Unix the program sees the name as written (`ls`), as from a shell (7.5).
+    let ran = process::run_captured_as(&argv, Some(std::ffi::OsStr::new(&**name)), utf8.as_slice(), None, input, raw_tail);
     // A signal that came while the program ran (its own `kill $PPID` too) ends the run here.
     stop_if_interrupted();
     let c = match ran {

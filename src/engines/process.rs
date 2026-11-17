@@ -985,6 +985,12 @@ fn command_line_arg(arg: &[u16]) -> Vec<u16> {
 
 impl ChildProc {
     pub fn spawn(s: &Spawn) -> Result<ChildProc, SpawnError> {
+        Self::spawn_as(s, None)
+    }
+
+    /// `spawn`, and on Unix with `arg0` as the program's `argv[0]`: it runs by its absolute path
+    /// (7.5), and sees the name it was called by, as a shell passes it (`exec`, 5.10).
+    pub fn spawn_as(s: &Spawn, arg0: Option<&std::ffi::OsStr>) -> Result<ChildProc, SpawnError> {
         stop_if_interrupted();
         let program = &s.argv[0];
         // Windows runs a batch file through cmd.exe, which would expand `%NAME%` in its path
@@ -1002,6 +1008,14 @@ impl ChildProc {
             return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
         }
         let mut cmd = Command::new(program);
+        // `ls: cannot access …` as from a shell, not `/usr/bin/ls: …`; Windows's command line
+        // starts with the path either way.
+        #[cfg(unix)]
+        if let Some(name) = arg0 {
+            std::os::unix::process::CommandExt::arg0(&mut cmd, name);
+        }
+        #[cfg(windows)]
+        let _ = arg0;
         // Windows: a program parses its own command line. cmd.exe and batch files keep Rust's
         // quoting, which is cmd's; every other program gets `command_line_arg`'s (8.3).
         #[cfg(windows)]
@@ -1343,8 +1357,20 @@ pub fn run_captured(
     input: Option<Vec<u8>>,
     raw_tail: bool,
 ) -> Result<Captured, SpawnError> {
+    run_captured_as(argv, None, env, limit, input, raw_tail)
+}
+
+/// `run_captured`, the program seeing `arg0` as its `argv[0]` on Unix (`ChildProc::spawn_as`).
+pub fn run_captured_as(
+    argv: &[OsString],
+    arg0: Option<&std::ffi::OsStr>,
+    env: &[(OsString, OsString)],
+    limit: Option<Duration>,
+    input: Option<Vec<u8>>,
+    raw_tail: bool,
+) -> Result<Captured, SpawnError> {
     let stdin = if input.is_some() { Pipe::Piped } else { Pipe::Null };
-    let mut child = ChildProc::spawn(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped, keep: &[], raw_tail })?;
+    let mut child = ChildProc::spawn_as(&Spawn { argv, env, stdin, stdout: Pipe::Piped, stderr: Pipe::Piped, keep: &[], raw_tail }, arg0)?;
     // A child that exits without reading gets a write error here, which is not the caller's.
     let feed = input.zip(child.take_stdin()).map(|(bytes, mut pipe)| {
         spawn_helper(std::thread::Builder::new(), move || {
