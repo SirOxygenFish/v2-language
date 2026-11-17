@@ -35,14 +35,15 @@ it is loaded automatically into every session and every subagent.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
   `C:\tmp` and `C:\var` are round 19's test leftovers (the safety check refused their removal; the
   owner was asked to delete them): leave them; tmp_on_windows_points_to_temp skips while there.
-  Rounds 1 to 19 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds: round 20 next. Rounds run as workflows:
+  Rounds 1 to 20 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds: round 21 next. Round 20's reviews
+  needed four passes after the first fixes; stop a chain once its issues are nits. Rounds run as workflows:
   two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
   implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
   the reviews' issues, then mine on the second reviews'. A worktree may start from main, not
-  v2-reboot: give agents the base commit and have them check it. (Round 19's prompts:
-  scratchpad/newcomer/prompt-*-r19.md, made by scratchpad/make19.py and setup_round19.py; round
-  20 takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
+  v2-reboot: give agents the base commit and have them check it. (Round 20's prompts:
+  scratchpad/newcomer/prompt-*-r20.md, made by scratchpad/setup_round20.py (distro v2new24t); round
+  21 takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
   cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
   windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
   Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
@@ -122,7 +123,7 @@ it is loaded automatically into every session and every subagent.
   `command` must be an array; unknown sections/keys and keys that don't apply are config
   errors (no warnings). `load_from(start, env)` is the test seam. Custom engine tables kept
   raw until Phase 3 (17.1). `unexpanded(text)`: the shell variable (`%X%`, `$X`) a hint names.
-- `syntax/`: `span` (SourceMap, FileId, display_path; `shown_path`, the one escaper of control
+- `syntax/`: `span` (SourceMap, FileId, display_path; `shown_path`, the one escaper of control and bidi
   characters in printed paths; `same_file`: one module per file identity), `lexer`, `scan` (block bodies, profiles,
   `canonical_tag`), `directives` (@export/@import, dedent), `resolve` (layouts, `Loc`, after
   `check`, in `parse_file`, the entry path and `parse_str`), `parser` (MAX_DEPTH 256, expression
@@ -145,7 +146,8 @@ it is loaded automatically into every session and every subagent.
   writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
   `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`; `link_problem`/`link_error`:
-  links that lead nowhere or in a loop, 3.10). A builtin returns
+  links that lead nowhere or in a loop, 3.10; `unicode_twin`/`folder_twin`: a Mac's decomposed names;
+  `nearby_module`: an import's did-you-mean). Number hints: builtins' `number_text`, `between_thousands`. A builtin returns
   `fail(..)`; the caller places it at the call site.
 - `Flow { Error, Return, Break, Continue, Exit }`, `Exec<T> = Result<T, Flow>`. Interrupts are
   never a Flow.
