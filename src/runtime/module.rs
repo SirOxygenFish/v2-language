@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::syntax::ast::*;
-use crate::syntax::span::{absolute_clean, display_path, os_message, shown_path, FileId, LoadError, SourceMap, Span};
+use crate::syntax::span::{absolute_clean, display_path, is_stand_in, os_message, shown_path, FileId, LoadError, SourceMap, Span};
 use crate::syntax::{check, lexer, parser, Diag};
 
 /// A static diagnostic of a module file, kept until an `import` of it runs (6.1 step 2).
@@ -267,7 +267,11 @@ fn locate_raw(sm: &SourceMap, importer: FileId, spec: &str) -> Result<PathBuf, I
         return Err((format!("cannot find module '{spec}' (a drive-relative path: write it relative to the file, or absolute)"), None));
     }
     let target = resolve(sm, importer, spec);
-    let found = match std::fs::canonicalize(&target) {
+    // Windows: `./util.v2.` would load util.v2, as Windows drops the dot (5.10).
+    if let Some(refused) = dotted_import(&target, spec) {
+        return Err(refused);
+    }
+    let found = match crate::syntax::span::canonicalize(&target) {
         Ok(found) => crate::syntax::span::strip_verbatim(&found),
         // There, but it can't be followed: a link to a file that isn't there, a link in a loop
         // (ELOOP, Windows' 1921), or the OS's reason, as for FILE (19.1).
@@ -413,6 +417,11 @@ pub fn trim_separators(written: &str) -> &str {
 /// name in another Unicode form (`unicode_twin`): PATH's, PATH`.v2`'s when PATH doesn't end in
 /// `.v2` (with the import that works then), or a missing folder's on the way (`folder_twin`).
 fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
+    // Windows: `./q?.v2` for a Linux `q?.v2` that WSL made, `q\u{f03f}.v2` to Windows: the import
+    // that reaches it, and what its stand-in is.
+    if let Some(written) = with_stand_ins(spec).filter(|_| stand_in_twin(&target.to_string_lossy()).is_some()) {
+        return (format!(" — did you mean '{written}'?"), stand_in_note(&written));
+    }
     let (Some(folder), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str())) else { return (String::new(), None) };
     let with_v2 = || unicode_twin(folder, &format!("{name}.v2")).map(|t| format!("{t}, and import '{}'", composed_v2(spec, name)));
     let twin = unicode_twin(folder, name).or_else(|| if spec.ends_with(".v2") { None } else { with_v2() });
@@ -452,12 +461,101 @@ fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
     } else {
         ""
     };
-    (format!(" — did you mean '{written}'?{case}"), None)
+    (format!(" — did you mean '{written}'?{case}"), stand_in_note(found))
 }
 
-/// `fs::canonicalize` without the `\\?\` prefix, or `None` when the file is missing.
+/// `fs::canonicalize` (`span::canonicalize`) without the `\\?\` prefix, or `None` when the file
+/// is missing.
 pub fn canonical(path: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok().map(|p| crate::syntax::span::strip_verbatim(&p))
+    crate::syntax::span::canonicalize(path).ok().map(|p| crate::syntax::span::strip_verbatim(&p))
+}
+
+/// Windows: an import whose path has a part that ends in a dot or a space, which Windows drops
+/// (`./util.v2.` would load util.v2), refused as the file builtins refuse it (5.10, 6.4): the
+/// `\\?\` way to a file of that name when it is there (WSL and Macs make them; one whose own name
+/// ends so isn't a `.v2` file), else the name Windows would read when that is there.
+fn dotted_import(target: &Path, spec: &str) -> Option<ImportFailure> {
+    let (why, there) = crate::runtime::builtins::dotted_name(target.to_str()?)?;
+    let message = format!("cannot import '{spec}': {why}");
+    let last = target.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(['.', ' ']));
+    Some(match there {
+        Some(_) if last => (message, Some("one of that name is there (WSL and Macs can make one), but a module's name ends in .v2: rename it".to_string())),
+        Some(v) => {
+            let mut q = String::new();
+            crate::runtime::value::quoted(&v, &mut q);
+            let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let plain = stem.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && stem.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let alias = if plain { stem } else { "m" };
+            (message, Some(format!(r"one of that name is there (WSL and Macs can make one): reach it by its full path with \\?\ in front, as in import {q} as {alias}")))
+        }
+        // `./util.v2.` for util.v2: the import without the dots and spaces.
+        None if std::fs::metadata(target).is_ok() => (format!("{message} — did you mean '{}'?", without_dots(spec)), None),
+        None => (message, None),
+    })
+}
+
+/// `path` as written with the dots and spaces at the end of each part (not `.` or `..`) taken
+/// off, as Windows reads it: `./lib./util.v2.` is `./lib/util.v2` (5.10, 6.4, 19.1).
+pub fn without_dots(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut at = 0;
+    for part in path.split(['/', '\\']) {
+        out.push_str(if matches!(part, "." | "..") { part } else { part.trim_end_matches(['.', ' ']) });
+        at += part.len();
+        // The separator after it, as written.
+        if let Some(sep) = path[at..].chars().next() {
+            out.push(sep);
+            at += sep.len_utf8();
+        }
+    }
+    out
+}
+
+/// Windows: the part of `path` after its root, where a name can't hold `:`: after `X:`, after the
+/// `\\server\share` of a UNC path (with either slash), or all of a relative path; `None` for a
+/// `\\?\` or `\\.\` path (`//?/`, `//./` too), which is taken as written (5.10).
+pub fn after_root(path: &str) -> Option<&str> {
+    let b = path.as_bytes();
+    let sep = |i: usize| matches!(b.get(i), Some(b'/' | b'\\'));
+    if sep(0) && sep(1) {
+        if matches!(b.get(2), Some(b'?' | b'.')) && (sep(3) || b.len() == 3) {
+            return None;
+        }
+        let mut parts = path[2..].splitn(3, ['/', '\\']);
+        let (_server, _share) = (parts.next(), parts.next());
+        return Some(parts.next().unwrap_or_default());
+    }
+    Some(if b.get(1) == Some(&b':') { &path[2..] } else { path })
+}
+
+/// The characters a Windows name can't hold whose WSL stand-ins (`span::is_stand_in`) Windows
+/// shows for a Linux name that has them; `/` and `\` are separators, and control characters are
+/// the escapes' hint's (5.10).
+pub const HELD: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+
+/// `path` with each of `HELD` in its parts after the root (`after_root`) as WSL's stand-in
+/// (`mod:x.v2` as `mod\u{f03a}x.v2`); `None` when it has none.
+pub fn with_stand_ins(path: &str) -> Option<String> {
+    let rest = after_root(path).filter(|r| r.contains(HELD))?;
+    let root = &path[..path.len() - rest.len()];
+    Some(root.chars().chain(rest.chars().map(|c| if HELD.contains(&c) { char::from_u32(0xF000 + c as u32).unwrap_or(c) } else { c })).collect())
+}
+
+/// Windows: `with_stand_ins(path)` when something is there by that name: a Linux name WSL made,
+/// which Windows reaches only so (5.10, 6.4, 19.1).
+pub fn stand_in_twin(path: &str) -> Option<String> {
+    with_stand_ins(path).filter(|twin| cfg!(windows) && std::fs::symlink_metadata(twin).is_ok())
+}
+
+/// Windows: for a name or path that holds a WSL stand-in, which a did-you-mean or a listing
+/// offers (`q\u{f03f}.v2`, as Windows shows a Linux `q?.v2`): `\u{f03f} is how Windows shows the
+/// '?' of the Linux name 'q?.v2': rename it in WSL` (the part that holds it; 6.4, 19.1, 5.10).
+pub fn stand_in_note(text: &str) -> Option<String> {
+    let part = text.split(['/', '\\']).find(|p| cfg!(windows) && p.chars().any(is_stand_in))?;
+    let real = |c: char| if is_stand_in(c) { char::from_u32(c as u32 - 0xF000).unwrap_or(c) } else { c };
+    let c = part.chars().find(|&c| is_stand_in(c))?;
+    let linux: String = part.chars().map(real).collect();
+    Some(format!("{} is how Windows shows the '{}' of the Linux name '{}': rename it in WSL", shown_path(&c.to_string()), shown_path(&real(c).to_string()), shown_path(&linux)))
 }
 
 /// 6.1 step 2: every file the `import` literals of `program` name, depth-first in source order.
@@ -674,6 +772,34 @@ mod tests {
         }
         assert_eq!(note("./real/counter.v2", "real/counter.v2"), None);
         assert_eq!(note("./other.v2", "real.v2"), None);
+    }
+
+    #[test]
+    fn the_parts_after_a_root_and_wsls_stand_ins_for_them() {
+        // INTERNALS 5.10, 6.4 (round 21): a ':' after a share's \\server\share is a stream, as
+        // after a drive, with either slash; WSL shows a Linux name's ':' as U+F03A.
+        assert_eq!(after_root(r"\\srv\share\a:b.txt"), Some("a:b.txt"));
+        assert_eq!(after_root("//srv/share/dir/a:b.txt"), Some("dir/a:b.txt"));
+        assert_eq!(after_root(r"\\wsl$\Ubuntu/root\x:y"), Some(r"root\x:y"));
+        assert_eq!(after_root(r"\\srv"), Some(""));
+        assert_eq!(after_root("C:x:y"), Some("x:y"));
+        assert_eq!(after_root("notes 12:30.txt"), Some("notes 12:30.txt"));
+        for written in [r"\\?\C:\a:b", r"\\.\pipe\x", "//?/C:/a", "//./C:/a"] {
+            assert_eq!(after_root(written), None, "{written}");
+        }
+        assert_eq!(with_stand_ins(r"\\wsl.localhost\d\root\q?.v2").as_deref(), Some("\\\\wsl.localhost\\d\\root\\q\u{f03f}.v2"));
+        assert_eq!(with_stand_ins("case/mod:x|y.v2").as_deref(), Some("case/mod\u{f03a}x\u{f07c}y.v2"));
+        assert_eq!(with_stand_ins("C:/plain.v2"), None);
+        assert_eq!(without_dots("./lib./util.v2. "), "./lib/util.v2");
+        assert_eq!(without_dots(r"..\a. \b"), r"..\a\b");
+        let note = stand_in_note("case/q\u{f03f}.v2");
+        let want = cfg!(windows).then(|| r"\u{f03f} is how Windows shows the '?' of the Linux name 'q?.v2': rename it in WSL".to_string());
+        assert_eq!(note, want);
+        assert_eq!(stand_in_note("case/plain.v2"), None);
+        // The review of round 21: a Nerd Font icon of U+F000 to U+F0FF is no stand-in of WSL's.
+        assert_eq!(stand_in_note("\u{f023}lock.v2"), None);
+        let tab = cfg!(windows).then(|| r"\u{f009} is how Windows shows the '\t' of the Linux name 'a\tb.v2': rename it in WSL".to_string());
+        assert_eq!(stand_in_note("a\u{f009}b.v2"), tab);
     }
 
     /// A link to a folder: a junction on Windows (which needs no administrator), else a symlink.
