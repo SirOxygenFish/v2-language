@@ -102,7 +102,7 @@ fn main() {
     // A file V2 couldn't name in its messages and paths: said so, not "no such file" (19.1).
     let file = raw.get(usize::from(raw.first().is_some_and(|w| w == "check")));
     if let Some(file) = file.filter(|f| f.to_str().is_none()) {
-        stderrln!("v2: the file name '{}' is not valid UTF-8, which V2 needs", syntax::span::shown_path(&file.to_string_lossy()));
+        stderrln!("v2: the file name '{}' is not valid UTF-8, which V2 needs: the name is in another encoding; rename it", syntax::span::shown_path(&file.to_string_lossy()));
         exit(EXIT_USAGE);
     }
     let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().into_owned()).collect();

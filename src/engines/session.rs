@@ -255,25 +255,6 @@ fn marshal_hint(message: &str, lang: &str) -> Option<&'static str> {
     })
 }
 
-/// What to do about a foreign exception that V2's setup causes (12.6): blocks run Python in its
-/// UTF-8 mode (8.4), so `open()` reads UTF-8 where a plain Windows Python reads the ANSI code page.
-fn foreign_hint(kind: &str, message: &str, lang: &str) -> Option<&'static str> {
-    match (lang, kind) {
-        // Byte 0xff or 0xfe first: most likely UTF-16's byte order mark (Excel's Unicode Text,
-        // PowerShell's Export-Csv -Encoding Unicode), which cp1252 would read as garbage; Python
-        // says the same of a binary file opened as text (a JPEG starts FF D8).
-        ("py", "UnicodeDecodeError")
-            if message.starts_with("'utf-8' codec can't decode byte 0xff in position 0:") || message.starts_with("'utf-8' codec can't decode byte 0xfe in position 0:") =>
-        {
-            Some("blocks run Python in UTF-8 mode, so open() reads UTF-8: text that starts with byte 0xff or 0xfe is probably UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding=\"utf-16\"), or pd.read_csv(path, encoding=\"utf-16\"); a binary file, such as an image, opens with open(path, \"rb\")")
-        }
-        ("py", "UnicodeDecodeError") if message.starts_with("'utf-8' codec can't decode") => {
-            Some("blocks run Python in UTF-8 mode, so open() reads UTF-8: for a file in another encoding, name it, as in open(path, encoding=\"cp1252\")")
-        }
-        _ => None,
-    }
-}
-
 /// JavaScript calls a callback with all it has (`xs.map(f)` passes the item, its index and the
 /// array) and a JS function ignores the extras: so does a V2 function called from JavaScript,
 /// passed in or imported with `from v2` (DOCS 8.2).
@@ -1065,10 +1046,8 @@ impl Interp {
             err
         };
         if &*err.kind == "ForeignError" {
-            if let Some(hint) = err.foreign_type.as_deref().and_then(|t| foreign_hint(t, message, &self.tag(s))) {
-                let _ = err.hint.set(hint.into());
-            }
-            // The adapter's own hint (a file of the user's that hides a standard module, 9.6).
+            // The adapter's own hint (a file of the user's that hides a standard module, a file
+            // that open() can't read as UTF-8, 9.6).
             if let Some(hint) = e.get("hint").and_then(Json::as_str) {
                 let _ = err.hint.set(hint.into());
             }

@@ -1,0 +1,15 @@
+// requires: py
+// What the hints of decode(), encode() and float() say runs: a block decodes and encodes another
+// encoding, and reads digits of another script with U+066B as a point (INTERNALS 5.4, 5.10,
+// round 20).
+let b = b"G\xfc\xdfe"
+print(@py(b) { b.decode("cp1254") })
+let s = "şehir"
+print(@py(s) { s.encode("cp1254") })
+let x = "١٢٫٥"
+try {
+    float(x)
+} catch (e) {
+    print(e.hint)
+}
+print(@py(x) { float(x.replace("٫", ".")) })

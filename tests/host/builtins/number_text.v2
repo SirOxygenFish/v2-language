@@ -15,3 +15,18 @@ for t in ["1_000", "12 345", "1.234,56", "15.655.924", "١٢٣", "１２"] {
     try_it(func() => int(t))
 }
 try_it(func() => float("0x1f"))
+// Numbers as locales write them (round 20): the separator named in the replace, which works.
+for t in ["1.234", "1,234", "1'000", "1\u{a0}234"] {
+    try_it(func() => int(t))
+}
+for t in ["1\u{202f}234,5", "1'234.5", "1,234.56", "\u{2212}5", "\u{2212}0,5", "12\u{66b}5", "1,234"] {
+    try_it(func() => float(t))
+}
+print(int("1.234".replace(".", "")), int(float("1.234")), int("1,234".replace(",", "")), int(float("1,234".replace(",", "."))))
+print(int("1'000".replace("'", "")), int("1\u{a0}234".replace("\u{a0}", "")))
+print(float("1\u{202f}234,5".replace("\u{202f}", "").replace(",", ".")), float("1'234.5".replace("'", "")), float("1,234.56".replace(",", "")))
+let x = "\u{2212}0,5"
+x = x.replace("−", "-")
+print(float("\u{2212}5".replace("−", "-")), float(x.replace(",", ".")), float("12\u{66b}5".replace("٫", ".")))
+// Never "'1' would work" when digits follow.
+try_it(func() => int("12a34"))
