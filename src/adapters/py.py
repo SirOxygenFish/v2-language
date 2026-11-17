@@ -9,6 +9,7 @@ if __name__ == "__main__":
     # 1. Every stdlib module the adapter uses, before any project folder is on sys.path (14.3).
     import sys, os, io, json, ast, types, builtins, inspect, importlib, keyword, traceback
     import linecache, weakref, threading, signal, base64, codecs, collections, collections.abc, numbers, atexit
+    import errno, shutil
 
     if os.name == "nt":
         import msvcrt, ctypes
@@ -326,7 +327,8 @@ if __name__ == "__main__":
             return True
 
         def isatty(self):
-            return False
+            # Where V2 writes this stream: a terminal or not (9.9).
+            return _terminals[self._stream] is not None
 
         def fileno(self):
             # stderr is fd 2. stdout is V2's, with no descriptor here: fd 1 is stderr, and
@@ -458,6 +460,50 @@ if __name__ == "__main__":
             raise OSError("getpass can't ask in a block: a block has no terminal, and V2's input() owns standard input: ask in V2 with input(prompt, echo: false) and pass the answer in as a block arg")
 
         getpass.getpass = no_getpass
+
+    # Which of V2's stdout and stderr are terminals, and their (columns, rows), from init (9.3): a
+    # block's sys.stdout and sys.stderr, os.isatty(1) and (2) and the terminal sizes answer for
+    # where V2 writes them, as Python's own would there, so colors and live bars show on a terminal
+    # and stay out of a file (9.9, DOCS 4.6). The size is the one at the worker's start.
+    _terminals = {"stdout": None, "stderr": None}
+    _os_isatty = os.isatty
+    _os_terminal_size = os.get_terminal_size
+
+    def _terminal_of(fd):
+        """V2's stream behind a block's fd 1 or 2 (or None for another fd), and its size."""
+        if isinstance(fd, int) and fd in (1, 2):
+            return True, _terminals["stdout" if fd == 1 else "stderr"]
+        return False, None
+
+    def isatty(fd):
+        ours, size = _terminal_of(fd)
+        return size is not None if ours else _os_isatty(fd)
+
+    def get_terminal_size(fd=1):
+        ours, size = _terminal_of(fd)
+        if not ours:
+            return _os_terminal_size(fd)
+        if size is None:
+            raise OSError(errno.ENOTTY, os.strerror(errno.ENOTTY))
+        return os.terminal_size(size)
+
+    def shutil_terminal_size(fallback=(80, 24)):
+        """shutil.get_terminal_size, with V2's stdout as the terminal it asks about."""
+        def env(name):
+            try:
+                return int(os.environ[name])
+            except (KeyError, ValueError):
+                return 0
+        columns, lines = env("COLUMNS"), env("LINES")
+        if columns <= 0 or lines <= 0:
+            size = _terminals["stdout"] or fallback
+            columns = columns if columns > 0 else size[0] or fallback[0]
+            lines = lines if lines > 0 else size[1] or fallback[1]
+        return os.terminal_size((columns, lines))
+
+    os.isatty = isatty
+    os.get_terminal_size = get_terminal_size
+    shutil.get_terminal_size = shutil_terminal_size
 
     _streams = (Output("stdout", 1), Output("stderr", 2))
     sys.stdout, sys.stderr = _streams
@@ -1464,6 +1510,11 @@ if __name__ == "__main__":
             while root in sys.path:
                 sys.path.remove(root)
             sys.path.insert(0, root)
+        terminals = m.get("terminals")
+        for name in _terminals:
+            size = terminals.get(name) if isinstance(terminals, dict) else None
+            if isinstance(size, list) and len(size) == 2 and all(isinstance(n, int) and n >= 0 for n in size):
+                _terminals[name] = tuple(size)
         return {"value": None}
 
     def do_load(m):
