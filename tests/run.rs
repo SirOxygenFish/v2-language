@@ -592,6 +592,31 @@ fn a_closed_stdout_stops_the_run_quietly() {
 }
 
 #[test]
+fn a_closed_stderr_stops_the_run_quietly() {
+    // DOCS 19.1, INTERNALS 6.5 (round 22, L8): stderr's reader going away (`v2 x.v2 2>&1 | head`)
+    // stops the run as stdout's does, with 141 and nothing more printed: `print(stderr: true)`,
+    // and a block's stderr text that V2 relays.
+    let mut programs = vec![("errloop.v2", "for i in 0..100000000 {\n    print(i, stderr: true)\n}\n")];
+    if needs("py", "a_closed_stderr_stops_the_run_quietly") {
+        programs.push(("pyerrloop.v2", "@py {\n    import sys\n    i = 0\n    while True:\n        print(i, file=sys.stderr)\n        i += 1\n}\n"));
+    }
+    for (name, src) in programs {
+        let home = TempHome::new();
+        std::fs::write(home.0.join(name), src).unwrap();
+        let mut child = v2_command(&home.0).arg(name).current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut first = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stderr.take().unwrap()), &mut first).unwrap();
+        assert_eq!(first, "0\n", "{name}");
+        // The reader is dropped with the BufReader: the pipe is closed.
+        let start = Instant::now();
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(20)).unwrap();
+        assert_eq!(out.status.code(), Some(141), "{name}: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(out.stdout.is_empty(), "{name}: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(start.elapsed() < Duration::from_secs(10), "{name} stopped only after {:?}", start.elapsed());
+    }
+}
+
+#[test]
 fn a_utf16_file_says_to_save_it_as_utf8() {
     // Windows PowerShell 5's `>` writes UTF-16 with a byte-order mark (INTERNALS 2.1).
     let home = TempHome::new();
@@ -1404,7 +1429,8 @@ fn list_dir_refuses_names_that_are_not_utf8_and_exists_follows_symlinks() {
 fn print_to_stderr_flushes_stdout_first() {
     // INTERNALS 5.10: `print(stderr: true)` flushes `Out` and then writes stderr, so on one pipe
     // the lines keep program order; a failed write to stderr is an IOError at the print (ch. 21
-    // Host).
+    // Host), but for a closed pipe, which stops the run quietly with 141, as on stdout (6.5;
+    // round 22, L8).
     let home = TempHome::new();
     std::fs::write(home.0.join("order.v2"), "print(\"a\")\nprint(\"b\", stderr: true)\nprint(\"c\")\nprint(\"d\", \"e\", sep: \"-\", end: \"!\\n\", stderr: true)\n").unwrap();
     let (mut reader, writer) = std::io::pipe().expect("a pipe");
@@ -1419,7 +1445,11 @@ fn print_to_stderr_flushes_stdout_first() {
     assert_eq!(text, "a\nb\nc\nd-e!\n");
     std::fs::write(home.0.join("closed.v2"), "try {\n    print(\"x\", stderr: true)\n} catch (e) {\n    print(e.type, e.message.split(\":\")[0], e.line)\n}\n").unwrap();
     let (code, stdout) = run_with_a_closed_stream(&home.0, &["closed.v2"], false);
-    assert_eq!((code, stdout.as_str()), (Some(0), "IOError cannot write to stderr 2\n"));
+    assert_eq!((code, stdout.as_str()), (Some(141), ""));
+    let Some(stderr) = failing_stdout(&home.0) else { return };
+    let child = v2_command(&home.0).arg("closed.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(stderr).spawn().expect("start v2");
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(DEFAULT_TIMEOUT_SECS)).unwrap();
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(0), "IOError cannot write to stderr 2\n"));
 }
 
 #[test]
@@ -2812,6 +2842,165 @@ fn an_interrupt_during_a_py_block_exits_130_and_cleans_up() {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(names_in(&tmp), Vec::<String>::new(), "signal {signal}: the run dir was left");
+    }
+}
+
+/// A pseudo-terminal (Unix): v2 gets the slave as its stdin, stdout, stderr and controlling
+/// terminal; the test reads what it draws from the master and types into it.
+#[cfg(unix)]
+struct Pty {
+    master: std::fs::File,
+    slave: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Pty {
+    fn open() -> Pty {
+        use std::os::fd::FromRawFd;
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty fills two descriptors; no name, settings or size is asked for.
+        let r = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, 0, "openpty: {}", std::io::Error::last_os_error());
+        for fd in [master, slave] {
+            // SAFETY: a plain fcntl on a descriptor this function owns: other tests' children don't
+            // inherit it.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        // SAFETY: as above; reads of the master don't wait (macOS's poll doesn't take devices).
+        unsafe { libc::fcntl(master, libc::F_SETFL, libc::fcntl(master, libc::F_GETFL) | libc::O_NONBLOCK) };
+        // SAFETY: both descriptors are open, and the files own them from here on.
+        unsafe { Pty { master: std::fs::File::from_raw_fd(master), slave: std::fs::File::from_raw_fd(slave) } }
+    }
+
+    /// `cmd` on the terminal, in a session of its own whose foreground job it is (as a shell starts
+    /// a command), with SIGINT's default action, which a test runner may have set to ignored.
+    fn attach(&self, cmd: &mut Command) {
+        use std::os::unix::process::CommandExt;
+        let end = || Stdio::from(self.slave.try_clone().expect("the terminal's slave"));
+        cmd.stdin(end()).stdout(end()).stderr(end());
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+    }
+
+    /// Read what is drawn into `seen` until `done` holds or `deadline` passes; whether it held.
+    fn read_until(&mut self, seen: &mut Vec<u8>, deadline: Instant, done: impl Fn(&[u8]) -> bool) -> bool {
+        let mut buf = [0u8; 4096];
+        while !done(seen) {
+            if Instant::now() > deadline {
+                return false;
+            }
+            match self.master.read(&mut buf) {
+                Ok(n) if n > 0 => seen.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(10)),
+                _ => return done(seen),
+            }
+        }
+        true
+    }
+
+    /// The terminal's input, output, control and local flags.
+    fn flags(&self) -> [libc::tcflag_t; 4] {
+        use std::os::fd::AsRawFd;
+        // SAFETY: tcgetattr fills a zeroed struct.
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(self.slave.as_raw_fd(), &mut t) }, 0, "tcgetattr: {}", std::io::Error::last_os_error());
+        [t.c_iflag, t.c_oflag, t.c_cflag, t.c_lflag]
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interrupt_gives_the_terminal_back() {
+    // DOCS 19.1, INTERNALS 6.5 (round 22, L5): Ctrl+C while a block has turned the terminal's echo
+    // off, or while a live display hides the cursor, stops the block before its own cleanup runs;
+    // the terminal gets back the settings it had when v2 started, and the cursor is shown.
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    let mut cases = vec![("v2", "print(\"\\x1b[?25l\", end: \"\")\nprint(\"ready\")\nwhile true {\n    sleep(0.05)\n}\n")];
+    if needs("py", "an_interrupt_gives_the_terminal_back") {
+        let src = "@py {\n    import termios, time\n    a = termios.tcgetattr(2)\n    a[3] &= ~(termios.ECHO | termios.ICANON)\n    termios.tcsetattr(2, termios.TCSANOW, a)\n    print(\"\\x1b[?25l\", end=\"\")\n    print(\"ready\", flush=True)\n    time.sleep(30)\n}\n";
+        cases.push(("py", src));
+    }
+    for (what, src) in cases {
+        let home = TempHome::new();
+        std::fs::write(home.0.join("tty.v2"), src).unwrap();
+        let mut pty = Pty::open();
+        let before = pty.flags();
+        let mut cmd = v2_command(&home.0);
+        cmd.arg("tty.v2").current_dir(&home.0);
+        pty.attach(&mut cmd);
+        let mut child = cmd.spawn().expect("start v2");
+        let mut seen = Vec::new();
+        let ready = pty.read_until(&mut seen, Instant::now() + Duration::from_secs(30), |s| find(s, b"ready").is_some());
+        let changed = pty.flags();
+        if !ready || (what == "py" && changed[3] & libc::ECHO != 0) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{what}: the program never got ready with echo off: {}", String::from_utf8_lossy(&seen).escape_debug());
+        }
+        // Ctrl+C, typed.
+        pty.master.write_all(b"\x03").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{what}: v2 didn't stop on Ctrl+C");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let at = find(&seen, b"ready").unwrap();
+        pty.read_until(&mut seen, Instant::now() + Duration::from_secs(2), |s| find(&s[at..], b"\x1b[?25h").is_some());
+        let shown = String::from_utf8_lossy(&seen).escape_debug().to_string();
+        assert_interrupted(&status, SIGINT, &shown);
+        assert!(find(&seen[at..], b"\x1b[?25h").is_some(), "{what}: the cursor wasn't shown again: {shown}");
+        assert_eq!(pty.flags(), before, "{what}: the terminal's settings weren't put back: {shown}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_readmes_way_to_leave_a_job_running_returns_at_once() {
+    // README (round 22, L4): its line for a job that outlives V2, run as written with `job` a script
+    // that writes job.log 2 s later: exec returns at once (dash, Ubuntu's sh, held exec's pipes
+    // while it waited for the job in the earlier line), and the job outlives V2.
+    let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    let flat = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = flat.split_once("to leave a job running, `").and_then(|(_, rest)| rest.split_once('`')).expect("the README's line for a job that outlives V2").0;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if !std::env::split_paths(&path).any(|d| d.join("setsid").is_file()) {
+        let _ = writeln!(std::io::stderr(), "SKIP the_readmes_way_to_leave_a_job_running_returns_at_once (no setsid on PATH)");
+        return;
+    }
+    let home = TempHome::new();
+    let bin = home.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("job"), "#!/bin/sh\nsleep 2\necho alive\n").unwrap();
+    let mut perms = std::fs::metadata(bin.join("job")).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(bin.join("job"), perms).unwrap();
+    std::fs::write(home.0.join("main.v2"), format!("let t0 = time()\n{line}\nprint(time() - t0 < 1.5)\n")).unwrap();
+    let mut cmd = v2_command(&home.0);
+    let mut dirs = vec![bin];
+    dirs.extend(std::env::split_paths(&path));
+    cmd.arg("main.v2").current_dir(&home.0).env("PATH", std::env::join_paths(dirs).unwrap()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(30)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref()), (Some(0), "true\n"), "{line}: {stderr}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read_to_string(home.0.join("job.log")).unwrap_or_default() != "alive\n" {
+        assert!(Instant::now() < deadline, "{line}: the job didn't outlive V2");
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

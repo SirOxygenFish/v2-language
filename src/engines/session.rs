@@ -860,7 +860,9 @@ impl Interp {
             Stream::Stdout => self.out.write_str(text),
             Stream::Stderr => {
                 self.out.flush_or_stop();
-                stderr!("{text}");
+                // A closed pipe stops the run there (6.5); other failures are ignored, as for V2's own
+                // diagnostics.
+                let _ = crate::runtime::builtins::write_stderr(text.as_bytes());
                 Ok(())
             }
         }
