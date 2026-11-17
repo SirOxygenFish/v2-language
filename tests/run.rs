@@ -4736,6 +4736,56 @@ fn an_engine_through_a_batch_file_is_refused_in_a_share_folder() {
     assert!(stderr.contains(&format!("EngineNotFound: {head}")) && stderr.contains(&tail), "{stderr}");
 }
 
+#[cfg(windows)]
+#[test]
+fn a_batch_file_on_path_is_passed_over_in_a_share_folder() {
+    // The review of round 21, 7.6, 19.2: from a \\server\share working folder, pyenv-win's
+    // shims\python.bat on PATH is skipped like a Store placeholder and the search goes on; with
+    // nothing else py doesn't run, and doctor says what to do instead of repairing Python. From
+    // the drive folder the shim is used. Skipped where the \\localhost share isn't reachable.
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let unc = format!(r"\\localhost\{}$\{}", &real[..1], &real[3..]);
+    if real.as_bytes().get(1) != Some(&b':') || !Path::new(&unc).is_dir() {
+        let _ = writeln!(std::io::stderr(), "SKIP a_batch_file_on_path_is_passed_over_in_a_share_folder (no \\\\localhost share)");
+        return;
+    }
+    let shims = home.0.join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    let shim = shims.join("python.bat");
+    std::fs::write(&shim, "@echo off\r\nfor %%a in (%*) do if \"%%~a\"==\"--version\" (echo Python 3.12.1& exit /b 0)\r\nexit /b 1\r\n").unwrap();
+    std::fs::write(home.0.join("s.v2"), "@py { 1 }\n").unwrap();
+    let run = |cwd: &str, path: &std::ffi::OsStr, args: &[&str]| {
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(cwd).env("PATH", path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
+        (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), normalize(&String::from_utf8_lossy(&out.stderr)))
+    };
+    let skipped = format!("skipped {} (runs in cmd.exe, which can't work in a \\\\server\\share folder)", shim.display());
+    let fix = "fix: name the program itself (python.exe) with V2_ENGINE_PY, or run v2 from a folder on a drive";
+    // Only the shim on PATH: doctor's row is broken, with the shim, and the fix isn't a repair.
+    let (code, stdout, stderr) = run(&unc, shims.as_os_str(), &["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(doctor_rows(&stdout)["py"][..2], ["broken".to_string(), shim.display().to_string()], "{stdout}");
+    assert!(stdout.contains(&format!("\n  py: engine 'py' (Python) was found but doesn't run (see why below)\n  py: {skipped}\n  py: {fix}\n")), "{stdout}");
+    assert!(!stdout.contains("repair that Python"), "{stdout}");
+    let (code, _, stderr) = run(&unc, shims.as_os_str(), &["s.v2"]);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains("EngineNotFound: engine 'py' (Python) was found but doesn't run (see why below)\n"), "{stderr}");
+    assert!(stderr.contains(&format!("\n    skipped: {} (runs in cmd.exe, which can't work in a \\\\server\\share folder)\n    {fix}\n", shim.display())), "{stderr}");
+    // The drive folder: the shim, which answers --version, is used.
+    let (_, stdout, stderr) = run(&real, shims.as_os_str(), &["doctor"]);
+    assert_eq!(doctor_rows(&stdout)["py"][..2], ["ok".to_string(), shim.display().to_string()], "{stdout}{stderr}");
+    // With this machine's Python after the shim, the share folder's search goes on to it.
+    if needs("py", "a_batch_file_on_path_is_passed_over_in_a_share_folder") {
+        let path = std::env::join_paths(std::iter::once(shims.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        let (_, stdout, stderr) = run(&unc, &path, &["doctor"]);
+        let rows = doctor_rows(&stdout);
+        assert!(rows["py"][0] == "ok" && rows["py"][1] != shim.display().to_string(), "{stdout}{stderr}");
+        assert!(stdout.contains(&format!("\n  py: {skipped}\n")), "{stdout}");
+    }
+}
+
 #[test]
 fn doctor_quotes_a_configured_command_with_a_space() {
     // 19.2: an item with a space is quoted when there is more than one, also when it isn't found.
