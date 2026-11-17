@@ -3,7 +3,7 @@ null
 17 108
 efbbbf626f6dff
 IOError: '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
-  hint: save it as UTF-8, or read it in a @py block with the code page of the Windows that saved it, as in @py(path) { open(path, encoding="cp1252").read() }: cp1252 for Western European text, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp1254 Turkish, cp1255 Hebrew, cp1256 Arabic, gbk Chinese, cp932 Japanese
+  hint: save it as UTF-8, or read it in a @py block with the code page of the Windows that saved it, as in @py(path) { open(path, encoding="cp1252").read() }: cp1252 for Western European text, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp1254 Turkish, cp1255 Hebrew, cp1256 Arabic, gbk Chinese, cp932 or euc-jp Japanese
 IOError cannot read '~/missing_v2_file.txt
 TypeError: write_file() argument 'data' must be a str or bytes, got int
   hint: write it as text with str(x)

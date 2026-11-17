@@ -86,17 +86,57 @@ pub enum LoadError {
 /// named as such: Windows PowerShell 5's `>` and `Out-File` write UTF-16. UTF-32's marks are
 /// looked for first, as the little-endian one starts with UTF-16's.
 pub fn not_utf8_message(bytes: &[u8]) -> &'static str {
+    // The locale doesn't change during a run.
+    static OLDER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    not_utf8_named(bytes).unwrap_or_else(|| OLDER.get_or_init(|| format!("file is not valid UTF-8: {}", older_encoding("old.v2 > new.v2"))))
+}
+
+/// `not_utf8_message` for a file whose bytes say what it is: UTF-32, UTF-16 or binary.
+pub fn not_utf8_named(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xFE, 0, 0]) || bytes.starts_with(&[0, 0, 0xFE, 0xFF]) {
-        "file is not valid UTF-8: it is UTF-32 (what Out-File -Encoding utf32 writes); save it as UTF-8"
+        Some("file is not valid UTF-8: it is UTF-32 (what Out-File -Encoding utf32 writes); save it as UTF-8")
     } else if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bomless_utf16(bytes) {
-        "file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"
+        Some("file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8")
     } else if bytes.iter().take(8192).any(|&b| b == 0) {
-        "file is not valid UTF-8: it looks like a binary file, not a V2 script"
-    } else if cfg!(windows) {
-        "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8"
+        Some("file is not valid UTF-8: it looks like a binary file, not a V2 script")
     } else {
-        // On Linux and macOS such a file comes from an old system or a share.
-        "file is not valid UTF-8: it may be in an older encoding, such as Windows-1252 or Latin-1: save it as UTF-8, as in iconv -f cp1252 -t utf-8 old.v2 > new.v2"
+        None
+    }
+}
+
+/// What a file in an older encoding gets (2.1). On Linux and macOS such a file comes from an old
+/// system or a share: iconv's line for `files` (`old.v2 > new.v2`), from the code page the locale
+/// suggests (`locale_code_page`), then a look at the text, as iconv converts from a wrong code page
+/// without an error.
+pub fn older_encoding(files: &str) -> String {
+    if cfg!(windows) {
+        return "it may be in an older encoding, such as Windows-1252 (what Windows PowerShell's Set-Content writes): save it as UTF-8".to_string();
+    }
+    let (page, name) = locale_code_page();
+    format!("it may be in an older encoding, such as {name}: save it as UTF-8, as in iconv -f {page} -t utf-8 {files}, then check the text")
+}
+
+/// The code page a file of the user's language was likely saved in, and its name, from the
+/// locale's language (`LC_ALL`, else `LC_CTYPE`, else `LANG`): `tr_TR.UTF-8` → cp1254.
+pub fn locale_code_page() -> (&'static str, &'static str) {
+    let locale = ["LC_ALL", "LC_CTYPE", "LANG"].iter().filter_map(|v| std::env::var(v).ok()).find(|v| !v.is_empty()).unwrap_or_default();
+    code_page_of(&locale)
+}
+
+/// `locale_code_page` for a locale's text: its language is what comes before `_`, `-`, `.` or `@`.
+fn code_page_of(locale: &str) -> (&'static str, &'static str) {
+    let lang = locale.split(['_', '.', '@', '-']).next().unwrap_or_default().to_ascii_lowercase();
+    match lang.as_str() {
+        "tr" => ("cp1254", "Windows-1254"),
+        "ru" | "uk" | "bg" => ("cp1251", "Windows-1251"),
+        "pl" | "cs" | "sk" | "hu" | "ro" | "hr" | "sl" => ("cp1250", "Windows-1250"),
+        "el" => ("cp1253", "Windows-1253"),
+        "he" => ("cp1255", "Windows-1255"),
+        "ar" => ("cp1256", "Windows-1256"),
+        "ja" => ("cp932", "Shift-JIS"),
+        "zh" => ("gbk", "GBK"),
+        "ko" => ("cp949", "EUC-KR"),
+        _ => ("cp1252", "Windows-1252 or Latin-1"),
     }
 }
 
@@ -409,6 +449,27 @@ mod tests {
     fn normalizes_bom_and_line_endings() {
         assert_eq!(normalize("\u{feff}a\r\nb\rc\n"), "a\nb\nc\n");
         assert_eq!(normalize("x"), "x");
+    }
+
+    #[test]
+    fn the_code_page_comes_from_the_locales_language() {
+        // 2.1 (round 20): iconv from cp1252 garbles a Turkish or Japanese file without an error.
+        assert_eq!(code_page_of("tr_TR.UTF-8"), ("cp1254", "Windows-1254"));
+        assert_eq!(code_page_of("ru_RU"), ("cp1251", "Windows-1251"));
+        assert_eq!(code_page_of("uk_UA.UTF-8").0, "cp1251");
+        assert_eq!(code_page_of("pl_PL.UTF-8").0, "cp1250");
+        assert_eq!(code_page_of("el_GR.UTF-8").0, "cp1253");
+        assert_eq!(code_page_of("he_IL.UTF-8").0, "cp1255");
+        assert_eq!(code_page_of("ar_EG.UTF-8").0, "cp1256");
+        assert_eq!(code_page_of("ja_JP.UTF-8"), ("cp932", "Shift-JIS"));
+        assert_eq!(code_page_of("zh_CN.UTF-8").0, "gbk");
+        assert_eq!(code_page_of("ko_KR.UTF-8").0, "cp949");
+        for other in ["C.UTF-8", "POSIX", "", "de_DE.UTF-8", "en_US"] {
+            assert_eq!(code_page_of(other), ("cp1252", "Windows-1252 or Latin-1"), "{other}");
+        }
+        // Those name a UTF-16 or UTF-32 mark only as a pair: 'ş' is 0xFE in cp1254.
+        assert_eq!(not_utf8_named(b"\xfeehir\n"), None);
+        assert_eq!(not_utf8_named(b"\xff\xfeh\x00"), Some("file is not valid UTF-8: it is UTF-16 (what Windows PowerShell's > and Out-File write); save it as UTF-8"));
     }
 
     #[test]

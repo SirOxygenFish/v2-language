@@ -886,7 +886,7 @@ if __name__ == "__main__":
         data = own_data(e)
         if data:
             out["data"] = data
-        hint = shadow_hint(e)
+        hint = shadow_hint(e) or decode_hint(e)
         if hint:
             out["hint"] = hint
         return out
@@ -912,6 +912,25 @@ if __name__ == "__main__":
             if any(isinstance(p, str) and where.startswith(os.path.normcase(os.path.abspath(p)) + os.sep) for p in own):
                 return None
             return "your %s hides Python's own %s module, which other code needs: give your file another name" % (path, name)
+        except Exception:
+            return None
+
+    def decode_hint(e):
+        """A UnicodeDecodeError that V2's setup causes (9.6): blocks run Python in its UTF-8 mode
+        (8.4), so open() reads UTF-8 where a plain Windows Python reads the ANSI code page. A UTF-16
+        byte-order mark first (Excel's Unicode Text, PowerShell's Export-Csv -Encoding Unicode)
+        wants encoding="utf-16", as a code page reads it as garbage; a first 0xff or 0xfe without
+        one is a code page's letter ('ş' is 0xfe in cp1254) or a binary file's byte (a JPEG starts
+        FF D8)."""
+        try:
+            if not isinstance(e, UnicodeDecodeError) or e.encoding != "utf-8":
+                return None
+            way = "blocks run Python in UTF-8 mode, so open() reads UTF-8: "
+            first = bytes(e.object[:2]) if e.start == 0 else b""
+            if first in (b"\xff\xfe", b"\xfe\xff"):
+                return way + "text that starts with byte 0xff or 0xfe is probably UTF-16 (what Windows PowerShell's > and Out-File write): name it, as in open(path, encoding=\"utf-16\"), or pd.read_csv(path, encoding=\"utf-16\"); a binary file, such as an image, opens with open(path, \"rb\")"
+            other = way + "for a file in another encoding, name it, as in open(path, encoding=\"cp1252\")"
+            return other + "; a binary file, such as an image, opens with open(path, \"rb\")" if first[:1] in (b"\xff", b"\xfe") else other
         except Exception:
             return None
 

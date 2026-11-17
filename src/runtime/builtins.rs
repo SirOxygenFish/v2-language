@@ -474,6 +474,8 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err
             .hint
             .set(r#"in "…", a backslash starts an escape (\n is a line break, \t a tab): write Windows paths with / or \\, as in "notes/new.txt""#.into());
+    } else if let Some(h) = lossy_hint(path) {
+        let _ = err.hint.set(h.into());
     } else if let Some(h) = hint {
         let _ = err.hint.set(h.into());
     } else if cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)) {
@@ -504,6 +506,22 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("the file size limit (ulimit -f) stops it: raise the limit, or write less".into());
     }
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// A path holding U+FFFD, which `args()` and `getenv()` put where bytes weren't UTF-8 (5.10): it
+/// names no file, so what to do when an argument or variable of this run had such bytes.
+fn lossy_hint(path: &str) -> Option<String> {
+    if !path.contains('\u{FFFD}') {
+        return None;
+    }
+    let what = if std::env::args_os().any(|a| a.to_str().is_none()) {
+        "an argument"
+    } else if std::env::vars_os().any(|(_, v)| v.to_str().is_none()) {
+        "an environment variable"
+    } else {
+        return None;
+    };
+    Some(format!("the path holds U+FFFD where {what} wasn't UTF-8: rename the file to a UTF-8 name, or use a UTF-8 locale"))
 }
 
 /// Windows: `/c/Users/me/x.txt`, Git Bash's spelling of `C:/Users/me/x.txt` (one letter after
@@ -1033,7 +1051,8 @@ fn unmarked_hint(file: &std::path::Path, shown: &str, bare: bool) -> Option<Stri
 }
 
 /// How a block reads a file in an old Windows code page: the one of the Windows that saved it,
-/// this Windows' own first (`GetACP`: cp1254 on a Turkish one), then the common others (5.10).
+/// this Windows' own first (`GetACP`: cp1254 on a Turkish one), then the common others, and
+/// euc-jp, Linux's older Japanese (5.10).
 fn code_page_way() -> String {
     #[cfg(windows)]
     // SAFETY: a plain query.
@@ -1043,7 +1062,7 @@ fn code_page_way() -> String {
     // Said only where it isn't the usual one, so the hint reads the same on most machines.
     let own = if here != "cp1252" { format!(" (this Windows saves {here})") } else { String::new() };
     format!(
-        "the code page of the Windows that saved it, as in @py(path) {{ open(path, encoding=\"{here}\").read() }}{own}: cp1252 for Western European text, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp1254 Turkish, cp1255 Hebrew, cp1256 Arabic, gbk Chinese, cp932 Japanese"
+        "the code page of the Windows that saved it, as in @py(path) {{ open(path, encoding=\"{here}\").read() }}{own}: cp1252 for Western European text, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp1254 Turkish, cp1255 Hebrew, cp1256 Arabic, gbk Chinese, cp932 or euc-jp Japanese"
     )
 }
 
@@ -1183,43 +1202,140 @@ fn int(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// be (5.10).
 fn number_text(message: String, t: &str, int: bool) -> Flow {
     let err = ErrorValue::new("ValueError", message);
+    if let Some(h) = number_hint(t, int) {
+        let _ = err.hint.set(h.into());
+    }
+    Flow::Error(Rc::new(err))
+}
+
+/// `number_text`'s hint for the trimmed text `t`, which `int()` (`int`) or `float()` can't read.
+/// Each says what makes the text one they read, as the user's code can write it.
+fn number_hint(t: &str, int: bool) -> Option<String> {
     let f = if int { "int" } else { "float" };
     let number = |x: &str| x.parse::<f64>().is_ok();
+    let reads = |x: &str| if int { x.parse::<i64>().is_ok() } else { number(x) };
     // The number the text starts with: digits, a sign, a point or a comma.
     let lead: String = t.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | ',')).collect();
     let spaces = |c: char| matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}');
-    let hint = if t.is_empty() {
+    if t.is_empty() {
         Some("the text is empty: an empty line from input() is \"\"".to_string())
     } else if t.starts_with("0x") || t.starts_with("0X") {
         Some(format!("{f}() reads decimal digits: for hex text, convert it in a block, as in @py(x) {{ int(x, 16) }}"))
+    } else if t.contains('\u{2212}') {
+        // `−5`: the minus sign U+2212, which JavaScript's Intl writes (sv-SE, fi-FI).
+        let plain = t.replace('\u{2212}', "-");
+        let head = "the text has a minus sign U+2212, as Intl writes it";
+        Some(if reads(&plain) {
+            format!("{head}: {f}(x.replace(\"\u{2212}\", \"-\"))")
+        } else if let Some(then) = number_hint(&plain, int) {
+            format!("{head}: x = x.replace(\"\u{2212}\", \"-\") changes it; then {then}")
+        } else {
+            format!("{head}: x.replace(\"\u{2212}\", \"-\") changes it")
+        })
     } else if t.contains('_') && number(&t.replace('_', "")) {
         // `1_000`: as a V2 literal it works; as text the _ has to go.
         Some(format!("{f}() reads digits without _: {f}(x.replace(\"_\", \"\"))"))
+    } else if t.contains('\u{66b}') && number(&t.replace('\u{66b}', ".")) {
+        // `12٫5`: U+066B, the Arabic decimal separator.
+        let g = if reads(&t.replace('\u{66b}', ".")) { f } else { "float" };
+        Some(format!("the text has U+066B, the Arabic decimal separator: {g}(x.replace(\"\u{66b}\", \".\"))"))
+    } else if let Some(h) = grouped_hint(t, int) {
+        Some(h)
     } else if t.chars().any(spaces) && number(&t.replace(spaces, "")) {
-        Some(format!("{f}() reads digits without spaces between them: {f}(x.replace(\" \", \"\"))"))
+        let mut seen: Vec<char> = t.chars().filter(|&c| spaces(c)).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        let removes: String = seen.iter().map(|&c| format!(".replace(\"{}\", \"\")", char_text(c))).collect();
+        Some(format!("{f}() reads digits without spaces between them: {f}(x{removes})"))
     } else if t.contains('.') && t.contains(',') && t.rfind(',') > t.rfind('.') && t.replace('.', "").replace(',', ".").parse::<f64>().is_ok() {
         // `1.234,56`: points between thousands and a decimal comma, as German and Turkish write.
         Some("the text has points between thousands and a decimal comma: float(x.replace(\".\", \"\").replace(\",\", \".\"))".to_string())
     } else if t.matches('.').count() > 1 && t.replace('.', "").parse::<i64>().is_ok() {
         Some(format!("the text has points between thousands: {f}(x.replace(\".\", \"\"))"))
+    } else if let Some((mark, whole)) = thousands(t).filter(|_| int) {
+        // `1.234`, `1,234`: a decimal to some, a thousand and more to others.
+        let (what, decimal) = if mark == '.' {
+            ("point", "use float(x), or int(float(x)) to drop what is after the point")
+        } else {
+            ("comma", "int(float(x.replace(\",\", \".\"))) drops what is after it")
+        };
+        Some(format!("if the {what} is between thousands, int(x.replace(\"{mark}\", \"\")) reads {whole}; if it is a decimal {what}, {decimal}"))
     } else if lead.contains(',') && lead.replace(',', ".").parse::<f64>().is_ok() {
         Some("write the decimal point as a point, as in 3.7: x.replace(\",\", \".\") changes it".to_string())
     } else if int && lead.parse::<i64>().is_err() && lead.parse::<f64>().is_ok() {
         Some(format!("int() reads whole numbers, as in 13: for {lead}, use float(x), or int(float(x)) to drop what is after the point"))
     } else if t.chars().any(|c| c.is_numeric() && !c.is_ascii_digit()) {
-        // `١٢٣`, `１２`: digits of another script, which Python reads.
-        Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {f}(x) }}"))
-    } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() {
+        // `١٢٣`, `１２`: digits of another script, which Python reads; with U+066B, a point there.
+        let x = if t.contains('\u{66b}') { "float(x.replace(\"\u{66b}\", \".\"))".to_string() } else { format!("{f}(x)") };
+        Some(format!("{f}() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) {{ {x} }}"))
+    } else if !lead.is_empty() && lead.len() < t.len() && lead.parse::<f64>().is_ok() && !t[lead.len()..].chars().any(char::is_numeric) {
         Some(format!("{f}() reads the number alone, without other text: '{lead}' would work"))
     } else if !t.chars().any(|c| c.is_ascii_digit()) {
         Some("the text has no digits: a number is written with digits, as in 13".to_string())
     } else {
         None
-    };
-    if let Some(h) = hint {
-        let _ = err.hint.set(h.into());
     }
-    Flow::Error(Rc::new(err))
+}
+
+/// `1 234,5`, `1'234.5`, `1,234.56`: digits in groups of three after the first one to three, one
+/// separator between them (a space, U+00A0, U+202F, U+2009, `'`, a comma or a point), perhaps a
+/// decimal part, as a locale writes a number: what removes the separator (5.10). One point or
+/// comma before three digits and no more (`1.234`) may be a decimal one: `None`.
+fn grouped_hint(t: &str, int: bool) -> Option<String> {
+    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
+    let first = body.bytes().take_while(u8::is_ascii_digit).count();
+    let sep = body[first..].chars().next()?;
+    if !(1..=3).contains(&first) || !matches!(sep, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}' | '\'' | ',' | '.') {
+        return None;
+    }
+    let mut rest = &body[first..];
+    let mut groups = 0;
+    while let Some(r) = rest.strip_prefix(sep) {
+        let b = r.as_bytes();
+        if b.len() < 3 || !b[..3].iter().all(u8::is_ascii_digit) || b.get(3).is_some_and(u8::is_ascii_digit) {
+            return None;
+        }
+        rest = &r[3..];
+        groups += 1;
+    }
+    let decimal = match rest.chars().next() {
+        None => None,
+        Some(d @ ('.' | ',')) if d != sep && rest.len() > 1 && rest[1..].bytes().all(|b| b.is_ascii_digit()) => Some(d),
+        _ => return None,
+    };
+    if groups == 1 && decimal.is_none() && matches!(sep, '.' | ',') {
+        return None;
+    }
+    let name = match sep {
+        ' ' => "spaces",
+        '\u{a0}' => "no-break spaces (U+00A0)",
+        '\u{202f}' => "narrow no-break spaces (U+202F)",
+        '\u{2009}' => "thin spaces (U+2009)",
+        '\'' => "apostrophes",
+        ',' => "commas",
+        _ => "points",
+    };
+    let (and, swap) = if decimal == Some(',') { (" and a decimal comma", ".replace(\",\", \".\")") } else { ("", "") };
+    let f = if int && decimal.is_none() { "int" } else { "float" };
+    Some(format!("the text has {name} between thousands{and}: {f}(x.replace(\"{}\", \"\"){swap})", char_text(sep)))
+}
+
+/// `1.234`, `-1,234`: one point or comma before exactly three digits, and the text without it.
+fn thousands(t: &str) -> Option<(char, String)> {
+    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
+    let (whole, part) = body.split_once(['.', ','])?;
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let mark = body[whole.len()..].chars().next()?;
+    ((1..=3).contains(&whole.len()) && digits(whole) && part.len() == 3 && digits(part)).then(|| (mark, t.replacen(mark, "", 1)))
+}
+
+/// A character as a V2 string writes it in a hint: an invisible space as its escape (`\u{a0}`).
+fn char_text(c: char) -> String {
+    if matches!(c, '\u{a0}' | '\u{202f}' | '\u{2009}') {
+        format!("\\u{{{:x}}}", c as u32)
+    } else {
+        c.to_string()
+    }
 }
 
 /// `int(input())` once the input has ended (5.10).

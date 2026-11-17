@@ -537,7 +537,7 @@ macOS, V2 and its blocks always read and write UTF-8, whatever `LANG` says: use 
 Python's UTF-8 mode, so `open()` reads UTF-8 unless told otherwise: for an Excel CSV, pass the
 code page of the Windows that saved it, `open(path, encoding="cp1252")` for Western European
 text (`cp1250` Central European, `cp1251` Cyrillic, `cp1254` Turkish, `cp1255` Hebrew, `cp1256`
-Arabic, `gbk` Chinese, `cp932` Japanese).
+Arabic, `gbk` Chinese, `cp932` or `euc-jp` Japanese).
 
 **`cannot find 'hello.v2'`.** Your terminal is in another folder: `cd` to the folder with the file,
 or give its full path. The message says where V2 looked and which `.v2` files are there.
