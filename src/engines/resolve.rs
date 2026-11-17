@@ -534,21 +534,26 @@ pub fn source_label(from: &ConfigSource) -> String {
 }
 
 /// A `V2_ENGINE_<TAG>` value that is `~` or starts with `~/` (`~\`), which config joined to the
-/// cwd as any relative path (18.4): the variable set with the path written out, as a shell
-/// expands it in double quotes (7.6): `V2_ENGINE_PY="$HOME/bin/python3"`, on Windows
-/// PowerShell's `$env:V2_ENGINE_PY = "$env:USERPROFILE\py\python.exe"`.
+/// cwd as any relative path (18.4): what to do (7.6). After `~/`, the variable set with the path
+/// written out, as a shell expands it in double quotes: `V2_ENGINE_PY="$HOME/bin/python3"`, on
+/// Windows PowerShell's `$env:V2_ENGINE_PY = "$env:USERPROFILE\py\python.exe"`; a bare `~` (or
+/// `~/`), the home folder and no program, gets no example.
 fn env_tilde(var: &str, name: &str) -> Option<String> {
     let p = Path::new(name);
     let cwd = std::env::current_dir().unwrap_or_default();
     let written = p.strip_prefix(&cwd).unwrap_or(p).to_string_lossy().into_owned();
+    let what = format!("V2 doesn't expand ~ in {var}: write the path out");
     let rest = match written.strip_prefix('~')? {
         "" => "",
         r if r.starts_with(['/', '\\']) => &r[1..],
         _ => return None,
     };
+    if rest.is_empty() {
+        return Some(what);
+    }
     let (home, sep) = if cfg!(windows) { ("$env:USERPROFILE", "\\") } else { ("$HOME", "/") };
-    let path = if rest.is_empty() { home.to_string() } else { format!("{home}{sep}{}", rest.replace(['/', '\\'], sep)) };
-    Some(if cfg!(windows) { format!("$env:{var} = \"{path}\"") } else { format!("{var}=\"{path}\"") })
+    let path = format!("{home}{sep}{}", rest.replace(['/', '\\'], sep));
+    Some(if cfg!(windows) { format!("{what}, as in $env:{var} = \"{path}\"") } else { format!("{what}, as in {var}=\"{path}\"") })
 }
 
 /// What "(set by …)" names: the file's full path, or the variable (7.6).
@@ -913,9 +918,7 @@ impl Resolver<'_> {
                     )
                 }
                 // `V2_ENGINE_PY="~/bin/python3"`: in quotes a shell keeps the ~.
-                ConfigSource::Env(var) if env_tilde(var, name).is_some() => {
-                    format!("; V2 doesn't expand ~ in {var}: write the path out, as in {}", env_tilde(var, name).unwrap_or_default())
-                }
+                ConfigSource::Env(var) if env_tilde(var, name).is_some() => format!("; {}", env_tilde(var, name).unwrap_or_default()),
                 // `%ProgramFiles%\…` from PowerShell's single quotes, or a REG_SZ variable.
                 _ if crate::config::unexpanded(name).is_some() => {
                     format!("; V2 doesn't expand {}: write the path out", crate::config::unexpanded(name).unwrap_or_default())
@@ -2275,20 +2278,21 @@ mod tests {
         let cfg = with_command("py", &[&unexpanded.to_string_lossy()], ConfigSource::Env("V2_ENGINE_PY".into()));
         let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with("not found (set by V2_ENGINE_PY); V2 doesn't expand %ProgramFiles%: write the path out"), "{}", nf.message);
-        // A ~ that quotes kept, joined to the cwd as config does (18.4, round 20).
+        // A ~ that quotes kept, joined to the cwd as config does (18.4, round 20). A bare ~ is the
+        // home folder, no program: the hint gives no example (the second review of round 20).
         let cwd = std::env::current_dir().unwrap();
-        for (value, path) in [("~/tools 1/bin/python3", "tools 1/bin/python3"), ("~", "")] {
+        for (value, path) in [("~/tools 1/bin/python3", "tools 1/bin/python3"), ("~", ""), ("~/", "")] {
             let joined = if value == "~" { value.into() } else { cwd.join(value).to_string_lossy().into_owned() };
             let cfg = with_command("py", &[&joined], ConfigSource::Env("V2_ENGINE_PY".into()));
             let nf = resolve_with(&cfg, &lookup(&[&d], None), &fake(|_| says("Python 3.12.1")), &mut ProbeCache::off(), "py").unwrap_err();
-            let want = if cfg!(windows) {
-                let path = if path.is_empty() { String::new() } else { format!("\\{}", path.replace('/', "\\")) };
-                format!("$env:V2_ENGINE_PY = \"$env:USERPROFILE{path}\"")
+            let want = if path.is_empty() {
+                String::new()
+            } else if cfg!(windows) {
+                format!(", as in $env:V2_ENGINE_PY = \"$env:USERPROFILE\\{}\"", path.replace('/', "\\"))
             } else {
-                let path = if path.is_empty() { String::new() } else { format!("/{path}") };
-                format!("V2_ENGINE_PY=\"$HOME{path}\"")
+                format!(", as in V2_ENGINE_PY=\"$HOME/{path}\"")
             };
-            assert!(nf.message.ends_with(&format!("not found (set by V2_ENGINE_PY); V2 doesn't expand ~ in V2_ENGINE_PY: write the path out, as in {want}")), "{}", nf.message);
+            assert!(nf.message.ends_with(&format!("not found (set by V2_ENGINE_PY); V2 doesn't expand ~ in V2_ENGINE_PY: write the path out{want}")), "{value}: {}", nf.message);
         }
         // A py launcher with no Python behind it: Python is missing, not broken (7.8).
         let launcher = temp("noruntime");
