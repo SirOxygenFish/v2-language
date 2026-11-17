@@ -5469,6 +5469,64 @@ fn an_activated_venv_gets_its_own_install_line_until_its_python_stops_running() 
 }
 
 #[test]
+fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
+    // Round 21 (L0, L9): a distribution the venv has, asked for by its pip name (normalized:
+    // pyzzyaml for PyZzYAML, zz_opencv_python, or quoted with -), names its module before any
+    // install line, as pip would only say it is installed; a my-helper.py of yours gets the rename.
+    // Fake distributions like PyYAML's (top_level.txt) and opencv-python's (a RECORD only), and
+    // each hint works when followed (INTERNALS 13.5).
+    if !needs("py", "a_package_imported_by_its_pip_name_gets_the_module_it_provides") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    let venv = home.0.join(".venv");
+    let made = Command::new(&python).args(["-m", "venv", "--without-pip"]).arg(&venv).output().expect("run python -m venv");
+    assert!(made.status.success(), "python -m venv: {}", String::from_utf8_lossy(&made.stderr));
+    let site = find_dir(&venv, "site-packages").expect("the venv's site-packages");
+    for (rel, text) in [
+        ("PyZzYAML-6.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: PyZzYAML\nVersion: 6.0\n"),
+        ("PyZzYAML-6.0.dist-info/top_level.txt", "_zzyaml\nzzyaml\n"),
+        ("zzyaml/__init__.py", "x = \"zzyaml here\"\n"),
+        ("zz_opencv_python-5.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-opencv-python\nVersion: 5.0\n"),
+        ("zz_opencv_python-5.0.dist-info/RECORD", "zzcv2/__init__.py,,\nzz_opencv_python-5.0.dist-info/METADATA,,\nzz_opencv_python-5.0.dist-info/RECORD,,\n"),
+        ("zzcv2/__init__.py", "y = 2\n"),
+    ] {
+        let path = site.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    std::fs::write(home.0.join("my-helper.py"), "def f():\n    return \"helper\"\n").unwrap();
+    let imports = ["py.pyzzyaml as m", "py.PyZzYAML as m", "py.\"zz-opencv-python\" as m", "py.zz_opencv_python as m", "{ f } from py.\"my-helper\"", "{ f } from py.my_helper"];
+    let tries: String = imports.iter().map(|i| format!("try {{\n    @import {i}\n}} catch (e) {{\n    print(e.message, \"|\", e.hint)\n}}\n")).collect();
+    std::fs::write(home.0.join("m.v2"), tries).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    let yaml = "PyZzYAML is installed, and its module is named zzyaml: @import py.zzyaml as zzyaml";
+    let cv = "zz-opencv-python is installed, and its module is named zzcv2: @import py.zzcv2 as zzcv2";
+    let rename = "Python module names use _: rename my-helper.py to my_helper.py and import py.my_helper";
+    let want = [
+        format!("No module named 'pyzzyaml' | {yaml}"),
+        format!("No module named 'PyZzYAML' | {yaml}"),
+        format!("'zz-opencv-python' is not a valid Python module name | {cv}"),
+        format!("No module named 'zz_opencv_python' | {cv}"),
+        format!("'my-helper' is not a valid Python module name | {rename}"),
+        format!("No module named 'my_helper' | {rename}"),
+    ];
+    assert_eq!((code, stdout.lines().collect::<Vec<_>>()), (Some(0), want.iter().map(String::as_str).collect()), "{stderr}");
+    // Uncaught: the hint, and no install line.
+    std::fs::write(home.0.join("m.v2"), "@import py.pyzzyaml as m\nprint(m.x)\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("ImportError: No module named 'pyzzyaml'") && stderr.contains(&format!("\n  hint: {yaml}\n")) && !stderr.contains("pip"), "{stderr}");
+    // Followed.
+    std::fs::rename(home.0.join("my-helper.py"), home.0.join("my_helper.py")).unwrap();
+    std::fs::write(home.0.join("m.v2"), "@import py.zzyaml as zzyaml\n@import py.zzcv2 as zzcv2\n@import { f } from py.my_helper\nprint(zzyaml.x, zzcv2.y, f())\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "zzyaml here 2 helper\n"), "{stderr}");
+}
+
+#[test]
 fn startup_timeout_from_v2_toml_reaches_the_worker() {
     // DOCS 14, INTERNALS 8.4: a configured command that never says hello is stopped after the
     // project's startup_timeout, and the engine stays down for the rest of the run.

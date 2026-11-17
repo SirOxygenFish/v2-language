@@ -120,10 +120,11 @@ if __name__ == "__main__":
     class Fail(Exception):
         """A failure the adapter detects itself, sent with its own kind (9.6)."""
 
-        def __init__(self, kind, message):
+        def __init__(self, kind, message, hint=None):
             Exception.__init__(self, message)
             self.kind = kind
             self.message = message
+            self.hint = hint  # an ImportError's, sent as err.hint (9.6, 13.5)
             self.steps = []  # where inside a value, innermost first (10.5)
             self.located = False
 
@@ -305,6 +306,7 @@ if __name__ == "__main__":
         def __init__(self, stream, fd):
             self._stream = stream
             self._fd = fd
+            self._held = ""  # a forked child's unfinished line
             self.buffer = BytesOutput(self)
 
         @property
@@ -330,8 +332,9 @@ if __name__ == "__main__":
             # console-aware libraries (click) would write to it (9.9).
             if self._fd == 2:
                 return 2
-            raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor; "
-                                          "a child process of a block writes to stderr (DOCS 4.6)")
+            raise io.UnsupportedOperation("fileno: a block's stdout is V2's and has no file descriptor: leave stdout= out "
+                                          "(the output then goes to stderr), or capture it (capture_output=True, text=True) "
+                                          "and print(r.stdout), or use V2's exec([…])")
 
         @property
         def line_buffering(self):
@@ -353,10 +356,12 @@ if __name__ == "__main__":
         def _put(self, s):
             if forked[0]:
                 # A forked child writes at the fd level, like any child of a block (9.9), also
-                # through a stream saved before the fork (a logging handler).
-                data = s.encode("utf-8", "backslashreplace")
-                while data:
-                    data = data[os.write(self._fd, data):]
+                # through a stream saved before the fork (a logging handler), a whole line per
+                # write, so children printing at once (a Pool) don't split each other's lines.
+                held = self._held + s
+                cut = held.rfind("\n") + 1 if len(held) < FLUSH_AT else len(held)
+                self._held = held[cut:]
+                self._write_fd(held[:cut])
                 return len(s)
             with _out_cond:
                 if threading.get_ident() != DISPATCH:
@@ -372,6 +377,14 @@ if __name__ == "__main__":
         def flush(self):
             if not forked[0]:
                 flush_out()
+                return
+            held, self._held = self._held, ""
+            self._write_fd(held)
+
+        def _write_fd(self, s):
+            data = s.encode("utf-8", "backslashreplace")
+            while data:
+                data = data[os.write(self._fd, data):]
 
     class BytesOutput(io.RawIOBase):
         """sys.stdout.buffer: bytes decoded as UTF-8 (invalid bytes become U+FFFD)."""
@@ -851,7 +864,10 @@ if __name__ == "__main__":
     def serialize(e, depth=0):
         """An exception as `err.error` (9.6)."""
         if isinstance(e, Fail):
-            return {"type": e.kind, "message": well_formed(e.message), "foreign_type": None, "trace": []}
+            out = {"type": e.kind, "message": well_formed(e.message), "foreign_type": None, "trace": []}
+            if e.hint:
+                out["hint"] = well_formed(e.hint)
+            return out
         trace = frames(e.__traceback__)
         # A SyntaxError's place is the error itself: a block's line, or the line of a module file
         # it couldn't compile (12.6, 13.5).
@@ -886,10 +902,36 @@ if __name__ == "__main__":
         data = own_data(e)
         if data:
             out["data"] = data
-        hint = shadow_hint(e) or decode_hint(e)
+        hint = shadow_hint(e) or decode_hint(e) or library_hint(e)
         if hint:
             out["hint"] = hint
         return out
+
+    def library_hint(e):
+        """A system library a package needs, missing (9.6): an ImportError, or an OSError raised
+        while importing, `libGL.so.1: cannot open shared object file: …` (Linux's loader) or
+        `PortAudio library not found` (ctypes.util's search, as sounddevice reports it)."""
+        try:
+            if not isinstance(e, (ImportError, OSError)):
+                return None
+            if not isinstance(e, ImportError):
+                # Raised by a module's top level (Python trims the import machinery's frames).
+                tb, importing = e.__traceback__, False
+                while tb is not None and not importing:
+                    code = tb.tb_frame.f_code
+                    importing = code.co_name == "<module>" and code.co_filename.endswith(".py")
+                    tb = tb.tb_next
+                if not importing:
+                    return None
+            message = str(e)
+            for mark in (": cannot open shared object file", " library not found"):
+                if mark in message:
+                    lib = os.path.basename(message.split(mark)[0].strip().split(" ")[-1].strip("'\""))
+                    if lib:
+                        return "%s is a system library the package needs, not a Python package: install it with your system's package manager" % lib
+            return None
+        except Exception:
+            return None
 
     def shadow_hint(e):
         """A file of the user's named like a standard module, which some other module needed (9.6):
@@ -1252,11 +1294,68 @@ if __name__ == "__main__":
             return None
         best = None
         for c in sorted(names):
-            if c == name or (c.startswith("_") and not name.startswith("_")) or abs(len(c) - len(target)) > 1:
+            # Not my-helper.py, which no module name reaches (package_hint says so).
+            if c == name or not c.isidentifier() or (c.startswith("_") and not name.startswith("_")) or abs(len(c) - len(target)) > 1:
                 continue
             if osa(target, c.lower()) <= 1:
                 best = best or c
         return best
+
+    def package_hint(name, lead):
+        """An ImportError's hint for a name Python has no module of (13.5): your own my-helper.py
+        in the .v2 file's folders (`lead`), which no module name reaches; else a distribution of
+        that name, installed, whose module is named otherwise (installed_as)."""
+        if "." in name:
+            return None
+        under = name.replace("-", "_")
+        if under.isidentifier() and not keyword.iskeyword(under):
+            for d in lead:
+                for entry in (name + ".py", under.replace("_", "-") + ".py", name, under.replace("_", "-")):
+                    path = os.path.join(d, entry)
+                    stem = entry[:-3] if entry.endswith(".py") else entry
+                    mine = os.path.isfile(path) if entry.endswith(".py") else os.path.isfile(os.path.join(path, "__init__.py"))
+                    if "-" in stem and mine:
+                        new = under + (".py" if entry.endswith(".py") else "")
+                        return "Python module names use _: rename %s to %s and import py.%s" % (entry, new, under)
+        return installed_as(name)
+
+    def installed_as(name):
+        """`PyYAML is installed, and its module is named yaml: @import py.yaml as yaml`, for
+        py.pyyaml, py.PyYAML or py."opencv-python": a distribution this Python has, found by pip's
+        normalized name, whose modules are named otherwise (13.5)."""
+        try:
+            if "importlib.metadata" not in sys.modules:
+                saved = sys.path[:]
+                sys.path[:] = ORIGINAL_PATH  # the stdlib's modules, not a project file (9.3)
+                try:
+                    importlib.import_module("importlib.metadata")
+                finally:
+                    sys.path[:] = saved
+            dist = sys.modules["importlib.metadata"].distribution(name)
+            mods = dist_modules(dist)
+            if not mods or name in mods:
+                return None
+            listed = mods[0] if len(mods) == 1 else ", ".join(mods[:-1]) + " and " + mods[-1]
+            return "%s is installed, and its module%s named %s: @import py.%s as %s" % (
+                dist.metadata.get("Name") or name, " is" if len(mods) == 1 else "s are", listed, mods[0], mods[0])
+        except Exception:
+            return None
+
+    def dist_modules(dist):
+        """The top-level modules a distribution provides: its top_level.txt's, else the names its
+        RECORD lists (a folder, or a .py, .pyd or .so file), the ones not starting with _ first."""
+        text = dist.read_text("top_level.txt")
+        found = text.split() if text else []
+        for f in () if text else dist.files or ():
+            parts = f.parts
+            if not parts or parts[0] in ("..", "__pycache__") or parts[0].endswith((".dist-info", ".data", ".egg-info")):
+                continue
+            if len(parts) > 1:
+                found.append(parts[0])
+            elif parts[0].endswith((".py", ".pyd", ".so")):
+                found.append(parts[0].split(".")[0])
+        names = sorted({n for n in found if n.isidentifier() and not keyword.iskeyword(n)})
+        return [n for n in names if not n.startswith("_")] or names
 
     def main_guard(node):
         """`if __name__ == "__main__":` (either way round), which a block's code never passes."""
@@ -1418,6 +1517,9 @@ if __name__ == "__main__":
         unit = m["unit"]
         if unit not in units:
             name = m["name"]
+            if not all(p.isidentifier() and not keyword.iskeyword(p) for p in name.split(".")):
+                # `py."opencv-python"`: a pip-style name, sent for package_hint (13.5).
+                raise Fail("ImportError", "'%s' is not a valid Python module name" % name, package_hint(name, lead))
             try:
                 mod = importlib.import_module(name)
             except ModuleNotFoundError as e:
@@ -1425,10 +1527,11 @@ if __name__ == "__main__":
                 # missing dependency is the module's own failure.
                 if e.name is not None and (name == e.name or name.startswith(e.name + ".")):
                     message = str(e)
-                    near = near_module(e.name) if "." not in e.name else None
+                    hint = package_hint(e.name, lead)
+                    near = near_module(e.name) if "." not in e.name and not hint else None
                     if near:
                         message += ". Did you mean: %r?" % near  # as Python's own suggestions read
-                    raise Fail("ImportError", message)
+                    raise Fail("ImportError", message, hint)
                 raise
             units[unit] = (mod, None)
         clash = shadowed(m["name"], lead)

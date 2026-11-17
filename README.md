@@ -327,7 +327,9 @@ More of V2, in short:
   dotenv's `config()` or `os.environ`, stays in that language). `exec(["git", "status"], input: text)` runs a program
   without a shell and returns `{code, stdout, stderr}`, its output as text and all of it in memory.
   A program that can't start is an `IOError`. To walk folders, or tell a file from a folder, use
-  Python's `os.walk` in a block. File paths are relative to the folder you run `v2` from; for a
+  Python's `os.walk` in a block, whose loop unpacks:
+  `@py(d) { import os; [os.path.join(r, f) for r, _, fs in os.walk(d) for f in fs] }` lists the
+  files below `d`. File paths are relative to the folder you run `v2` from; for a
   file next to the script, `read_file(f"${script_dir()}/data.csv")`. They are taken as written:
   `~` and `%USERPROFILE%` are a shell's, so write `getenv("HOME")` (`getenv("USERPROFILE")` on
   Windows) instead; a path whose first part is one (or, on Linux and macOS, `~name` for a user
@@ -406,7 +408,8 @@ modules, such as `json` or `numbers`: one Python serves the whole run, with one 
 and V2 says so when another came first). One project serves the run, too: a `.v2` file imported
 from another project uses your script's `v2.toml`, venv and project folder, and only its own
 folder is added for its `.py` files (npm packages are still found from each `.v2` file's own
-folder upward, as Node does).
+folder upward, as Node does). The name you `pip install` isn't always the one you import: PyYAML is
+`py.yaml`, opencv-python `py.cv2`, beautifulsoup4 `py.bs4`, Pillow `py.PIL`.
 
 - **npm:** in your project folder, `npm install lodash` (in a Windows PowerShell that blocks
   `npm`, `npm.cmd install lodash`; in WSL, check that `type -P npm` names Linux's npm, as the
@@ -430,7 +433,9 @@ folder upward, as Node does).
   `.venv\Scripts\python -m pip install numpy`, and a file named `v2.toml` next to your script
   that says which venv to use, two lines: `[python]`, then `venv = ".venv"` (as shown below).
 - **Python on Linux and macOS:** the system's and Homebrew's Python refuse `pip install` outside a
-  virtual environment ("externally-managed-environment"), so make one in your project folder:
+  virtual environment ("externally-managed-environment"). On Debian and Ubuntu, apt's `python3-<name>`
+  packages (`sudo apt install python3-requests`) work with the system Python and need no `v2.toml`;
+  for others, make a virtual environment in your project folder:
 
   ```bash
   python3 -m venv .venv          # on Ubuntu and Debian, first: sudo apt install python3-venv

@@ -1,0 +1,43 @@
+// requires: py js
+// A V2 function that foreign code calls with fewer arguments than it declares (Node's emit and
+// callbacks often do) is an ArityError whose hint says to give those parameters a default, as
+// DOCS 8.2 does (round 21, L9; INTERNALS 11.8). Not for V2's own calls, nor for an ArityError
+// inside the function.
+@js events {
+    const { EventEmitter } = require("events");
+    function emitWith(f) {
+        const e = new EventEmitter();
+        e.on("data", f);
+        e.emit("data");
+    }
+    @import { two } from v2
+    function viaRoute() {
+        two(1);
+    }
+    @export { emitWith, viaRoute }
+}
+@import { emitWith, viaRoute } from events
+func one(x) {
+    print(x)
+}
+func two(a, b, c = 3) {
+    print(a, b, c)
+}
+func calls_one(x = 1) {
+    one()
+}
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.message, "|", e.hint)
+    }
+}
+show(func() => emitWith(one))
+show(func() => viaRoute())
+show(func() => emitWith(func(p, q) => p))
+show(func() => @py(two) { two(b=2) })
+show(func() => emitWith(calls_one))
+show(func() => one())
+// Given the default, it runs.
+emitWith(func(x = null) { print("called with", x) })
