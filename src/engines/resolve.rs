@@ -556,6 +556,73 @@ fn env_tilde(var: &str, name: &str) -> Option<String> {
     Some(if cfg!(windows) { format!("{what}, as in $env:{var} = \"{path}\"") } else { format!("{what}, as in {var}=\"{path}\"") })
 }
 
+/// A path on WSL's share, `\\wsl.localhost\<distro>\…` or `\\wsl$\<distro>\…` (Windows).
+fn on_wsl_share(p: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    match p.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Windows: a configured program that is there but that Windows can't start (7.6), so never
+/// "not found": `Some(true)` for a Linux one (an ELF file, a WSL link Windows can't follow, any
+/// file on WSL's share), `Some(false)` for another (a script, a text file). `None` when nothing is
+/// there, or for a link Windows follows to nothing.
+fn not_windows_program(p: &Path) -> Option<bool> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(p).ok().filter(|m| !m.is_dir())?;
+    match std::fs::metadata(p) {
+        // A link: Windows' own reads back (and leads nowhere); WSL's doesn't read at all.
+        Err(_) => (meta.file_type().is_symlink() && std::fs::read_link(p).is_err()).then_some(true),
+        Ok(m) if m.is_dir() => None,
+        Ok(_) => {
+            let mut magic = [0u8; 4];
+            let elf = std::fs::File::open(p).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic)).is_ok() && magic == *b"\x7fELF";
+            Some(elf || on_wsl_share(p))
+        }
+    }
+}
+
+/// A configured program's path as messages and doctor show it: on Windows one that mixes `/` and
+/// `\` (a `/usr/bin/python3` or `../x/python` joined to `v2.toml`'s folder, 18.1) with `\` only.
+fn one_separator(name: &str) -> String {
+    if cfg!(windows) && name.contains('/') && name.contains('\\') {
+        name.replace('/', "\\")
+    } else {
+        name.to_string()
+    }
+}
+
+/// `one_separator`, its control characters escaped (2.1).
+fn shown_program(name: &str) -> String {
+    crate::syntax::span::shown_path(&one_separator(name))
+}
+
+/// Windows: the WSL launcher a command runs (`wsl.exe`, or WSL's `bash.exe` in System32, not Git
+/// for Windows'), whose Linux interpreter can't read the worker's adapter, a Windows path: what is
+/// wrong and what to do, for doctor's notes and a crash at startup (7.6, 8.4, 19.2).
+pub fn linux_interpreter_note(id: &str, argv: &[OsString]) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let program = Path::new(argv.first()?);
+    let stem = program.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    let system = program.parent().and_then(Path::file_name).is_some_and(|d| ["system32", "sysnative"].iter().any(|s| d.eq_ignore_ascii_case(s)));
+    let launcher = match stem.as_str() {
+        "wsl" => "wsl.exe",
+        "bash" if system => "WSL's bash.exe",
+        _ => return None,
+    };
+    let (language, exe) = if id == "py" { ("python", "python.exe") } else { ("node", "node.exe") };
+    Some(format!("{launcher} runs a Linux {language}, which the Windows v2 can't use, as its adapter is a Windows path: name a {exe}, or run the Linux v2 inside WSL"))
+}
+
 /// What "(set by …)" names: the file's full path, or the variable (7.6).
 fn set_by(from: &ConfigSource) -> String {
     match from {
@@ -677,6 +744,38 @@ pub fn remake_venv(venv: &Path) -> String {
     }
     let python = if cfg!(windows) { "py" } else { "python3" };
     format!("make the venv again, {python} -m venv --clear {dir}, and install its packages again")
+}
+
+/// A venv the other system made, which that system may still use (one project folder used from
+/// Windows and from WSL), so never made again here (7.6): on Windows, one with a `bin/python` (or
+/// `python3`) and no `bin/python.exe` (MSYS2's has one), or whose `pyvenv.cfg`'s `home` is a POSIX
+/// path; elsewhere, one with a `Scripts/python.exe`, or a `home` with a drive letter or `\\`.
+/// The rest of the message after the venv's name: where it was made, and a venv for this system
+/// beside it, named in `V2_ENGINE_PY`.
+pub fn foreign_venv(venv: &Path) -> Option<String> {
+    let home = pyvenv_value(venv, "home").unwrap_or_default();
+    let there = |p: PathBuf| std::fs::symlink_metadata(p).is_ok();
+    let made_on = if cfg!(windows) {
+        let bin = venv.join("bin");
+        let posix = (there(bin.join("python")) || there(bin.join("python3"))) && !there(bin.join("python.exe"));
+        (home.starts_with('/') || posix).then_some("Linux or macOS")?
+    } else {
+        let h = home.as_bytes();
+        let drive = h.len() >= 3 && h[0].is_ascii_alphabetic() && h[1] == b':' && matches!(h[2], b'\\' | b'/');
+        (drive || home.starts_with(r"\\") || is_regular_file(&venv.join("Scripts").join("python.exe"))).then_some("Windows")?
+    };
+    let this = if cfg!(windows) { "win" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
+    let new = venv.parent().unwrap_or(venv).join(format!(".venv-{this}"));
+    let word = |p: &Path| crate::cli::shell_word(&p.display().to_string());
+    let (python, set) = if cfg!(windows) {
+        ("py", format!("$env:V2_ENGINE_PY = \"{}\"", new.join("Scripts").join("python.exe").display()))
+    } else {
+        ("python3", format!("export V2_ENGINE_PY={}", word(&new.join("bin").join("python"))))
+    };
+    Some(format!(
+        "was made on {made_on}: keep it, make one for this system beside it, {python} -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv ({set}), or run V2 on that system",
+        word(&new)
+    ))
 }
 
 /// Where a link that leads nowhere was meant to lead: its last link's target, a relative one read
@@ -892,6 +991,18 @@ impl Resolver<'_> {
     fn configured(&mut self, spec: &Rc<EngineSpec>, command: &[String], from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
         let name = &command[0];
         let Some(path) = first_program(name, self.lookup) else {
+            let command_words = join(&std::iter::once(OsString::from(one_separator(name))).chain(command[1..].iter().map(OsString::from)).collect::<Vec<_>>());
+            // Windows: a file there that isn't a Windows program, as a Linux python on WSL's share.
+            let file: PathBuf = self.lookup.cwd.join(name).components().collect();
+            if let Some(linux) = name.contains(['/', '\\']).then(|| not_windows_program(&file)).flatten() {
+                let exe = if &*spec.id == "py" { "python.exe" } else { "node.exe" };
+                let what = if linux {
+                    format!("isn't a Windows program (a Linux one): the Windows v2 runs Windows programs: name a {exe}, or run the Linux v2 inside WSL")
+                } else {
+                    format!("isn't a Windows program (an .exe, .com, .bat or .cmd file): name a {exe}")
+                };
+                return Err(NotFound::broken(format!("engine '{}' command '{}' (set by {}) {what}", spec.id, shown_program(name), set_by(from)), command_words, from));
+            }
             // `V2_ENGINE_PY="C:\Python311"`: a folder; `V2_ENGINE_PY="py -3"`: the variable holds
             // one program, never split (18.4).
             // The shortest run of words that is a program, then its arguments: a path with spaces
@@ -927,15 +1038,11 @@ impl Resolver<'_> {
             };
             // `"C:/Program Files/nodejs\node.exe"`: `\n` became a line break (18.5).
             let hint = crate::config::configured_escape_hint(Path::new(name), from, &spec.id).map_or(hint, |h| format!("; {h}"));
-            return Err(NotFound::broken(
-                format!("engine '{}' command '{}' not found (set by {}){hint}", spec.id, crate::syntax::span::shown_path(name), set_by(from)),
-                join(&command.iter().map(OsString::from).collect::<Vec<_>>()),
-                from,
-            ));
+            return Err(NotFound::broken(format!("engine '{}' command '{}' not found (set by {}){hint}", spec.id, shown_program(name), set_by(from)), command_words, from));
         };
         let mut argv = vec![path.into_os_string()];
         argv.extend(command[1..].iter().map(OsString::from));
-        self.usable(spec, argv, Origin::Config(from.clone()), &format!("command '{}'", crate::syntax::span::shown_path(name)), from)
+        self.usable(spec, argv, Origin::Config(from.clone()), &format!("command '{}'", shown_program(name)), from)
     }
 
     fn venv(&mut self, spec: &Rc<EngineSpec>, venv: &Path, from: &ConfigSource) -> Result<ResolvedEngine, NotFound> {
@@ -1046,6 +1153,9 @@ impl Resolver<'_> {
             } else if let Some(folder) = inside {
                 let create = if !free(folder) { String::new() } else { format!(" (create it: {python} -m venv {})", pasted(folder)) };
                 format!("[python] venv '{shown}' is inside a virtual environment, and venv names the environment's folder: write {}{create}", write(folder))
+            } else if let Some(advice) = foreign_venv(venv).filter(|_| is_venv(venv)) {
+                // Made on the other system, which may still use it: kept.
+                format!("[python] venv '{shown}' {advice}")
             } else if is_venv(venv) {
                 // A venv made on another system (`bin` where Windows wants `Scripts`), or damaged.
                 format!("[python] venv '{shown}' has no {want}, so it was made on another system or is damaged: make it again here, {python} -m venv --clear {}", pasted(venv))
@@ -2497,6 +2607,133 @@ mod tests {
         let gone = fake(|_| ProbeOutcome::Exited { code: Some(103), output: "No Python at '\"C:\\Python39\\python.exe'".into() });
         let nf = resolve_with(&at(&old), &lookup(&[], None), &gone, &mut ProbeCache::off(), "py").unwrap_err();
         assert!(nf.message.ends_with(&format!("; make the venv again, {python} -m venv --clear {}, and install its packages again", old.display())), "{}", nf.message);
+    }
+
+    #[test]
+    fn a_venv_the_other_system_made_is_kept() {
+        // Round 21 (W2, L8), 7.6: one project folder used from Windows and from WSL. The other
+        // system's venv (on Windows a bin/python, or a POSIX home; elsewhere a Scripts\python.exe,
+        // or a home with a drive letter) is never made again here with --clear, which on a
+        // \\wsl.localhost path failed halfway and left neither system a venv: a venv for this
+        // system beside it, named in V2_ENGINE_PY, which wins over [python] venv.
+        let d = temp("othersystem");
+        let p = fake(|_| says("Python 3.12.1"));
+        let at = |v: &Path| Config { python_venv: Some(Sourced { value: v.to_path_buf(), from: project_source() }), ..Config::default() };
+        let (other, bin, home) = if cfg!(windows) { ("Linux or macOS", "bin", "/usr/bin") } else { ("Windows", "Scripts", r"C:\Program Files\Python311") };
+        let make = |name: &str, home: &str, python: bool| {
+            let v = d.join(name);
+            std::fs::create_dir_all(v.join(bin)).unwrap();
+            std::fs::write(v.join("pyvenv.cfg"), format!("home = {home}\nversion = 3.12.3\n")).unwrap();
+            if python {
+                std::fs::write(v.join(bin).join(if cfg!(windows) { "python" } else { "python.exe" }), "").unwrap();
+            }
+            v
+        };
+        // Its python alone, its home alone, or both.
+        for v in [make("both", home, true), make("python", "x", true), make("home", home, false)] {
+            let nf = resolve_with(&at(&v), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+            let want = if cfg!(windows) {
+                let new = d.join(".venv-win");
+                format!(
+                    "[python] venv '{}' was made on {other}: keep it, make one for this system beside it, py -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv ($env:V2_ENGINE_PY = \"{}\"), or run V2 on that system",
+                    v.display(),
+                    crate::cli::shell_word(&new.display().to_string()),
+                    new.join("Scripts").join("python.exe").display()
+                )
+            } else {
+                let new = d.join(if cfg!(target_os = "macos") { ".venv-macos" } else { ".venv-linux" });
+                format!(
+                    "[python] venv '{}' was made on {other}: keep it, make one for this system beside it, python3 -m venv {}, and name its python in V2_ENGINE_PY, which wins over [python] venv (export V2_ENGINE_PY={}), or run V2 on that system",
+                    v.display(),
+                    crate::cli::shell_word(&new.display().to_string()),
+                    crate::cli::shell_word(&new.join("bin").join("python").display().to_string())
+                )
+            };
+            assert_eq!(nf.message, want);
+            assert!(!nf.message.contains("--clear"), "{}", nf.message);
+            assert_eq!((nf.status, nf.from.as_deref()), (Status::Broken, Some("venv")));
+        }
+        // On Windows, an MSYS2 venv's bin has a python.exe: not Linux's, so the message for a venv
+        // without this system's python stays.
+        if cfg!(windows) {
+            let msys = make("msys", "C:/msys64/ucrt64/bin", true);
+            std::fs::write(msys.join("bin").join("python.exe"), "").unwrap();
+            let nf = resolve_with(&at(&msys), &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+            assert!(nf.message.contains(", so it was made on another system or is damaged: "), "{}", nf.message);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_configured_program_windows_cant_start_isnt_called_missing() {
+        // Round 21 (W7), 7.6: a Linux python named in v2.toml (an ELF file, as /usr/bin/python3.12
+        // on WSL's share) is there: it isn't a Windows program, never "not found". A path that
+        // mixes separators, as `/usr/bin/x` joined to v2.toml's folder, is shown with `\` only.
+        let d = temp("notwindows");
+        let elf = d.join("python3.12");
+        std::fs::write(&elf, b"\x7fELF\x02\x01\x01\0rest").unwrap();
+        let text = d.join("pytext");
+        std::fs::write(&text, "#!/usr/bin/env python3\n").unwrap();
+        let p = fake(|_| says("Python 3.12.1"));
+        let from = ConfigSource::Project(PathBuf::from(r"C:\proj\v2.toml"));
+        let mixed = format!("{}/python3.12", d.display());
+        for (id, exe) in [("py", "python.exe"), ("js", "node.exe")] {
+            let cfg = with_command(id, &[&mixed, "-X", "utf8"], from.clone());
+            let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), id).unwrap_err();
+            let want = format!(
+                "engine '{id}' command '{}' (set by C:\\proj\\v2.toml) isn't a Windows program (a Linux one): the Windows v2 runs Windows programs: name a {exe}, or run the Linux v2 inside WSL",
+                elf.display()
+            );
+            assert_eq!(nf.message, want);
+            assert_eq!((nf.status, nf.command.as_deref()), (Status::Broken, Some(&*format!("{} -X utf8", crate::cli::shell_word(&elf.display().to_string())))));
+        }
+        let cfg = with_command("py", &[&text.display().to_string()], ConfigSource::Env("V2_ENGINE_PY".into()));
+        let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("engine 'py' command '{}' (set by V2_ENGINE_PY) isn't a Windows program (an .exe, .com, .bat or .cmd file): name a python.exe", text.display()));
+        // Nothing there: still not found, shown with one separator.
+        let cfg = with_command("py", &[&format!("{}/missing/python", d.display())], from.clone());
+        let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+        assert_eq!(nf.message, format!("engine 'py' command '{}' not found (set by C:\\proj\\v2.toml)", d.join("missing").join("python").display()));
+        // On WSL's share (V2_TEST_WSL_DISTRO names a distro), a Linux program and a WSL link,
+        // which Windows can't follow: /usr/bin/env and Debian's /usr/bin/sh, a link to dash.
+        let Some(distro) = std::env::var("V2_TEST_WSL_DISTRO").ok().filter(|d| !d.is_empty()) else {
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), b"SKIP the WSL share part of a_configured_program_windows_cant_start_isnt_called_missing (V2_TEST_WSL_DISTRO not set)\n");
+            return;
+        };
+        let root = PathBuf::from(format!(r"\\wsl.localhost\{distro}"));
+        let mut programs = vec![root.join("usr").join("bin").join("env")];
+        let sh = root.join("usr").join("bin").join("sh");
+        if std::fs::symlink_metadata(&sh).is_ok_and(|m| m.file_type().is_symlink()) {
+            programs.push(sh);
+        }
+        for program in programs {
+            let cfg = with_command("py", &[&program.display().to_string()], from.clone());
+            let nf = resolve_with(&cfg, &lookup(&[], None), &p, &mut ProbeCache::off(), "py").unwrap_err();
+            assert!(nf.message.ends_with(" isn't a Windows program (a Linux one): the Windows v2 runs Windows programs: name a python.exe, or run the Linux v2 inside WSL"), "{}", nf.message);
+        }
+    }
+
+    #[test]
+    fn a_command_through_wsl_exe_gets_a_note() {
+        // Round 21 (W7), 7.6: wsl.exe, or WSL's bash.exe in System32, runs a Linux interpreter,
+        // which can't read the adapter's Windows path. Git for Windows' bash, another program, and
+        // any program elsewhere than Windows get no note.
+        let note = |id: &str, p: &str| linux_interpreter_note(id, &[OsString::from(p), OsString::from("-e"), OsString::from("python3")]);
+        let py = "runs a Linux python, which the Windows v2 can't use, as its adapter is a Windows path: name a python.exe, or run the Linux v2 inside WSL";
+        if cfg!(windows) {
+            assert_eq!(note("py", r"C:\WINDOWS\system32\wsl.exe").as_deref(), Some(&*format!("wsl.exe {py}")));
+            assert_eq!(note("py", r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\wsl.exe").as_deref(), Some(&*format!("wsl.exe {py}")));
+            assert_eq!(note("py", r"C:\Windows\System32\bash.exe").as_deref(), Some(&*format!("WSL's bash.exe {py}")));
+            assert_eq!(
+                note("js", r"C:\Windows\Sysnative\bash.exe").as_deref(),
+                Some("WSL's bash.exe runs a Linux node, which the Windows v2 can't use, as its adapter is a Windows path: name a node.exe, or run the Linux v2 inside WSL")
+            );
+        } else {
+            assert_eq!(note("py", "/usr/bin/wsl.exe"), None);
+        }
+        assert_eq!(note("py", r"C:\Program Files\Git\bin\bash.exe"), None);
+        assert_eq!(note("py", r"C:\Python311\python.exe"), None);
+        assert_eq!(linux_interpreter_note("py", &[]), None);
     }
 
     #[cfg(windows)]

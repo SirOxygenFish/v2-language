@@ -485,6 +485,8 @@ impl Interp {
             let session = &self.sessions[s];
             let fds = cfg!(unix) && session.engine.spec.protocol_fds;
             let wrapper = if exit.is_some_and(|e| e.code == Some(0)) { wrapper_note(&tag, &session.engine.argv, fds, session.hello.is_some()) } else { String::new() };
+            // Windows: a command through wsl.exe, whose Linux interpreter can't read the adapter.
+            let wrapper = wrapper + &super::resolve::linux_interpreter_note(&tag, &session.engine.argv).map(|n| format!("; {n}")).unwrap_or_default();
             // A variable the program reads as it starts may be why (8.4).
             let set = super::spec::startup_variables(&tag);
             let vars = if set.is_empty() { String::new() } else { format!("; {}", super::spec::startup_vars_fix(&set)) };

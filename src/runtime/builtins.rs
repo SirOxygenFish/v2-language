@@ -1768,6 +1768,43 @@ pub(crate) fn named_hint(builtin: &str, name: &str) -> Option<String> {
     })
 }
 
+/// Windows: a working folder on a `\\server\share` (`\\wsl.localhost\Ubuntu\…`, also as
+/// `\\?\UNC\…`), as cmd's `pushd` takes it; cmd.exe can't work in one (7.5).
+fn share_folder(cwd: &std::path::Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+    match cwd.components().next() {
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..)) => Some(crate::syntax::span::strip_verbatim(cwd).display().to_string()),
+        _ => None,
+    }
+}
+
+/// Windows: exec's refusal of cmd.exe, or a `.bat` or `.cmd` file it would run (`npm.cmd`), in a
+/// `\\server\share` working folder, where cmd says "UNC paths are not supported" and works in the
+/// Windows folder instead, exit code 0 (7.5): what to run instead. Not for a cmd.exe whose
+/// command line first changes the folder (`pushd "\\server\share\p" && …`, `cd /d C:\p && …`).
+fn cmd_in_share(argv: &[OsString], cwd: &std::path::Path) -> Option<String> {
+    let folder = share_folder(cwd)?;
+    let program = std::path::Path::new(argv.first()?);
+    let file = program.file_name()?.to_string_lossy().into_owned();
+    let ext = program.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let line = argv.iter().skip(1).position(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k")).map(|i| {
+        let rest: Vec<String> = argv[i + 2..].iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        rest.join(" ").trim_start().to_ascii_lowercase()
+    });
+    let moves = line.is_some_and(|l| l.starts_with("pushd ") || l.starts_with("cd /d ") || l.starts_with("chdir /d "));
+    let who = if file.eq_ignore_ascii_case("cmd.exe") && !moves {
+        "cmd.exe".to_string()
+    } else if ext == "bat" || ext == "cmd" {
+        format!("{file} runs in cmd.exe, which")
+    } else {
+        return None;
+    };
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let mut line = String::new();
+    super::value::quoted(&format!("pushd \"{folder}\" && …"), &mut line);
+    Some(format!("exec: {who} can't work in a \\\\server\\share folder and would run in {windows}: run the program itself, or exec([\"cmd\", \"/c\", {line}])"))
+}
+
 fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let items = match &args[0] {
         Value::List(l) => l.borrow().clone(),
@@ -1872,6 +1909,10 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
             return Err(Flow::Error(Rc::new(err)));
         }
     };
+    // Windows: cmd.exe in a \\server\share folder would run in C:\Windows instead (7.5).
+    if let Some(refused) = cmd_in_share(&argv, &lookup.cwd) {
+        return io_error(refused);
+    }
     it.out.flush_or_stop();
     // A Python program writes a pipe in the locale's encoding (ANSI on Windows: café as cafÚ in
     // the console's code page, and CJK not at all): UTF-8 instead, unless the user chose (5.10).
@@ -2195,6 +2236,34 @@ mod tests {
         assert_eq!(child_text("café\n".as_bytes()), "café\n");
         let ints = [1u8, 0, 0, 0, 2, 0, 0, 0];
         assert_eq!(child_text(&ints), String::from_utf8_lossy(&ints));
+    }
+
+    #[test]
+    fn exec_refuses_cmd_in_a_share_folder_unless_it_moves() {
+        // Round 21 (W1), 7.5: cmd.exe, and a batch file it runs, in a \\server\share working
+        // folder (also as \\?\UNC\…) would run in the Windows folder; a cmd line that first moves
+        // (pushd, cd /d) works. Drive folders and other programs are fine; elsewhere a path has
+        // no share prefix at all.
+        let argv = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        let share = std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\ann\p");
+        let cmd = argv(&[r"C:\WINDOWS\system32\cmd.exe", "/c", "npm run build"]);
+        let npm = argv(&[r"C:\Program Files\nodejs\npm.cmd", "run", "build"]);
+        if cfg!(windows) {
+            let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            let rest = format!(
+                "can't work in a \\\\server\\share folder and would run in {windows}: run the program itself, or exec([\"cmd\", \"/c\", \"pushd \\\"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\ann\\\\p\\\" && …\"])"
+            );
+            assert_eq!(cmd_in_share(&cmd, share), Some(format!("exec: cmd.exe {rest}")));
+            assert_eq!(cmd_in_share(&npm, share), Some(format!("exec: npm.cmd runs in cmd.exe, which {rest}")));
+            assert_eq!(cmd_in_share(&npm, std::path::Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\ann\p")), Some(format!("exec: npm.cmd runs in cmd.exe, which {rest}")));
+            assert_eq!(cmd_in_share(&argv(&["C:\\x\\BUILD.BAT"]), share).map(|m| m.starts_with("exec: BUILD.BAT runs in cmd.exe, ")), Some(true));
+        }
+        for moves in [&["cmd.exe", "/C", "pushd \"\\\\wsl.localhost\\Ubuntu\\p\" && npm run build"][..], &["cmd.exe", "/k", " cd /d C:\\p && dir"], &["cmd.exe", "/c", "pushd", "\\\\server\\share"]] {
+            assert_eq!(cmd_in_share(&argv(moves), share), None, "{moves:?}");
+        }
+        assert_eq!(cmd_in_share(&argv(&[r"C:\Program Files\nodejs\node.exe", "x.js"]), share), None);
+        assert_eq!(cmd_in_share(&cmd, std::path::Path::new(r"C:\Users\ann\p")), None);
+        assert_eq!(cmd_in_share(&npm, std::path::Path::new(r"\\?\C:\Users\ann\p")), None);
     }
 
     #[test]
