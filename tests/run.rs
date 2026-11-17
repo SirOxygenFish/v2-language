@@ -4480,8 +4480,12 @@ fn a_script_run_by_its_verbatim_path_reaches_the_files_beside_it() {
         "let d = script_dir()\nprint(d.starts_with(\"\\\\\\\\?\\\\\"), read_file(f\"${{d}}/data.csv\"), exists(f\"${{d}}/data.csv\"))\n\
          print(read_file(f\"${{d}}/./../top.txt\"), exists(f\"${{d}}/../top.txt\"))\nwrite_file(f\"${{d}}/out.txt\", \"w\")\nmake_dir(f\"${{d}}/sub/deeper\")\n\
          print(list_dir(f\"${{d}}/\"), list_dir(f\"${{d}}/sub\"))\nremove_file(f\"${{d}}/out.txt\")\nprint(exists(f\"${{d}}/out.txt\"))\n\
-         let r = exec([{exe}, \"--version\"])\nprint(r.code, r.stdout.trim())\n"
+         let r = exec([{exe}, \"--version\"])\nprint(r.code, r.stdout.trim())\n\
+         let h = exec([{exe}, f\"${{d}}/hello.v2\"])\nprint(h.code, h.stdout.trim())\n"
     );
+    // The second review: an argument that is such a path too (python couldn't open
+    // f"${script_dir()}/x.py"; builtins' unit test has cmd's command line, which stays as written).
+    std::fs::write(v(r"dots.\hello.v2"), "print(\"hello from dots.\")\n").unwrap();
     std::fs::write(v(r"dots.\sd.v2"), src).unwrap();
     let (code, _, stderr) = run_in_home(&home.0, &[r"dots.\sd.v2"], &[]);
     let start = r"one of that name is there (WSL and Macs can make one): run it by its full path with \\?\ in front: v2 ";
@@ -4489,7 +4493,8 @@ fn a_script_run_by_its_verbatim_path_reaches_the_files_beside_it() {
     assert_eq!(code, Some(2), "{stderr}");
     let (code, stdout, stderr) = run_in_home(&home.0, &[&path], &[]);
     let version = format!("0 v2 {} (VEP/1)", env!("CARGO_PKG_VERSION"));
-    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["true a,b true", "top true", "[\"data.csv\", \"out.txt\", \"sd.v2\", \"sub\"] [\"deeper\"]", "false", &version], "{stderr}");
+    let want = ["true a,b true", "top true", "[\"data.csv\", \"hello.v2\", \"out.txt\", \"sd.v2\", \"sub\"] [\"deeper\"]", "false", &version, "0 hello from dots."];
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), want, "{stderr}");
     assert_eq!(code, Some(0), "{stderr}");
     std::fs::remove_dir_all(v("dots.")).unwrap();
 }
