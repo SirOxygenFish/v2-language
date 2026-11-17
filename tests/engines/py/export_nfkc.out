@@ -1,0 +1,5 @@
+ImportError | @export lists 'ｈｅｌｌｏ' (U+FF48 …), which Python reads as 'hello': export hello, and import it as @import { hello as ｈｅｌｌｏ } from p
+U+FB01), which Python reads as 'file': export file, and import it as @import { file as ﬁle }
+@import { file as ﬁle }
+hi
+ImportError | 'buyut' is not exported by 'r' — did you mean 'büyüt'? (or should its @export say 'buyut'?)
