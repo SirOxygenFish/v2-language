@@ -1,0 +1,2 @@
+IOError: cannot read 'no\u{202e}file.txt'
+IOError: cannot read 'no\u{1b}file.txt'

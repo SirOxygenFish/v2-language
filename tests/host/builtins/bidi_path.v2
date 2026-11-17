@@ -1,0 +1,4 @@
+// A bidi override in a path prints as \u{202e} in an IOError's message, as a control character
+// does, so it can't reorder the terminal's line (INTERNALS 5.10, 2.1).
+try { read_file("no\u{202e}file.txt") } catch (e) { print(e.type + ": " + e.message.split(":")[0]) }
+try { read_file("no\u{1b}file.txt") } catch (e) { print(e.type + ": " + e.message.split(":")[0]) }

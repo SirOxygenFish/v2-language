@@ -1,0 +1,6 @@
+// exit: 1
+// stderr: thousands_comma.v2:5:11: SyntaxError: a number can't start with 0 (leading zeros)
+// stderr: hint: numbers are written without thousands commas: 1000000 or 1_000_000
+// A thousands comma (INTERNALS 2.4): past one comma there is no decimal reading.
+let n = 1,000,000
+print(n)
