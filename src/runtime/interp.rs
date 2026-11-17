@@ -203,7 +203,13 @@ fn pairs_call(e: &Expr) -> Option<(&'static str, Span)> {
 
 /// What V2 writes for a Python or JavaScript method or field name on its own values (5.9):
 /// `xs.append` is `xs.push`, `s.length` is `len(s)`.
-fn habit(o: &Value, n: &str) -> Option<&'static str> {
+fn habit(o: &Value, n: &str) -> Option<String> {
+    // Python's string methods V2 has none of: the one called, in a block.
+    const IN_A_BLOCK: [&str; 10] = ["capitalize", "title", "isalpha", "isalnum", "isupper", "islower", "isspace", "swapcase", "zfill", "casefold"];
+    if matches!(o, Value::Str(_)) && IN_A_BLOCK.contains(&n) {
+        let args = if n == "zfill" { "5" } else { "" };
+        return Some(format!("V2's strings don't have it: do it in a block, as in @py(s) {{ s.{n}({args}) }}"));
+    }
     let sized = matches!(o, Value::Str(_) | Value::List(_) | Value::Dict(_) | Value::Bytes(_));
     let seq = matches!(o, Value::Str(_) | Value::List(_));
     Some(match n {
@@ -224,9 +230,6 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "ljust" | "rjust" | "center" | "padEnd" | "padStart" if matches!(o, Value::Str(_)) => "V2 pads with \" \" * n, as in s + \" \" * (10 - len(s))",
         "isdigit" | "isnumeric" | "isdecimal" if matches!(o, Value::Str(_)) => "V2 checks for a number by converting it: try { int(s) } catch (e) { ... }",
         "count" if matches!(o, Value::Str(_)) => "V2 counts a piece of text with len(s.split(piece)) - 1",
-        "capitalize" | "title" | "isalpha" | "isalnum" | "isupper" | "islower" | "isspace" | "swapcase" | "zfill" | "casefold" if matches!(o, Value::Str(_)) => {
-            "V2's strings don't have it: do it in a block, as in @py(s) { s.title() }"
-        }
         "chars" | "toCharArray" if matches!(o, Value::Str(_)) => "V2 loops over a string's characters with for ch in s",
         "charAt" if matches!(o, Value::Str(_)) => "V2 reads a character with s[i]",
         "toUpperCase" if matches!(o, Value::Str(_)) => "did you mean 'upper'?",
@@ -243,7 +246,7 @@ fn habit(o: &Value, n: &str) -> Option<&'static str> {
         "pop" | "delete" if matches!(o, Value::Dict(_)) => "did you mean 'remove'?",
         "set" | "put" | "update" | "setdefault" if matches!(o, Value::Dict(_)) => "V2 sets a key with d[key] = value",
         _ => return None,
-    })
+    }.into())
 }
 
 /// `x += piece` with a str `x` and `piece` (5.3): `append` puts `piece` on the target's string

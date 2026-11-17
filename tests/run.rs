@@ -5626,6 +5626,104 @@ fn an_activated_venv_gets_its_own_install_line_until_its_python_stops_running() 
 }
 
 #[test]
+fn a_package_imported_by_its_pip_name_gets_the_module_it_provides() {
+    // Round 21 (L0, L9): a distribution the venv has, asked for by its pip name (normalized:
+    // pyzzyaml for PyZzYAML, zz_opencv_python, or quoted with -), names its module before any
+    // install line, as pip would only say it is installed; a my-helper.py of yours gets the rename.
+    // Fake distributions like PyYAML's (top_level.txt) and opencv-python's (a RECORD only), and
+    // each hint works when followed (INTERNALS 13.5). Review of round 21: like protobuf's, a
+    // namespace package is named by its package (google.protobuf, never google); like
+    // llama-cpp-python's, folders of data (bin, include, lib) are no modules; like
+    // python-multipart's, the module closest to the distribution's name comes first; one with no
+    // module gets no such hint; and py.myhelper is never offered my-helper.py.
+    if !needs("py", "a_package_imported_by_its_pip_name_gets_the_module_it_provides") {
+        return;
+    }
+    let python = block_python();
+    let home = TempHome::new();
+    let venv = home.0.join(".venv");
+    let made = Command::new(&python).args(["-m", "venv", "--without-pip"]).arg(&venv).output().expect("run python -m venv");
+    assert!(made.status.success(), "python -m venv: {}", String::from_utf8_lossy(&made.stderr));
+    let site = find_dir(&venv, "site-packages").expect("the venv's site-packages");
+    for (rel, text) in [
+        ("PyZzYAML-6.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: PyZzYAML\nVersion: 6.0\n"),
+        ("PyZzYAML-6.0.dist-info/top_level.txt", "_zzyaml\nzzyaml\n"),
+        ("zzyaml/__init__.py", "x = \"zzyaml here\"\n"),
+        ("zz_opencv_python-5.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-opencv-python\nVersion: 5.0\n"),
+        ("zz_opencv_python-5.0.dist-info/RECORD", "zzcv2/__init__.py,,\nzz_opencv_python-5.0.dist-info/METADATA,,\nzz_opencv_python-5.0.dist-info/RECORD,,\n"),
+        ("zzcv2/__init__.py", "y = 2\n"),
+        ("zzprotobuf-4.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zzprotobuf\nVersion: 4.0\n"),
+        ("zzprotobuf-4.0.dist-info/top_level.txt", "zzgoogle\n"),
+        ("zzprotobuf-4.0.dist-info/RECORD", "zzgoogle/zzproto/__init__.py,,\nzzgoogle/zzproto/wire.py,,\nzzgoogle/_zzupb/_message.abi3.so,,\nzzprotobuf-4.0.dist-info/RECORD,,\n"),
+        ("zzgoogle/zzproto/__init__.py", "z = 4\n"),
+        ("zz_llama_python-0.3.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-llama-python\nVersion: 0.3\n"),
+        ("zz_llama_python-0.3.dist-info/RECORD", "bin/zz-llama-cli,,\ninclude/zzllama.h,,\nlib/libzzllama.so,,\nzz_llama/__init__.py,,\nzz_llama/lib/libzzllama.so,,\nzz_llama_python-0.3.dist-info/RECORD,,\n"),
+        ("zz_llama/__init__.py", "w = 5\n"),
+        ("zz_python_multipart-0.0.20.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-python-multipart\nVersion: 0.0.20\n"),
+        ("zz_python_multipart-0.0.20.dist-info/RECORD", "multizz/__init__.py,,\nzz_python_multipart/__init__.py,,\nzz_python_multipart-0.0.20.dist-info/RECORD,,\n"),
+        ("zz_python_multipart/__init__.py", "v = 6\n"),
+        ("zz_data_only-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: zz-data-only\nVersion: 1.0\n"),
+        ("zz_data_only-1.0.dist-info/RECORD", "share/zzdata/a.txt,,\nbin/zzdata,,\nzz_data_only-1.0.dist-info/RECORD,,\n"),
+        // Python 3.12 and later list only the files of a RECORD that are there.
+        ("multizz/__init__.py", ""),
+        ("zzgoogle/zzproto/wire.py", ""),
+        ("zzgoogle/_zzupb/_message.abi3.so", ""),
+        ("bin/zz-llama-cli", ""),
+        ("include/zzllama.h", ""),
+        ("lib/libzzllama.so", ""),
+        ("zz_llama/lib/libzzllama.so", ""),
+        ("share/zzdata/a.txt", ""),
+        ("bin/zzdata", ""),
+    ] {
+        let path = site.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::write(home.0.join("v2.toml"), "[python]\nvenv = \".venv\"\n").unwrap();
+    std::fs::write(home.0.join("my-helper.py"), "def f():\n    return \"helper\"\n").unwrap();
+    let imports = ["py.pyzzyaml as m", "py.PyZzYAML as m", "py.\"zz-opencv-python\" as m", "py.zz_opencv_python as m", "{ f } from py.\"my-helper\"", "{ f } from py.my_helper",
+        "py.zzprotobuf as m", "py.zz_llama_python as m", "py.\"zz-python-multipart\" as m", "py.zz_data_only as m", "{ f } from py.myhelper"];
+    let tries: String = imports.iter().map(|i| format!("try {{\n    @import {i}\n}} catch (e) {{\n    print(e.message, \"|\", e.hint)\n}}\n")).collect();
+    std::fs::write(home.0.join("m.v2"), tries).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    let yaml = "PyZzYAML is installed, and its module is named zzyaml: @import py.zzyaml as zzyaml";
+    let cv = "zz-opencv-python is installed, and its module is named zzcv2: @import py.zzcv2 as zzcv2";
+    let rename = "Python module names use _: rename my-helper.py to my_helper.py and import py.my_helper";
+    let want = [
+        format!("No module named 'pyzzyaml' | {yaml}"),
+        format!("No module named 'PyZzYAML' | {yaml}"),
+        format!("'zz-opencv-python' is not a valid Python module name | {cv}"),
+        format!("No module named 'zz_opencv_python' | {cv}"),
+        format!("'my-helper' is not a valid Python module name | {rename}"),
+        format!("No module named 'my_helper' | {rename}"),
+        "No module named 'zzprotobuf' | zzprotobuf is installed, and its module is named zzgoogle.zzproto: @import py.zzgoogle.zzproto as zzproto".into(),
+        "No module named 'zz_llama_python' | zz-llama-python is installed, and its module is named zz_llama: @import py.zz_llama as zz_llama".into(),
+        "'zz-python-multipart' is not a valid Python module name | zz-python-multipart is installed, and its modules are named zz_python_multipart and multizz: @import py.zz_python_multipart as zz_python_multipart".into(),
+    ];
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!((code, &lines[..lines.len().min(want.len())]), (Some(0), &want.iter().map(String::as_str).collect::<Vec<_>>()[..]), "{stderr}");
+    // No module to name, and no my-helper.py offered for py.myhelper: the install line.
+    let rest = &lines[want.len()..];
+    assert_eq!(rest.len(), 2, "{stdout}");
+    for (line, name) in rest.iter().zip(["zz_data_only", "myhelper"]) {
+        assert!(line.starts_with(&format!("No module named '{name}' | if '{name}' isn't misspelled, install it for the Python V2 uses")) && !line.contains("is installed"), "{line}");
+    }
+    // Uncaught: the hint, and no install line.
+    std::fs::write(home.0.join("m.v2"), "@import py.pyzzyaml as m\nprint(m.x)\n").unwrap();
+    let (code, _, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("ImportError: No module named 'pyzzyaml'") && stderr.contains(&format!("\n  hint: {yaml}\n")) && !stderr.contains("pip"), "{stderr}");
+    // Followed.
+    std::fs::rename(home.0.join("my-helper.py"), home.0.join("my_helper.py")).unwrap();
+    let follow = "@import py.zzyaml as zzyaml\n@import py.zzcv2 as zzcv2\n@import { f } from py.my_helper\n@import py.zzgoogle.zzproto as zzproto\n\
+        @import py.zz_llama as zz_llama\n@import py.zz_python_multipart as zz_python_multipart\n\
+        print(zzyaml.x, zzcv2.y, f(), zzproto.z, zz_llama.w, zz_python_multipart.v)\n";
+    std::fs::write(home.0.join("m.v2"), follow).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["m.v2"], &[]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "zzyaml here 2 helper 4 5 6\n"), "{stderr}");
+}
+
+#[test]
 fn startup_timeout_from_v2_toml_reaches_the_worker() {
     // DOCS 14, INTERNALS 8.4: a configured command that never says hello is stopped after the
     // project's startup_timeout, and the engine stays down for the rest of the run.

@@ -1,0 +1,22 @@
+// requires: py
+// A package that needs a system library that isn't installed: an ImportError, or an OSError
+// raised while it is imported, that names a shared library gets the hint that it is no Python
+// package (round 21, L5; INTERNALS 9.6). Python's own words stay the message.
+func show(f) {
+    try {
+        f()
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.hint)
+    }
+}
+show(func() {
+    @import py.needs_libgl as gl
+    return gl
+})
+show(func() {
+    @import py.needs_portaudio as sd
+    return sd
+})
+show(func() => @py { import needs_portaudio })
+// Not while importing: the program's own error.
+show(func() => @py { raise OSError("ZzAudio library not found") })
