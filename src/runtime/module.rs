@@ -394,10 +394,16 @@ pub fn composed_v2(written: &str, name: &str) -> String {
     }
 }
 
-/// A path as written without the separators it ends with (`/`, and on Windows `\` too), whose
-/// last name a hint changes: `hello/` is `hello`, so its `.v2` is `hello.v2`, not `hello/.v2`.
+/// A path as written without the separators it ends with (`/`, and on Windows `\` too) and the
+/// `.` parts after them, whose last name a hint changes: `hello/` and `hello/.` are `hello`, so
+/// its `.v2` is `hello.v2`, not `hello/.v2`.
 pub fn trim_separators(written: &str) -> &str {
-    written.trim_end_matches(|c| c == '/' || (cfg!(windows) && c == '\\'))
+    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let mut w = written.trim_end_matches(sep);
+    while let Some(before) = w.strip_suffix('.').filter(|b| b.ends_with(sep)) {
+        w = before.trim_end_matches(sep);
+    }
+    w
 }
 
 /// A relative `import` of a missing `.v2` file (6.4): ` — did you mean './Util.v2'?` (the path as
@@ -412,6 +418,11 @@ fn nearby_module(target: &Path, spec: &str) -> (String, Option<String>) {
     let twin = unicode_twin(folder, name).or_else(|| if spec.ends_with(".v2") { None } else { with_v2() });
     if let Some(twin) = twin.or_else(|| folder_twin(target)) {
         return (String::new(), Some(twin));
+    }
+    // `./util.v2/`: the file itself, which only Windows finds with a separator after it.
+    let trimmed = trim_separators(spec);
+    if trimmed.len() < spec.len() && trimmed.ends_with(name) && folder.join(name).is_file() {
+        return (format!(" — did you mean '{trimmed}'?"), None);
     }
     let stem = |s: &str| s.len().checked_sub(3).filter(|&i| s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".v2")).map(|i| s[..i].to_string());
     let Some(want) = stem(name).filter(|_| Path::new(spec).is_relative()) else { return (String::new(), None) };

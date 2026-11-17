@@ -217,14 +217,17 @@ fn missing_hint(file: &str, path: &Path, folder: &Path, rest: &[&str], command: 
         }
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    // `größe.v2` copied from a Mac, its `ö` an `o` plus an accent: it looks like the name typed
-    // (or like NAME`.v2`, for `v2 größe`, which also lacks the .v2: the run that works then).
-    if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name) {
-        return twin;
-    }
-    // A folder can hold both forms: then NAME.v2 itself is the one to run (below).
+    // A folder can hold both forms: then NAME.v2 itself is the one to run (below), not a twin of
+    // NAME (a Mac's `größe` folder beside `größe.v2`) nor of NAME.v2.
     let bare = path.extension().is_none();
     let with_v2 = bare && folder.join(format!("{name}.v2")).is_file();
+    // `größe.v2` copied from a Mac, its `ö` an `o` plus an accent: it looks like the name typed
+    // (or like NAME`.v2`, for `v2 größe`, which also lacks the .v2: the run that works then).
+    if !with_v2 {
+        if let Some(twin) = crate::runtime::module::unicode_twin(folder, &name) {
+            return twin;
+        }
+    }
     if bare && !with_v2 {
         if let Some(twin) = crate::runtime::module::unicode_twin(folder, &format!("{name}.v2")) {
             return format!("{twin}, and run {command} {}", quoted(&crate::runtime::module::composed_v2(file, &name)));
@@ -520,11 +523,17 @@ mod tests {
         if cfg!(windows) {
             assert!(hint(&format!("{file}\\")).ends_with(&format!(": rename it, and run v2 {with_v2}")));
         }
+        // `größe_çalış/.` names the same file (the fifth look at round 20).
+        assert_eq!(hint(&format!("{file}/.")), hint(&format!("{file}/")));
         // Both forms there (Linux and NTFS keep both, fourth pass): the composed one is run as it
         // is, with no rename onto its name.
         std::fs::write(d.join(format!("{file}.v2")), "").unwrap();
         assert_eq!(hint(file), format!("did you mean '{}.v2'?", at(file)));
         assert!(entry_error(&at(&format!("{file}.v2")), &[], "v2").is_none());
+        // A Mac's decomposed NAME (a folder) beside the composed NAME.v2: that file, no rename.
+        std::fs::create_dir_all(d.join(file_nfd)).unwrap();
+        assert_eq!(hint(file), format!("did you mean '{}.v2'?", at(file)));
+        std::fs::remove_dir(d.join(file_nfd)).unwrap();
         std::fs::remove_file(d.join(format!("{file}.v2"))).unwrap();
         // A decomposed name given for a composed `naïve.v2`: the run, with the name composed.
         std::fs::write(d.join("na\u{ef}ve.v2"), "").unwrap();

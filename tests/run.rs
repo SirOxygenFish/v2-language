@@ -1047,13 +1047,17 @@ fn a_missing_module_names_the_file_it_probably_meant() {
     // './lib/utl.v2/Util.v2'.
     let slash = "func show(f) { try { f() } catch (e) { print(e.message) } }\n\
                  show(func() { import \"./lib/Util/\" as a })\n\
-                 show(func() { import \"./lib/utl.v2/\" as b })\n";
+                 show(func() { import \"./lib/utl.v2/\" as b })\n\
+                 show(func() { import \"./lib/Util.v2/\" as c })\n";
     std::fs::write(home.0.join("slash.v2"), slash).unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["slash.v2"], &[]);
     assert_eq!(code, Some(0), "{stderr}");
+    // The right file with a separator after it: Windows imports it; Linux and macOS don't, and
+    // name it (the fifth look at round 20).
+    let itself = if cfg!(windows) { "" } else { "cannot find module './lib/Util.v2/' (looked for lib/Util.v2) — did you mean './lib/Util.v2'?\n" };
     assert_eq!(
         stdout,
-        "cannot find module './lib/Util/' (looked for lib/Util) — did you mean './lib/Util.v2'?\ncannot find module './lib/utl.v2/' (looked for lib/utl.v2) — did you mean './lib/Util.v2'?\n"
+        format!("cannot find module './lib/Util/' (looked for lib/Util) — did you mean './lib/Util.v2'?\ncannot find module './lib/utl.v2/' (looked for lib/utl.v2) — did you mean './lib/Util.v2'?\n{itself}")
     );
 }
 

@@ -105,3 +105,5 @@ int() reads the digits 0 to 9 only: for other digits, convert in a block, as in 
 int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
 int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x) }
 int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("٬", "").replace("٫", ".")) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { float(x.replace("\u200e", "").replace(",", "")) }
+int() reads the digits 0 to 9 only: for other digits, convert in a block, as in @py(x) { int(x.replace("\u061c", "").replace(",", "")) }
