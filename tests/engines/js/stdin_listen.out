@@ -1,0 +1,11 @@
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 12 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 13 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 14 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 15 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 16 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 17 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 18 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 19 | {"code": "EBADF"}
+ForeignError | Error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 20 | {"code": "EBADF"}
+[false, 0, true]
+after

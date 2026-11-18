@@ -1,0 +1,27 @@
+// requires: js
+// Round 23: a block that reads process.stdin (a listener for its data, read(), resume(), pipe(),
+// readline) gets the stdin error at once, at its own line, and nothing is left to fail at the
+// end; looking at it is fine, so libraries that only check it load (DOCS 4.6, INTERNALS 9.9).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.line, "|", e.data)
+    }
+}
+show(func() => @js { new Promise((r) => { process.stdin.once("data", (d) => r(String(d))) }) })
+show(func() => @js { process.stdin.on("data", () => {}) })
+show(func() => @js { process.stdin.addListener("readable", () => {}) })
+show(func() => @js { process.stdin.prependOnceListener("data", () => {}) })
+show(func() => @js { process.stdin.read() })
+show(func() => @js { process.stdin.resume() })
+show(func() => @js { process.stdin.pipe(process.stdout) })
+show(func() => @js { new Promise((r) => { require("readline").createInterface({ input: process.stdin }).once("line", r) }) })
+show(func() => @js { (async () => { for await (const c of process.stdin) return c })() })
+print(@js {
+    process.stdin.on("end", () => {});
+    process.stdin.once("close", () => {});
+    process.stdin.on("error", () => {});
+    [process.stdin.isTTY, process.stdin.fd, process.stdin.readable]
+})
+print("after")
