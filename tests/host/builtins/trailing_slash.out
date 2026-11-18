@@ -1,0 +1,8 @@
+cannot read '~/v2_slash.txt/': it is a file, not a folder | leave out the slash at its end: read_file("~/v2_slash.txt")
+cannot write '~/v2_slash.txt/': it is a file, not a folder | leave out the slash at its end: write_file("~/v2_slash.txt", …)
+cannot write '~/v2_slash.txt/': it is a file, not a folder | leave out the slash at its end: write_file("~/v2_slash.txt", …)
+cannot remove '~/v2_slash.txt/': it is a file, not a folder | leave out the slash at its end: remove_file("~/v2_slash.txt")
+cannot remove '~/v2_slash.txt/.': it is a file, not a folder | leave out the slash at its end: remove_file("~/v2_slash.txt")
+cannot write '~/v2_slash_new.txt/': with the slash at its end it names a folder, which isn't there | leave out the slash at its end: write_file("~/v2_slash_new.txt", …)
+false false data
+true true

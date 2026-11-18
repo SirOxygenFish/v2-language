@@ -1,0 +1,23 @@
+// A path that ends in a slash names a folder: after a file's name it is refused on every OS, as rm
+// and Linux refuse it, where Windows took it for the file (remove_file("f.txt/") deleted f.txt,
+// write_file("new.txt/") made new.txt); exists() is false for it (DOCS 3.11, INTERNALS 5.10).
+let home = getenv("HOME") ?? getenv("USERPROFILE")
+let f = home + "/v2_slash.txt"
+write_file(f, "data")
+func show(g) {
+    try {
+        print(g())
+    } catch (e) {
+        // The hint's path is in quotes, a Windows one's backslashes doubled.
+        print(e.message.replace(home, "~"), "|", e.hint.replace(home.replace("\\", "\\\\"), "~"))
+    }
+}
+show(func() => read_file(f + "/"))
+show(func() => write_file(f + "/", "new"))
+show(func() => write_file(f + "/", "more", append: true))
+show(func() => remove_file(f + "/"))
+show(func() => remove_file(f + "/."))
+show(func() => write_file(home + "/v2_slash_new.txt/", "x"))
+print(exists(f + "/"), exists(home + "/v2_slash_new.txt"), read_file(f))
+// A folder with a slash is a folder.
+print(exists(home + "/"), len(list_dir(home + "/")) > 0)
