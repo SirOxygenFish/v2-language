@@ -59,6 +59,11 @@ show(func() {
     @import { x } from js.path.sep
     return x
 })
+// A built-in without that member: no npm install for it (review of round 23).
+show(func() {
+    @import { x } from js.path.nothere
+    return x
+})
 // The way the hints show.
 @import py.datetime as m
 @import { getcwd } from py.os

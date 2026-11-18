@@ -350,10 +350,9 @@ impl Out {
     }
 }
 
-/// A child's output as text (5.10): UTF-8 as it is. On Windows, output that isn't UTF-8 is read
-/// a line at a time, as Windows' own tools don't agree on a code page (cmd writes the console's,
-/// attrib the ANSI one whatever chcp says): a line that is UTF-8 stays, the others are read in
-/// `other_code_page`; what is left invalid becomes U+FFFD.
+/// A child's output as text (5.10): UTF-8 as it is, also when it is cut inside its last
+/// character (`cut_utf8`). On Windows, other output is read in `other_code_page`, a line at a time
+/// in a single-byte one (`other_text`); what is left invalid becomes U+FFFD.
 fn child_text(bytes: &[u8]) -> String {
     if let Some(s) = utf16_text(bytes) {
         return s;
@@ -361,16 +360,46 @@ fn child_text(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
+    if cut_utf8(bytes) {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
     #[cfg(windows)]
     if let Some(cp) = other_code_page() {
-        return by_lines(bytes, |run| code_page_text(run, cp));
+        return other_text(bytes, single_byte(cp), |run| code_page_text(run, cp));
     }
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// `bytes` a line at a time (5.10): a line that is valid UTF-8 as it is, each run of the other
-/// lines through `decode`, and lossy UTF-8 where that gives nothing. A line ends at `\n`, which
-/// is never part of a character in UTF-8 or a code page, the double-byte ones (932, 936) too.
+/// UTF-8 cut inside its last character, as `head -c` or a program stopped while it wrote leaves
+/// it: valid up to an incomplete character at the end, after one past ASCII on its last line
+/// (an ANSI line that ends in `é` is not one).
+fn cut_utf8(bytes: &[u8]) -> bool {
+    match std::str::from_utf8(bytes) {
+        Err(e) if e.error_len().is_none() => {
+            let valid = &bytes[..e.valid_up_to()];
+            valid.rsplit(|&b| b == b'\n' || b == b'\r').next().unwrap_or(valid).iter().any(|&b| b >= 0x80)
+        }
+        _ => false,
+    }
+}
+
+/// Output that isn't UTF-8 in a code page that `decode` reads (5.10). Windows' own tools don't
+/// agree on one (cmd writes the console's, attrib the ANSI one whatever chcp says), so in a
+/// single-byte code page it is read a line at a time (`by_lines`); a double-byte one (932, 936,
+/// 949, 950) reads it whole, as its characters can be valid UTF-8 (GBK's 图片 is), and there the
+/// ANSI and OEM code pages are one.
+#[cfg(any(windows, test))]
+fn other_text(bytes: &[u8], single_byte: bool, decode: impl Fn(&[u8]) -> Option<String>) -> String {
+    if single_byte {
+        return by_lines(bytes, decode);
+    }
+    decode(bytes).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// `bytes` a line at a time (5.10): a line that is valid UTF-8 (or cut inside its last
+/// character, `cut_utf8`) as it is, each run of the other lines through `decode`, and lossy UTF-8
+/// where that gives nothing. A line ends at `\n` or `\r` (a progress line), which are never part
+/// of a character in UTF-8 or a single-byte code page.
 #[cfg(any(windows, test))]
 fn by_lines(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<String>) -> String {
     let mut out = String::with_capacity(bytes.len());
@@ -380,17 +409,16 @@ fn by_lines(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<String>) -> String {
     };
     let (mut at, mut run) = (0, None);
     while at < bytes.len() {
-        let end = bytes[at..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| at + n + 1);
-        match std::str::from_utf8(&bytes[at..end]) {
-            Ok(line) => {
-                if let Some(start) = run.take() {
-                    other(&bytes[start..at], &mut out);
-                }
-                out.push_str(line);
+        let end = bytes[at..].iter().position(|&b| b == b'\n' || b == b'\r').map_or(bytes.len(), |n| at + n + 1);
+        let line = &bytes[at..end];
+        let utf8 = std::str::from_utf8(line).is_ok() || cut_utf8(line);
+        if utf8 {
+            if let Some(start) = run.take() {
+                other(&bytes[start..at], &mut out);
             }
-            Err(_) => {
-                run.get_or_insert(at);
-            }
+            out.push_str(&String::from_utf8_lossy(line));
+        } else {
+            run.get_or_insert(at);
         }
         at = end;
     }
@@ -398,6 +426,15 @@ fn by_lines(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<String>) -> String {
         other(&bytes[start..], &mut out);
     }
     out
+}
+
+/// Windows: whether `cp` has one byte a character (`GetCPInfo`'s MaxCharSize).
+#[cfg(windows)]
+fn single_byte(cp: u32) -> bool {
+    use windows_sys::Win32::Globalization::{GetCPInfo, CPINFO};
+    // SAFETY: `info` is a zeroed CPINFO that GetCPInfo fills.
+    let mut info: CPINFO = unsafe { std::mem::zeroed() };
+    unsafe { GetCPInfo(cp, &mut info) != 0 && info.MaxCharSize == 1 }
 }
 
 /// The code page of output lines that aren't UTF-8 (5.10): the console's output code page (the
@@ -2405,21 +2442,22 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 }
 
 /// exec's error for a program that didn't start (5.10): `exec: cannot start 'x': <reason>`, the
-/// OS's, except for Windows' limits, whose own messages read as if the name were wrong: a program
-/// path over 259 characters (CreateProcessW's 2, 3 or 206; `ChildProc::spawn_as` tried its 8.3
-/// name) and a command line over 32,766 (206). A command line too long, there or for Unix
-/// (E2BIG), says how to pass the arguments.
+/// OS's, except for the limits of starting a program on Windows, whose own messages read as if
+/// the name were wrong: a program path over 259 characters, which V2 can't start from
+/// (CreateProcessW's 2, 3 or 206, when `ChildProc::spawn_as` found no shorter path for it), and a
+/// command line over 32,766 (206), counted with the path it started by. A command line too
+/// long, there or for Unix (E2BIG), says how to pass the arguments.
 fn start_error(name: &str, argv: &[OsString], raw_tail: bool, e: &process::SpawnError) -> ErrorValue {
-    const ANOTHER_WAY: &str = "pass the names another way: as input (one per line), in a file, or a part at a time";
+    const ANOTHER_WAY: &str = "pass the data another way: as input (one per line), in a file, or a part at a time";
     #[cfg(windows)]
     {
-        if let Some(n) = process::long_program(&argv[0]).filter(|_| matches!(e.code, Some(2 | 3 | 206))) {
+        if let Some(n) = process::long_program(&argv[0]).filter(|_| e.short.is_none() && matches!(e.code, Some(2 | 3 | 206))) {
             return ErrorValue::new(
                 "IOError",
-                format!("exec: cannot start '{name}': its path is {} characters long, and Windows starts programs only from paths of at most 259: move it to a shorter folder", with_commas(n)),
+                format!("exec: cannot start '{name}': its path is {} characters long, and V2 can start a program only from a path of at most 259: move it to a shorter folder", with_commas(n)),
             );
         }
-        let units = if e.code == Some(206) { process::command_line_units(argv, raw_tail) } else { 0 };
+        let units = if e.code == Some(206) { process::command_line_units(e.short.as_ref().unwrap_or(&argv[0]), &argv[1..], raw_tail) } else { 0 };
         if units > 32_766 {
             let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': its command line is {} characters, and Windows takes at most 32,766", with_commas(units)));
             let _ = err.hint.set(ANOTHER_WAY.into());
@@ -2740,6 +2778,21 @@ mod tests {
         assert_eq!(by_lines(b"ok\n\xff\xfe last", latin1), "ok\nÿþ last");
         // What the code page can't read is U+FFFD, the UTF-8 lines kept.
         assert_eq!(by_lines(b"\xe9\nfine\n", |_| None), "\u{FFFD}\nfine\n");
+        // A line ends at \r too, as a progress line does.
+        assert_eq!(by_lines(b"10%\r50% caf\xe9\r100% caf\xc3\xa9\r", latin1), "10%\r50% café\r100% café\r");
+        // UTF-8 cut inside its last character (`head -c`) stays UTF-8, on its own or after an
+        // ANSI line; an ANSI line that ends in é is read in the code page (review of round 23).
+        let cut = "Łódź utf8\nŁódź".as_bytes();
+        let cut = &cut[..cut.len() - 1];
+        assert_eq!(child_text(cut), "Łódź utf8\nŁód\u{FFFD}");
+        assert_eq!(by_lines(&[b"caf\xe9 ansi\n", cut].concat(), latin1), "café ansi\nŁódź utf8\nŁód\u{FFFD}");
+        assert!(!cut_utf8(b"caf\xc3\xa9 utf8\nlast caf\xe9") && cut_utf8(&"ßŁ".as_bytes()[..3]) && !cut_utf8(b"caf\xe9 x\n\xc5\x81\xc5"));
+        assert_eq!(by_lines(b"caf\xc3\xa9 utf8\nlast caf\xe9", latin1), "café utf8\nlast café");
+        // A double-byte code page reads the output whole: GBK's 图片 (CD BC C6 AC) is valid UTF-8
+        // (ͼƬ), which a line at a time would keep.
+        let whole = |b: &[u8]| Some(format!("<{}>", b.len()));
+        assert_eq!(other_text(b"\xcd\xbc\xc6\xac\r\n\xce\xc4", false, whole), "<8>");
+        assert_eq!(other_text(b"\xcd\xbc\xc6\xac\r\n\xce\xc4", true, whole), "ͼƬ\r\n<2>");
         // The console's code page; with no console the OEM one; at a UTF-8 console the ANSI one,
         // and none when that is UTF-8 too (Windows' "Beta: Use Unicode UTF-8").
         assert_eq!(pick_code_page(850, 437, 1252), Some(850));
@@ -2751,9 +2804,11 @@ mod tests {
         {
             assert_eq!(code_page_text(b"caf\xe9", 1252).as_deref(), Some("café"));
             assert_eq!(code_page_text(b"caf\x82", 437).as_deref(), Some("café"));
-            // A double-byte code page: Shift-JIS 日本 between a UTF-8 line and an ASCII one.
-            let sjis = b"\x93\xfa\x96\x7b\r\n\xe6\x97\xa5\r\nok";
-            assert_eq!(by_lines(sjis, |b| code_page_text(b, 932)), "日本\r\n日\r\nok");
+            assert!(single_byte(1252) && single_byte(437) && single_byte(850) && !single_byte(936) && !single_byte(932));
+            // `dir /b` at chcp 936: 图片 文档 下载 视频 in GBK, the first one valid UTF-8 too.
+            let gbk = b"\xcd\xbc\xc6\xac\r\n\xce\xc4\xb5\xb5\r\n\xcf\xc2\xd4\xd8\r\n\xca\xd3\xc6\xb5\r\n";
+            assert_eq!(other_text(gbk, single_byte(936), |b| code_page_text(b, 936)), "图片\r\n文档\r\n下载\r\n视频\r\n");
+            assert_eq!(other_text(b"\x93\xfa\x96\x7b sjis\r\nok", single_byte(932), |b| code_page_text(b, 932)), "日本 sjis\r\nok");
         }
         assert_eq!([0, 999, 1000, 32_766, 115_123, 1_234_567].map(with_commas), ["0", "999", "1,000", "32,766", "115,123", "1,234,567"]);
     }

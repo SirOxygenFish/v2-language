@@ -1883,20 +1883,27 @@ function doModule(m) {
 
 function builtinMember(name) {
   // `js.path.join`: a member of one of Node's built-in modules named as a module (13.5). Loading
-  // a built-in runs no package's code, so the member is looked up there; null for any other name.
+  // a built-in runs no package's code, so the member is looked up there, with the warning a
+  // deprecated or experimental one would print (punycode, sqlite) held back; null for a name that
+  // isn't a built-in's.
   const dot = name.lastIndexOf('.');
   const head = name.slice(0, dot);
   const last = name.slice(dot + 1);
-  if (dot <= 0 || !Module.isBuiltin(head) || !/^[A-Za-z_]\w*$/.test(last)) return null;
+  if (dot <= 0 || !Module.isBuiltin(head)) return null;
+  const warn = process.emitWarning;
   let v;
   try {
+    process.emitWarning = () => {};
     v = require(head)[last];
   } catch {
     return null;
+  } finally {
+    process.emitWarning = warn;
   }
-  if (v === undefined) return null;
+  if (v === undefined) return new Fail('ImportError', `'${head}' is Node's built-in module, and has no '${last}'`);
   const fail = new Fail('ImportError', `'${name}' is ${typeof v === 'function' ? 'a function' : 'a value'} in Node's module ${head}, not a module`);
-  errorHints.set(fail, `@import { ${last} } from js.${/^[A-Za-z_]\w*$/.test(head) ? head : JSON.stringify(head)}`);
+  const ident = /^[A-Za-z_]\w*$/;
+  if (ident.test(last)) errorHints.set(fail, `@import { ${last} } from js.${ident.test(head) ? head : JSON.stringify(head)}`);
   return fail;
 }
 
