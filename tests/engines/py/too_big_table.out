@@ -1,0 +1,7 @@
+MarshalError: value too large to send to V2 (about 116 MiB, limit 64 MiB)
+  hint: convert part of it, as in to_v2(df.head(1000)), or keep it in Python and write it to a file: df.to_parquet(path)
+MarshalError: value too large to send to V2 (67 MiB, limit 64 MiB)
+  hint: convert part of it, as in to_v2(df.head(1000)), or keep it in Python and write it to a file: df.to_csv(path)
+MarshalError: value too large to send to V2 (about 120 MiB, limit 64 MiB)
+  hint: write it to a file and pass the file's path, or send it in parts
+3

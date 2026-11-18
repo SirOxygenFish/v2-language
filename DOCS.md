@@ -640,7 +640,7 @@ bigger come from the languages you embed.
 | `args()`                                | command-line arguments after the script name                |
 | `sleep(seconds)`                        | wait (an int or float ≥ 0); Ctrl+C still stops the program  |
 | `time()`                                | seconds since 1970-01-01 UTC, as a float                    |
-| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly, but `finally` blocks don't run; `code` is a 32-bit signed int, on Windows also up to 4294967295, as `exec` gives a crashed program's code (else a `ValueError`); on Linux and macOS, and in Git Bash on Windows, a shell sees only 0-255 (`exit(256)` reads as 0), so use 0-255 for a code a shell checks |
+| `exit(code = 0)`                        | stop the program now; engines are shut down cleanly (their exit handlers run, and Python's open files are flushed; a JavaScript stream's writes still pending in a call from JavaScript are lost, as with `process.exit()`), but `finally` blocks don't run; `code` is a 32-bit signed int, on Windows also up to 4294967295, as `exec` gives a crashed program's code (else a `ValueError`); on Linux and macOS, and in Git Bash on Windows, a shell sees only 0-255 (`exit(256)` reads as 0), so use 0-255 for a code a shell checks |
 | `error(type, message, data = null)`     | make an error value                                         |
 | `assert(cond, message = "assertion failed")` | throw `error("AssertionError", message)` if `cond` is falsy |
 | `to_v2(h)`                              | convert a foreign handle to plain V2 data ([9.2](#92-handles-everything-else)) |
@@ -914,10 +914,11 @@ A block value used as an operand, or followed by `.method()`, must be in parenth
 Output from blocks (`print` in Python, `console.log` in JavaScript, `printf` in C, …) goes to the
 same place as V2's `print`, **in program order** — even when output is redirected to a file.
 
-One exception: output written *below* the language level — by a Python C extension, `os.system`,
-or a child process a Python/JS block starts — goes to standard error instead, so it can't mix
-into V2's internal communication with the engine. It isn't ordered with the block's own prints:
-it can come before them.
+One exception: output written *below* the language level — by a Python C extension,
+`os.write(1, …)`, `os.system`, or a child process a Python/JS block starts — goes to standard
+error instead, so it can't mix into V2's internal communication with the engine. It isn't ordered
+with the block's own prints: it can come before them. In JavaScript, `fs.writeSync(1, …)` is the
+block's standard output, as `process.stdout.write` is.
 
 Blocks see where V2's output goes. In Python, `sys.stdout.isatty()` and `os.isatty(1)` say
 whether V2's standard output is a terminal (`sys.stderr.isatty()` and `os.isatty(2)` its standard
@@ -1478,7 +1479,10 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   for at most a second (as Python's threads get), and an error in it ends the run with exit code 1.
 - A foreign function may only call V2 from the thread V2 called it on. A Python thread pool that
   maps a V2 function (`ThreadPoolExecutor().map(score, xs)`) gets an error that says so: do the
-  threaded work in Python and call V2 with the results.
+  threaded work in Python and call V2 with the results. Callbacks Python runs in its own helper
+  threads (`Pool.apply_async(callback=…)`, `Future.add_done_callback`) can't be V2 functions
+  either (a `multiprocessing` pool then hangs): loop over `imap_unordered` or `as_completed` in
+  the block and call V2 there.
 - When an imported function (another language's, or V2's) throws, the foreign code that called it
   gets a `V2Error` exception with `type`, `message`, `data`, `lang` and `foreign_type`. The name is
   there in Python and JavaScript without importing anything: `except V2Error as e:`,
@@ -1580,6 +1584,10 @@ converts the whole object, and for an item deeper inside what to do with each su
 of another type, the hint names a block that makes the keys strings; in Python, a key of what the
 object's `to_dict()` gave (a pandas Series indexed by dates) gets one in the message:
 `a key of h has the type pandas.Timestamp: … as in @py(h) { __import__("json").loads(h.to_json(date_format="iso")) }`.
+A pandas object or numpy array that a sample of it shows clearly over the 64 MiB limit (9.1) is
+refused before it converts. A DataFrame or Series too big gets a hint, for a DataFrame
+`convert part of it, as in to_v2(df.head(1000)), or keep it in Python and write it to a file: df.to_parquet(path)`
+(a Series: `to_csv`).
 
 **Handle rules:**
 

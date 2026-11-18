@@ -1101,8 +1101,12 @@ impl Interp {
         let mut err = if KINDS.contains(&kind) {
             let mut err = ErrorValue::new(kind, message);
             err.foreign_type = e.get("foreign_type").and_then(Json::as_str).map(Rc::from);
-            if let Some(hint) = (kind == "MarshalError").then(|| marshal_hint(message, &self.tag(s))).flatten() {
-                let _ = err.hint.set(hint.into());
+            if kind == "MarshalError" {
+                // The adapter's own (a table too big to send: how to send part of it, 11.5) wins.
+                let own = e.get("hint").and_then(Json::as_str).map(Rc::from);
+                if let Some(hint) = own.or_else(|| marshal_hint(message, &self.tag(s)).map(Rc::from)) {
+                    let _ = err.hint.set(hint);
+                }
             }
             err
         } else {

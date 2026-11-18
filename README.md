@@ -685,9 +685,10 @@ Node.js workers.
   don't get those warnings.
 - **Values cross between languages as copies** (numbers, strings, lists, dicts) or as handles to
   the foreign object; one value can be at most 64 MiB, and a list or dict nest at most 256 deep
-  (deeper parts of a value from Python or JavaScript arrive as handles). `to_v2` of a large
-  DataFrame or array converts all of it before it finds it too big, which takes time and memory:
-  try a slice first (`df.head(1000)`), and keep the rest in its block.
+  (deeper parts of a value from Python or JavaScript arrive as handles). `to_v2` of a DataFrame
+  or array clearly too big is refused at once, from a sample of it; one just over the limit is
+  converted first, which takes time and memory: convert a slice (`to_v2(df.head(1000))`), or
+  keep it in its block and write it to a file (`df.to_parquet(path)`).
   V2's integers are 64-bit: a bigger Python or JavaScript integer arrives as a handle, so do big
   number math inside the block. In JavaScript, a V2 integer from ±2⁵³ on is a `BigInt` (`x + 1`
   fails there: write `x + 1n`), a whole number comes back as an integer (`2.0` as `2`), and dict
@@ -698,7 +699,10 @@ Node.js workers.
   in its block, `@py(amount) { amount == 0 }`.
 - **A V2 function given to Python or JavaScript** can be called whenever V2 is in a call to that
   language (one kept for later works in later calls), on its main thread: not from another
-  thread, and not from a timer or an event that fires while V2 runs its own code.
+  thread, and not from a timer or an event that fires while V2 runs its own code. So it can't be
+  a callback Python runs in a helper thread (`Pool.apply_async(callback=…)`,
+  `Future.add_done_callback`; a `multiprocessing` pool then hangs): loop over `imap_unordered` or
+  `as_completed` in the block and call V2 there.
 - **JavaScript's event loop runs only while V2 is in a call to JavaScript:** a server, timer or
   socket in a `@js` block waits in between. Output a Python or JavaScript thread prints in
   between shows at the next call, or when the program ends. When the script ends, what
@@ -726,7 +730,10 @@ Node.js workers.
   when the script runs.
 - **A `#!` first line is an error:** delete it, and run scripts with `v2 file.v2`.
 - **Ctrl+C and `exit(n)` stop at once:** `finally` blocks don't run, in any language. After
-  `exit(n)` Python and Node.js still end cleanly (open files are flushed, `atexit` runs). Ctrl+C,
+  `exit(n)` Python and Node.js run their exit handlers (`atexit`, `process.on("exit")`) and
+  Python's open files are flushed; a JavaScript stream's writes still pending when `exit(n)` runs
+  inside a call from JavaScript are lost, as with `process.exit()`: use `fs.writeFileSync` or
+  `appendFileSync` there, or end the stream and await it before calling V2. Ctrl+C,
   or a kill such as `docker stop`, stops them on the spot: what an open file still buffers is
   lost and `atexit` doesn't run, so close files as you go (`with open(...)` in each call).
 - **An error V2 can't raise in your program** (from a JavaScript timer, a Promise nobody waits

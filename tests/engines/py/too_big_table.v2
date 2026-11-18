@@ -1,0 +1,65 @@
+// requires: py
+// timeout: 60
+// Round 23: to_v2 of a table or array too big to send is refused before it converts when a
+// sample of it puts it clearly over the limit, and a table's hint (pandas' head, to_csv,
+// to_parquet) says how to send part of it; the size reads the same in each refusal, about N MiB
+// when estimated, N MiB when measured (INTERNALS 9.1, 11.5).
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type + ": " + e.message)
+        print("  hint: " + (e.hint ?? "none"))
+    }
+}
+@py tables {
+    WIDE = "x" * 290
+    class Rows:
+        """Rows of a one-column table, as pandas converts them: {column: {row: value}}."""
+        def __init__(self, start, n):
+            self.start, self.n, self.size = start, n, n
+        def __len__(self):
+            return self.n
+        def to_dict(self):
+            return {"text": {"r%06d" % i: WIDE for i in range(self.start, self.start + self.n)}}
+    class Table(Rows):
+        """400,000 rows of 303 bytes each as sent: refused from its first and last 500."""
+        def head(self, k):
+            return Rows(0, k)
+        def tail(self, k):
+            return Rows(self.n - k, k)
+        def to_csv(self, path):
+            pass
+        def to_parquet(self, path):
+            pass
+        def to_dict(self):
+            raise RuntimeError("converted anyway")
+    class Floats:
+        """One item to the count, 2,800,000 numbers of 25 bytes each as sent: measured at send."""
+        size = 1
+        def head(self, k):
+            return self
+        def to_csv(self, path):
+            pass
+        def to_dict(self):
+            return {"v": [-1.7976931348623157e+308] * 2800000}
+    class Array:
+        """5,000,000 numbers of 25 bytes each as sent, like a numpy array: refused from its flat."""
+        size = 5000000
+        flat = [-1.7976931348623157e+308] * 5000000
+        def tolist(self):
+            raise RuntimeError("converted anyway")
+    def table():
+        return Table(0, 400000)
+    def floats():
+        return Floats()
+    def array():
+        return Array()
+    @export { table, floats, array }
+}
+@import { table, floats, array } from tables
+show(func() => to_v2(table()))
+show(func() => to_v2(floats()))
+show(func() => to_v2(array()))
+// A part of it converts.
+show(func() => len(to_v2(table().head(3))["text"]))

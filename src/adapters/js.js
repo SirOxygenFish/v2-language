@@ -195,7 +195,8 @@ function writeFrame(obj) {
   }
 }
 
-const tooBigMessage = (n) => `value too large to send to V2 (${Math.ceil(n / (1 << 20))} MiB, limit ${LIMIT >> 20} MiB)`;
+// A frame's size as measured, or (`about`) as far as the walk below got before it stopped (9.1).
+const tooBigMessage = (n, about = false) => `value too large to send to V2 (${about ? 'about ' : ''}${Math.ceil(n / (1 << 20))} MiB, limit ${LIMIT >> 20} MiB)`;
 
 class Walk extends Set {
   // The containers open on the way down, and the least the frame can come to: a value too big
@@ -206,7 +207,7 @@ class Walk extends Set {
   spend(n) {
     this.cost += n;
     if (this.cost > LIMIT) {
-      const f = new Fail('MarshalError', `value too large to send to V2 (more than ${LIMIT >> 20} MiB)`);
+      const f = new Fail('MarshalError', tooBigMessage(this.cost, true));
       f.located = true;
       throw f;
     }
@@ -360,12 +361,26 @@ const stdoutStream = outputStream('stdout');
 const stderrStream = outputStream('stderr');
 
 function noInput() {
-  // process.stdin: V2's input() owns the user's stdin (9.9, DOCS 4.6).
+  // process.stdin: V2's input() owns the user's stdin (9.9, DOCS 4.6). Reading it fails at once,
+  // where the block reads: a listener for its data, read(), resume() and pipe() throw; one for
+  // 'end' or 'close', and its properties, are fine, so libraries that only look at it load.
   const r = new stream.Readable({
     read() {
-      this.destroy(new Error("blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg"));
+      this.destroy(stdinError());
     },
   });
+  for (const name of ['on', 'addListener', 'once', 'prependListener', 'prependOnceListener']) {
+    const add = r[name];
+    r[name] = function (event, ...rest) {
+      if (event === 'data' || event === 'readable') throw stdinError();
+      return add.call(this, event, ...rest);
+    };
+  }
+  for (const name of ['read', 'resume', 'pipe']) {
+    r[name] = () => {
+      throw stdinError();
+    };
+  }
   r.isTTY = false;
   r.fd = 0;
   return r;
@@ -1157,7 +1172,9 @@ let nextOutId = 0;
 
 function hostCall(target, args, name) {
   const top = stack[stack.length - 1];
-  if (!top || top.kind !== 'request') throw new V2Error('Error', `V2 function '${name}' called outside an active V2 call: JavaScript called it while V2 wasn't waiting on JavaScript (a server, timer or event after its call returned); keep V2 in a call while it serves, as in an exported async function that resolves when the server should stop`);
+  // A route (an @import in a block) may lead to another language: only a stub is V2's (13.7).
+  const what = 'route' in target ? `'${name}'` : `V2 function '${name}'`;
+  if (!top || top.kind !== 'request') throw new V2Error('Error', `${what} called outside an active V2 call: JavaScript called it while V2 wasn't waiting on JavaScript (a server, timer or event after its call returned); keep V2 in a call while it serves, as in an exported async function that resolves when the server should stop`);
   let frame;
   try {
     frame = { t: 'call', id: 0, target, args: args.map((a, i) => encodeValue(a, `args[${i}]`)), kwargs: {} };
