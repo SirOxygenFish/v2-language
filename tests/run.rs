@@ -7540,10 +7540,11 @@ fn bidi_characters_in_file_names_are_shown_escaped() {
 fn read_file_and_exec_stop_past_what_a_str_holds() {
     // 5.10: past 1 GiB, the most text `*` makes (here the debug builds' V2_TEST_MAX_READ,
     // 1000 bytes), read_file and exec raise IOError instead of using up the memory, and exec
-    // stops the program there; what fits is read whole.
+    // stops the program there; what fits is read whole. read_file's hint shows blocks that read
+    // a piece (round 23; tests/host/builtins/read_hints.v2 runs them).
     let main = "let v2 = args()[0]\n\
                 for f in [\"fits.txt\", \"big.txt\"] {\n\
-                \x20   try { print(len(read_file(f)), len(read_file(f, binary: true))) } catch (e) { print(e.type + \": \" + e.message) }\n\
+                \x20   try { print(len(read_file(f)), len(read_file(f, binary: true))) } catch (e) { print(e.type + \": \" + e.message); print(e.hint) }\n\
                 }\n\
                 print(len(exec([v2, \"fits.v2\"]).stdout))\n\
                 for f in [\"more.v2\", \"more_err.v2\"] {\n\
@@ -7562,7 +7563,8 @@ fn read_file_and_exec_stop_past_what_a_str_holds() {
     let (code, stdout, stderr, _home) = run_with_files_env(&files, &["main.v2", BIN], &[("V2_TEST_MAX_READ", "1000")]);
     assert_eq!(code, Some(0), "{stderr}");
     let exec = "IOError: exec: 'v2' wrote more than 1 GiB of output: send it to a file in the command, or read it in pieces in a block";
-    let want = format!("1000 1000\nIOError: cannot read 'big.txt': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block\n1000\n{exec}\n{exec}\n");
+    let hint = r#"for its first MiB: @py(path) { open(path, "rb").read(1 << 20) }; for its last: @py(path) { f = open(path, "rb"); f.seek(-(1 << 20), 2); f.read() }"#;
+    let want = format!("1000 1000\nIOError: cannot read 'big.txt': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block\n{hint}\n1000\n{exec}\n{exec}\n");
     assert_eq!(stdout, want);
     // Sources that never end: a device, and a program that writes until it is stopped.
     #[cfg(unix)]
@@ -7581,7 +7583,8 @@ fn read_file_and_exec_stop_past_what_a_str_holds() {
 #[test]
 fn a_file_another_program_holds_open_says_to_close_it_there() {
     // 5.10: a file another program opened without sharing, as Excel does, is refused by Windows
-    // with ERROR_SHARING_VIOLATION; each file builtin's IOError says what to do.
+    // with ERROR_SHARING_VIOLATION; each file builtin's IOError says what to do, a block of the
+    // script being one such program, and only a write can go to another name (round 23).
     use std::os::windows::fs::OpenOptionsExt;
     let home = TempHome::new();
     let csv = home.0.join("results.csv");
@@ -7595,9 +7598,185 @@ fn a_file_another_program_holds_open_says_to_close_it_there() {
     let (code, stdout, stderr) = run_in_home(&home.0, &["locked.v2"], &[]);
     drop(held);
     assert_eq!(code, Some(0), "{stderr}");
-    let hint = "another program has it open (Excel keeps an open file locked): close it there, or use another file name";
-    let want: String = ["read", "write", "write", "remove"].iter().map(|v| format!("cannot {v} 'results.csv' | {hint}\n")).collect();
+    let close = "another program has it open (Excel keeps an open file locked; so does a block of this script that opened it): close it there";
+    let write = format!("{close}, or write to another file name");
+    let want: String = [("read", close), ("write", &write), ("write", &write), ("remove", close)].iter().map(|(v, hint)| format!("cannot {v} 'results.csv' | {hint}\n")).collect();
     assert_eq!(stdout, want);
+}
+
+#[cfg(windows)]
+#[test]
+fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
+    // 5.10 (round 23): another program's lock of a part of a file (as a database keeps: bytes
+    // 0-99, or 500-599, past the new data) or a mapping of it refuses write_file before anything
+    // changed: Rust's fs::write had cut a locked file to nothing, then failed to write. A free
+    // file, a hidden and a system one, a new one and empty data are written as before.
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
+    use windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, PAGE_READONLY};
+    let home = TempHome::new();
+    let d = &home.0;
+    let old = "D".repeat(1000);
+    for (name, attributes) in [("lock0.db", 0), ("lock500.db", 0), ("mapped.db", 0), ("free.db", 0), ("hidden.db", 2), ("system.db", 4), ("empty.db", 0)] {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).attributes(attributes).open(d.join(name)).unwrap();
+        f.write_all(old.as_bytes()).unwrap();
+    }
+    // Held by this process, as another program would: closing a file ends its lock.
+    let lock = |name: &str, at: u32| {
+        let f = std::fs::OpenOptions::new().read(true).write(true).open(d.join(name)).unwrap();
+        // SAFETY: a zeroed OVERLAPPED that says where the range starts, for a handle `f` keeps
+        // open.
+        let ok = unsafe {
+            let mut at_offset: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+            at_offset.Anonymous.Anonymous.Offset = at;
+            LockFileEx(f.as_raw_handle(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &mut at_offset)
+        };
+        assert_ne!(ok, 0, "LockFileEx {name}");
+        f
+    };
+    let (_a, _b) = (lock("lock0.db", 0), lock("lock500.db", 500));
+    let mapped = std::fs::File::open(d.join("mapped.db")).unwrap();
+    // SAFETY: a read-only mapping of a file `mapped` keeps open, and a view of all of it; both
+    // are closed below.
+    let (mapping, view) = unsafe {
+        let mapping = CreateFileMappingW(mapped.as_raw_handle(), std::ptr::null(), PAGE_READONLY, 0, 0, std::ptr::null());
+        assert!(!mapping.is_null(), "CreateFileMappingW");
+        let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+        assert!(!view.Value.is_null(), "MapViewOfFile");
+        (mapping, view)
+    };
+    let src = "for f in [\"lock0.db\", \"lock500.db\", \"mapped.db\"] {\n\
+               \x20   try { write_file(f, \"new contents\"); print(f, \"written\") } catch (e) { print(e.message + \" | \" + e.hint) }\n\
+               }\n\
+               write_file(\"free.db\", \"new contents\")\nwrite_file(\"hidden.db\", \"new contents\")\nwrite_file(\"system.db\", b\"new contents\")\n\
+               write_file(\"new.db\", \"new contents\")\nwrite_file(\"empty.db\", \"\")\nprint(\"done\")\n";
+    std::fs::write(d.join("held.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(d, &["held.v2"], &[]);
+    // SAFETY: the view and the mapping made above, unmapped and closed once.
+    unsafe {
+        UnmapViewOfFile(view);
+        CloseHandle(mapping);
+    }
+    drop((_a, _b, mapped));
+    assert_eq!(code, Some(0), "{stderr}");
+    let hint = "another program has it open (Excel keeps an open file locked; so does a block of this script that opened it): close it there, or write to another file name";
+    let locked = "The process cannot access the file because another process has locked a portion of the file";
+    let want = format!(
+        "cannot write 'lock0.db': {locked} | {hint}\ncannot write 'lock500.db': {locked} | {hint}\n\
+         cannot write 'mapped.db': The requested operation cannot be performed on a file with a user-mapped section open | {hint}\ndone\n"
+    );
+    assert_eq!(stdout, want);
+    for name in ["lock0.db", "lock500.db", "mapped.db"] {
+        assert_eq!(std::fs::read_to_string(d.join(name)).unwrap(), old, "{name}");
+    }
+    for name in ["free.db", "hidden.db", "system.db", "new.db"] {
+        assert_eq!(std::fs::read_to_string(d.join(name)).unwrap(), "new contents", "{name}");
+    }
+    assert_eq!(std::fs::read(d.join("empty.db")).unwrap(), b"");
+    assert_eq!(std::fs::metadata(d.join("hidden.db")).unwrap().file_attributes() & 2, 2, "still hidden");
+    assert_eq!(std::fs::metadata(d.join("system.db")).unwrap().file_attributes() & 4, 4, "still a system file");
+}
+
+#[cfg(windows)]
+#[test]
+fn write_file_to_a_named_pipe_opens_it_once() {
+    // 5.10 (round 23): a named pipe is no disk file: write_file writes to it without the cut that
+    // failed ("The parameter is incorrect"), and opens it once: each look at the path (for WSL's
+    // pipes, then for the error's message) had taken another of its server's instances.
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, PIPE_ACCESS_INBOUND};
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
+    let home = TempHome::new();
+    let name = format!(r"\\.\pipe\v2-test-pipe-{}", std::process::id());
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Four instances wait; each keeps what its client sent.
+    let servers: Vec<_> = (0..4)
+        .map(|_| {
+            // SAFETY: a NUL-terminated name; the handle is closed by its thread.
+            let h = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, std::ptr::null()) };
+            assert_ne!(h, INVALID_HANDLE_VALUE, "CreateNamedPipeW");
+            let (h, got) = (h as usize, got.clone());
+            std::thread::spawn(move || {
+                let h = h as HANDLE;
+                let mut data = Vec::new();
+                let mut buf = [0u8; 64];
+                // SAFETY: the instance made above, read into `buf` until its client is gone.
+                unsafe {
+                    ConnectNamedPipe(h, std::ptr::null_mut());
+                    let mut n = 0u32;
+                    while ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut n, std::ptr::null_mut()) != 0 && n > 0 {
+                        data.extend_from_slice(&buf[..n as usize]);
+                    }
+                    CloseHandle(h);
+                }
+                got.lock().unwrap().push(data);
+            })
+        })
+        .collect();
+    let src = format!("write_file(\"{}\", \"hello\")\nprint(\"ok\")\n", name.replace('\\', "\\\\"));
+    std::fs::write(home.0.join("pipe.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["pipe.v2"], &[]);
+    // The instances still waiting get a client of the test's own.
+    for _ in 0..4 {
+        if let Ok(mut client) = std::fs::OpenOptions::new().write(true).open(&name) {
+            client.write_all(b"cleanup").unwrap();
+        }
+    }
+    for s in servers {
+        s.join().unwrap();
+    }
+    assert_eq!((code, stdout.as_str()), (Some(0), "ok\n"), "{stderr}");
+    let from_v2: Vec<Vec<u8>> = got.lock().unwrap().iter().filter(|d| d.as_slice() != b"cleanup").cloned().collect();
+    assert_eq!(from_v2, [b"hello".to_vec()]);
+}
+
+#[cfg(windows)]
+#[test]
+fn remove_file_of_a_running_program_says_to_stop_it() {
+    // 5.10 (round 23): Windows refuses to remove a running program's .exe with "Access is
+    // denied", which permissions give too: the hint says what to do if it is the program.
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::copy(BIN, d.join("busy.exe")).unwrap();
+    std::fs::write(d.join("wait.v2"), "sleep(60)\n").unwrap();
+    // The copy runs until the test ends it by its handle, however the test ends.
+    struct Running(Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let running = Running(Command::new(d.join("busy.exe")).arg("wait.v2").current_dir(d).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    std::fs::write(d.join("rm.v2"), "try { remove_file(\"busy.exe\") } catch (e) { print(e.message + \" | \" + e.hint) }\n").unwrap();
+    let (code, stdout, stderr) = run_in_home(d, &["rm.v2"], &[]);
+    drop(running);
+    assert_eq!((code, stdout.as_str()), (Some(0), "cannot remove 'busy.exe': Access is denied | if that program is running, stop it first\n"), "{stderr}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_v2_toml_another_program_holds_open_says_to_close_it() {
+    // 18.5, 19.1 (round 23): the project's v2.toml that another program opened without sharing
+    // is a config error (exit 2, as before) with the hint FILE gets, in a run and in v2 check.
+    use std::os::windows::fs::OpenOptionsExt;
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::write(d.join("v2.toml"), "# nothing\n").unwrap();
+    std::fs::write(d.join("solo.v2"), "print(1)\n").unwrap();
+    let toml = real_path(&d.join("v2.toml"));
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(d.join("v2.toml")).unwrap();
+    let want = format!(
+        "{toml}: config error: cannot read the file: The process cannot access the file because it is being used by another process\n  hint: another program has it open (Excel keeps an open file locked): close it there\n"
+    );
+    for args in [&["solo.v2"][..], &["check", "solo.v2"]] {
+        let (code, _, stderr) = run_in_home(d, args, &[]);
+        assert_eq!((code, stderr.as_str()), (Some(2), want.as_str()), "{args:?}");
+    }
+    drop(held);
 }
 
 #[test]
@@ -7746,6 +7925,50 @@ fn links_on_the_way_that_lead_nowhere_or_in_a_loop_say_so() {
         let (code, _, stderr) = run(&["rel/broken/main.v2"], None);
         assert_eq!((code, stderr), (Some(2), format!("v2: cannot find 'rel/broken/main.v2'\n{problem}: {fix}\n")));
     }
+}
+
+#[test]
+fn remove_file_removes_a_link_not_the_folder_it_points_to() {
+    // DOCS 3.11, 5.10 (round 23): as rm does, remove_file of a link to a folder (a junction on
+    // Windows, which said "it is a folder" and hinted shutil.rmtree, which refuses a link) takes
+    // the link and leaves the folder; `live/` names the folder, refused as one, with no rmtree
+    // hint (given `live/`, rmtree would empty the folder). On Windows a link that leads nowhere
+    // keeps its message (on Linux and macOS unlink removes it); a directory symlink, which needs
+    // the privilege to make, is removed as a junction is.
+    let home = TempHome::new();
+    let d = &home.0;
+    std::fs::create_dir_all(d.join("target")).unwrap();
+    std::fs::write(d.join("target").join("keep.txt"), "kept").unwrap();
+    dir_link(&d.join("live"), &d.join("target"));
+    std::fs::create_dir_all(d.join("gone")).unwrap();
+    dir_link(&d.join("dead"), &d.join("gone"));
+    std::fs::remove_dir(d.join("gone")).unwrap();
+    #[cfg(windows)]
+    let symlink = std::os::windows::fs::symlink_dir(d.join("target"), d.join("sym")).is_ok();
+    #[cfg(unix)]
+    let symlink = false;
+    let src = "func show(f) {\n    try { f(); print(\"removed\") } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n\
+               show(func() => remove_file(\"live/\"))\nshow(func() => remove_file(\"live\"))\nshow(func() => remove_file(\"dead\"))\n\
+               if exists(\"sym\") { show(func() => remove_file(\"sym\")) }\n";
+    std::fs::write(d.join("links.v2"), src).unwrap();
+    // Outside Git Bash (MSYSTEM unset), whatever shell runs the tests: the hint's rmdir.
+    let mut cmd = v2_command(d);
+    cmd.arg("links.v2").current_dir(d).env_remove("MSYSTEM").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
+    let (code, stdout, stderr) = (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), String::from_utf8_lossy(&out.stderr).into_owned());
+    assert_eq!(code, Some(0), "{stderr}");
+    let target = d.join("target").display().to_string();
+    let gone = d.join("gone").display().to_string();
+    let dead = if cfg!(windows) { format!("cannot remove 'dead': it is a link to {gone}, which isn't there | remove the link (rmdir dead), or make {gone}") } else { "removed".to_string() };
+    let mut want = format!(
+        "cannot remove 'live/': it is a link to {target}, a folder, and remove_file removes files only | to remove the link alone, leave out the slash at its end: remove_file(\"live\")\nremoved\n{dead}\n"
+    );
+    if symlink {
+        want.push_str("removed\n");
+    }
+    assert_eq!(stdout, want);
+    assert!(std::fs::symlink_metadata(d.join("live")).is_err() && std::fs::symlink_metadata(d.join("sym")).is_err(), "the links are gone");
+    assert_eq!(std::fs::read_to_string(d.join("target").join("keep.txt")).unwrap(), "kept");
 }
 
 /// Takes away reading `dir` (Windows: a deny for this user that its files inherit; elsewhere its
