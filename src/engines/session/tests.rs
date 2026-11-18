@@ -543,7 +543,8 @@ fn spawned_worker_lifecycle() {
     let s = start(&mut it, "serve", no_timeouts()).expect("started");
     let r = it.request(s, call("hello"), "a call to 'hello'", at()).unwrap();
     assert!(matches!(r.value, Value::Str(v) if &*v == "hello"));
-    it.shutdown_sessions();
+    // One that ends at `bye` ended in time: no note (8.7).
+    assert_eq!(it.shutdown_sessions(), Vec::<String>::new());
     assert!(matches!(it.sessions[s].state, State::Closed));
 }
 
@@ -609,10 +610,15 @@ fn grace_kills_a_worker_that_ignores_bye() {
     let (mut it, _) = interp();
     let s = start(&mut it, "ignore_bye", no_timeouts()).expect("started");
     let started = Instant::now();
-    it.shutdown_sessions();
+    let notes = it.shutdown_sessions();
     let took = started.elapsed();
     assert!(took >= Duration::from_millis(900) && took < Duration::from_secs(5), "{took:?}");
     assert!(matches!(it.sessions[s].state, State::Closed));
+    // Round 23, 8.7: the worker the second cut off gets a note, for the end of the run to print.
+    assert_eq!(
+        notes,
+        ["v2: note: Python was still running 1 s after the script ended (a thread that hadn't ended), and was stopped: join it, or wait for it in an exported function"]
+    );
 }
 
 #[cfg(windows)]

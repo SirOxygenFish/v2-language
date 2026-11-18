@@ -1153,12 +1153,15 @@ impl Interp {
 
     /// The orderly end (8.7): `bye` to every running session, newest first, then one shared
     /// 1 s drain that forwards `out` frames from all of them as they come, then the tree kill
-    /// and reaping. After an interrupt the watchdog kills the workers instead (6.5).
-    pub fn shutdown_sessions(&mut self) {
+    /// and reaping. After an interrupt the watchdog kills the workers instead (6.5). Returns a
+    /// note for each worker still running when the drain ended, for the end of the run to print.
+    pub fn shutdown_sessions(&mut self) -> Vec<String> {
         process::stop_if_interrupted();
-        let (lines, rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+        // Each line with the session it came from; `None` once that worker's output has ended.
+        let (lines, rx) = std::sync::mpsc::channel::<(SessionId, Option<Vec<u8>>)>();
         let mut closing = Vec::new();
-        let mut open = 0;
+        // The sessions whose output is still being read.
+        let mut open: Vec<SessionId> = Vec::new();
         for s in (0..self.sessions.len()).rev() {
             if !matches!(self.sessions[s].state, State::Ready | State::Busy(_)) {
                 continue;
@@ -1177,22 +1180,22 @@ impl Interp {
                 let lines = lines.clone();
                 let drain = move || {
                     while let Ok(Some(line)) = reader.read_line() {
-                        if lines.send(Some(line)).is_err() {
+                        if lines.send((s, Some(line))).is_err() {
                             return;
                         }
                     }
-                    let _ = lines.send(None);
+                    let _ = lines.send((s, None));
                 };
                 if process::spawn_helper(std::thread::Builder::new().name("v2-drain".into()), drain).is_ok() {
-                    open += 1;
+                    open.push(s);
                 }
             }
         }
         let deadline = Instant::now() + GRACE;
-        while open > 0 {
+        while !open.is_empty() {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
             match rx.recv_timeout(left) {
-                Ok(Some(line)) => {
+                Ok((_, Some(line))) => {
                     if let Ok(Frame::Out { stream, text, error }) = vep::parse_frame(&line, Caps::default()) {
                         self.reported |= error;
                         if let Err(Flow::Error(lost)) = self.forward(stream, &text) {
@@ -1200,16 +1203,35 @@ impl Interp {
                         }
                     }
                 }
-                Ok(None) => open -= 1,
+                Ok((s, None)) => open.retain(|&o| o != s),
                 Err(_) => break,
             }
         }
+        // Cut off: a worker still running at the deadline (one that exited just then, its output
+        // not read to the end yet, ended in time).
+        let notes = open
+            .into_iter()
+            .filter(|&s| self.sessions[s].child.as_ref().is_some_and(|c| c.exited().is_none()))
+            .map(|s| still_running_note(&self.sessions[s].key, &self.sessions[s].engine.spec.language))
+            .collect();
         for s in closing {
             self.sessions[s].stop();
             self.sessions[s].state = State::Closed;
         }
         let _ = self.out.flush();
+        notes
     }
+}
+
+/// 8.7: a worker the end's 1 s drain cut off, by its session's key: what may have kept it running,
+/// and what to do so the script waits for it.
+fn still_running_note(key: &str, language: &str) -> String {
+    let (what, fix) = match key {
+        "py" => ("a thread that hadn't ended", "join it, or wait for it in an exported function"),
+        "js" => ("a timer, a server or a promise", "wait for it in an exported async function"),
+        _ => ("work it hadn't finished", "wait for it in an exported function"),
+    };
+    format!("v2: note: {language} was still running {} s after the script ended ({what}), and was stopped: {fix}", GRACE.as_secs())
 }
 
 #[cfg(test)]

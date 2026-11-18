@@ -592,6 +592,38 @@ fn a_closed_stdout_stops_the_run_quietly() {
 }
 
 #[test]
+fn a_worker_the_last_second_stops_gets_a_note() {
+    // Round 23, DOCS 8.4, INTERNALS 8.7: what still runs a second after the script ends is
+    // stopped, as documented, and a note on stderr says which language and what to do; the exit
+    // code stays 0. What ends in time gets none, and nor does a run whose stdout reader went away.
+    if !needs("py", "a_worker_the_last_second_stops_gets_a_note") {
+        return;
+    }
+    let thread = |secs: &str| format!("@py {{\n    import threading, time\n    threading.Thread(target=lambda: (time.sleep({secs}), print(\"thread done\"))).start()\n}}\nprint(\"body done\")\n");
+    let (code, stdout, stderr, _home) = run_with_files(&[("late.v2", &thread("5"))], &["late.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "body done\n"), "{stderr}");
+    assert_eq!(stderr, "v2: note: Python was still running 1 s after the script ended (a thread that hadn't ended), and was stopped: join it, or wait for it in an exported function\n");
+    let (code, stdout, stderr, _home) = run_with_files(&[("soon.v2", &thread("0.2"))], &["soon.v2"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "body done\nthread done\n", ""));
+    // The note waits for the end, which a closed stdout makes 141 with nothing more said.
+    let home = TempHome::new();
+    std::fs::write(home.0.join("late.v2"), thread("5")).unwrap();
+    let mut child = v2_command(&home.0).arg("late.v2").current_dir(&home.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    drop(child.stdout.take());
+    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(20)).unwrap();
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stderr).as_ref()), (Some(141), ""));
+    if !needs("js", "a_worker_the_last_second_stops_gets_a_note") {
+        return;
+    }
+    let timer = |ms: &str| format!("@js {{ setTimeout(() => {{ console.log(\"timer done\") }}, {ms}); 1 }}\nprint(\"body done\")\n");
+    let (code, stdout, stderr, _home) = run_with_files(&[("late.v2", &timer("5000"))], &["late.v2"]);
+    assert_eq!((code, stdout.as_str()), (Some(0), "body done\n"), "{stderr}");
+    assert_eq!(stderr, "v2: note: JavaScript was still running 1 s after the script ended (a timer, a server or a promise), and was stopped: wait for it in an exported async function\n");
+    let (code, stdout, stderr, _home) = run_with_files(&[("soon.v2", &timer("200"))], &["soon.v2"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "body done\ntimer done\n", ""));
+}
+
+#[test]
 fn a_closed_stderr_stops_the_run_quietly() {
     // DOCS 19.1, INTERNALS 6.5 (round 22, L8): stderr's reader going away (`v2 x.v2 2>&1 | head`)
     // stops the run as stdout's does, with 141 and nothing more printed: `print(stderr: true)`,
@@ -4395,6 +4427,65 @@ fn doctor_starts_node_under_a_memory_limit() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_library_that_cant_be_mapped_under_a_memory_limit_names_the_limit() {
+    // Round 23, 7.8: under ulimit -v, Node.js's loader says "failed to map segment from shared
+    // object", or Node.js dies of a signal before it answers --version: the limit, in a run and
+    // in doctor alike, once, never "isn't installed". Without a limit, the loader's own words.
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    let home = TempHome::new();
+    let (first, second) = (home.0.join("bin1"), home.0.join("bin2"));
+    let crashes = first.join("node");
+    let unmapped = second.join("node");
+    for (dir, file, text) in [
+        (&first, &crashes, "#!/bin/sh\nkill -SEGV $$\n"),
+        (&second, &unmapped, "#!/bin/sh\necho \"$0: error while loading shared libraries: libbrotlienc.so.1: failed to map segment from shared object\" >&2\nexit 127\n"),
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(file, text).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(home.0.join("j.v2"), "print(@js { 1 })\n").unwrap();
+    let path = std::env::join_paths([&first, &second]).unwrap();
+    let v2 = |args: &[&str], limit: Option<libc::rlim_t>| {
+        let mut cmd = v2_command(&home.0);
+        cmd.args(args).current_dir(&home.0).env("PATH", &path).env_remove("NODE_OPTIONS").stdin(Stdio::null());
+        if let Some(bytes) = limit {
+            // SAFETY: setrlimit is async-signal-safe and touches only the child.
+            unsafe {
+                cmd.pre_exec(move || {
+                    let limit = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+                    if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let out = cmd.output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let limit = "fix: a memory limit (ulimit -v) of 1024 MB is set for this shell, and Node.js reserves about 1 GB as it starts: raise it\n";
+    let (code, stdout, stderr) = v2(&["doctor"], Some(1 << 30));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout.matches(&format!("  js: {limit}")).count(), 1, "{stdout}");
+    assert!(!stdout.contains("isn't installed") && !stdout.contains("repair that"), "{stdout}");
+    let (code, _, stderr) = v2(&["j.v2"], Some(1 << 30));
+    assert_eq!(code, Some(3), "{stderr}");
+    assert_eq!(stderr.matches(limit).count(), 1, "{stderr}");
+    assert!(!stderr.contains("isn't installed"), "{stderr}");
+    // No limit: what the loader said, about the one it said it of.
+    let words = format!("fix: {} can't load libbrotlienc.so.1 (failed to map segment from shared object)\n", unmapped.display());
+    let (code, stdout, stderr) = v2(&["doctor"], None);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains(&format!("  js: {words}")) && !stdout.contains("memory limit"), "{stdout}");
+    let (code, _, stderr) = v2(&["j.v2"], None);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains(&words) && !stderr.contains("memory limit"), "{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_write_past_the_file_size_limit_is_an_ioerror() {
     // INTERNALS 8.3: V2 ignores SIGXFSZ, so a write past ulimit -f fails with EFBIG, an IOError
     // the script can catch, instead of killing v2.
@@ -4706,10 +4797,10 @@ fn doctor_names_the_programs_it_could_not_use() {
     let (py, node) = (bin.join(format!("python3{ext}")), bin.join(format!("node{ext}")));
     if cfg!(windows) {
         std::fs::write(&py, "@echo Python 3.8.1\r\n").unwrap();
-        std::fs::write(&node, "@echo node: error while loading shared libraries: libatomic.so.1 1>&2\r\n@exit /b 127\r\n").unwrap();
+        std::fs::write(&node, "@echo node: error while loading shared libraries: libatomic.so.1: cannot open shared object file: No such file or directory 1>&2\r\n@exit /b 127\r\n").unwrap();
     } else {
         std::fs::write(&py, "#!/bin/sh\necho Python 3.8.1\n").unwrap();
-        std::fs::write(&node, "#!/bin/sh\necho 'node: error while loading shared libraries: libatomic.so.1' >&2\nexit 127\n").unwrap();
+        std::fs::write(&node, "#!/bin/sh\necho 'node: error while loading shared libraries: libatomic.so.1: cannot open shared object file: No such file or directory' >&2\nexit 127\n").unwrap();
     }
     #[cfg(unix)]
     for f in [&py, &node] {
@@ -4731,7 +4822,7 @@ fn doctor_names_the_programs_it_could_not_use() {
     let line = stdout.split(&*fix).nth(1).and_then(|r| r.lines().next()).unwrap_or_else(|| panic!("{stdout}"));
     assert!(line.contains("apt install libatomic1") || line.contains("dnf install libatomic"), "{stdout}");
     // The note, then the program it skipped and why, which "see why below" points at.
-    let below = format!("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)\n  js: skipped {node} (version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1)\n");
+    let below = format!("\n  js: engine 'js' (JavaScript) was found but doesn't run (see why below)\n  js: skipped {node} (version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file: No such file or directory)\n");
     assert!(stdout.contains(&below), "{stdout}");
     // ts runs on that node: js's notes, fix included, are its own (19.2).
     assert!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), "{stdout}");
