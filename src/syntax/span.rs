@@ -151,9 +151,9 @@ pub fn bomless_utf16(bytes: &[u8]) -> bool {
     pairs >= 2 && (count(true) * 4 >= pairs * 3 || count(false) * 4 >= pairs * 3)
 }
 
-/// What to do about a file V2 can't read, for the script and the files it imports (19.1, 6.4):
-/// on Windows one another program opened without sharing (`ERROR_SHARING_VIOLATION`,
-/// `ERROR_LOCK_VIOLATION`), as the file builtins say too (5.10).
+/// What to do about a file V2 can't read, for the script, the files it imports and the project's
+/// v2.toml (19.1, 6.4, 18.5): on Windows one another program opened without sharing
+/// (`ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`), as the file builtins say too (5.10).
 pub fn read_hint(e: &std::io::Error) -> Option<&'static str> {
     (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))).then_some("another program has it open (Excel keeps an open file locked): close it there")
 }

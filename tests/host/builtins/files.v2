@@ -38,3 +38,13 @@ show(func() => read_file(home))
 try { read_file(home + "\new.txt") } catch (e) { print(e.type, e.message.replace(home, "~").split("': ")[0]) }
 // Invisible characters show inside containers.
 print(["\u{feff}name", "a\u{200b}b"])
+// UTF-8 whose last character is cut (a log another program is still writing) says so, with no
+// code page's advice, which would garble it; a byte-order mark counts as UTF-8's. One byte past
+// ASCII at the end (cp1252's caf\xe9), a bad byte inside, or a lone lead byte keeps the code
+// page's advice (round 23).
+for data in [b"started in \xc5\x81\xc3\xb3d\xc5\xba\nuser \xc5", b"\xe2\x82\xac and \xe2\x82", b"\xf0\x9f\x98\x80 then \xf0\x9f\x98", b"\xef\xbb\xbfplain \xc5", b"caf\xe9", b"caf\xe9 au lait", b"\xc5"] {
+    write_file(path, data)
+    try { read_file(path) } catch (e) { print(e.message.replace(home, "~")) }
+}
+write_file(path, b"user \xc5\x81\xc3\xb3d\xc5")
+show(func() => read_file(path))

@@ -444,6 +444,11 @@ fn file_error<T>(verb: &str, path: &str, e: &std::io::Error) -> Exec<T> {
 
 /// `file_error`, with a hint of the caller's when the path itself needs none.
 fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<String>) -> Exec<T> {
+    // Windows: a pipe or a device (`\\.\pipe\x`): each look at the path below would open it
+    // again, and each open of a pipe takes one of its server's instances (5.10).
+    if device_path(path) {
+        return root_error(verb, path, os_message(e));
+    }
     // On Windows /dev/stdin and the others are Linux's names, whatever the current folder: on a
     // \\wsl.localhost share they are WSL's links, and their hint is Windows' way, below.
     if !(cfg!(windows) && matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr")) {
@@ -451,6 +456,13 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     }
     if let Some(why) = unreachable_root(path, e) {
         return root_error(verb, path, why);
+    }
+    // A name longer than Windows takes, which it says as a bad name or a folder that isn't there
+    // (so a make_dir hint would fail too).
+    if let Some(why) = long_name(path) {
+        let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
+        let _ = err.hint.set("shorten it".into());
+        return Err(Flow::Error(Rc::new(err)));
     }
     let hint = hint.or_else(|| tmp_hint(path)).or_else(|| read_only_hint(verb, path, e));
     // A file where a folder goes, or the other way round: Windows says "Access is denied", "The
@@ -460,7 +472,14 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
     // words for them ("The system cannot find the path specified") don't say which part.
     let in_the_way = p.ancestors().skip(1).find(|a| !a.as_os_str().is_empty() && a.exists()).filter(|a| a.is_file());
     let no_folder = p.parent().filter(|d| !d.as_os_str().is_empty() && !as_folder(d).exists() && e.kind() == std::io::ErrorKind::NotFound);
+    // A link to a folder is no folder to remove, and shutil.rmtree refuses one (or, given
+    // `link/`, empties the folder it points to): `link/` names the folder, and the link alone is
+    // removed without the slash.
+    let link = if verb == "remove" { folder_link(path) } else { None };
+    let slash = super::module::trim_separators(path).len() < path.len();
     let why = match verb {
+        "remove" if link.is_some() && slash => format!("it is a link to {}, a folder, and remove_file removes files only", link.as_ref().map(|to| shown_path(&to.to_string_lossy())).unwrap_or_default()),
+        "remove" if link.is_some() => os_message(e),
         "remove" if p.is_dir() => "it is a folder, and remove_file removes files only".to_string(),
         "read" | "write" if p.is_dir() => "it is a folder".to_string(),
         "list" if p.is_file() => "it is a file, not a folder".to_string(),
@@ -480,10 +499,19 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set(h.into());
     } else if let Some(h) = hint {
         let _ = err.hint.set(h.into());
-    } else if cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)) {
-        // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: the OS says only that a process uses it.
-        let _ = err.hint.set("another program has it open (Excel keeps an open file locked): close it there, or use another file name".into());
-    } else if verb == "remove" && p.is_dir() {
+    } else if cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33 | 1224)) {
+        // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_USER_MAPPED_FILE: the OS says only
+        // that a process uses it.
+        let _ = err.hint.set(busy_hint(verb).into());
+    } else if cfg!(windows) && verb == "remove" && e.raw_os_error() == Some(5) && program_file(p) {
+        // A running program's .exe (or a .dll it loaded) can't be removed; 5 also comes from a
+        // folder's or file's permissions, hence "if".
+        let _ = err.hint.set("if that program is running, stop it first".into());
+    } else if link.is_some() && slash {
+        let mut q = String::new();
+        super::value::quoted(super::module::trim_separators(path), &mut q);
+        let _ = err.hint.set(format!("to remove the link alone, leave out the slash at its end: remove_file({q})").into());
+    } else if verb == "remove" && link.is_none() && p.is_dir() {
         let _ = err.hint.set("a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }".into());
     } else if cfg!(windows) && matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr") {
         // Linux's and macOS's names for the standard streams.
@@ -514,6 +542,60 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         let _ = err.hint.set("the file size limit (ulimit -f) stops it: raise the limit, or write less".into());
     }
     Err(Flow::Error(Rc::new(err)))
+}
+
+/// Windows: the hint for a file another process has open without sharing, locked or mapped
+/// (5.10): V2's own blocks are processes too. Only a write can go to another name.
+fn busy_hint(verb: &str) -> String {
+    let close = "another program has it open (Excel keeps an open file locked; so does a block of this script that opened it): close it there";
+    if verb == "write" {
+        format!("{close}, or write to another file name")
+    } else {
+        close.to_string()
+    }
+}
+
+/// Whether `p` names a program or a library by its extension (`.exe`, `.dll`), which Windows
+/// keeps while it runs.
+fn program_file(p: &std::path::Path) -> bool {
+    p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe") || x.eq_ignore_ascii_case("dll"))
+}
+
+/// Where `path` (without the separators at its end) points when it is a link to a folder that is
+/// there (a symlink, a junction on Windows), as messages show it (`module::link_target`) (5.10).
+fn folder_link(path: &str) -> Option<std::path::PathBuf> {
+    let link = std::path::Path::new(super::module::trim_separators(path));
+    if link.as_os_str().is_empty() || !std::fs::symlink_metadata(link).ok()?.file_type().is_symlink() || !link.is_dir() {
+        return None;
+    }
+    Some(super::module::link_target(link, &std::fs::read_link(link).ok()?))
+}
+
+/// Windows: what is wrong with a part of `path` longer than a Windows file or folder name can be,
+/// 255 UTF-16 units (an emoji is 2): `the name 'nnnnnnnnnnnnnnnnnnnn…' is 256 characters long, and
+/// a Windows file or folder name can have at most 255` (5.10).
+fn long_name(path: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let (part, units) = path.split(['/', '\\']).map(|p| (p, p.encode_utf16().count())).find(|&(_, n)| n > 255)?;
+    let start: String = part.chars().take(20).collect();
+    let counted = if units == part.chars().count() { "" } else { " as Windows counts them (an emoji is 2)" };
+    Some(format!("the name '{}…' is {units} characters long{counted}, and a Windows file or folder name can have at most 255", shown_path(&start)))
+}
+
+/// Windows: a path in the device namespace that names no file: `\\.\pipe\x`, `\\.\COM1`,
+/// `\\?\pipe\x` (either slash), not a drive's, a share's (`UNC`) or a volume's path after it
+/// (5.10). Each look at such a path opens it, and each open of a named pipe takes an instance.
+fn device_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    let sep = |c: u8| c == b'\\' || c == b'/';
+    if !cfg!(windows) || b.len() < 4 || !sep(b[0]) || !sep(b[1]) || !matches!(b[2], b'.' | b'?') || !sep(b[3]) {
+        return false;
+    }
+    let first = path[4..].split(['/', '\\']).next().unwrap_or_default();
+    let drive = first.len() == 2 && first.as_bytes()[0].is_ascii_alphabetic() && first.as_bytes()[1] == b':';
+    !(drive || first.eq_ignore_ascii_case("UNC") || first.get(..7).is_some_and(|v| v.eq_ignore_ascii_case("Volume{")))
 }
 
 /// A path holding U+FFFD, which `args()` and `getenv()` put where bytes weren't UTF-8 (5.10): it
@@ -904,8 +986,8 @@ fn network_error(e: &std::io::Error) -> bool {
     matches!(e.raw_os_error(), Some(51 | 53 | 55 | 59 | 64 | 67 | 1201 | 1203 | 1222 | 1231 | 1232))
 }
 
-/// `unreachable_root`'s IOError: no hint of a folder to make, but the escapes' one when the
-/// path holds a control character (`"Q:\temp"`).
+/// `unreachable_root`'s IOError, and a device's (`device_path`): no hint of a folder to make,
+/// but the escapes' one when the path holds a control character (`"Q:\temp"`).
 fn root_error<T>(verb: &str, path: &str, why: String) -> Exec<T> {
     let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
     if path.chars().any(char::is_control) {
@@ -1264,6 +1346,15 @@ fn not_utf8_kind(bytes: &[u8], start: bool) -> &'static str {
     }
 }
 
+/// Whether text that isn't UTF-8 (`e`, from `from_utf8`) is UTF-8 with its last character cut
+/// (another program is still writing it, or cut it there): the bad bytes are an unfinished
+/// character at the end (`error_len` is `None`), and the valid part before them (`good`, with a
+/// UTF-8 byte-order mark when there was one) holds a byte past ASCII, so it isn't one byte of an
+/// older code page at the end (`caf\xE9`) (5.10).
+fn cut_utf8(good: &[u8], e: &std::str::Utf8Error) -> bool {
+    e.error_len().is_none() && good.iter().any(|&b| b >= 0x80)
+}
+
 /// How many times in a row `input()` may give null before a loop that never checks is stopped.
 const INPUT_NULLS: u32 = 1000;
 
@@ -1329,7 +1420,14 @@ fn input(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     match String::from_utf8(line) {
         Ok(s) => Ok(Value::Str(s.into())),
         Err(e) => {
-            let err = ErrorValue::new("IOError", format!("input line {n} is not valid UTF-8: {}: send UTF-8 text", not_utf8_kind(e.as_bytes(), n == 1)));
+            let kind = not_utf8_kind(e.as_bytes(), n == 1);
+            let good = &e.as_bytes()[..e.utf8_error().valid_up_to()];
+            // A character cut in two (by `head -c`, or a writer stopped in the middle): no
+            // code page's advice, which would garble the rest.
+            if kind.ends_with("Windows-1252") && cut_utf8(good, &e.utf8_error()) {
+                return io_error(format!("input line {n} is UTF-8 but ends inside a character: send whole characters"));
+            }
+            let err = ErrorValue::new("IOError", format!("input line {n} is not valid UTF-8: {kind}: send UTF-8 text"));
             if stdin_is_file() {
                 // `v2 x.v2 < data.txt`: no shell setting changes a file's bytes.
                 let _ = err.hint.set(format!("the file sent as input isn't UTF-8: save it as UTF-8, or read it in a @py block with {}", code_page_way()).into());
@@ -1894,7 +1992,13 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
         Ok(Some(b)) => b,
         // More than a str or bytes holds: a huge file, or a device that never ends (/dev/zero).
         Ok(None) => {
-            return io_error(format!("cannot read '{}': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block", shown_path(&path)));
+            let err = ErrorValue::new("IOError", format!("cannot read '{}': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block", shown_path(&path)));
+            // Forms that give a block's value (a `with` statement gives none); the first works
+            // on a device that never ends too.
+            let _ = err
+                .hint
+                .set(r#"for its first MiB: @py(path) { open(path, "rb").read(1 << 20) }; for its last: @py(path) { f = open(path, "rb"); f.seek(-(1 << 20), 2); f.read() }"#.into());
+            return Err(Flow::Error(Rc::new(err)));
         }
         Err(e) => {
             // A relative path starts in the folder v2 runs in; the file may be next to the script.
@@ -1912,8 +2016,16 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
     match std::str::from_utf8(text) {
         Ok(s) => Ok(Value::str(s)),
-        Err(_) => {
+        Err(e) => {
             let kind = not_utf8_kind(&bytes, true);
+            // A log another program is still writing: a code page's advice would garble it.
+            if kind.ends_with("Windows-1252") && cut_utf8(&bytes[..bytes.len() - text.len() + e.valid_up_to()], &e) {
+                let err = ErrorValue::new("IOError", format!("'{}' is UTF-8 but ends inside a character (a program may still be writing it)", shown_path(&path)));
+                let _ = err
+                    .hint
+                    .set(r#"read it again once it is written, or without the cut character: @py(path) { open(path, encoding="utf-8", errors="ignore", newline="").read() }"#.into());
+                return Err(Flow::Error(Rc::new(err)));
+            }
             // Text in another encoding is read by a block that knows it (V2's strings are UTF-8).
             let fix = match kind {
                 k if k.ends_with("binary data") => "read it with binary: true",
@@ -1947,11 +2059,11 @@ fn wsl_special(verb: &str, path: &str) -> Exec<()> {
 /// Windows: whether `path` is on a `\\server\share` or a network drive (as WSL's files are, on
 /// \\wsl.localhost or a drive mapped to it), by its text, or a relative one by the current
 /// folder's: where `wsl_special` looks, as its look at a local file would make a small read a
-/// quarter slower (5.10).
+/// quarter slower (5.10). A pipe or a device (`device_path`) is none: the look would open it.
 fn on_a_share(path: &str) -> bool {
     let unc = |b: &[u8]| b.len() >= 2 && matches!(b[0], b'\\' | b'/') && matches!(b[1], b'\\' | b'/');
     let drive = |b: &[u8]| (b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic()).then(|| (b[0] as char).to_ascii_uppercase());
-    if !cfg!(windows) {
+    if !cfg!(windows) || device_path(path) {
         return false;
     }
     if unc(path.as_bytes()) {
@@ -2023,12 +2135,47 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let r = if append {
         std::fs::OpenOptions::new().append(true).create(true).open(&*path).and_then(|mut f| f.write_all(bytes))
     } else {
-        std::fs::write(&*path, bytes)
+        replace_file(&path, bytes)
     };
     match r {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("write", &path, &e),
     }
+}
+
+/// `write_file`'s new contents for `path`, created if missing (5.10). Unix: `fs::write`, whose
+/// locks are advisory. Windows: `fs::write` cuts a file before it writes, and another program's
+/// lock of a part of it (a database's) doesn't stop the cut, only the write after it, so a failed
+/// write left it empty. So the file is opened as it is, locked whole (`try_lock`: another
+/// program's lock anywhere in it, past the end too, refuses it, as ERROR_LOCK_VIOLATION, before
+/// anything changed; a file system without locks goes on without), cut (a file another program
+/// has mapped refuses that, ERROR_USER_MAPPED_FILE, still whole), written and unlocked; never
+/// written first and cut after, which would leave a mapped file part old, part new. What isn't a
+/// disk file (a named pipe, a console) is only written: it can't be cut.
+fn replace_file(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_DISK};
+        // Opened as `OPEN_ALWAYS`, as `fs::write` does: a hidden or system file keeps working.
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+        // SAFETY: a handle that `f` keeps open during the call.
+        if unsafe { GetFileType(f.as_raw_handle()) } != FILE_TYPE_DISK {
+            return f.write_all(bytes);
+        }
+        let locked = match f.try_lock() {
+            Ok(()) => true,
+            Err(std::fs::TryLockError::WouldBlock) => return Err(std::io::Error::from_raw_os_error(33)),
+            Err(std::fs::TryLockError::Error(_)) => false,
+        };
+        let written = f.set_len(0).and_then(|()| f.write_all(bytes));
+        if locked {
+            let _ = f.unlock();
+        }
+        written
+    }
+    #[cfg(not(windows))]
+    std::fs::write(path, bytes)
 }
 
 /// `exists(path)`: whether `fs::metadata` succeeds, symlinks followed; never an error (5.10).
@@ -2121,12 +2268,23 @@ fn whole_tree_error(e: &std::io::Error) -> bool {
     e.raw_os_error().is_none() && e.to_string() == "failed to create whole tree"
 }
 
-/// `remove_file(path)`: a file, never a folder (5.10).
+/// `remove_file(path)`: a file, never a folder; a link, not what it points to, as `rm` does
+/// (5.10). Windows removes a link to a folder (a junction, a directory symlink) as a folder, so
+/// one that leads to a folder goes with `remove_dir`, which takes the link alone; written with a
+/// slash at its end (`link/`) it names the folder, refused as one, and one that leads nowhere
+/// keeps `module::link_error`'s message.
 fn remove_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "remove_file", "path")?;
     shell_shorthand("remove", &path)?;
     let path = verbatim_parts(&path);
-    match std::fs::remove_file(&*path) {
+    #[cfg(windows)]
+    let dir_link = super::module::trim_separators(&path).len() == path.len()
+        && std::fs::symlink_metadata(&*path).is_ok_and(|m| std::os::windows::fs::FileTypeExt::is_symlink_dir(&m.file_type()))
+        && std::path::Path::new(&*path).is_dir();
+    #[cfg(not(windows))]
+    let dir_link = false;
+    let removed = if dir_link { std::fs::remove_dir(&*path) } else { std::fs::remove_file(&*path) };
+    match removed {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("remove", &path, &e),
     }

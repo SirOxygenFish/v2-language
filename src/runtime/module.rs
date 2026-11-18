@@ -194,7 +194,7 @@ fn remove_command(link: &str, dir: bool, git_bash: bool) -> String {
 
 /// Where the link `at` points, absolute: a relative target (`ln -s ../shared lib`) is relative to
 /// the link's own folder, so `make gone` would make the wrong folder (DOCS 3.10).
-fn link_target(at: &Path, to: &Path) -> PathBuf {
+pub(crate) fn link_target(at: &Path, to: &Path) -> PathBuf {
     if to.is_absolute() {
         // `\\?\C:\x` reads as `C:\x`; `\\?\Volume{…}\x` (a mount point's or a junction into a
         // volume's target) has no other name: as it is, never joined to the link's folder (the
