@@ -1,0 +1,56 @@
+// requires: py js
+// Round 23: a function an @import brings into a block may be another language's, so 9.8's
+// refusals (another thread, outside a call) name it as it is; a V2 function passed in is named
+// a V2 function (INTERNALS 9.8, 13.7).
+func twice(x) {
+    return x * 2
+}
+@js jsside {
+    function jsfn(x) { return x + 0.5 }
+    @export { jsfn }
+}
+@py pyside {
+    def pyfn(x):
+        return x - 1
+    @export { pyfn }
+}
+@py threads {
+    @import { jsfn } from jsside
+    import threading
+    def from_thread(f):
+        out = []
+        def run():
+            try:
+                out.append(f(1))
+            except V2Error as e:
+                out.append([e.type, e.message])
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        return out[0]
+    def imported():
+        return from_thread(jsfn)
+    @export { from_thread, imported }
+}
+@import { from_thread, imported } from threads
+print(imported())
+print(from_thread(twice))
+@js later {
+    @import { pyfn } from pyside
+    function schedule() {
+        process.v2Late = null;
+        setImmediate(() => {
+            try {
+                process.v2Late = pyfn(1);
+            } catch (e) {
+                process.v2Late = [e.type, e.message];
+            }
+        });
+        return "scheduled";
+    }
+    @export { schedule }
+}
+@import { schedule } from later
+print(schedule())
+// The turn after schedule()'s own reply ran the callback, before this block's load.
+print(@js { process.v2Late })

@@ -1,0 +1,4 @@
+["Error", "'v2fn' called from a forked process: a process multiprocessing forks can't call V2 or other languages: return the data to the parent and call it there"]
+["Error", "'jsfn' called from a forked process: a process multiprocessing forks can't call V2 or other languages: return the data to the parent and call it there"]
+["Error", "'twice' called from a forked process: a process multiprocessing forks can't call V2 or other languages: return the data to the parent and call it there"]
+end

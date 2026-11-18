@@ -1,9 +1,9 @@
-MarshalError | value too large to send to V2 (more than 64 MiB)
-MarshalError | value too large to send to V2 (more than 64 MiB)
-MarshalError | value too large to send to V2 (more than 64 MiB)
-MarshalError | value too large to send to V2 (more than 64 MiB)
-MarshalError | value too large to send to V2 (more than 64 MiB)
+MarshalError | value too large to send to V2 (about 573 MiB, limit 64 MiB)
+MarshalError | value too large to send to V2 (about 382 MiB, limit 64 MiB)
+MarshalError | value too large to send to V2 (about 191 MiB, limit 64 MiB)
+MarshalError | value too large to send to V2 (about 65 MiB, limit 64 MiB)
+MarshalError | value too large to send to V2 (about 77 MiB, limit 64 MiB)
 MarshalError | true
-[true, "MarshalError", "value too large to send to V2 (more than 64 MiB)"]
-[true, "MarshalError", "value too large to send to V2 (more than 64 MiB)"]
-MarshalError | value too large to send to V2 (more than 64 MiB)
+[true, "MarshalError", "value too large to send to V2 (about 573 MiB, limit 64 MiB)"]
+[true, "MarshalError", "value too large to send to V2 (about 382 MiB, limit 64 MiB)"]
+MarshalError | value too large to send to V2 (about 382 MiB, limit 64 MiB)
