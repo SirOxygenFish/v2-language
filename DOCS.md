@@ -628,12 +628,12 @@ bigger come from the languages you embed.
 | `round(x, digits = 0)`                  | `x` rounded to `digits` decimals, ties to even, exactly as `f"${x:.Nf}"` prints it: `round(2.5)` is `2`, `round(2.675, 2)` is `2.67`. `digits` 0 gives an int, so NaN, infinity and floats beyond the 64-bit range (about ±9.22e18) are a `ValueError`; more gives a float, for any float (`round(1e300, 1)` is `1e300`); fewer is a `ValueError`; an int `x` comes back unchanged |
 | `div(a, b)`                             | integer division of two ints, rounded down: `div(-7, 2)` is `-4`, and `div(a, b) * b + a % b == a` (V2 has no `//`: it starts a comment) |
 | `json_parse(text)`, `json_stringify(value, indent = null)` | JSON in and out, nested 1,000 levels deep at most (deeper is a `ValueError`); `json_parse` skips one leading byte-order mark, as `read_file` does, and JSON has no NaN or infinity, so `json_stringify` of one is a `TypeError` (its hint: store `null` instead) |
-| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it; one that holds more than 1 GiB (`/dev/zero` too) is an `IOError` that says to read it in pieces in a block |
+| `read_file(path, binary: false)`        | file contents as `str`, without a leading byte-order mark (or `bytes` with `binary: true`); a file that isn't UTF-8 is an `IOError` whose hint says how to read it (one that is UTF-8 up to a character cut at its end, as a log still being written is, says so); one that holds more than 1 GiB (`/dev/zero` too) is an `IOError` that says to read it in pieces in a block, as its hint shows |
 | `write_file(path, data, append: false)` | write a `str` or `bytes`, replacing the file; `append: true` adds to its end (creating it if missing) |
 | `exists(path)`                          | `true` if a file or folder is there (`false` on any error; a path that starts with `~` or `$HOME`, or one Windows would read as another, is refused, below) |
 | `list_dir(path)`                        | list of the names in a folder, sorted by code point as `sort()` sorts strings (`LC_ALL=C ls`'s order, not your locale's); one name that isn't UTF-8 fails the whole call, an `IOError` (rename that file, or list the names as bytes with `os.listdir` in a `@py` block, as its hint shows) |
 | `make_dir(path)`                        | create a folder and any missing parents; an existing folder is fine |
-| `remove_file(path)`                     | delete a file (not a folder), a read-only one too, on every OS, as `rm` does |
+| `remove_file(path)`                     | delete a file (not a folder), a read-only one too, on every OS, as `rm` does: a link goes, not what it points to (a link to a folder too, a junction on Windows; `link/` names the folder) |
 | `script_dir()`                          | absolute path of the folder of the `.v2` file containing the call |
 | `exec(argv, input = null)`              | run a program without a shell (below)                       |
 | `getenv(name, default = null)`          | environment variable                                        |
@@ -662,11 +662,11 @@ it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
 wrote, and `read_file("/dev/stdin")` reads the rest of standard input, after what `input()` read. The file
 functions raise `IOError` when they fail (`exists` just returns `false`); on Windows, for a file
-another program keeps open (as Excel does), its hint says to close it there, for a Git Bash or WSL path
+another program keeps open (as Excel does, or a block of the script), its hint says to close it there (a file another program has locked a part of, as databases do, or mapped, is refused by `write_file` before anything changes), for a Git Bash or WSL path
 that isn't there (`/c/Users/me/notes` or `/mnt/c/Users/me/notes`, which `make_dir` doesn't make) it gives the Windows spelling (`C:/Users/me/notes`),
 for another Linux path that isn't there (`/home/me/notes`, `/root/…`, `/usr/…`) it says where WSL's files are
 from Windows (`\\wsl.localhost\<distro>\…`),
-and for a name Windows doesn't allow (`what?.txt`, `CON`, one that ends in a dot) it says why.
+and for a name Windows doesn't allow (`what?.txt`, `CON`, one that ends in a dot, one over 255 characters) it says why.
 A path that Windows would read as another is refused before anything is read or written, in every
 file function, `exists` too: a name with a `:` (`notes 12:30.txt`, a hidden stream of `notes 12` to
 Windows), on a drive or a `\\server\share` path, with either slash; a name that ends in a dot or a space, which Windows drops

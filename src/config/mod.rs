@@ -486,7 +486,11 @@ fn iconv_files(path: &Path) -> String {
 fn read_file(cfg: &mut Config, path: &Path, overrides: &Overrides) -> Result<(), ConfigError> {
     // A folder's name can't act on the terminal (2.1).
     let shown = crate::syntax::span::shown_path(&path.display().to_string());
-    let bytes = std::fs::read(path).map_err(|e| ConfigError(format!("{shown}: config error: cannot read the file: {}", crate::syntax::span::os_message(&e))))?;
+    let bytes = std::fs::read(path).map_err(|e| {
+        // Another program has it open without sharing: what FILE gets (19.1).
+        let hint = crate::syntax::span::read_hint(&e).map(|h| format!("\n  hint: {h}")).unwrap_or_default();
+        ConfigError(format!("{shown}: config error: cannot read the file: {}{hint}", crate::syntax::span::os_message(&e)))
+    })?;
     let text = String::from_utf8(bytes).map_err(|e| {
         // iconv's line names this file (2.1).
         let why = match crate::syntax::span::not_utf8_named(e.as_bytes()) {

@@ -1,0 +1,30 @@
+// platform: windows
+// A file or folder name longer than Windows takes, 255 UTF-16 units (an emoji is 2), is said as
+// such in every file builtin, not as a bad name or as a folder to make with make_dir, which would
+// fail too (DOCS 3.11, INTERNALS 5.10); 255 is written and removed.
+func show(f) {
+    try {
+        let r = f()
+        print("ok", r)
+    } catch (e) {
+        // Without the path, which is longer than the name.
+        let parts = e.message.split("': ")
+        print(parts[0].split(" '")[0] + ":", parts[1:len(parts)].join("': "), "|", e.hint)
+    }
+}
+let n256 = "n" * 252 + ".txt"
+let d256 = "d" * 256
+show(func() => write_file(n256, "x"))
+show(func() => read_file(n256))
+show(func() => remove_file(n256))
+show(func() => make_dir(d256))
+show(func() => write_file(d256 + "/x.txt", "x"))
+show(func() => list_dir(d256))
+show(func() => exists(n256))
+show(func() => write_file("\u{1F600}" * 127 + ".t", "x"))
+let n255 = "n" * 251 + ".txt"
+let e255 = "\u{1F600}" * 126 + "a.t"
+show(func() => write_file(n255, "x"))
+show(func() => write_file(e255, "x"))
+show(func() => remove_file(n255))
+show(func() => remove_file(e255))

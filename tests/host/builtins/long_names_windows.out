@@ -1,0 +1,12 @@
+cannot write: the name 'nnnnnnnnnnnnnnnnnnnn…' is 256 characters long, and a Windows file or folder name can have at most 255 | shorten it
+cannot read: the name 'nnnnnnnnnnnnnnnnnnnn…' is 256 characters long, and a Windows file or folder name can have at most 255 | shorten it
+cannot remove: the name 'nnnnnnnnnnnnnnnnnnnn…' is 256 characters long, and a Windows file or folder name can have at most 255 | shorten it
+cannot create: the name 'dddddddddddddddddddd…' is 256 characters long, and a Windows file or folder name can have at most 255 | shorten it
+cannot write: the name 'dddddddddddddddddddd…' is 256 characters long, and a Windows file or folder name can have at most 255 | shorten it
+cannot list: the name 'dddddddddddddddddddd…' is 256 characters long, and a Windows file or folder name can have at most 255 | shorten it
+ok false
+cannot write: the name '😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀…' is 256 characters long as Windows counts them (an emoji is 2), and a Windows file or folder name can have at most 255 | shorten it
+ok null
+ok null
+ok null
+ok null

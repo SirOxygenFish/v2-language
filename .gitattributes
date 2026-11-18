@@ -6,3 +6,4 @@ tests/engines/py/bom_crlf.v2 -text
 *.sh text eol=lf
 tests/host/builtins/input_bom.in -text
 tests/host/builtins/input_bad.in -text
+tests/host/builtins/input_cut.in -text

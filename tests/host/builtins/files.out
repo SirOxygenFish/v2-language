@@ -18,3 +18,12 @@ IOError: '~/v2_files_test.txt' is not valid UTF-8: it is UTF-32 (what Out-File -
 IOError: cannot read '~': it is a folder
 IOError cannot read '~\new.txt
 ["\u{feff}name", "a\u{200b}b"]
+'~/v2_files_test.txt' is UTF-8 but ends inside a character (a program may still be writing it)
+'~/v2_files_test.txt' is UTF-8 but ends inside a character (a program may still be writing it)
+'~/v2_files_test.txt' is UTF-8 but ends inside a character (a program may still be writing it)
+'~/v2_files_test.txt' is UTF-8 but ends inside a character (a program may still be writing it)
+'~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
+'~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
+'~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
+IOError: '~/v2_files_test.txt' is UTF-8 but ends inside a character (a program may still be writing it)
+  hint: read it again once it is written, or without the cut character: @py(path) { open(path, encoding="utf-8", errors="ignore", newline="").read() }
