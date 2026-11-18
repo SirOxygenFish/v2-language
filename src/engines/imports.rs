@@ -1608,7 +1608,8 @@ impl Interp {
     }
 
     /// What a waiting reference stands for: found at its first use, at `at`, which starts its
-    /// language; a failure leaves it waiting (12.7).
+    /// language; a failure leaves it waiting (12.7). Its error, there or at a later use, is the
+    /// `@import`'s, with the use's frames below (round 23).
     pub(crate) fn settle(&mut self, f: &Func, at: Span) -> Exec<Value> {
         let Callable::Waiting { import, local, seen, resolved } = &**f else { unreachable!("only a waiting reference settles") };
         if let Some(v) = resolved.get() {
@@ -1617,7 +1618,7 @@ impl Interp {
         if let Some(tag) = self.import_tag(import) {
             self.start_engine(&tag, at)?;
         }
-        let value = self.resolve_import(import, Some(seen))?.into_iter().find(|(name, _)| name == local).map(|(_, v)| v);
+        let value = self.run_for(at, |it| it.resolve_import(import, Some(seen)))?.into_iter().find(|(name, _)| name == local).map(|(_, v)| v);
         let value = value.expect("an @import binds each of its local names");
         Ok(resolved.get_or_init(|| value).clone())
     }

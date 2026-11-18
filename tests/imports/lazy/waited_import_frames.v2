@@ -1,0 +1,22 @@
+// requires: py
+// Round 23 (INTERNALS 12.7): a waiting @import that fails when its language starts keeps its own
+// place, with the V2 frames of what needed the language below it; a later use, which runs it
+// again, gets the same.
+@import { thing } from py.no_such_module_r23_v2
+func show(e) {
+    print(e.type, e.trace)
+}
+func use() {
+    return thing()
+}
+print("not started yet")
+try {
+    use()
+} catch (e) {
+    show(e)
+}
+try {
+    thing()
+} catch (e) {
+    show(e)
+}
