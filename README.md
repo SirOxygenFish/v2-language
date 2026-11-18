@@ -661,8 +661,11 @@ or a block whose value is a Promise, is awaited, and you get its result; a rejec
 can catch. A block can't use `await` at its top level: end it with a Promise, or export an `async`
 function. One exception: while JavaScript is itself waiting on V2, as when it calls a V2
 function from a route handler or a callback, that V2 function can't wait on async JavaScript;
-write such handlers in JavaScript, and call V2 for the parts that don't wait. An HTTP server in a
-block serves only while V2 waits on it:
+write such handlers in JavaScript, and call V2 for the parts that don't wait. A call from a block
+into another language waits for its answer (awaited, for an async function) and gives the value,
+not a Promise or coroutine, so `Promise.all` or Python's `asyncio.gather` over such calls runs
+them one after another: keep the concurrent part in one language. An HTTP server in a block
+serves only while V2 waits on it:
 [the cookbook has one](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#176-an-http-server-in-a-javascript-block).
 
 **How do I catch a V2 error in Python or JavaScript?** It arrives as a `V2Error`
@@ -702,7 +705,8 @@ Node.js workers.
 - **JavaScript's event loop runs only while V2 is in a call to JavaScript:** a server, timer or
   socket in a `@js` block waits in between. Output a Python or JavaScript thread prints in
   between shows at the next call, or when the program ends. When the script ends, what
-  JavaScript timers and promises and Python threads still have to do runs, for at most a second.
+  JavaScript timers and promises and Python threads still have to do runs, for at most a second;
+  what still runs then is stopped, and a note on standard error says so.
 - **A block's functions and classes can't go to another process:** `multiprocessing` with spawn
   (the default on Windows and macOS) or forkserver (on Linux from Python 3.14) can't import them:
   each worker prints why, and a `Pool` using them hangs (press Ctrl+C). A pickle of a block's

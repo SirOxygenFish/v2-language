@@ -285,7 +285,8 @@ pub fn limit_fix(id: &str) -> Option<String> {
     let megabytes = crate::address_limit().map(|l| l >> 20);
     #[cfg(not(unix))]
     let megabytes: Option<u64> = None;
-    let needs = if id == "js" { "Node.js reserves about 1 GB" } else { "the engine may need more" };
+    // ts runs on Node.js too (7.6).
+    let needs = if matches!(id, "js" | "ts") { "Node.js reserves about 1 GB" } else { "the engine may need more" };
     megabytes.map(|mb| format!("a memory limit (ulimit -v) of {mb} MB is set for this shell, and {needs} as it starts: raise it"))
 }
 

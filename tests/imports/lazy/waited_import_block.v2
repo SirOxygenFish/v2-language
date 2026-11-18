@@ -1,0 +1,12 @@
+// requires: py
+// Round 23 (INTERNALS 12.7): a block that starts the language gets the error of a waiting @import
+// that fails then: at the @import, with the block's frames below it.
+@import { thing } from py.no_such_module_r23_v2
+func run() {
+    @py { print("never") }
+}
+try {
+    run()
+} catch (e) {
+    print(e.type, e.trace)
+}

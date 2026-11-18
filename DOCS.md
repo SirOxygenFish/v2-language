@@ -801,6 +801,16 @@ after the header, closed by a line holding only the same backticks.
 ```
 ````
 
+The closing fence stands alone on its line, also when the block is part of an expression: what
+follows the block (a `)`, a `,`) goes on the line after it.
+
+````v2
+print(@js ```
+    "a{{b".replace(/\{+/, "(")
+```
+)
+````
+
 An unterminated block is a syntax error that points at the line where the block started.
 
 ### 4.3 Action blocks and definition blocks
@@ -1468,6 +1478,9 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   language (`@js(h) { Array.fromAsync(h) }`; in Python, an async function a block exports, as in
   `async def collect(h): return [x async for x in h]`) and loop over the list; the error's hint
   says so.
+- A call into another language waits for its answer (awaited, for an async function) and gives
+  the value, not a Promise or coroutine, so `asyncio.gather` or `Promise.all` over such calls
+  runs them one after another: keep the concurrent part in one language.
 - Foreign code can call into V2 (an imported function or a V2 callback) only while V2 is waiting
   on that engine — during a call or block V2 started. A call from a timer, background thread or
   event handler that fires while the engine is idle fails with an error inside the foreign
@@ -1476,6 +1489,8 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   (and for a moment right after each call returns): to let them finish, export an async function
   and call it. When the program ends, what is still waiting runs, as Node runs it after a script,
   for at most a second (as Python's threads get), and an error in it ends the run with exit code 1.
+  A language still running after that second is stopped (the exit code doesn't change), and a
+  note on standard error says so: `v2: note: Python was still running 1 s after the script ended …`.
 - A foreign function may only call V2 from the thread V2 called it on. A Python thread pool that
   maps a V2 function (`ThreadPoolExecutor().map(score, xs)`) gets an error that says so: do the
   threaded work in Python and call V2 with the results.
@@ -2018,10 +2033,12 @@ flags = ["-C", "opt-level=3"]
 venv = ".venv"                    # use this virtual environment
 ```
 
-A call that runs past `call_timeout` raises `EngineTimeout`. For a worker engine that stops the
-whole engine for the rest of the run, so later uses of it raise `EngineCrashed`. For a request
-that may hang, use the language's own timeout, which you can retry: `urlopen(url, timeout=5)`,
-`fetch(url, { signal: AbortSignal.timeout(5000) })`.
+A call that runs past `call_timeout` raises `EngineTimeout`. Only time spent in that engine
+counts: while it waits on a V2 function or another language it called, its clock stops. For a
+worker engine that stops the whole engine for the rest of the run, so later uses of it raise
+`EngineCrashed`; stopping the engine also stops the processes it started (a multiprocessing
+pool). For a request that may hang, use the language's own timeout, which you can retry:
+`urlopen(url, timeout=5)`, `fetch(url, { signal: AbortSignal.timeout(5000) })`.
 
 `V2_ENGINE_PY` wins over `[python] venv` (`v2 doctor` names a venv it leaves unused). Setting both
 `[python] venv` and `[engines.py] command` in `v2.toml` is a configuration error: keep one. So a
