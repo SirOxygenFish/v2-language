@@ -350,9 +350,10 @@ impl Out {
     }
 }
 
-/// A child's output as text (5.10): UTF-8 as it is. On Windows, output that isn't UTF-8 is what
-/// console programs (`cmd /c dir`) write in the console's code page (850, 437, …), and is decoded
-/// with it; what is left invalid becomes U+FFFD.
+/// A child's output as text (5.10): UTF-8 as it is. On Windows, output that isn't UTF-8 is read
+/// a line at a time, as Windows' own tools don't agree on a code page (cmd writes the console's,
+/// attrib the ANSI one whatever chcp says): a line that is UTF-8 stays, the others are read in
+/// `other_code_page`; what is left invalid becomes U+FFFD.
 fn child_text(bytes: &[u8]) -> String {
     if let Some(s) = utf16_text(bytes) {
         return s;
@@ -361,10 +362,65 @@ fn child_text(bytes: &[u8]) -> String {
         return s.to_string();
     }
     #[cfg(windows)]
-    if let Some(s) = console_text(bytes) {
-        return s;
+    if let Some(cp) = other_code_page() {
+        return by_lines(bytes, |run| code_page_text(run, cp));
     }
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `bytes` a line at a time (5.10): a line that is valid UTF-8 as it is, each run of the other
+/// lines through `decode`, and lossy UTF-8 where that gives nothing. A line ends at `\n`, which
+/// is never part of a character in UTF-8 or a code page, the double-byte ones (932, 936) too.
+#[cfg(any(windows, test))]
+fn by_lines(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<String>) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let other = |run: &[u8], out: &mut String| match decode(run) {
+        Some(s) => out.push_str(&s),
+        None => out.push_str(&String::from_utf8_lossy(run)),
+    };
+    let (mut at, mut run) = (0, None);
+    while at < bytes.len() {
+        let end = bytes[at..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| at + n + 1);
+        match std::str::from_utf8(&bytes[at..end]) {
+            Ok(line) => {
+                if let Some(start) = run.take() {
+                    other(&bytes[start..at], &mut out);
+                }
+                out.push_str(line);
+            }
+            Err(_) => {
+                run.get_or_insert(at);
+            }
+        }
+        at = end;
+    }
+    if let Some(start) = run {
+        other(&bytes[start..], &mut out);
+    }
+    out
+}
+
+/// The code page of output lines that aren't UTF-8 (5.10): the console's output code page (the
+/// OEM one with no console), as cmd and other console programs write it; at a UTF-8 console,
+/// which has no other to try, the ANSI one, as attrib, xcopy and fc write it whatever chcp says;
+/// `None` when that is UTF-8 too.
+#[cfg(any(windows, test))]
+fn pick_code_page(console: u32, oem: u32, ansi: u32) -> Option<u32> {
+    let cp = match console {
+        0 => oem,
+        65001 => ansi,
+        cp => cp,
+    };
+    (cp != 65001).then_some(cp)
+}
+
+/// `pick_code_page` for this console and this Windows.
+#[cfg(windows)]
+fn other_code_page() -> Option<u32> {
+    use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+    // SAFETY: none of them takes arguments or has preconditions.
+    pick_code_page(unsafe { GetConsoleOutputCP() }, unsafe { GetOEMCP() }, unsafe { GetACP() })
 }
 
 /// A child's output in UTF-16 (`cmd /u`, `wsl --list`, a program that set its console to
@@ -395,18 +451,11 @@ fn utf16_text(bytes: &[u8]) -> Option<String> {
     (odd * 2 >= bytes.len() / 2 && even * 4 <= odd).then(|| decode(bytes, true))
 }
 
-/// `bytes` in the console's output code page, or the OEM code page with no console; `None` for
-/// a UTF-8 console, whose programs write UTF-8.
+/// `bytes` in the code page `cp`; `None` when Windows can't read them so.
 #[cfg(windows)]
-fn console_text(bytes: &[u8]) -> Option<String> {
-    use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
-    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
-    // SAFETY: neither takes arguments or has preconditions.
-    let cp = match unsafe { GetConsoleOutputCP() } {
-        0 => unsafe { GetOEMCP() },
-        cp => cp,
-    };
-    let len = i32::try_from(bytes.len()).ok().filter(|_| cp != 65001)?;
+fn code_page_text(bytes: &[u8], cp: u32) -> Option<String> {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    let len = i32::try_from(bytes.len()).ok()?;
     // SAFETY: the input is `len` readable bytes; a null output with size 0 asks for the length.
     let n = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
     let mut wide = vec![0u16; usize::try_from(n).ok().filter(|&n| n > 0)?];
@@ -2330,7 +2379,7 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let c = match ran {
         Ok(c) => c,
         Err(e) => {
-            let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': {}", e.reason));
+            let err = start_error(name, &argv, raw_tail, &e);
             let file = std::path::Path::new(&argv[0]);
             if let Some(h) = unmarked_hint(file, name, false).or_else(|| script_hint(name).filter(|_| file.is_file())) {
                 let _ = err.hint.set(h.into());
@@ -2353,6 +2402,52 @@ fn exec(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     result.insert(Rc::from("stdout"), Value::str(&child_text(&c.stdout)));
     result.insert(Rc::from("stderr"), Value::str(&child_text(&c.stderr)));
     Ok(Value::dict(result))
+}
+
+/// exec's error for a program that didn't start (5.10): `exec: cannot start 'x': <reason>`, the
+/// OS's, except for Windows' limits, whose own messages read as if the name were wrong: a program
+/// path over 259 characters (CreateProcessW's 2, 3 or 206; `ChildProc::spawn_as` tried its 8.3
+/// name) and a command line over 32,766 (206). A command line too long, there or for Unix
+/// (E2BIG), says how to pass the arguments.
+fn start_error(name: &str, argv: &[OsString], raw_tail: bool, e: &process::SpawnError) -> ErrorValue {
+    const ANOTHER_WAY: &str = "pass the names another way: as input (one per line), in a file, or a part at a time";
+    #[cfg(windows)]
+    {
+        if let Some(n) = process::long_program(&argv[0]).filter(|_| matches!(e.code, Some(2 | 3 | 206))) {
+            return ErrorValue::new(
+                "IOError",
+                format!("exec: cannot start '{name}': its path is {} characters long, and Windows starts programs only from paths of at most 259: move it to a shorter folder", with_commas(n)),
+            );
+        }
+        let units = if e.code == Some(206) { process::command_line_units(argv, raw_tail) } else { 0 };
+        if units > 32_766 {
+            let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': its command line is {} characters, and Windows takes at most 32,766", with_commas(units)));
+            let _ = err.hint.set(ANOTHER_WAY.into());
+            return err;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (argv, raw_tail);
+    let err = ErrorValue::new("IOError", format!("exec: cannot start '{name}': {}", e.reason));
+    #[cfg(unix)]
+    if e.code == Some(libc::E2BIG) {
+        let _ = err.hint.set(ANOTHER_WAY.into());
+    }
+    err
+}
+
+/// `n` with a comma between thousands: `115,123`.
+#[cfg(any(windows, test))]
+fn with_commas(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    out
 }
 
 /// `sleep(seconds)` on the interpreter thread; an interrupt still ends the run through the
@@ -2633,6 +2728,34 @@ mod tests {
 
     fn utf16le(s: &str) -> Vec<u8> {
         s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn output_that_isnt_utf8_is_read_a_line_at_a_time() {
+        // Round 23 (W1), 5.10: attrib's line in the ANSI code page next to a UTF-8 program's
+        // line; each run of lines that aren't UTF-8 is decoded together, the UTF-8 ones stay.
+        let latin1 = |b: &[u8]| Some(b.iter().map(|&c| char::from(c)).collect::<String>());
+        let mixed = b"A  caf\xe9.txt\r\ncaf\xc3\xa9 utf8\r\n\xe9\n\xe9t\xe9\nend";
+        assert_eq!(by_lines(mixed, latin1), "A  café.txt\r\ncafé utf8\r\né\nété\nend");
+        assert_eq!(by_lines(b"ok\n\xff\xfe last", latin1), "ok\nÿþ last");
+        // What the code page can't read is U+FFFD, the UTF-8 lines kept.
+        assert_eq!(by_lines(b"\xe9\nfine\n", |_| None), "\u{FFFD}\nfine\n");
+        // The console's code page; with no console the OEM one; at a UTF-8 console the ANSI one,
+        // and none when that is UTF-8 too (Windows' "Beta: Use Unicode UTF-8").
+        assert_eq!(pick_code_page(850, 437, 1252), Some(850));
+        assert_eq!(pick_code_page(0, 437, 1252), Some(437));
+        assert_eq!(pick_code_page(65001, 437, 1252), Some(1252));
+        assert_eq!(pick_code_page(65001, 65001, 65001), None);
+        assert_eq!(pick_code_page(0, 65001, 65001), None);
+        #[cfg(windows)]
+        {
+            assert_eq!(code_page_text(b"caf\xe9", 1252).as_deref(), Some("café"));
+            assert_eq!(code_page_text(b"caf\x82", 437).as_deref(), Some("café"));
+            // A double-byte code page: Shift-JIS 日本 between a UTF-8 line and an ASCII one.
+            let sjis = b"\x93\xfa\x96\x7b\r\n\xe6\x97\xa5\r\nok";
+            assert_eq!(by_lines(sjis, |b| code_page_text(b, 932)), "日本\r\n日\r\nok");
+        }
+        assert_eq!([0, 999, 1000, 32_766, 115_123, 1_234_567].map(with_commas), ["0", "999", "1,000", "32,766", "115,123", "1,234,567"]);
     }
 
     #[test]

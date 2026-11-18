@@ -1132,6 +1132,8 @@ pub struct SpawnError {
     pub message: String,
     /// The OS message alone, which `exec` words its own way (5.10).
     pub reason: String,
+    /// The OS's error code, when the OS refused the start.
+    pub code: Option<i32>,
 }
 
 /// Windows messages such as `%1 is not a valid Win32 application` come with their `%1`
@@ -1141,7 +1143,98 @@ fn spawn_error(program: &OsString, e: &std::io::Error) -> SpawnError {
     if cfg!(windows) && e.raw_os_error() == Some(193) {
         reason.push_str(" (not a valid program for this machine)");
     }
-    SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason }
+    SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason, code: e.raw_os_error() }
+}
+
+/// Windows: the length of `program`'s path in UTF-16 units, without a `\\?\` in front, when it
+/// is over 259, the most CreateProcessW starts a program from, long paths enabled or not (5.10).
+#[cfg(windows)]
+pub fn long_program(program: &std::ffi::OsStr) -> Option<usize> {
+    let full = std::path::absolute(program).unwrap_or_else(|_| program.into());
+    let shown = full.to_string_lossy();
+    let plain = shown.strip_prefix(r"\\?\UNC\").map(|rest| format!(r"\\{rest}")).unwrap_or_else(|| shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string());
+    Some(plain.encode_utf16().count()).filter(|&n| n > 259)
+}
+
+/// Windows: a program whose path is too long to start from (`long_program`) by its 8.3 name,
+/// when the volume gives it one of at most 259 units (5.10).
+#[cfg(windows)]
+fn short_program(program: &std::ffi::OsStr) -> Option<OsString> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    long_program(program)?;
+    // GetShortPathNameW reaches a path that long by its \\?\ form.
+    let full = std::path::absolute(program).ok()?;
+    let text = full.to_string_lossy();
+    let verbatim = if text.starts_with(r"\\?\") {
+        text.into_owned()
+    } else if let Some(share) = text.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{share}")
+    } else {
+        format!(r"\\?\{text}")
+    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(&verbatim).encode_wide().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated; a null buffer of size 0 asks for the size.
+    let n = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    let mut short = vec![0u16; usize::try_from(n).ok().filter(|&n| n > 0)?];
+    // SAFETY: `short` holds the `n` units the first call asked for.
+    let m = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), n) };
+    short.truncate(usize::try_from(m).ok().filter(|&m| m > 0 && m < short.len())?);
+    let short = String::from_utf16(&short).ok()?;
+    let plain = match short.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => short.strip_prefix(r"\\?\").unwrap_or(&short).to_string(),
+    };
+    let plain = OsString::from(plain);
+    long_program(&plain).is_none().then_some(plain)
+}
+
+/// Windows: the length in UTF-16 units of the command line `ChildProc::spawn_as` makes of `argv`
+/// (8.3), of which CreateProcessW takes at most 32,766 (32,767 with its closing NUL). cmd.exe's
+/// and a batch file's arguments are counted with Rust's quoting for a program, which a batch
+/// file's own quoting can exceed by a few.
+#[cfg(any(windows, test))]
+pub fn command_line_units(argv: &[OsString], raw_tail: bool) -> usize {
+    let units = |a: &OsString| a.to_string_lossy().encode_utf16().collect::<Vec<u16>>();
+    let program = std::path::Path::new(&argv[0]);
+    let ext = program.extension().map(|e| e.to_ascii_lowercase());
+    let batch = ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref());
+    let rust_quoting = batch || program.file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
+    // Rust's: quotes around one with a space or a tab (or an empty one), a backslash before each
+    // `"` and the backslashes before it, and before the closing quote.
+    let rust = |a: &[u16]| {
+        let quote = a.is_empty() || a.iter().any(|&u| u == u16::from(b' ') || u == u16::from(b'\t'));
+        let (mut n, mut run) = (a.len() + if quote { 2 } else { 0 }, 0);
+        for &u in a {
+            if u == u16::from(b'\\') {
+                run += 1;
+            } else {
+                if u == u16::from(b'"') {
+                    n += run + 1;
+                }
+                run = 0;
+            }
+        }
+        n + if quote { run } else { 0 }
+    };
+    let last = argv.len() - 1;
+    let args: usize = argv
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, a)| {
+            1 + if raw_tail && i == last && last > 1 {
+                units(a).len()
+            } else if rust_quoting || raw_tail {
+                rust(&units(a))
+            } else {
+                command_line_arg(&units(a)).len()
+            }
+        })
+        .sum();
+    // A batch file runs as `cmd.exe /e:ON /v:OFF /d /c ""script" args"`.
+    let shell = if batch { "cmd.exe /e:ON /v:OFF /d /c \"\"".len() } else { 0 };
+    shell + units(&argv[0]).len() + 2 + args
 }
 
 /// Windows: one argument as the command line carries it, so that both kinds of program read it
@@ -1202,19 +1295,25 @@ impl ChildProc {
     pub fn spawn_as(s: &Spawn, arg0: Option<&std::ffi::OsStr>) -> Result<ChildProc, SpawnError> {
         stop_if_interrupted();
         let program = &s.argv[0];
+        // Windows starts no program from a path over 259 characters: by its 8.3 name, when the
+        // volume has one that short (5.10).
+        #[cfg(windows)]
+        let short = short_program(program);
+        #[cfg(windows)]
+        let program = short.as_ref().unwrap_or(program);
         // Windows runs a batch file through cmd.exe, which would expand `%NAME%` in its path
         // (Rust escapes only the arguments) and run something else (7.5).
         let ext = std::path::Path::new(program).extension().map(|e| e.to_ascii_lowercase());
         let batch = cfg!(windows) && (ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref()));
         if batch && program.to_string_lossy().contains('%') {
             let reason = "a batch file whose path contains '%' can't be started safely: move it to a folder whose path has no %, or start the program it runs directly".to_string();
-            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
+            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason, code: None });
         }
         // Rust refuses them ("batch file arguments are invalid"): cmd.exe would end the command
         // line there.
         if batch && s.argv[1..].iter().any(|a| a.as_encoded_bytes().iter().any(|b| matches!(b, b'\n' | b'\r'))) {
             let reason = "a batch file can't take an argument with a line break: pass the text as input, as in exec(argv, input: text)".to_string();
-            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
+            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason, code: None });
         }
         let mut cmd = Command::new(program);
         // `ls: cannot access …` as from a shell, not `/usr/bin/ls: …`; Windows's command line
@@ -1840,6 +1939,20 @@ pub(crate) mod tests {
                 plain_helper(&format!("late:{arg}")).stdin(Stdio::null()).spawn().unwrap();
                 wait_for(&started(arg));
             }
+            // The length of the command line this process was started with, as Windows keeps it.
+            #[cfg(windows)]
+            "cmdline" => {
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn GetCommandLineW() -> *const u16;
+                }
+                // SAFETY: Windows keeps the process's NUL-terminated command line for its lifetime.
+                let n = unsafe {
+                    let line = GetCommandLineW();
+                    (0..).take_while(|&i| *line.add(i) != 0).count()
+                };
+                writeln!(out, "\ncmdline {n}").unwrap();
+            }
             "cat" => {
                 let mut input = Vec::new();
                 std::io::stdin().read_to_end(&mut input).unwrap();
@@ -2019,6 +2132,27 @@ pub(crate) mod tests {
         for w in &words {
             let line = format!("{} {} x", encoded(w), encoded("~"));
             assert_eq!(c_runtime_args(&line), [w.as_str(), "~", "x"], "{w:?} as {line}");
+        }
+    }
+
+    #[test]
+    fn command_line_units_counts_what_createprocess_gets() {
+        // Round 23 (W5), 5.10: exec's error names the command line's length past 32,766. The
+        // program in quotes, then each argument after a space, quoted as `command_line_arg` does.
+        let argv = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(command_line_units(&argv(&[r"C:\p\x.exe", "a b", "c"]), false), 12 + 6 + 2);
+        // cmd.exe: Rust's quoting, and with /c the last argument as written.
+        assert_eq!(command_line_units(&argv(&["cmd.exe", "/c", "echo \"hi\""]), true), 9 + 3 + 10);
+        assert_eq!(command_line_units(&argv(&["cmd.exe", "/c", "a b", "q\"x"]), false), 9 + 3 + 6 + 5);
+        // On Windows, the count is the length the child sees.
+        #[cfg(windows)]
+        {
+            let (mut argv, env) = helper("cmdline");
+            argv.extend(["plain", "with space", "q\"uote", "trail\\", "a\\\\\"b", "", "*.v2", "{a,b}", "Čeština"].map(OsString::from));
+            let c = run_captured(&argv, &env, None, None, false).unwrap();
+            let out = String::from_utf8_lossy(&c.stdout);
+            let seen = out.lines().find_map(|l| l.strip_prefix("cmdline ")).unwrap_or_else(|| panic!("{out}"));
+            assert_eq!(command_line_units(&argv, false).to_string(), seen);
         }
     }
 

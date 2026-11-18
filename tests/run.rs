@@ -1847,6 +1847,90 @@ fn exec_output_in_the_console_code_page_is_decoded() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1 true\n", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// Windows: `bytes` in the code page `cp`, as the test expects V2 to read them.
+#[cfg(windows)]
+fn in_code_page(bytes: &[u8], cp: u32) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    let mut wide = vec![0u16; bytes.len() * 2];
+    // SAFETY: `wide` has room for every byte as up to two units.
+    let n = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), bytes.len() as i32, wide.as_mut_ptr(), wide.len() as i32) };
+    String::from_utf16(&wide[..n as usize]).unwrap()
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_output_is_decoded_a_line_at_a_time() {
+    // Round 23 (W1), INTERNALS 5.10: attrib writes the ANSI code page whatever chcp says, a UTF-8
+    // program UTF-8. In one output, the UTF-8 line stays whole, and the other is read in the
+    // console's code page, or at a UTF-8 console in the ANSI one. v2 runs in a console of its own
+    // with no window (CREATE_NO_WINDOW), whose code page cmd's chcp sets.
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let home = TempHome::new();
+    let ansi_line = b"caf\xe9 \xc0 ansi\r\n";
+    std::fs::write(home.0.join("mixed.txt"), [&ansi_line[..], "café utf8\r\n".as_bytes()].concat()).unwrap();
+    let src = "let r = exec([\"cmd\", \"/d\", \"/c\", \"type mixed.txt\"])\nfor l in r.stdout.lines() { print(json_stringify(l)) }\n";
+    std::fs::write(home.0.join("mixed.v2"), src).unwrap();
+    // SAFETY: plain queries.
+    let (ansi, oem) = unsafe { (GetACP(), GetOEMCP()) };
+    let oem_text = oem.to_string();
+    for (chcp, cp) in [("65001", ansi), (oem_text.as_str(), oem)] {
+        let out = Command::new("cmd.exe")
+            .raw_arg(format!("/d /c chcp {chcp} >nul & \"{BIN}\" mixed.v2"))
+            .current_dir(&home.0)
+            .stdin(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        let first = in_code_page(&ansi_line[..ansi_line.len() - 2], cp);
+        let want = format!("{}\n\"café utf8\"\n", serde_json::to_string(&first).unwrap());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "chcp {chcp}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_of_a_program_at_a_long_path_starts_it_or_says_why_not() {
+    // Round 23 (W5), INTERNALS 5.10: CreateProcessW starts no program from a path over 259
+    // characters, long paths enabled or not. One whose folders have 8.3 names that short starts
+    // by them; one whose folders are 8.3 names already can't, and exec says so instead of "The
+    // system cannot find the path specified".
+    let home = TempHome::new();
+    let where_exe = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32").join("where.exe");
+    let mut long = home.0.join("long");
+    for _ in 0..3 {
+        long.push("d".repeat(100));
+    }
+    let mut eight = home.0.join("eight");
+    for _ in 0..30 {
+        eight.push("aaaaaaaa");
+    }
+    let mut programs = Vec::new();
+    for dir in [long, eight] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(&where_exe, dir.join("w.exe")).unwrap();
+        programs.push(dir.join("w.exe").to_string_lossy().replace('\\', "/"));
+    }
+    let src = "for p in read_file(\"programs.txt\").lines() {\n    try {\n        let r = exec([p, \"cmd.exe\"])\n        print(r.code, r.stdout.trim().lower().ends_with(\"cmd.exe\"))\n    } catch (e) {\n        print(e.message, e.hint)\n    }\n}\n";
+    std::fs::write(home.0.join("long.v2"), src).unwrap();
+    std::fs::write(home.0.join("programs.txt"), programs.join("\n")).unwrap();
+    let out = v2_command(&home.0).arg("long.v2").current_dir(&home.0).stdin(Stdio::null()).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let refused = |p: &str| format!("exec: cannot start '{p}': its path is {} characters long, and Windows starts programs only from paths of at most 259: move it to a shorter folder null", p.encode_utf16().count());
+    // A volume with 8.3 names off (some CI drives) gives the first no short name either.
+    let short = {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = std::ffi::OsStr::new(&format!(r"\\?\{}", programs[0].replace('/', "\\"))).encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and `buf` holds 1,024 units.
+        let n = unsafe { windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024) };
+        n > 0 && (n as usize - 4) <= 259
+    };
+    assert_eq!(lines, [if short { "0 true".to_string() } else { refused(&programs[0]) }, refused(&programs[1])], "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn a_python_program_run_with_exec_writes_utf8() {
     // INTERNALS 5.10: exec's children get PYTHONIOENCODING=utf-8 unless it is set, so a Python
@@ -4992,6 +5076,28 @@ fn exec_and_file_errors_name_the_part_that_is_wrong() {
             None => assert!(!stderr.contains("hint:"), "{src}{stderr}"),
         }
     }
+}
+
+#[test]
+fn exec_with_too_long_a_command_line_says_how_to_pass_it() {
+    // Round 23 (W5), INTERNALS 5.10: Windows' error 206 reads as if the program's name were too
+    // long, and Unix's E2BIG names no fix. Windows: 5,000 names past its 32,766 units; Unix:
+    // 60,000 of 100 characters past ARG_MAX (2 MiB on Linux, 1 MiB on macOS).
+    let (program, count, size) = if cfg!(windows) { ("where", 5000, 20) } else { ("true", 60_000, 100) };
+    let src = format!("let names = []\nfor i in 0..{count} {{ names.push(f\"${{i}}\" + \"n\" * {size}) }}\ntry {{\n    exec([\"{program}\"] + names)\n}} catch (e) {{\n    print(e.message)\n    print(e.hint)\n}}\n");
+    let (code, stdout, stderr, _home) = run_with_files(&[("long.v2", &src)], &["long.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let (message, hint) = stdout.split_once('\n').unwrap();
+    let wanted = if cfg!(windows) { "exec: cannot start 'where': its command line is " } else { "exec: cannot start 'true': Argument list too long" };
+    assert!(message.starts_with(wanted), "{stdout}");
+    if cfg!(windows) {
+        // The program's path in quotes, then each name after a space.
+        let names: usize = (0..count).map(|i| 1 + i.to_string().len() + size).sum();
+        let digits = message.trim_start_matches(wanted).split(' ').next().unwrap().replace(',', "");
+        let line: usize = digits.parse().unwrap();
+        assert!(line > names && line < names + 300 && message.ends_with(" characters, and Windows takes at most 32,766"), "{stdout}");
+    }
+    assert_eq!(hint, "pass the names another way: as input (one per line), in a file, or a part at a time\n");
 }
 
 #[cfg(windows)]

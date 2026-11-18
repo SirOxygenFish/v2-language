@@ -329,7 +329,9 @@ More of V2, in short:
   A program that can't start is an `IOError`. To walk folders, or tell a file from a folder, use
   Python's `os.walk` in a block, whose loop unpacks:
   `@py(d) { import os; [os.path.join(r, f) for r, _, fs in os.walk(d) for f in fs] }` lists the
-  files below `d`. File paths are relative to the folder you run `v2` from; for a
+  files below `d`. A file's size and modification time come from Python too:
+  `@import { getsize, getmtime } from py.os.path` (`getmtime` is seconds since 1970, as `time()`
+  is). File paths are relative to the folder you run `v2` from; for a
   file next to the script, `read_file(f"${script_dir()}/data.csv")`. They are taken as written:
   `~` and `%USERPROFILE%` are a shell's, so write `getenv("HOME")` (`getenv("USERPROFILE")` on
   Windows) instead; a path whose first part is one (or, on Linux and macOS, `~name` for a user
