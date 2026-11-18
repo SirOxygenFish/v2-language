@@ -25,5 +25,7 @@ IOError cannot read '~\new.txt
 '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
 '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
 '~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
+'~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
+'~/v2_files_test.txt' is not valid UTF-8: it may be in an older encoding, such as Windows-1252
 IOError: '~/v2_files_test.txt' is UTF-8 but ends inside a character (a program may still be writing it)
-  hint: read it again once it is written, or without the cut character: @py(path) { open(path, encoding="utf-8", errors="ignore", newline="").read() }
+  hint: read it again once it is written, or without the cut character: @py(path) { open(path, encoding="utf-8-sig", errors="ignore", newline="").read() }

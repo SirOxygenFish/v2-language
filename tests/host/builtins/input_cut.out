@@ -3,3 +3,4 @@
 IOError input line 3 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text
 IOError input line 4 is UTF-8 but ends inside a character: send whole characters
 IOError input line 5 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text
+IOError input line 6 is not valid UTF-8: it may be in an older encoding, such as Windows-1252: send UTF-8 text
