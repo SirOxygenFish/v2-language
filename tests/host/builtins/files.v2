@@ -39,10 +39,11 @@ try { read_file(home + "\new.txt") } catch (e) { print(e.type, e.message.replace
 // Invisible characters show inside containers.
 print(["\u{feff}name", "a\u{200b}b"])
 // UTF-8 whose last character is cut (a log another program is still writing) says so, with no
-// code page's advice, which would garble it; a byte-order mark counts as UTF-8's. One byte past
-// ASCII at the end (cp1252's caf\xe9), a bad byte inside, or a lone lead byte keeps the code
-// page's advice (round 23).
-for data in [b"started in \xc5\x81\xc3\xb3d\xc5\xba\nuser \xc5", b"\xe2\x82\xac and \xe2\x82", b"\xf0\x9f\x98\x80 then \xf0\x9f\x98", b"\xef\xbb\xbfplain \xc5", b"caf\xe9", b"caf\xe9 au lait", b"\xc5"] {
+// code page's advice, which would garble it: two characters past ASCII before the cut, or a
+// byte-order mark, make it UTF-8. One byte past ASCII at the end (cp1252's caf\xe9), a bad byte
+// inside, a lone lead byte, or a short text in a code page that reads as one such character and a
+// cut (cp1251's Пёс, cp932's ﾃｽﾄ) keeps the code page's advice (round 23).
+for data in [b"started in \xc5\x81\xc3\xb3d\xc5\xba\nuser \xc5", b"\xe2\x82\xac\xe2\x82\xac and \xe2\x82", b"\xf0\x9f\x98\x80 \xf0\x9f\x98\x81 then \xf0\x9f\x98", b"\xef\xbb\xbfplain \xc5", b"caf\xe9", b"caf\xe9 au lait", b"\xc5", b"\xcf\xb8\xf1", b"\xc3\xbd\xc4"] {
     write_file(path, data)
     try { read_file(path) } catch (e) { print(e.message.replace(home, "~")) }
 }

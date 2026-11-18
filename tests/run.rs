@@ -7570,12 +7570,13 @@ fn read_file_and_exec_stop_past_what_a_str_holds() {
     #[cfg(unix)]
     {
         let home = TempHome::new();
-        let src = "for f in [func() => read_file(\"/dev/zero\"), func() => read_file(\"/dev/zero\", binary: true), func() => exec([\"yes\"])] {\n    try { f() } catch (e) { print(e.message) }\n}\n";
+        let src = "for f in [func() => read_file(\"/dev/zero\"), func() => read_file(\"/dev/zero\", binary: true), func() => exec([\"yes\"])] {\n    try { f() } catch (e) { print(e.message + \" | \" + str(e.hint)) }\n}\n";
         std::fs::write(home.0.join("endless.v2"), src).unwrap();
         let (code, stdout, stderr) = run_capped(&home.0, &["endless.v2"], &[("V2_TEST_MAX_READ", "100000")]);
         assert_eq!(code, Some(0), "{stderr}");
-        let device = "cannot read '/dev/zero': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block";
-        assert_eq!(stdout, format!("{device}\n{device}\n{}\n", exec.trim_start_matches("IOError: ").replace("'v2'", "'yes'")));
+        // A device has no end to seek from: the first MiB's block only (the review of round 23).
+        let device = r#"cannot read '/dev/zero': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block | for its first MiB: @py(path) { open(path, "rb").read(1 << 20) }"#;
+        assert_eq!(stdout, format!("{device}\n{device}\n{} | null\n", exec.trim_start_matches("IOError: ").replace("'v2'", "'yes'")));
     }
 }
 
@@ -7608,9 +7609,10 @@ fn a_file_another_program_holds_open_says_to_close_it_there() {
 #[test]
 fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
     // 5.10 (round 23): another program's lock of a part of a file (as a database keeps: bytes
-    // 0-99, or 500-599, past the new data) or a mapping of it refuses write_file before anything
-    // changed: Rust's fs::write had cut a locked file to nothing, then failed to write. A free
-    // file, a hidden and a system one, a new one and empty data are written as before.
+    // 0-99, or 500-599 and 1,000,000-1,000,099, past the new data and past the end; a shared lock
+    // too) or a mapping of it refuses write_file before anything changed: Rust's fs::write had cut
+    // a locked file to nothing, then failed to write. A free file, a hidden and a system one, a
+    // new one and empty data are written as before.
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -7619,24 +7621,26 @@ fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
     let home = TempHome::new();
     let d = &home.0;
     let old = "D".repeat(1000);
-    for (name, attributes) in [("lock0.db", 0), ("lock500.db", 0), ("mapped.db", 0), ("free.db", 0), ("hidden.db", 2), ("system.db", 4), ("empty.db", 0)] {
+    let held = ["lock0.db", "lock500.db", "far.db", "shared.db", "mapped.db"];
+    for (name, attributes) in held.iter().map(|&n| (n, 0)).chain([("free.db", 0), ("hidden.db", 2), ("system.db", 4), ("empty.db", 0)]) {
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).attributes(attributes).open(d.join(name)).unwrap();
         f.write_all(old.as_bytes()).unwrap();
     }
     // Held by this process, as another program would: closing a file ends its lock.
-    let lock = |name: &str, at: u32| {
+    let lock = |name: &str, at: u32, exclusive: bool| {
         let f = std::fs::OpenOptions::new().read(true).write(true).open(d.join(name)).unwrap();
+        let how = if exclusive { LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY } else { LOCKFILE_FAIL_IMMEDIATELY };
         // SAFETY: a zeroed OVERLAPPED that says where the range starts, for a handle `f` keeps
         // open.
         let ok = unsafe {
             let mut at_offset: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
             at_offset.Anonymous.Anonymous.Offset = at;
-            LockFileEx(f.as_raw_handle(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &mut at_offset)
+            LockFileEx(f.as_raw_handle(), how, 0, 100, 0, &mut at_offset)
         };
         assert_ne!(ok, 0, "LockFileEx {name}");
         f
     };
-    let (_a, _b) = (lock("lock0.db", 0), lock("lock500.db", 500));
+    let locks = [lock("lock0.db", 0, true), lock("lock500.db", 500, true), lock("far.db", 1_000_000, true), lock("shared.db", 0, false)];
     let mapped = std::fs::File::open(d.join("mapped.db")).unwrap();
     // SAFETY: a read-only mapping of a file `mapped` keeps open, and a view of all of it; both
     // are closed below.
@@ -7647,7 +7651,7 @@ fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
         assert!(!view.Value.is_null(), "MapViewOfFile");
         (mapping, view)
     };
-    let src = "for f in [\"lock0.db\", \"lock500.db\", \"mapped.db\"] {\n\
+    let src = "for f in [\"lock0.db\", \"lock500.db\", \"far.db\", \"shared.db\", \"mapped.db\"] {\n\
                \x20   try { write_file(f, \"new contents\"); print(f, \"written\") } catch (e) { print(e.message + \" | \" + e.hint) }\n\
                }\n\
                write_file(\"free.db\", \"new contents\")\nwrite_file(\"hidden.db\", \"new contents\")\nwrite_file(\"system.db\", b\"new contents\")\n\
@@ -7659,16 +7663,16 @@ fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
         UnmapViewOfFile(view);
         CloseHandle(mapping);
     }
-    drop((_a, _b, mapped));
+    drop((locks, mapped));
     assert_eq!(code, Some(0), "{stderr}");
     let hint = "another program has it open (Excel keeps an open file locked; so does a block of this script that opened it): close it there, or write to another file name";
     let locked = "The process cannot access the file because another process has locked a portion of the file";
     let want = format!(
-        "cannot write 'lock0.db': {locked} | {hint}\ncannot write 'lock500.db': {locked} | {hint}\n\
-         cannot write 'mapped.db': The requested operation cannot be performed on a file with a user-mapped section open | {hint}\ndone\n"
+        "cannot write 'lock0.db': {locked} | {hint}\ncannot write 'lock500.db': {locked} | {hint}\ncannot write 'far.db': {locked} | {hint}\n\
+         cannot write 'shared.db': {locked} | {hint}\ncannot write 'mapped.db': The requested operation cannot be performed on a file with a user-mapped section open | {hint}\ndone\n"
     );
     assert_eq!(stdout, want);
-    for name in ["lock0.db", "lock500.db", "mapped.db"] {
+    for name in held {
         assert_eq!(std::fs::read_to_string(d.join(name)).unwrap(), old, "{name}");
     }
     for name in ["free.db", "hidden.db", "system.db", "new.db"] {
@@ -7681,10 +7685,45 @@ fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
 
 #[cfg(windows)]
 #[test]
+fn other_programs_read_a_file_while_write_file_rewrites_it() {
+    // 5.10 (round 23's review): write_file looks for another program's lock by taking one and
+    // letting it go at once: held through the write, it made another program's reads meanwhile
+    // fail (ERROR_LOCK_VIOLATION), where they had read the file whole or in part.
+    let home = TempHome::new();
+    let d = &home.0;
+    let size = 20 * 1048576;
+    std::fs::write(d.join("status.txt"), "x".repeat(size)).unwrap();
+    std::fs::write(d.join("w.v2"), "let big = \"x\" * (20 * 1048576)\nfor i in 0..10 { write_file(\"status.txt\", big) }\nprint(\"written\")\n").unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let path = d.join("status.txt");
+    let reader = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let (mut reads, mut failures) = (0, Vec::new());
+            while !stop.load(Ordering::Relaxed) {
+                match std::fs::read(&path) {
+                    Ok(_) => reads += 1,
+                    Err(e) => failures.push(e.to_string()),
+                }
+            }
+            (reads, failures)
+        })
+    };
+    let (code, stdout, stderr) = run_in_home(d, &["w.v2"], &[]);
+    stop.store(true, Ordering::Relaxed);
+    let (reads, failures) = reader.join().unwrap();
+    assert_eq!((code, stdout.as_str()), (Some(0), "written\n"), "{stderr}");
+    assert!(reads > 0 && failures.is_empty(), "{reads} reads, {} failed: {:?}", failures.len(), failures.first());
+}
+
+#[cfg(windows)]
+#[test]
 fn write_file_to_a_named_pipe_opens_it_once() {
     // 5.10 (round 23): a named pipe is no disk file: write_file writes to it without the cut that
     // failed ("The parameter is incorrect"), and opens it once: each look at the path (for WSL's
-    // pipes, then for the error's message) had taken another of its server's instances.
+    // pipes, then for the error's message) had taken another of its server's instances. With
+    // append: true it is written too (the access that appends is a pipe's "create an instance",
+    // which it refused).
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, PIPE_ACCESS_INBOUND};
     use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
@@ -7716,7 +7755,8 @@ fn write_file_to_a_named_pipe_opens_it_once() {
             })
         })
         .collect();
-    let src = format!("write_file(\"{}\", \"hello\")\nprint(\"ok\")\n", name.replace('\\', "\\\\"));
+    let lit = name.replace('\\', "\\\\");
+    let src = format!("write_file(\"{lit}\", \"hello\")\nwrite_file(\"{lit}\", \"again\", append: true)\nprint(\"ok\")\n");
     std::fs::write(home.0.join("pipe.v2"), src).unwrap();
     let (code, stdout, stderr) = run_in_home(&home.0, &["pipe.v2"], &[]);
     // The instances still waiting get a client of the test's own.
@@ -7729,15 +7769,17 @@ fn write_file_to_a_named_pipe_opens_it_once() {
         s.join().unwrap();
     }
     assert_eq!((code, stdout.as_str()), (Some(0), "ok\n"), "{stderr}");
-    let from_v2: Vec<Vec<u8>> = got.lock().unwrap().iter().filter(|d| d.as_slice() != b"cleanup").cloned().collect();
-    assert_eq!(from_v2, [b"hello".to_vec()]);
+    let mut from_v2: Vec<Vec<u8>> = got.lock().unwrap().iter().filter(|d| d.as_slice() != b"cleanup").cloned().collect();
+    from_v2.sort();
+    assert_eq!(from_v2, [b"again".to_vec(), b"hello".to_vec()]);
 }
 
 #[cfg(windows)]
 #[test]
 fn remove_file_of_a_running_program_says_to_stop_it() {
     // 5.10 (round 23): Windows refuses to remove a running program's .exe with "Access is
-    // denied", which permissions give too: the hint says what to do if it is the program.
+    // denied", which permissions give too: the hint says what to do if it is the program. A
+    // folder named tool.exe is a folder (the review of round 23).
     let home = TempHome::new();
     let d = &home.0;
     std::fs::copy(BIN, d.join("busy.exe")).unwrap();
@@ -7751,10 +7793,13 @@ fn remove_file_of_a_running_program_says_to_stop_it() {
         }
     }
     let running = Running(Command::new(d.join("busy.exe")).arg("wait.v2").current_dir(d).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-    std::fs::write(d.join("rm.v2"), "try { remove_file(\"busy.exe\") } catch (e) { print(e.message + \" | \" + e.hint) }\n").unwrap();
+    std::fs::create_dir(d.join("tool.exe")).unwrap();
+    std::fs::write(d.join("rm.v2"), "for f in [\"busy.exe\", \"tool.exe\"] {\n    try { remove_file(f) } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n").unwrap();
     let (code, stdout, stderr) = run_in_home(d, &["rm.v2"], &[]);
     drop(running);
-    assert_eq!((code, stdout.as_str()), (Some(0), "cannot remove 'busy.exe': Access is denied | if that program is running, stop it first\n"), "{stderr}");
+    let want = "cannot remove 'busy.exe': Access is denied | if that program is running, stop it first\n\
+                cannot remove 'tool.exe': it is a folder, and remove_file removes files only | a @py block removes a folder with what is in it: @py(path) { import shutil; shutil.rmtree(path) }\n";
+    assert_eq!((code, stdout.as_str()), (Some(0), want), "{stderr}");
 }
 
 #[cfg(windows)]
@@ -7932,9 +7977,10 @@ fn remove_file_removes_a_link_not_the_folder_it_points_to() {
     // DOCS 3.11, 5.10 (round 23): as rm does, remove_file of a link to a folder (a junction on
     // Windows, which said "it is a folder" and hinted shutil.rmtree, which refuses a link) takes
     // the link and leaves the folder; `live/` names the folder, refused as one, with no rmtree
-    // hint (given `live/`, rmtree would empty the folder). On Windows a link that leads nowhere
-    // keeps its message (on Linux and macOS unlink removes it); a directory symlink, which needs
-    // the privilege to make, is removed as a junction is.
+    // hint (given `live/`, rmtree would empty the folder), on Windows `live\` and `live/.` too. A
+    // link that leads nowhere goes too (the review of round 23: Windows had refused a junction's),
+    // and so does a read-only junction (attrib +r j /L), as rm takes one; a directory symlink,
+    // which needs the privilege to make, is removed as a junction is.
     let home = TempHome::new();
     let d = &home.0;
     std::fs::create_dir_all(d.join("target")).unwrap();
@@ -7944,30 +7990,37 @@ fn remove_file_removes_a_link_not_the_folder_it_points_to() {
     dir_link(&d.join("dead"), &d.join("gone"));
     std::fs::remove_dir(d.join("gone")).unwrap();
     #[cfg(windows)]
+    {
+        dir_link(&d.join("readonly"), &d.join("target"));
+        let ok = Command::new("attrib").args(["+r", "readonly", "/L"]).current_dir(d).stdout(Stdio::null()).status().unwrap().success();
+        assert!(ok, "attrib +r readonly /L");
+    }
+    #[cfg(windows)]
     let symlink = std::os::windows::fs::symlink_dir(d.join("target"), d.join("sym")).is_ok();
     #[cfg(unix)]
     let symlink = false;
     let src = "func show(f) {\n    try { f(); print(\"removed\") } catch (e) { print(e.message + \" | \" + e.hint) }\n}\n\
-               show(func() => remove_file(\"live/\"))\nshow(func() => remove_file(\"live\"))\nshow(func() => remove_file(\"dead\"))\n\
+               show(func() => remove_file(\"live/\"))\nif exists(\"readonly\") {\n    show(func() => remove_file(\"live\\\\\"))\n    show(func() => remove_file(\"live/.\"))\n    show(func() => remove_file(\"readonly\"))\n}\n\
+               show(func() => remove_file(\"live\"))\nshow(func() => remove_file(\"dead\"))\n\
                if exists(\"sym\") { show(func() => remove_file(\"sym\")) }\n";
     std::fs::write(d.join("links.v2"), src).unwrap();
-    // Outside Git Bash (MSYSTEM unset), whatever shell runs the tests: the hint's rmdir.
-    let mut cmd = v2_command(d);
-    cmd.arg("links.v2").current_dir(d).env_remove("MSYSTEM").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(60)).unwrap();
-    let (code, stdout, stderr) = (out.status.code(), normalize(&String::from_utf8_lossy(&out.stdout)), String::from_utf8_lossy(&out.stderr).into_owned());
+    let (code, stdout, stderr) = run_in_home(d, &["links.v2"], &[]);
     assert_eq!(code, Some(0), "{stderr}");
     let target = d.join("target").display().to_string();
-    let gone = d.join("gone").display().to_string();
-    let dead = if cfg!(windows) { format!("cannot remove 'dead': it is a link to {gone}, which isn't there | remove the link (rmdir dead), or make {gone}") } else { "removed".to_string() };
-    let mut want = format!(
-        "cannot remove 'live/': it is a link to {target}, a folder, and remove_file removes files only | to remove the link alone, leave out the slash at its end: remove_file(\"live\")\nremoved\n{dead}\n"
-    );
+    let folder = |written: &str| format!("cannot remove '{written}': it is a link to {target}, a folder, and remove_file removes files only | to remove the link alone, leave out the slash at its end: remove_file(\"live\")\n");
+    let mut want = folder("live/");
+    if cfg!(windows) {
+        want = format!("{want}{}{}removed\n", folder("live\\"), folder("live/."));
+    }
+    want.push_str("removed\nremoved\n");
     if symlink {
         want.push_str("removed\n");
     }
     assert_eq!(stdout, want);
-    assert!(std::fs::symlink_metadata(d.join("live")).is_err() && std::fs::symlink_metadata(d.join("sym")).is_err(), "the links are gone");
+    for link in ["live", "dead", "readonly", "sym"] {
+        assert!(std::fs::symlink_metadata(d.join(link)).is_err(), "{link} is gone");
+    }
+    assert!(!d.join("gone").exists(), "a dead link's target isn't made");
     assert_eq!(std::fs::read_to_string(d.join("target").join("keep.txt")).unwrap(), "kept");
 }
 

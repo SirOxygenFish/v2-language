@@ -503,9 +503,9 @@ fn file_error_hint<T>(verb: &str, path: &str, e: &std::io::Error, hint: Option<S
         // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_USER_MAPPED_FILE: the OS says only
         // that a process uses it.
         let _ = err.hint.set(busy_hint(verb).into());
-    } else if cfg!(windows) && verb == "remove" && e.raw_os_error() == Some(5) && program_file(p) {
+    } else if cfg!(windows) && verb == "remove" && e.raw_os_error() == Some(5) && program_file(p) && p.is_file() {
         // A running program's .exe (or a .dll it loaded) can't be removed; 5 also comes from a
-        // folder's or file's permissions, hence "if".
+        // file's permissions, hence "if" (a folder named `tool.exe` gets the folder's hint).
         let _ = err.hint.set("if that program is running, stop it first".into());
     } else if link.is_some() && slash {
         let mut q = String::new();
@@ -1348,11 +1348,12 @@ fn not_utf8_kind(bytes: &[u8], start: bool) -> &'static str {
 
 /// Whether text that isn't UTF-8 (`e`, from `from_utf8`) is UTF-8 with its last character cut
 /// (another program is still writing it, or cut it there): the bad bytes are an unfinished
-/// character at the end (`error_len` is `None`), and the valid part before them (`good`, with a
-/// UTF-8 byte-order mark when there was one) holds a byte past ASCII, so it isn't one byte of an
-/// older code page at the end (`caf\xE9`) (5.10).
+/// character at the end (`error_len` is `None`), and the valid part before them (`good`) starts
+/// with a UTF-8 byte-order mark or holds two characters past ASCII (a lead byte starts each). One
+/// isn't enough: a short text in a code page can read as one (cp1251's `Пёс`, cp932's `ﾃｽﾄ`), and
+/// one byte of it at the end (`caf\xE9`) as none (5.10).
 fn cut_utf8(good: &[u8], e: &std::str::Utf8Error) -> bool {
-    e.error_len().is_none() && good.iter().any(|&b| b >= 0x80)
+    e.error_len().is_none() && (good.starts_with(b"\xEF\xBB\xBF") || good.iter().filter(|&&b| b >= 0xC0).count() >= 2)
 }
 
 /// How many times in a row `input()` may give null before a loop that never checks is stopped.
@@ -1988,16 +1989,21 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let path = verbatim_parts(&path);
     let binary = bool_arg(&args[1], "read_file", "binary")?;
     wsl_special("read", &path)?;
+    slash_after_a_file("read", &path)?;
     let bytes = match read_path(&path) {
         Ok(Some(b)) => b,
         // More than a str or bytes holds: a huge file, or a device that never ends (/dev/zero).
         Ok(None) => {
             let err = ErrorValue::new("IOError", format!("cannot read '{}': it holds more than 1 GiB, the most V2 reads at once: read it in pieces in a block", shown_path(&path)));
-            // Forms that give a block's value (a `with` statement gives none); the first works
-            // on a device that never ends too.
-            let _ = err
-                .hint
-                .set(r#"for its first MiB: @py(path) { open(path, "rb").read(1 << 20) }; for its last: @py(path) { f = open(path, "rb"); f.seek(-(1 << 20), 2); f.read() }"#.into());
+            // Forms that give a block's value (a `with` statement gives none). A device has no
+            // end to seek from: it would be read until the memory runs out.
+            let first = r#"for its first MiB: @py(path) { open(path, "rb").read(1 << 20) }"#;
+            let hint = if std::fs::metadata(&*path).is_ok_and(|m| m.is_file()) {
+                format!(r#"{first}; for its last: @py(path) {{ f = open(path, "rb"); f.seek(-(1 << 20), 2); f.read() }}"#)
+            } else {
+                first.to_string()
+            };
+            let _ = err.hint.set(hint.into());
             return Err(Flow::Error(Rc::new(err)));
         }
         Err(e) => {
@@ -2023,7 +2029,7 @@ fn read_file(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
                 let err = ErrorValue::new("IOError", format!("'{}' is UTF-8 but ends inside a character (a program may still be writing it)", shown_path(&path)));
                 let _ = err
                     .hint
-                    .set(r#"read it again once it is written, or without the cut character: @py(path) { open(path, encoding="utf-8", errors="ignore", newline="").read() }"#.into());
+                    .set(r#"read it again once it is written, or without the cut character: @py(path) { open(path, encoding="utf-8-sig", errors="ignore", newline="").read() }"#.into());
                 return Err(Flow::Error(Rc::new(err)));
             }
             // Text in another encoding is read by a block that knows it (V2's strings are UTF-8).
@@ -2132,8 +2138,13 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
         _ => {}
     }
     wsl_special("write", &path)?;
+    slash_after_a_file("write", &path)?;
     let r = if append {
-        std::fs::OpenOptions::new().append(true).create(true).open(&*path).and_then(|mut f| f.write_all(bytes))
+        // A pipe or a device has no end to add at, and a pipe refuses the access that appends
+        // (FILE_APPEND_DATA is a pipe's FILE_CREATE_PIPE_INSTANCE): it is written.
+        let mut open = std::fs::OpenOptions::new();
+        if device_path(&path) { open.write(true) } else { open.append(true).create(true) };
+        open.open(&*path).and_then(|mut f| f.write_all(bytes))
     } else {
         replace_file(&path, bytes)
     };
@@ -2146,36 +2157,68 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `write_file`'s new contents for `path`, created if missing (5.10). Unix: `fs::write`, whose
 /// locks are advisory. Windows: `fs::write` cuts a file before it writes, and another program's
 /// lock of a part of it (a database's) doesn't stop the cut, only the write after it, so a failed
-/// write left it empty. So the file is opened as it is, locked whole (`try_lock`: another
-/// program's lock anywhere in it, past the end too, refuses it, as ERROR_LOCK_VIOLATION, before
-/// anything changed; a file system without locks goes on without), cut (a file another program
-/// has mapped refuses that, ERROR_USER_MAPPED_FILE, still whole), written and unlocked; never
-/// written first and cut after, which would leave a mapped file part old, part new. What isn't a
-/// disk file (a named pipe, a console) is only written: it can't be cut.
+/// write left it empty. So the file is opened as it is, and a lock of the whole of it is tried
+/// and let go at once (`try_lock`): another program's lock anywhere in it, past the end too,
+/// refuses it, as ERROR_LOCK_VIOLATION, before anything changed (a file system without locks goes
+/// on). Held through the write, the lock would make other programs' reads fail meanwhile; a lock
+/// taken during the write is the race of a write in place. Then it is cut (a file another program
+/// has mapped refuses that, ERROR_USER_MAPPED_FILE, still whole) and written; never written first
+/// and cut after, which would leave a mapped file part old, part new. A pipe or a console
+/// (`GetFileType`) is only written, and so is a handle that can't be cut (ERROR_INVALID_FUNCTION
+/// or ERROR_INVALID_PARAMETER from the cut).
 fn replace_file(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_DISK};
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR, FILE_TYPE_PIPE};
         // Opened as `OPEN_ALWAYS`, as `fs::write` does: a hidden or system file keeps working.
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
         // SAFETY: a handle that `f` keeps open during the call.
-        if unsafe { GetFileType(f.as_raw_handle()) } != FILE_TYPE_DISK {
+        if matches!(unsafe { GetFileType(f.as_raw_handle()) }, FILE_TYPE_PIPE | FILE_TYPE_CHAR) {
             return f.write_all(bytes);
         }
-        let locked = match f.try_lock() {
-            Ok(()) => true,
+        match f.try_lock() {
+            Ok(()) => {
+                let _ = f.unlock();
+            }
             Err(std::fs::TryLockError::WouldBlock) => return Err(std::io::Error::from_raw_os_error(33)),
-            Err(std::fs::TryLockError::Error(_)) => false,
-        };
-        let written = f.set_len(0).and_then(|()| f.write_all(bytes));
-        if locked {
-            let _ = f.unlock();
+            Err(std::fs::TryLockError::Error(_)) => {}
         }
-        written
+        match f.set_len(0) {
+            Err(e) if !matches!(e.raw_os_error(), Some(1 | 87)) => return Err(e),
+            _ => {}
+        }
+        f.write_all(bytes)
     }
     #[cfg(not(windows))]
     std::fs::write(path, bytes)
+}
+
+/// A path that ends in a slash (`f.txt/`, `f.txt\`, `f.txt/.`: `module::trim_separators`) names a
+/// folder: refused before the OS sees it when the name before the slash is a file, or, for a
+/// write, nothing in a folder that is there, as rm and Linux refuse it, where Windows takes it for
+/// the name without the slash (`remove_file("f.txt/")` deleted f.txt, `write_file("new.txt/")`
+/// made new.txt) (5.10). A folder, or a link to one, goes on.
+fn slash_after_a_file(verb: &str, path: &str) -> Exec<()> {
+    let name = super::module::trim_separators(path);
+    if name.is_empty() || name.len() == path.len() {
+        return Ok(());
+    }
+    let why = match std::fs::metadata(name) {
+        Ok(m) if m.is_dir() => return Ok(()),
+        Ok(_) => "it is a file, not a folder",
+        // A link that leads nowhere, or a folder on the way that isn't there, is the OS's to say.
+        Err(_) if verb == "write" && std::fs::symlink_metadata(name).is_err() && std::path::Path::new(name).parent().is_none_or(|d| d.as_os_str().is_empty() || d.is_dir()) => {
+            "with the slash at its end it names a folder, which isn't there"
+        }
+        Err(_) => return Ok(()),
+    };
+    let err = ErrorValue::new("IOError", format!("cannot {verb} '{}': {why}", shown_path(path)));
+    let mut q = String::new();
+    super::value::quoted(name, &mut q);
+    let data = if verb == "write" { ", …" } else { "" };
+    let _ = err.hint.set(format!("leave out the slash at its end: {}({q}{data})", builtin_name(verb)).into());
+    Err(Flow::Error(Rc::new(err)))
 }
 
 /// `exists(path)`: whether `fs::metadata` succeeds, symlinks followed; never an error (5.10).
@@ -2187,6 +2230,11 @@ fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // `exists("~/.config/x")` would be false for a file that is there: refused as in the others.
     shell_shorthand("check", &path)?;
     let path = verbatim_parts(&path);
+    // `f.txt/` names a folder: Windows would find the file, Linux and macOS don't.
+    let name = super::module::trim_separators(&path);
+    if !name.is_empty() && name.len() < path.len() {
+        return Ok(Value::Bool(std::fs::metadata(name).is_ok_and(|m| m.is_dir())));
+    }
     Ok(Value::Bool(std::fs::metadata(&*path).is_ok()))
 }
 
@@ -2269,25 +2317,53 @@ fn whole_tree_error(e: &std::io::Error) -> bool {
 }
 
 /// `remove_file(path)`: a file, never a folder; a link, not what it points to, as `rm` does
-/// (5.10). Windows removes a link to a folder (a junction, a directory symlink) as a folder, so
-/// one that leads to a folder goes with `remove_dir`, which takes the link alone; written with a
-/// slash at its end (`link/`) it names the folder, refused as one, and one that leads nowhere
-/// keeps `module::link_error`'s message.
+/// (5.10). Windows removes a link made as a folder's (a junction, a directory symlink, wherever
+/// it leads, nowhere too) as a folder: it goes with `remove_dir`, which takes the link alone, a
+/// read-only one too (`remove_dir_link`); written with a slash at its end (`link/`) it names the
+/// folder, refused as one.
 fn remove_file(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let path = str_arg(&args[0], "remove_file", "path")?;
     shell_shorthand("remove", &path)?;
     let path = verbatim_parts(&path);
+    slash_after_a_file("remove", &path)?;
     #[cfg(windows)]
     let dir_link = super::module::trim_separators(&path).len() == path.len()
-        && std::fs::symlink_metadata(&*path).is_ok_and(|m| std::os::windows::fs::FileTypeExt::is_symlink_dir(&m.file_type()))
-        && std::path::Path::new(&*path).is_dir();
+        && std::fs::symlink_metadata(&*path).is_ok_and(|m| std::os::windows::fs::FileTypeExt::is_symlink_dir(&m.file_type()));
     #[cfg(not(windows))]
     let dir_link = false;
-    let removed = if dir_link { std::fs::remove_dir(&*path) } else { std::fs::remove_file(&*path) };
+    let removed = if dir_link { remove_dir_link(&path) } else { std::fs::remove_file(&*path) };
     match removed {
         Ok(()) => Ok(Value::Null),
         Err(e) => file_error("remove", &path, &e),
     }
+}
+
+/// Windows: `remove_dir` of a link made as a folder's, whose read-only attribute (`attrib +r j
+/// /L`) Windows' RemoveDirectoryW refuses, as `rm` doesn't: the attribute goes from the link
+/// itself (`SetFileAttributesW` doesn't follow it), and comes back if the link can't go (5.10).
+fn remove_dir_link(path: &str) -> std::io::Result<()> {
+    let first = std::fs::remove_dir(path);
+    #[cfg(windows)]
+    if let Err(e) = &first {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_READONLY};
+        let attributes = std::fs::symlink_metadata(path).map(|m| m.file_attributes()).unwrap_or(0);
+        if e.kind() != std::io::ErrorKind::PermissionDenied || attributes & FILE_ATTRIBUTE_READONLY == 0 {
+            return first;
+        }
+        let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        // SAFETY: a NUL-terminated path; the link's own attributes, without the read-only one.
+        if unsafe { SetFileAttributesW(wide.as_ptr(), attributes & !FILE_ATTRIBUTE_READONLY) } == 0 {
+            return first;
+        }
+        let again = std::fs::remove_dir(path);
+        if again.is_err() {
+            // SAFETY: as above; the attributes it had.
+            unsafe { SetFileAttributesW(wide.as_ptr(), attributes) };
+        }
+        return again;
+    }
+    first
 }
 
 /// `script_dir()`: the folder of the file containing the call, not the entry file's (5.10).

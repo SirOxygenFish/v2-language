@@ -1,6 +1,7 @@
 // input() of a line whose last character is cut in two (by head -c, or a writer that stopped
-// there) says so, without the code page's advice, which would garble the rest; a line in a code
-// page (one byte past ASCII, at its end too) or a lone lead byte keeps it (INTERNALS 5.10).
+// there, after two characters past ASCII) says so, without the code page's advice, which would
+// garble the rest; a line in a code page (one byte past ASCII, at its end too; cp1251's Пёс,
+// which reads as one such character and a cut) or a lone lead byte keeps it (INTERNALS 5.10).
 while true {
     try {
         let line = input()
