@@ -1,0 +1,45 @@
+// requires: py
+// A loop that runs no iteration makes no frame, so it counts nothing toward the collector's next
+// collection (INTERNALS 5.1, 5.6; milestone 1.15's review): 10,000 outer iterations of a body
+// whose inner loop runs none count 20,000 slots, under the 100,000 that start one, so the cycle
+// below (with the object it holds) is still there at the end.
+@py tracker {
+    alive = 0
+    class Obj:
+        def __init__(self):
+            global alive
+            alive += 1
+        def __del__(self):
+            global alive
+            alive -= 1
+    def make():
+        return Obj()
+    def count():
+        return alive
+    @export { make, count }
+}
+@import { make, count } from tracker
+
+func keep(h) {
+    let box = [h]
+    let f = func() { return box }
+    box.push(f)
+    return box
+}
+let b = keep(make())
+b = null
+let none = []
+for i in 0..10000 {
+    for x in none {
+        let a1 = x
+        let a2 = x
+        let a3 = x
+        let a4 = x
+        let a5 = x
+        let a6 = x
+        let a7 = x
+        let a8 = x
+        let a9 = x
+    }
+}
+print(count())

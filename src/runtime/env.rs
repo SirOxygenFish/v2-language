@@ -28,8 +28,9 @@ pub struct Frame {
     /// What its last check looked at, and when (in frames left): what a recheck must wait for.
     weight: Cell<u32>,
     checked: Cell<u32>,
-    /// Frames left before it was made: a walk from a younger frame doesn't go into it.
-    born: u32,
+    /// Frames left before it was made: a walk from a younger frame doesn't go into it. A loop's
+    /// shared frame is made again for each iteration (`shared_frame`).
+    born: Cell<u32>,
 }
 
 pub struct Slot {
@@ -88,7 +89,7 @@ pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
             slots.resize_with(layout.len(), || None);
         }
         f.parent = parent.cloned();
-        f.born = born;
+        f.born.set(born);
         f.weight.set(0);
         f.checked.set(0);
         return env;
@@ -104,7 +105,7 @@ pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
         queued: Cell::new(false),
         weight: Cell::new(0),
         checked: Cell::new(0),
-        born: TICKS.with(Cell::get),
+        born: Cell::new(TICKS.with(Cell::get)),
     })
 }
 
@@ -453,41 +454,62 @@ fn pool(mut env: Env) {
     });
 }
 
-/// A frame that a loop's iterations share (`Body.reusable`), after one: its values go, as a fresh
-/// frame's would on leaving it, and the next iteration starts with nothing declared (5.6). Each
-/// value goes outside the borrow, so its drop may look at frames.
-pub fn reset(env: &Env) {
-    let n = env.slots.borrow().len();
-    for i in 0..n {
-        let old = env.slots.borrow_mut()[i].take();
-        drop(old);
+/// The frame a loop's iterations share (`Body.reusable`) for its next iteration: made on the
+/// first, and for each later one renewed as `new_frame` would make it, so the collector sees each
+/// iteration as a frame made, of its own age (5.1, 5.6).
+#[inline]
+pub fn shared_frame<'a>(shared: &'a mut Option<Env>, layout: &Layout, parent: &Env) -> &'a Env {
+    match shared {
+        Some(env) => {
+            made(layout.len() + 1);
+            env.born.set(TICKS.with(Cell::get));
+            env.weight.set(0);
+            env.checked.set(0);
+            env
+        }
+        None => shared.insert(new_frame(layout, Some(parent))),
     }
 }
 
-/// What leaving a frame does for the collector, for an iteration that shares its frame: the
-/// count of frames left that paces it, its rechecks and its collections (5.1).
-pub fn tick() {
+/// A loop iteration ending in its shared frame: what `leave` does, in its order. The frames-left
+/// count and any recheck first, then the values go, then a collection if one is due (5.1, 5.6).
+/// They go under one borrow: no value can lead back to this frame, as no closure can be made
+/// over it (`Body.reusable`), so no drop can look at its slots.
+pub fn end_iteration(env: &Env) {
     let ticks = TICKS.with(|t| {
         let n = t.get().wrapping_add(1);
         t.set(n);
         n
     });
-    if !GC_ACTIVE.with(Cell::get) {
-        return;
-    }
-    let so_far = MADE.with(Cell::get);
-    let Ok((pending, due)) = GC.try_with(|g| {
-        let g = g.borrow();
-        (!g.recheck.is_empty(), !g.remembered.is_empty() && so_far.wrapping_sub(g.since) >= g.due)
-    }) else {
-        return;
+    let (pending, due) = if GC_ACTIVE.with(Cell::get) {
+        let so_far = MADE.with(Cell::get);
+        GC.try_with(|g| {
+            let g = g.borrow();
+            (!g.recheck.is_empty(), !g.remembered.is_empty() && so_far.wrapping_sub(g.since) >= g.due)
+        })
+        .unwrap_or((false, false))
+    } else {
+        (false, false)
     };
     if pending {
         recheck(ticks);
     }
+    // A scalar needs no drop (as in `pool`).
+    for slot in env.slots.borrow_mut().iter_mut() {
+        match slot {
+            Some(Slot { value: Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_), .. }) => std::mem::forget(slot.take()),
+            _ => *slot = None,
+        }
+    }
     if due {
         collect();
     }
+}
+
+/// A loop's shared frame after its last iteration, already left (`end_iteration`): kept for
+/// `new_frame` without counting another frame left.
+pub fn release_shared(env: Env) {
+    pool(env);
 }
 
 /// Check the remembered frames a closure has let go of, each once the frames left since its
@@ -734,7 +756,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
     let Scratch { nodes, edges, todo, live } = &mut scratch;
     let n = seeds.len();
     nodes.extend(seeds.iter().map(|s| Entry { node: Node::Frame(s.clone()), addr: Rc::as_ptr(s) as usize, refs: 0, edges: (0, 0), items: 0, held: 0, walked: true, closed: false }));
-    let youngest = seeds.iter().map(|s| s.born).max().unwrap_or(0);
+    let youngest = seeds.iter().map(|s| s.born.get()).max().unwrap_or(0);
     let checked = seeds.first().map_or(0, |s| Rc::as_ptr(s) as usize);
     let mut seen = HashSet::new();
     // Found by address in that list while it is short, then through a map.
@@ -791,7 +813,7 @@ fn walk(seeds: &[Env], lazy: bool, mut budget: usize, max_nodes: usize) -> Optio
                     // with a big group and not the checked frame's own nested call: a chain built
                     // by recursion would be walked at every level.
                     let closed = lazy
-                        && matches!(&node, Node::Frame(f) if (youngest.wrapping_sub(f.born) as i32) > 0
+                        && matches!(&node, Node::Frame(f) if (youngest.wrapping_sub(f.born.get()) as i32) > 0
                             || (f.remembered.get() && f.weight.get() > SMALL_GROUP && !below(f, checked)));
                     // `count` has no copy of ours yet.
                     let walked = !lazy || (count == 1 && !closed);
