@@ -1208,7 +1208,8 @@ impl Interp {
             }
         }
         // Cut off: a worker still running at the deadline (one that exited just then, its output
-        // not read to the end yet, ended in time).
+        // not read to the end yet, ended in time), in the order the engines started.
+        open.sort_unstable();
         let notes = open
             .into_iter()
             .filter(|&s| self.sessions[s].child.as_ref().is_some_and(|c| c.exited().is_none()))
@@ -1227,8 +1228,9 @@ impl Interp {
 /// and what to do so the script waits for it.
 fn still_running_note(key: &str, language: &str) -> String {
     let (what, fix) = match key {
-        "py" => ("a thread that hadn't ended", "join it, or wait for it in an exported function"),
-        "js" => ("a timer, a server or a promise", "wait for it in an exported async function"),
+        "py" => ("a thread or an exit handler that hadn't ended", "join it, or wait for it in an exported function"),
+        // A promise alone doesn't keep Node.js running.
+        "js" => ("a timer, a server or a child process", "wait for it in an exported async function"),
         _ => ("work it hadn't finished", "wait for it in an exported function"),
     };
     format!("v2: note: {language} was still running {} s after the script ended ({what}), and was stopped: {fix}", GRACE.as_secs())

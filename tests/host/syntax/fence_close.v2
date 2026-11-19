@@ -2,7 +2,7 @@
 // stderr: fence_close.v2:11:22: SyntaxError: @js block is never closed
 // stderr: note: the fence opens here (fence_close.v2:11:26)
 // stderr: note: this line starts with the closing ```, but more follows it (fence_close.v2:13:1)
-// stderr: hint: the closing ``` must stand alone on its line: put what follows it (the ')') on the next line
+// stderr: hint: the closing ``` on line 13 must stand alone on its line: put what follows it (the ')') on the next line
 // Round 23 (DOCS 4.2): the closing fence stands alone on its line, so ```) doesn't close the
 // block; the error points at that line and says what to move.
 func t(label, f) {

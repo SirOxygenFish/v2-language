@@ -617,7 +617,7 @@ fn grace_kills_a_worker_that_ignores_bye() {
     // Round 23, 8.7: the worker the second cut off gets a note, for the end of the run to print.
     assert_eq!(
         notes,
-        ["v2: note: Python was still running 1 s after the script ended (a thread that hadn't ended), and was stopped: join it, or wait for it in an exported function"]
+        ["v2: note: Python was still running 1 s after the script ended (a thread or an exit handler that hadn't ended), and was stopped: join it, or wait for it in an exported function"]
     );
 }
 
@@ -1146,11 +1146,26 @@ fn the_grace_is_shared() {
     let _serial = crate::engines::process::tests::serial();
     let (mut it, _) = interp();
     start(&mut it, "ignore_bye", no_timeouts()).expect("started");
-    start(&mut it, "ignore_bye", no_timeouts()).expect("started");
+    // A js session second, its worker the same script, which speaks on stdin and stdout and
+    // says it is Python 3.12.
+    let mut js = builtins().into_iter().nth(1).unwrap();
+    js.protocol_fds = false;
+    js.min_version = None;
+    let (argv, env) = worker("ignore_bye");
+    let engine = ResolvedEngine { spec: Rc::new(js), argv: argv.clone(), ..clone_engine(&py()) };
+    it.start_session(Rc::new(engine), &argv, &env, no_timeouts(), at()).expect("started");
     let started = Instant::now();
-    it.shutdown_sessions();
+    let notes = it.shutdown_sessions();
     let took = started.elapsed();
     assert!(took < Duration::from_millis(1700), "one shared 1 s grace (8.7): {took:?}");
+    // Round 23's review: a note each, in the order the engines started.
+    assert_eq!(
+        notes,
+        [
+            "v2: note: Python was still running 1 s after the script ended (a thread or an exit handler that hadn't ended), and was stopped: join it, or wait for it in an exported function",
+            "v2: note: JavaScript was still running 1 s after the script ended (a timer, a server or a child process), and was stopped: wait for it in an exported async function",
+        ]
+    );
 }
 
 #[cfg(unix)]

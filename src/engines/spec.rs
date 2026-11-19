@@ -278,16 +278,25 @@ pub fn startup_vars_fix(set: &[(&str, String)]) -> String {
     format!("{}, which it reads as it starts: unset {it} or fix {it}", vars.join(" and "))
 }
 
-/// Unix, under an address-space limit (`ulimit -v`): `a memory limit (ulimit -v) of 585 MB is set
-/// for this shell, and Node.js reserves about 1 GB as it starts: raise it` (8.4, 19.2).
+/// Unix, under an address-space limit (`ulimit -v`) below what the engine needs to start: `a
+/// memory limit (ulimit -v) of 585 MB is set for this shell, and Node.js reserves about 1 GB as
+/// it starts: raise it` (8.4, 19.2). A higher limit isn't why it failed: `None`.
 pub fn limit_fix(id: &str) -> Option<String> {
     #[cfg(unix)]
-    let megabytes = crate::address_limit().map(|l| l >> 20);
+    let limit = crate::address_limit();
     #[cfg(not(unix))]
-    let megabytes: Option<u64> = None;
+    let limit: Option<u64> = None;
+    limit_fix_at(id, limit)
+}
+
+/// `limit_fix` under a limit of `bytes`. Node.js 22 starts in about 700 MB of address space,
+/// Python with V2's worker in about 30 MB (round 23): a limit under 2 GB, or 256 MB, may be why.
+pub fn limit_fix_at(id: &str, bytes: Option<u64>) -> Option<String> {
     // ts runs on Node.js too (7.6).
-    let needs = if matches!(id, "js" | "ts") { "Node.js reserves about 1 GB" } else { "the engine may need more" };
-    megabytes.map(|mb| format!("a memory limit (ulimit -v) of {mb} MB is set for this shell, and {needs} as it starts: raise it"))
+    let node = matches!(id, "js" | "ts");
+    let enough: u64 = if node { 2 << 30 } else { 256 << 20 };
+    let needs = if node { "Node.js reserves about 1 GB" } else { "the engine may need more" };
+    bytes.filter(|&b| b < enough).map(|b| format!("a memory limit (ulimit -v) of {} MB is set for this shell, and {needs} as it starts: raise it", b >> 20))
 }
 
 /// Which package manager a Linux uses, from `/etc/os-release`'s `ID` and `ID_LIKE` (7.8).
@@ -496,5 +505,20 @@ mod tests {
             package_line(Family::Unknown, "sudo ", "libatomic1", "libatomic", Some(())),
             "on Debian and Ubuntu, sudo apt install libatomic1; on Fedora, sudo dnf install libatomic"
         );
+    }
+
+    #[test]
+    fn only_a_limit_under_what_the_engine_needs_is_blamed() {
+        // Round 23's review, 8.4: Node.js needs about 1 GB to start, Python little; a limit far
+        // above that isn't why a program failed.
+        let node = "a memory limit (ulimit -v) of 48 MB is set for this shell, and Node.js reserves about 1 GB as it starts: raise it";
+        assert_eq!(limit_fix_at("js", Some(48 << 20)).as_deref(), Some(node));
+        assert_eq!(limit_fix_at("ts", Some(48 << 20)).as_deref(), Some(node));
+        assert!(limit_fix_at("js", Some((2 << 30) - 1)).is_some());
+        assert_eq!(limit_fix_at("js", Some(2 << 30)), None);
+        assert_eq!(limit_fix_at("js", Some(8_000_000 << 10)), None);
+        assert_eq!(limit_fix_at("js", None), None);
+        assert_eq!(limit_fix_at("py", Some(100 << 20)).as_deref(), Some("a memory limit (ulimit -v) of 100 MB is set for this shell, and the engine may need more as it starts: raise it"));
+        assert_eq!(limit_fix_at("py", Some(1 << 30)), None);
     }
 }
