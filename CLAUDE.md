@@ -23,50 +23,31 @@ it is loaded automatically into every session and every subagent.
 - Status: ROADMAP "Where we are". Phase 2 needs the owner's go-ahead.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
-- Released `v0.1.0-alpha.1` on 2026-11-12 (`main`, CI green; the crate version matches the tag).
-- Milestone 1.15 (interpreter speed, the owner's request of 2026-11-19) is done: ROADMAP 1.15.
-  More speed is the next phase's compiler.
-- Now: ROADMAP "Pre-publish" (owner-approved 2026-11-14): newcomer README, release.yml + install
-  scripts (§22.6), first-run messages, clean-machine tests, newcomer agents round after round.
-  Pushing `v2-reboot` and CI are fine; merging, new tags and publishing the draft release
-  (`v0.1.0-alpha.2`) wait for the owner's OK. Ask before creating OS user accounts.
-  A `v2-reboot` push whose commit message contains `[release]` rebuilds the draft (release.yml).
-  Subagents always get this file and the memory index (renaming CLAUDE.md doesn't stop it), so
-  newcomer agents are told to ignore them. Clean Linux: `wsl --import` of the official Ubuntu
-  base images in scratchpad/distro-images (root only, no users); remove with `wsl --unregister`.
-  The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
-  `C:\tmp` and `C:\var` are round 19's test leftovers (the safety check refused their removal; the
-  owner was asked to delete them): leave them; tmp_on_windows_points_to_temp skips while there.
-  Rounds 1 to 23 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds (again on 2026-11-17).
-  Round 23 closed 2026-11-19 (ROADMAP log). The owner stopped its agents on 2026-11-18 over usage
-  (about 4M tokens a round); I recommended ending the rounds (they find edge cases now): no round
-  24 unless the owner asks, and then a lean one (one newcomer, one implementer, one review).
-  With workflows off, a round runs as Agent calls (worktree isolation, run_in_background), each
-  implementer reviewed by another agent and sent the review by SendMessage. Round 20's reviews
-  needed four passes after the first fixes; stop a chain once its issues are nits. Rounds run as workflows:
-  two newcomers, refuters that reproduce each finding (printing e.hint) and check the docs, then
-  implementers per area in worktrees with a reviewer each, merged into v2-reboot, then a pass on
-  the reviews' issues, then mine on the second reviews'. A worktree may start from main, not
-  v2-reboot: give agents the base commit and have them check it. (Round 23's prompts:
-  scratchpad/newcomer/prompt-*-r23.md, made by scratchpad/setup_round23.py (distro v2new24w; round 21's
-  v2win21 for the Windows agent's WSL side; WSL-share tests: V2_TEST_WSL_DISTRO=v2win21, set from
-  PowerShell or Python, never Git Bash); each round takes new angles, a new distro and sandbox; the round's distro is where paths.sh's noexec
-  cases run as root; agents may read the archive's DOCS.md; the Windows one forbids
-  windowed programs and files named like PATH programs: round 5's code.cmd ran VS Code).
-  Heredocs mangle `\n` in edit scripts too: Write them (scratchpad/swap.py FILE OLD NEW keeps
-  line endings). A swap-out proof in WSL: `touch` the restored files after the rsync, as rsync -a
-  keeps Windows' older mtimes and cargo would keep the swapped-out build.
-  CI's minimum Node (22.13) for local checks: WSL Ubuntu's ~/node2213/node-v22.13.0-linux-x64/bin
-  first on PATH (copied from round 5's distro, which checked it against nodejs.org's SHASUMS).
-  Newcomer agents work as root only: no user accounts, not even in a throwaway distro (the
-  owner's rule; the auto-mode classifier also blocks it). Loop until a round finds nothing new.
-  Installer test changes run on Windows, WSL and the Mac before they are pushed. Installer tests: tests/install/paths.{sh,ps1} (paths.ps1 never
-  changes the user PATH without -ModifyPath, CI only).
-  Newcomer prompts: scratchpad/newcomer/prompt-{linux,windows}.md (session-local; rewrite if gone).
-  Owner decisions still open: `#!` lines, static members of imported classes, `v2 check` finding
+- Released `v0.1.0-alpha.1` (2026-11-12) and `v0.1.0-alpha.2` (2026-11-19, on the owner's OK: a
+  published GitHub pre-release with the binaries; `main` = its tag, 80cee2c; CI green; the README
+  one-liners install it on Windows, Linux and macOS). Pre-publish and milestone 1.15 (interpreter
+  speed) are done: ROADMAP.
+- Next, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order. Pushing
+  `v2-reboot` and CI are fine; merging, tags and publishing wait for the owner's OK. Ask before
+  creating OS user accounts.
+- A `[release]` push now fails (release.yml leaves a published release alone): the next release
+  first bumps the version in Cargo.toml, install.sh and install.ps1 (release.yml checks all three).
+- Owner decisions still open: `#!` lines, static members of imported classes, `v2 check` finding
   undeclared names.
-  Then, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order.
+- Newcomer rounds ended after round 23 (2026-11-19; about 4M tokens a round, and the owner stopped
+  round 23's agents over usage): no round 24 unless the owner asks, and then a lean one (one
+  newcomer, one implementer, one review). How they ran is in the ROADMAP log. Agents always get
+  this file and the memory index, so newcomers are told to ignore them; they work as root only,
+  with no OS user accounts (the owner's rule). Clean Linux: `wsl --import` of the official Ubuntu
+  base images in scratchpad/distro-images; remove with `wsl --unregister`.
+- The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`): never touch it
+  (install.ps1 warns that it shadows a new install). `C:\tmp` and `C:\var` are round 19's test
+  leftovers: leave them; tmp_on_windows_points_to_temp skips while they are there.
+- Installer changes run on Windows, WSL and the Mac before they are pushed (tests/install/
+  paths.{sh,ps1}; paths.ps1 changes the user PATH only with -ModifyPath, in CI). WSL-share tests:
+  V2_TEST_WSL_DISTRO=v2win21, set from PowerShell, never Git Bash. CI's minimum Node for local
+  checks: WSL's ~/node2213/node-v22.13.0-linux-x64/bin first on PATH. A swap-out proof in WSL:
+  `touch` the restored files after the rsync (rsync -a keeps Windows' older mtimes).
 - `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
   commit it; it is in `.git/info/exclude`.
 - macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
