@@ -99,37 +99,43 @@ pub fn bind(fname: &str, params: &[Param], pos: Vec<Value>, named: Vec<(Rc<str>,
     Ok(bound)
 }
 
-/// The usual call: positional arguments that fit, the rest with defaults, or a rest parameter
-/// last (`push(...items)`) with each parameter before it given. They are already the values in
-/// order, so the binder isn't needed. `Err` hands them back for `bind_spec`, which checks them
-/// and says what is wrong.
-pub fn bind_plain(specs: &[ParamSpec], mut pos: Vec<Value>, named: &[(Rc<str>, Value)]) -> Result<Vec<Value>, Vec<Value>> {
-    if !named.is_empty() {
-        return Err(pos);
+/// The usual call, bound without the binder: the positional arguments fill the parameters in
+/// order (a rest parameter takes what is left after those before it), and each parameter after
+/// them is its named argument or its default (`print(x, end: "")`, `push(...items)`). `Err`
+/// hands the arguments back for `bind_spec` when anything is out of the ordinary (too many or too
+/// few, a name for a parameter already given, an unknown name), which it checks and says.
+pub fn bind_plain(specs: &[ParamSpec], mut pos: Vec<Value>, mut named: Named) -> Result<Vec<Value>, (Vec<Value>, Named)> {
+    let rest = specs.iter().position(|s| s.rest);
+    // The parameters left to named arguments and defaults start here.
+    let open = match rest {
+        None if pos.len() <= specs.len() => pos.len(),
+        Some(r) if pos.len() >= r => r + 1,
+        _ => return Err((pos, named)),
+    };
+    let left = &specs[open..];
+    let named_ok = named.iter().all(|(n, _)| left.iter().any(|s| s.name == &**n));
+    if !named_ok || left.iter().any(|s| s.default.is_none() && !named.iter().any(|(n, _)| s.name == &**n)) {
+        return Err((pos, named));
     }
-    match specs.iter().position(|s| s.rest) {
-        None if pos.len() <= specs.len() => {
-            let left = &specs[pos.len()..];
-            if left.iter().all(|s| s.default.is_some()) {
-                pos.extend(left.iter().map(|s| s.default.map_or(Value::Null, |d| d())));
-                return Ok(pos);
-            }
-            Err(pos)
-        }
-        Some(r) if r + 1 == specs.len() && pos.len() >= r => {
-            let rest = pos.split_off(r);
-            pos.push(Value::list(rest));
-            Ok(pos)
-        }
-        _ => Err(pos),
+    if let Some(r) = rest {
+        let items = pos.split_off(r);
+        pos.push(Value::list(items));
     }
+    for s in left {
+        let v = match named.iter().position(|(n, _)| s.name == &**n) {
+            Some(i) => named.swap_remove(i).1,
+            None => s.default.map_or(Value::Null, |d| d()),
+        };
+        pos.push(v);
+    }
+    Ok(pos)
 }
 
 /// Bind for a builtin or method: defaults are filled in, so every slot holds a value.
 pub fn bind_spec(fname: &str, specs: &[ParamSpec], pos: Vec<Value>, named: Vec<(Rc<str>, Value)>) -> Exec<Vec<Value>> {
-    let pos = match bind_plain(specs, pos, &named) {
+    let (pos, named) = match bind_plain(specs, pos, named) {
         Ok(args) => return Ok(args),
-        Err(pos) => pos,
+        Err(given) => given,
     };
     let params: Vec<Param> =
         specs.iter().map(|s| Param { name: s.name, has_default: s.default.is_some(), rest: s.rest }).collect();

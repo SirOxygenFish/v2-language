@@ -136,18 +136,23 @@ it is loaded automatically into every session and every subagent.
   height MAX_LINKS 10,000; anonymous functions are `func(…)`, there is no `lambda`), `check`
   (static checks, 4.5, incl. "this expression's value is not used" and a loop's `let i = i + 1`), `ast`.
 - `runtime/`: `interp` (exec/eval take `&Env` and keep only the common cases, the rest in
-  `exec_other`/`eval_other`; `binary` has an int fast path, `direct_call` puts args straight in the
-  frame; stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
+  `exec_other`/`eval_other`; 1.15's fast paths (5.7): `leaf` (an int or a variable without eval),
+  `peek_int`/`int_op` (`binary`'s ints read in place), `direct_call` (+ `direct_call_named`,
+  `fill_params`) and call_value's `fill_params_pos` bind without the binder, `run_body`'s tail
+  `return` and guard clause, `compound_slot` (`x op= y`: peek, never a copy, or `s +=` stops
+  growing in place), loops' shared frames (`Body.reusable`, `LoopVars`, `exec_while`); stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
   `call_value(f, pos, named, at)` calls any V2 value from Rust; `line`: 12.7), `value` (`Callable` = Closure |
   Builtin | Proxy {session, unit, name} | Route {route, name} | Waiting {import, local, seen,
   resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`;
   `Str`: an `Rc<str>` until `+=` grows it in place (`env::grow`); `DictMap`: dicts in order with
   holes, O(1) remove),
   `env` (`Frame` = layout + slots, by position; an empty slot means not declared yet, so reads
-  and writes fall back by name; a spare-array pool; the frame cycle collector of 5.1: `walk`
+  and writes fall back by name; a spare-array pool and `POOL` of whole frames (`pool`,
+  `new_frame`), `reset`/`tick` for a loop's shared frame, `read_int`/`update_int`, `GC_ACTIVE`
+  (the collector's lists looked at only once it has kept a frame); the frame cycle collector of 5.1: `walk`
   (lazy for `leave` and `recheck`, everything for `collect`); `closure_dropped` from `Func::drop`
   queues rechecks; `made()` counts list items, dict entries and frame slots, which start
-  collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
+  collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`, its fast path `bind_plain`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
   `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`; `write_stderr` (a closed stderr is 141); `input(echo: false)`: `EchoOff`, Unix `ECHO_SAVED`/`background`/`echo_around_stop` (Ctrl+Z), Windows `ECHO_MODE`/`echo_back`; files (round 23): `replace_file` (Windows write_file: lock held through cut and write), `write_to_stream`, `device_path`, `busy_hint`, `program_file`, `folder_link`/`remove_dir_link`, `long_name`, `slash_after_a_file`, `cut_utf8` (read_file, input) and exec's `cut_output`; exec output: `by_lines`, `other_text`, `single_byte`, `pick_code_page`, `other_code_page`, `code_page_text`/`strict_code_page_text`; exec start errors: `start_error`, `with_commas`), `error` (ErrorValue, Flow, `fail`,
@@ -232,6 +237,10 @@ it is loaded automatically into every session and every subagent.
   `V2_TEST_REQUIRE`. `Pty` (Unix: `wait`/`reap` keep reading, as macOS holds a session leader's exit until its
   output is read; `flags` through the master, as macOS revokes the slave). `run_with_files` / `run_with_files_env` / `doctor_rows` helpers for CLI
   tests. `tests/v2.toml` is comment-only (it just stops the upward config search).
+- `bench/`: the interpreter's benchmarks (fib, loop, while, calls, closures, lists, dicts, strings,
+  errors, and engine ones), `measure.py` (wall-time medians) and `callgrind.sh` (instruction counts
+  in WSL, `--top NAME`); 1.15's baseline and numbers are in ROADMAP. Compare full-size wall times
+  too: a quadratic cost hides at callgrind's small sizes.
 - `ffi/`: `cdecl` (C declarations; `parse_definition_head` waits for 15.3 (roadmap 2.3)),
   `types` (CType, Sig), `call` (libffi smoke test).
 
