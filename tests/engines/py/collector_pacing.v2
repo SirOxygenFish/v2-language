@@ -1,0 +1,35 @@
+// requires: py
+// The collector of cycles through frames runs once the program has made as many list items,
+// dict entries and frame slots as it found alive, at least 100,000 (INTERNALS 5.1). Each loop
+// iteration counts as a frame made, also when a loop's iterations share one frame (milestone
+// 1.15's review): an empty loop of 100,000 iterations starts a collection, which frees the cycle
+// below (a list holding a closure over the frame that holds the list), and the object it held.
+@py tracker {
+    alive = 0
+    class Obj:
+        def __init__(self):
+            global alive
+            alive += 1
+        def __del__(self):
+            global alive
+            alive -= 1
+    def make():
+        return Obj()
+    def count():
+        return alive
+    @export { make, count }
+}
+@import { make, count } from tracker
+
+func keep(h) {
+    let box = [h]
+    let f = func() { return box }
+    box.push(f)
+    return box
+}
+let b = keep(make())
+b = null
+print(count())
+for i in 0..100000 {
+}
+print(count())

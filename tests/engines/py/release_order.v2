@@ -1,0 +1,77 @@
+// requires: py
+// When values are released, a Python object's __del__ the witness (INTERNALS 5.1, 5.6, 5.7):
+// milestone 1.15's fast paths keep the order of the general ones (its review). At the end of a
+// loop iteration the frame's values go in slot order, then the loop's own copies of its
+// variables; a call with named arguments that fails releases what was evaluated as the binder
+// did (an argument failing: the named ones given so far, then the positional ones; a default
+// failing: what no parameter took, then the frame); a cycle that a loop local let go of waits
+// for a collection, as it did when each iteration had a frame of its own.
+@py tr {
+    log = []
+    alive = 0
+    class Obj:
+        def __init__(self, n):
+            global alive
+            alive += 1
+            self.n = n
+        def __del__(self):
+            global alive
+            alive -= 1
+            log.append(f"del {self.n}")
+    def make(n):
+        return Obj(n)
+    def gen(n):
+        for i in range(n):
+            yield Obj(f"item{i}")
+    def take():
+        out = list(log)
+        log.clear()
+        return out
+    def count():
+        return alive
+    @export { make, gen, take, count }
+}
+@import { make, gen, take, count } from tr
+
+for o in gen(3) {
+    let h = make(f"local${o.n}")
+}
+print(take())
+for i, o in gen(2) {
+    let h = make(f"local${i}")
+}
+print(take())
+for o in gen(2) {
+    let h = make(f"local${o.n}")
+    let f = func() => h
+}
+print(take())
+
+func boom() {
+    throw error("ValueError", "boom")
+}
+func f(a, b = boom(), c = 0) {
+    return 1
+}
+try { f(make("a"), c: make("c")) } catch (e) { print(e.message) }
+print(take())
+func g(a, b = 0, c = 0, d = 0) {
+    return 1
+}
+try { g(make("a"), d: make("d"), c: make("c"), b: boom()) } catch (e) { print(e.message) }
+print(take())
+try { g(make("a"), make("b"), d: boom()) } catch (e) { print(e.message) }
+print(take())
+
+func keep(h) {
+    let box = [h]
+    return func() { return box }
+}
+for i in 0..5 {
+    let k = keep(make(f"kept${i}"))
+    let box = k()
+    box.push(k)
+    k = null
+    print(i, count())
+}
+print("end", count())
