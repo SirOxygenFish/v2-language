@@ -728,13 +728,10 @@ impl Interp {
             StmtKind::Return(_) => return Err(Flow::Return(Value::Null)),
             StmtKind::Throw(e) => return Err(self.throw(e, s.span, env)),
             StmtKind::While { cond, body } => {
-                let shared = match &body.layout {
-                    Some(layout) if body.reusable => Some(new_frame(layout, Some(env))),
-                    _ => None,
-                };
-                let r = self.exec_while(cond, body, env, shared.as_ref());
+                let mut shared = None;
+                let r = self.exec_while(cond, body, env, &mut shared);
                 if let Some(frame) = shared {
-                    env::leave(frame);
+                    env::release_shared(frame);
                 }
                 r?
             }
@@ -982,18 +979,18 @@ impl Interp {
         }
     }
 
-    /// `while`: its body in a frame of its own each time, or in `shared` (`Body.reusable`),
-    /// emptied after each, as a fresh one would be left (5.6).
-    fn exec_while(&mut self, cond: &Expr, body: &Body, env: &Env, shared: Option<&Env>) -> Exec<()> {
+    /// `while`: its body in a frame of its own each time, or in `shared` (`Body.reusable`), made
+    /// on the first time and renewed and left each time as a fresh one would be (5.6).
+    fn exec_while(&mut self, cond: &Expr, body: &Body, env: &Env, shared: &mut Option<Env>) -> Exec<()> {
         while self.condition(cond, env)? {
-            let r = match shared {
-                Some(frame) => {
+            let r = match &body.layout {
+                Some(layout) if body.reusable => {
+                    let frame = env::shared_frame(shared, layout, env);
                     let r = self.exec_in(body, frame);
-                    env::reset(frame);
-                    env::tick();
+                    env::end_iteration(frame);
                     r
                 }
-                None => self.exec_body(body, env),
+                _ => self.exec_body(body, env),
             };
             match r {
                 Ok(()) | Err(Flow::Continue) => {}
@@ -1004,33 +1001,33 @@ impl Interp {
         Ok(())
     }
 
-    /// One loop iteration in a fresh frame holding the loop variables (5.6). `Ok(false)` ends
-    /// the loop.
-    fn iteration(&mut self, body: &Body, env: &Env, vars: LoopVars, shared: Option<&Env>) -> Exec<bool> {
+    /// One loop iteration in a fresh frame holding the loop variables (5.6), or, for a body
+    /// nothing can keep its frame from (`Body.reusable`), in `shared`: made on the first
+    /// iteration, renewed for each later one as `new_frame` would make it and left as `leave`
+    /// leaves (`env::shared_frame`, `env::end_iteration`). This is for variables whose release
+    /// nothing can see (ints, floats, strings); `item_iteration` is for the rest. `Ok(false)`
+    /// ends the loop.
+    fn iteration(&mut self, body: &Body, env: &Env, vars: LoopVars, shared: &mut Option<Env>) -> Exec<bool> {
         let ((n, v), second) = vars;
-        let r = match shared {
-            // One frame for every iteration of a body nothing can keep it from (5.6): emptied
-            // after each, as a fresh one would be left.
-            Some(frame) => {
+        let layout = body.layout.as_ref().expect("a loop body has a frame");
+        let r = if body.reusable {
+            let frame = env::shared_frame(shared, layout, env);
+            declare_at(frame, n.slot, v, false);
+            if let Some((n, v)) = second {
                 declare_at(frame, n.slot, v, false);
-                if let Some((n, v)) = second {
-                    declare_at(frame, n.slot, v, false);
-                }
-                let r = self.exec_in(body, frame);
-                env::reset(frame);
-                env::tick();
-                r
             }
-            None => {
-                let frame = new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env));
+            let r = self.exec_in(body, frame);
+            env::end_iteration(frame);
+            r
+        } else {
+            let frame = new_frame(layout, Some(env));
+            declare_at(&frame, n.slot, v, false);
+            if let Some((n, v)) = second {
                 declare_at(&frame, n.slot, v, false);
-                if let Some((n, v)) = second {
-                    declare_at(&frame, n.slot, v, false);
-                }
-                let r = self.exec_in(body, &frame);
-                env::leave(frame);
-                r
             }
+            let r = self.exec_in(body, &frame);
+            env::leave(frame);
+            r
         };
         match r {
             Ok(()) | Err(Flow::Continue) => Ok(true),
@@ -1039,17 +1036,37 @@ impl Interp {
         }
     }
 
+    /// `iteration` for a list's, a dict's or a handle's items, whose release the program can see
+    /// (a handle's goes to its worker): the frame holds copies of the loop variables, and the
+    /// loop's own go after it, so they are released last, as when each iteration had a frame of
+    /// its own. Scalars need no copies.
+    fn item_iteration(&mut self, body: &Body, env: &Env, vars: LoopVars, shared: &mut Option<Env>) -> Exec<bool> {
+        let scalar = |v: &Value| matches!(v, Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_));
+        if scalar(&vars.0 .1) && vars.1.as_ref().is_none_or(|(_, v)| scalar(v)) {
+            return self.iteration(body, env, vars, shared);
+        }
+        self.kept_iteration(body, env, vars, shared)
+    }
+
+    #[inline(never)]
+    fn kept_iteration(&mut self, body: &Body, env: &Env, vars: LoopVars, shared: &mut Option<Env>) -> Exec<bool> {
+        let own = (vars.0 .1.clone(), vars.1.as_ref().map(|(_, v)| v.clone()));
+        let r = self.iteration(body, env, vars, shared);
+        drop(own);
+        r
+    }
+
     /// `for` evaluates its iterable once and walks a snapshot of it (5.8).
     fn exec_for(&mut self, first: &Name, second: Option<&Name>, iter: &ForIter, body: &Body, env: &Env) -> Exec<()> {
-        let shared = body.reusable.then(|| new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env)));
-        let r = self.exec_for_in(first, second, iter, body, env, shared.as_ref());
+        let mut shared = None;
+        let r = self.exec_for_in(first, second, iter, body, env, &mut shared);
         if let Some(frame) = shared {
-            env::leave(frame);
+            env::release_shared(frame);
         }
         r
     }
 
-    fn exec_for_in(&mut self, first: &Name, second: Option<&Name>, iter: &ForIter, body: &Body, env: &Env, shared: Option<&Env>) -> Exec<()> {
+    fn exec_for_in(&mut self, first: &Name, second: Option<&Name>, iter: &ForIter, body: &Body, env: &Env, shared: &mut Option<Env>) -> Exec<()> {
         // With two variables, the first gets the index (the key for a dict).
         let pair = |a: Value, b: Value| -> LoopVars {
             match second {
@@ -1110,7 +1127,7 @@ impl Interp {
                     Value::List(l) => {
                         let items = l.borrow().clone();
                         for (i, x) in items.into_iter().enumerate() {
-                            if !self.iteration(body, env, pair(Value::Int(i as i64), x), shared)? {
+                            if !self.item_iteration(body, env, pair(Value::Int(i as i64), x), shared)? {
                                 break;
                             }
                         }
@@ -1122,7 +1139,7 @@ impl Interp {
                                 Some(s) => ((first, Value::Str(k.into())), Some((s, v))),
                                 None => ((first, Value::Str(k.into())), None),
                             };
-                            if !self.iteration(body, env, vars, shared)? {
+                            if !self.item_iteration(body, env, vars, shared)? {
                                 break;
                             }
                         }
@@ -1165,7 +1182,7 @@ impl Interp {
     /// `[key, value]` pairs, so one variable is the key and two are key and value, as for a
     /// dict; anything else gives items, or index and item, as for a list.
     #[allow(clippy::too_many_arguments)]
-    fn for_handle(&mut self, h: &HandleRef, first: &Name, second: Option<&Name>, body: &Body, env: &Env, at: Span, shared: Option<&Env>) -> Exec<()> {
+    fn for_handle(&mut self, h: &HandleRef, first: &Name, second: Option<&Name>, body: &Body, env: &Env, at: Span, shared: &mut Option<Env>) -> Exec<()> {
         let (it, mapping) = self.handle_iter(h, second.is_some(), at)?;
         let mut index = 0;
         loop {
@@ -1190,7 +1207,7 @@ impl Interp {
                     }
                 };
                 index += 1;
-                if !self.iteration(body, env, vars, shared)? {
+                if !self.item_iteration(body, env, vars, shared)? {
                     return Ok(());
                 }
             }
@@ -1618,11 +1635,31 @@ impl Interp {
         let mut values: [Option<Value>; MAX_DIRECT] = Default::default();
         for (i, a) in args.iter().enumerate() {
             let (Arg::Pos(x) | Arg::Named(_, x)) = a else { unreachable!("checked above") };
-            values[to[i]] = Some(self.leaf(x, env)?);
+            match self.leaf(x, env) {
+                Ok(v) => values[to[i]] = Some(v),
+                Err(flow) => {
+                    // Released as the binder's path releases them: the named arguments given so
+                    // far, in order, then the positional ones.
+                    for (j, b) in args[..i].iter().enumerate() {
+                        if matches!(b, Arg::Named(..)) {
+                            drop(values[to[j]].take());
+                        }
+                    }
+                    drop(values);
+                    return Err(flow);
+                }
+            }
         }
         self.enter(name, at)?;
         let frame = new_frame(&decl.layout, Some(captured));
-        let r = self.fill_params(decl, &frame, &mut values).and_then(|()| self.run_body(decl, &frame));
+        let r = match self.fill_params(decl, &frame, &mut values) {
+            Ok(()) => self.run_body(decl, &frame),
+            // What no parameter took goes before the frame, as the binder's path has it.
+            Err(flow) => {
+                drop(values);
+                Err(flow)
+            }
+        };
         self.calls.pop();
         env::leave(frame);
         r.map(Some)

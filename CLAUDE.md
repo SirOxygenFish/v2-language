@@ -24,6 +24,8 @@ it is loaded automatically into every session and every subagent.
 
 ## In flight (update at every step boundary; trim when a milestone closes)
 - Released `v0.1.0-alpha.1` on 2026-11-12 (`main`, CI green; the crate version matches the tag).
+- Milestone 1.15 (interpreter speed, the owner's request of 2026-11-19) is done: ROADMAP 1.15.
+  More speed is the next phase's compiler.
 - Now: ROADMAP "Pre-publish" (owner-approved 2026-11-14): newcomer README, release.yml + install
   scripts (§22.6), first-run messages, clean-machine tests, newcomer agents round after round.
   Pushing `v2-reboot` and CI are fine; merging, new tags and publishing the draft release
@@ -108,6 +110,10 @@ it is loaded automatically into every session and every subagent.
   (the repo lives in `Desktop\My Stuff\v2-language`; quote the path, it has a space)
   (also `cargo clippy --all-targets` there: nightly has extra lints, and cfg(unix) code only
   compiles there).
+- WSL's `Catastrophic failure ... E_UNEXPECTED` during heavy runs: most likely the VM running out
+  of memory (2026-11-19: generated programs of 5 GB each, an OOM kill in `dmesg`). Cap each
+  program's address space (RLIMIT_AS, 3 GB at most 8 at a time) and send output to files, not
+  pipes; `wsl --shutdown` recovers.
 - For review workflows, copy `target/debug/v2.exe` to the scratchpad and let agents use that
   snapshot (never cargo in the repo while agents run).
 - `cargo test` = unit tests + `tests/run.rs` (the .v2 harness + CLI tests). Clippy must be clean.
@@ -140,7 +146,7 @@ it is loaded automatically into every session and every subagent.
   `peek_int`/`int_op` (`binary`'s ints read in place), `direct_call` (+ `direct_call_named`,
   `fill_params`) and call_value's `fill_params_pos` bind without the binder, `run_body`'s tail
   `return` and guard clause, `compound_slot` (`x op= y`: peek, never a copy, or `s +=` stops
-  growing in place), loops' shared frames (`Body.reusable`, `LoopVars`, `exec_while`); stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
+  growing in place), loops' shared frames (`Body.reusable`, `LoopVars`, `exec_while`; `item_iteration` copies a list's, dict's or handle's loop variables to keep their release order); stacks: `calls` and `import_stack`; `guard()` at 7/8 of the stack, on calls and `eval_other`; MAX_CALLS 10,000; `files` (FileScope per file), `units`, `routes`;
   `call_value(f, pos, named, at)` calls any V2 value from Rust; `line`: 12.7), `value` (`Callable` = Closure |
   Builtin | Proxy {session, unit, name} | Route {route, name} | Waiting {import, local, seen,
   resolved}: an `@import` that hasn't run, settled at first use by `interp.settle`/`settled`;
@@ -148,7 +154,7 @@ it is loaded automatically into every session and every subagent.
   holes, O(1) remove),
   `env` (`Frame` = layout + slots, by position; an empty slot means not declared yet, so reads
   and writes fall back by name; a spare-array pool and `POOL` of whole frames (`pool`,
-  `new_frame`), `reset`/`tick` for a loop's shared frame, `read_int`/`update_int`, `GC_ACTIVE`
+  `new_frame`), `shared_frame`/`end_iteration`/`release_shared` for a loop's shared frame, `read_int`/`update_int`, `GC_ACTIVE`
   (the collector's lists looked at only once it has kept a frame); the frame cycle collector of 5.1: `walk`
   (lazy for `leave` and `recheck`, everything for `collect`); `closure_dropped` from `Func::drop`
   queues rechecks; `made()` counts list items, dict entries and frame slots, which start
