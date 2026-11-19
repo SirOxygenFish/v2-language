@@ -83,7 +83,10 @@ pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
         if !Rc::ptr_eq(f.layout.get_mut(), layout) {
             *f.layout.get_mut() = layout.clone();
         }
-        f.slots.get_mut().resize_with(layout.len(), || None);
+        let slots = f.slots.get_mut();
+        if slots.len() != layout.len() {
+            slots.resize_with(layout.len(), || None);
+        }
         f.parent = parent.cloned();
         f.born = born;
         f.weight.set(0);
@@ -153,6 +156,32 @@ fn frame_at(env: &Env, hops: u32) -> &Env {
 #[inline]
 pub fn read(env: &Env, hops: u32, index: u32) -> Option<Value> {
     frame_at(env, hops).slots.borrow()[index as usize].as_ref().map(|slot| slot.value.clone())
+}
+
+/// The int at a position, without a copy of the value: `None` if it isn't declared yet or holds
+/// something else.
+#[inline]
+pub fn read_int(env: &Env, hops: u32, index: u32) -> Option<i64> {
+    match frame_at(env, hops).slots.borrow()[index as usize] {
+        Some(Slot { value: Value::Int(n), .. }) => Some(n),
+        _ => None,
+    }
+}
+
+/// `x = f(x)` for the int `x` at a position, in place: whether it was done (the slot holds an
+/// int, isn't a constant, and `f` gave one). Otherwise nothing changed.
+#[inline]
+pub fn update_int(env: &Env, hops: u32, index: u32, f: impl FnOnce(i64) -> Option<i64>) -> bool {
+    match &mut frame_at(env, hops).slots.borrow_mut()[index as usize] {
+        Some(Slot { value: Value::Int(n), is_const: false }) => match f(*n) {
+            Some(r) => {
+                *n = r;
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 /// Write the slot at a position.
@@ -302,6 +331,9 @@ thread_local! {
     };
     /// A check is dropping the copies it held, which are no one letting go.
     static CHECKING: Cell<bool> = const { Cell::new(false) };
+    /// The collector has had something to recheck or keep since the run began: until then,
+    /// leaving a frame needn't look at its lists.
+    static GC_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// A closure over `env` is going and leaves at most one holder: each remembered frame from `env`
@@ -314,6 +346,7 @@ pub fn closure_dropped(env: &Env) {
     while let Some(f) = frame {
         if f.remembered.get() && !f.queued.get() {
             let queued = GC.try_with(|g| g.try_borrow_mut().map(|mut g| g.recheck.push(Rc::downgrade(f))).is_ok());
+            let _ = GC_ACTIVE.try_with(|a| a.set(true));
             f.queued.set(queued.unwrap_or(false));
         }
         frame = f.parent.as_ref();
@@ -325,14 +358,22 @@ pub fn closure_dropped(env: &Env) {
 /// frame now, its slots are cleared so it goes; if something else still does (a closure that
 /// was returned), it is remembered, for rechecks and collections (5.1).
 pub fn leave(env: Env) {
-    let ticks = TICKS.with(|t| t.get().wrapping_add(1));
-    TICKS.with(|t| t.set(ticks));
-    let so_far = MADE.with(Cell::get);
-    let Ok((pending, due)) = GC.try_with(|g| {
-        let g = g.borrow();
-        (!g.recheck.is_empty(), !g.remembered.is_empty() && so_far.wrapping_sub(g.since) >= g.due)
-    }) else {
-        return;
+    let ticks = TICKS.with(|t| {
+        let n = t.get().wrapping_add(1);
+        t.set(n);
+        n
+    });
+    let (pending, due) = if GC_ACTIVE.with(Cell::get) {
+        let so_far = MADE.with(Cell::get);
+        let Ok(state) = GC.try_with(|g| {
+            let g = g.borrow();
+            (!g.recheck.is_empty(), !g.remembered.is_empty() && so_far.wrapping_sub(g.since) >= g.due)
+        }) else {
+            return;
+        };
+        state
+    } else {
+        (false, false)
     };
     if pending {
         recheck(ticks);
@@ -358,6 +399,7 @@ pub fn leave(env: Env) {
     env.weight.set(u32::try_from(weight).unwrap_or(u32::MAX));
     env.checked.set(ticks);
     env.remembered.set(true);
+    let _ = GC_ACTIVE.try_with(|a| a.set(true));
     let _ = GC.try_with(|g| {
         let mut g = g.borrow_mut();
         g.remembered.push(Rc::downgrade(&env));
@@ -381,7 +423,10 @@ fn pool(mut env: Env) {
         return;
     }
     let Some(f) = Rc::get_mut(&mut env) else { return };
-    f.slots.get_mut().clear();
+    // Emptied in place: the next frame of the same layout needn't size the array again.
+    for slot in f.slots.get_mut().iter_mut() {
+        *slot = None;
+    }
     f.parent = None;
     let _ = POOL.try_with(|p| {
         let mut pool = p.borrow_mut();

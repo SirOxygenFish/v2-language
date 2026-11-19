@@ -931,7 +931,7 @@ impl<'a> Parser<'a> {
         } else {
             FuncBody::Block(self.body("func")?)
         };
-        Ok(FuncDecl { name, params, rest, body, layout: Layout::from([]), span: start.to(self.prev_span()) })
+        Ok(FuncDecl { name, params, rest, body, layout: Layout::from([]), span: start.to(self.prev_span()), anon_name: std::cell::OnceCell::new() })
     }
 
     /// Parameters through the closing `)` (4.1, 4.5).
