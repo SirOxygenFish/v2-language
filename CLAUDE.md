@@ -35,8 +35,11 @@ it is loaded automatically into every session and every subagent.
   The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`), never touch it.
   `C:\tmp` and `C:\var` are round 19's test leftovers (the safety check refused their removal; the
   owner was asked to delete them): leave them; tmp_on_windows_points_to_temp skips while there.
-  Rounds 1 to 22 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
-  and on 2026-11-16 the owner said to continue the rounds (again on 2026-11-17): round 23 next.
+  Rounds 1 to 23 found and fixed (ROADMAP log); the final report went to the owner on 2026-11-15,
+  and on 2026-11-16 the owner said to continue the rounds (again on 2026-11-17).
+  Round 23 closed 2026-11-19 (ROADMAP log). The owner stopped its agents on 2026-11-18 over usage
+  (about 4M tokens a round); I recommended ending the rounds (they find edge cases now): no round
+  24 unless the owner asks, and then a lean one (one newcomer, one implementer, one review).
   With workflows off, a round runs as Agent calls (worktree isolation, run_in_background), each
   implementer reviewed by another agent and sent the review by SendMessage. Round 20's reviews
   needed four passes after the first fixes; stop a chain once its issues are nits. Rounds run as workflows:
@@ -147,7 +150,7 @@ it is loaded automatically into every session and every subagent.
   collections), `call` (binder: `ParamSpec::req/opt/rest`, `bind_spec`), `ops`, `methods` (tables of
   `MethodDef`), `strings` (char cache), `builtins` (`BuiltinDef` table, `str_arg`/`bool_arg`; `Out`, the only stdout
   writer, its pending bytes in `PENDING` so the interrupt path's `write_pending` can write them,
-  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`; `write_stderr` (a closed stderr is 141); `input(echo: false)`: `EchoOff`, Unix `ECHO_SAVED`/`background`/`echo_around_stop` (Ctrl+Z), Windows `ECHO_MODE`/`echo_back`), `error` (ErrorValue, Flow, `fail`,
+  `flusher`, a thread that writes held output 100 ms later; `Out::capture()` in tests; `POSITIONAL_ONLY`; Windows names and drives: `windows_name`, `unreachable_root`/`drive_problem`; `write_stderr` (a closed stderr is 141); `input(echo: false)`: `EchoOff`, Unix `ECHO_SAVED`/`background`/`echo_around_stop` (Ctrl+Z), Windows `ECHO_MODE`/`echo_back`; files (round 23): `replace_file` (Windows write_file: lock held through cut and write), `write_to_stream`, `device_path`, `busy_hint`, `program_file`, `folder_link`/`remove_dir_link`, `long_name`, `slash_after_a_file`, `cut_utf8` (read_file, input) and exec's `cut_output`; exec output: `by_lines`, `other_text`, `single_byte`, `pick_code_page`, `other_code_page`, `code_page_text`/`strict_code_page_text`; exec start errors: `start_error`, `with_commas`), `error` (ErrorValue, Flow, `fail`,
   rendering, did_you_mean), `module` (import graph, `locate`, `shown`; `link_problem`/`link_error`:
   links that lead nowhere or in a loop, 3.10; `unicode_twin`/`folder_twin`: a Mac's decomposed names;
   `nearby_module`: an import's did-you-mean). Number hints: builtins' `number_text`, `between_thousands`. A builtin returns
@@ -168,13 +171,13 @@ it is loaded automatically into every session and every subagent.
   `INTERRUPTED`/`stop_if_interrupted`/`exit_interrupted` (kills trees, waits ≤ 500 ms, removes
   the run dir), `take_interrupts`/`spawn_helper` (Unix: only the interpreter thread takes
   SIGINT/TERM/HUP/QUIT; **start every helper thread with `spawn_helper`**), parking (`allow_parking`, `Watch::due_to_park`; a thread per trim; debug builds
-  take `V2_TEST_PARK_MS`), the terminal (6.5: `remember_terminal`/`restore_terminal` only when stdout is a terminal or `TERMINAL_CHANGED`, `show_cursor`, `cursor_back` + `TOLD_TERMINAL`, `terminal_size` for init's `terminals`; Windows `console_vt_on`/`restore_console`). Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
+  take `V2_TEST_PARK_MS`), the terminal (6.5: `remember_terminal`/`restore_terminal` only when stdout is a terminal or `TERMINAL_CHANGED`, `show_cursor`, `cursor_back` + `TOLD_TERMINAL`, `terminal_size` for init's `terminals`; Windows `console_vt_on`/`restore_console`), Windows starts: `SpawnError.code`/`short`, `long_program` (259; a batch file 246), `short_program`/`short_path` (8.3), `command_line_units`. Tests re-run the test binary as the child (`V2_HELPER`); **tests that push
   timers must hold `engines::process::tests::serial()`** (the watchdog is global).
 - `engines/spec.rs` (py/js/ts table, `Version`, `too_old`: Python 3.10+, one Node rule for js
   and ts: 22.13+, not 23.0/23.1), `engines/resolve.rs` (`Lookup`, `find_program`,
   `Prober`/`RealProber`, `ProbeCache` (usable entries only) + `CacheMode`, `Resolver`,
   `ResolvedEngine`, `NotFound`; venvs, 7.6: `venv_mismatch`, `activated_venv_problem`, `venv_stamps`
-  in the cache key; `clip_middle`, `venv_maker` (the remake line from the base Python), `PthPython` (embeddable), `unused_venv`, `made_elsewhere`, `npm_fix`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
+  in the cache key; `clip_middle`, `venv_maker` (the remake line from the base Python), `PthPython` (embeddable), `unused_venv`, `made_elsewhere`, `npm_fix`; `library_fix(id, …)`/`library_fixes`; spec `limit_fix_at`), `engines/registry.rs` (`Registry::real`, `resolve_tag`,
   `engine_available`; `later_language`: tags of Phases 2-3 say "not in this version yet", drop
   each row when its engine registers). Uncaught EngineNotFound exits 3.
 - `engines/vep.rs` (framing, `Frame`, `parse_frame`, builders; `hello` = vep, version, pid,
@@ -199,8 +202,8 @@ it is loaded automatically into every session and every subagent.
   config. `adapters/py.py` (embedded
   via `adapters/mod.rs`, `for_session(key)`): the whole Python worker; its internals are module
   globals of `__main__`, so white-box tests reach them with `sys.modules["__main__"]` (units,
-  HANDLERS; `AfterImport` changes shutil and colorama at their first import; `stdlib_hint`). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
-  JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`; `seeTerminal` gives process.stdout/stderr V2's terminal (9.9).
+  HANDLERS; `AfterImport` changes shutil and colorama at their first import; `stdlib_hint`; `member_error`; `flush_files` (bye in a stub); `refuse_big`/`sampled_size`/`table_hint`). `adapters/js.js`: the Node worker (js and ts); its internals are module-scoped, so
+  JS white-box tests use `process.*` and `require("vm").runInNewContext("gc")`; `seeTerminal` gives process.stdout/stderr V2's terminal (9.9); `noInput` refuses stdin listeners; `builtinMember`.
 - `engines/handles.rs`: `HandleRef` (+ `callable`, `text()`, `plain_way`: the block for a date or Decimal), `CallableTable` (Values: functions
   and other sessions' callable handles, keyed by Rc address), and the host's handle ops on
   `Interp`: `handle_getattr/setattr/getitem/setitem/len/str/value/call/iter/next`; `foreign_call`
