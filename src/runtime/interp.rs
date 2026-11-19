@@ -684,8 +684,10 @@ impl Interp {
     /// compound path.
     #[allow(clippy::too_many_arguments)]
     fn compound_slot(&mut self, target: &Target, n: &Name, loc: Loc, hops: u32, index: u32, op: BinOp, op_span: Span, value: &Expr, env: &Env) -> Exec<()> {
-        match env::read(env, hops, index) {
-            Some(Value::Int(p)) => {
+        // Peeked, not read: a copy of a string held through `assign` would stop `s += t` from
+        // growing it in place (5.3), making each append a copy of the whole.
+        match env::read_int(env, hops, index) {
+            Some(p) => {
                 let rhs = self.leaf(value, env)?;
                 if let Value::Int(q) = rhs {
                     let fast = match op {
@@ -1242,7 +1244,13 @@ impl Interp {
     /// `f(args)`: the usual call, without the postfix chain's machinery. The stack guard is in
     /// the call itself.
     fn call_name(&mut self, callee: &Expr, args: &[Arg], env: &Env) -> Exec<Value> {
-        let f = self.eval(callee, env)?;
+        let f = match &callee.kind {
+            ExprKind::Name(_, Loc::Slot { hops, index }) => match env::read(env, *hops, *index) {
+                Some(v) => v,
+                None => self.eval(callee, env)?,
+            },
+            _ => self.eval(callee, env)?,
+        };
         if !matches!(f, Value::Func(_) | Value::Handle(_)) {
             if let Some(flow) = self.hidden_builtin(callee, &f) {
                 return Err(flow);
@@ -1834,6 +1842,18 @@ impl Interp {
             _ => (None, &b.stmts[..]),
         };
         for s in init {
+            // A guard clause, `if cond { return e }`, the base case of most recursions: the
+            // condition, then `e`'s value, without the body's statement or `Flow::Return`.
+            if let StmtKind::If { arms, else_: None } = &s.kind {
+                if let [(cond, Body { stmts, layout: None, .. })] = &arms[..] {
+                    if let [Stmt { kind: StmtKind::Return(Some(e)), .. }] = &stmts[..] {
+                        if self.condition(cond, frame)? {
+                            return self.leaf(e, frame);
+                        }
+                        continue;
+                    }
+                }
+            }
             match self.exec(s, frame) {
                 Ok(()) => {}
                 Err(Flow::Return(v)) => return Ok(v),

@@ -1,0 +1,98 @@
+// The interpreter's fast paths (milestone 1.15) do what the general ones do (DOCS 3.3, 3.8,
+// INTERNALS 5.6, 5.7): named and default arguments bound straight into the frame, positional
+// callbacks, a body ending in `return`, one frame shared by a loop's iterations, ints read in
+// place, `x += int`.
+
+// Defaults are evaluated in order in the call's frame: one sees the parameters before it; a
+// later one isn't declared yet, so its name means the outer variable.
+let b = "outer b"
+func order(a, b2 = a + 1, c = b) {
+    return [a, b2, c]
+}
+print(order(1), order(1, c: 5), order(a: 2, b2: 0))
+func later(a = b, b = 1) {
+    return [a, b]
+}
+print(later(b: 5), later())
+
+// Arguments are evaluated once each, left to right, before the defaults.
+let log = []
+func note(x) {
+    log.push(x)
+    return x
+}
+func three(a, b = 10, c = 20) {
+    return a + b + c
+}
+print(three(note(1), c: note(3)), log)
+
+// What the binder refuses, it says as before, with each argument evaluated once.
+func two(a, b) {
+    return a + b
+}
+log = []
+try { two(note(1), note(2), note(3)) } catch (e) { print(e.type, e.message) }
+try { two(note(4), zzz: note(5)) } catch (e) { print(e.type, e.message) }
+try { two(note(6)) } catch (e) { print(e.type, e.message) }
+try { two(note(7), a: note(8)) } catch (e) { print(e.type, e.message) }
+print(log)
+
+// A callback with a default, through map; a body ending in `return`, and one ending without.
+print([1, 2, 3].map(func(x, k = 10) => x * k))
+func tail(n) {
+    if n > 1 {
+        return "big"
+    }
+    return "small"
+}
+func no_return(n) {
+    let m = n
+}
+print(tail(5), tail(0), no_return(1))
+
+// A loop body that nothing can keep: each iteration still starts with its own names undeclared,
+// so a name read before its `let` means the outer one, every time.
+let seen = "outer"
+for i in 0..3 {
+    let before = seen
+    let seen = i
+    print(before, seen)
+}
+let tag = "outer"
+let k = 0
+while k < 3 {
+    let was = tag
+    let tag = k
+    k += 1
+    print(was, tag)
+}
+let total = 0
+for i in 0..10 {
+    let sq = i * i
+    if i == 2 {
+        continue
+    }
+    if i == 5 {
+        break
+    }
+    total += sq
+}
+print(total)
+try {
+    for i in 0..5 {
+        let v = 10 % (2 - i)
+        print(v)
+    }
+} catch (e) {
+    print(e.type, e.message)
+}
+
+// Ints read in place: overflow and `%` as before.
+let big = 9223372036854775807
+try { big += 1 } catch (e) { print(e.type, e.message) }
+try { print(big + 1) } catch (e) { print(e.type, e.message) }
+print(big, -7 % 3, 7 % -3, 7 % 7)
+let n = 5
+n -= 7
+n *= 3
+print(n)
