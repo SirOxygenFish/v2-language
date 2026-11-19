@@ -663,9 +663,9 @@ function. One exception: while JavaScript is itself waiting on V2, as when it ca
 function from a route handler or a callback, that V2 function can't wait on async JavaScript;
 write such handlers in JavaScript, and call V2 for the parts that don't wait. A call from a block
 into another language waits for its answer (awaited, for an async function) and gives the value,
-not a Promise or coroutine, so `Promise.all` or Python's `asyncio.gather` over such calls runs
-them one after another: keep the concurrent part in one language. An HTTP server in a block
-serves only while V2 waits on it:
+not a Promise or coroutine: `Promise.all` over such calls gets the values one after another, and
+Python's `asyncio.gather` refuses them (`TypeError`), so keep the concurrent part in one
+language. An HTTP server in a block serves only while V2 waits on it:
 [the cookbook has one](https://github.com/SirOxygenFish/v2-language/blob/main/DOCS.md#176-an-http-server-in-a-javascript-block).
 
 **How do I catch a V2 error in Python or JavaScript?** It arrives as a `V2Error`

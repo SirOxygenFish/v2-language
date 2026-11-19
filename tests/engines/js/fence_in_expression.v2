@@ -1,0 +1,7 @@
+// requires: js
+// DOCS 4.2: a fenced block in an expression closes with the fence alone on its line, and what
+// follows the block goes on the next line (round 23's review: the docs' example, as written).
+print(@js ```
+    "a{{b".replace(/\{+/, "(")
+```
+)

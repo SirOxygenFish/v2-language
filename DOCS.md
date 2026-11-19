@@ -155,8 +155,9 @@ not ready: js, ts (see the notes); scripts that don't use them still run
 ```
 
 With `PYTHONHOME`, `PYTHONPATH` or `NODE_OPTIONS` set, which Python or Node.js reads as it starts,
-or under a memory limit (`ulimit -v`), doctor also starts the program (Python imports the
-standard modules V2's worker uses; `node -e 0`): one that can't is `broken`, and its note names
+or under a memory limit (`ulimit -v`) that may be too low (under 2 GB for Node.js, 256 MB for
+Python), doctor also starts the program (Python imports the standard modules V2's worker uses;
+`node -e 0`): one that can't is `broken`, and its note names
 the variable to unset or fix, or the limit to raise. A `PATH` entry that starts with `~` (from a
 quoted `export PATH="~/.nvm/…/bin:$PATH"`) is one only bash expands: V2 skips it, as other
 programs do, and when it holds the program, doctor's notes (and the error, when nothing else is
@@ -1479,8 +1480,10 @@ print(average(3.0, 4.0))   // 3.5 — Rust called a Python library
   `async def collect(h): return [x async for x in h]`) and loop over the list; the error's hint
   says so.
 - A call into another language waits for its answer (awaited, for an async function) and gives
-  the value, not a Promise or coroutine, so `asyncio.gather` or `Promise.all` over such calls
-  runs them one after another: keep the concurrent part in one language.
+  the value, not a Promise or coroutine. So `Promise.all` over such calls gets their values one
+  after another, and `asyncio.gather` refuses them (`TypeError: An asyncio.Future, a coroutine or
+  an awaitable is required`) once it has made them, one after another: keep the concurrent part
+  in one language.
 - Foreign code can call into V2 (an imported function or a V2 callback) only while V2 is waiting
   on that engine — during a call or block V2 started. A call from a timer, background thread or
   event handler that fires while the engine is idle fails with an error inside the foreign

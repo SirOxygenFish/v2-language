@@ -602,7 +602,8 @@ fn a_worker_the_last_second_stops_gets_a_note() {
     let thread = |secs: &str| format!("@py {{\n    import threading, time\n    threading.Thread(target=lambda: (time.sleep({secs}), print(\"thread done\"))).start()\n}}\nprint(\"body done\")\n");
     let (code, stdout, stderr, _home) = run_with_files(&[("late.v2", &thread("5"))], &["late.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "body done\n"), "{stderr}");
-    assert_eq!(stderr, "v2: note: Python was still running 1 s after the script ended (a thread that hadn't ended), and was stopped: join it, or wait for it in an exported function\n");
+    let py_note = "v2: note: Python was still running 1 s after the script ended (a thread or an exit handler that hadn't ended), and was stopped: join it, or wait for it in an exported function\n";
+    assert_eq!(stderr, py_note);
     let (code, stdout, stderr, _home) = run_with_files(&[("soon.v2", &thread("0.2"))], &["soon.v2"]);
     assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "body done\nthread done\n", ""));
     // The note waits for the end, which a closed stdout makes 141 with nothing more said.
@@ -618,9 +619,14 @@ fn a_worker_the_last_second_stops_gets_a_note() {
     let timer = |ms: &str| format!("@js {{ setTimeout(() => {{ console.log(\"timer done\") }}, {ms}); 1 }}\nprint(\"body done\")\n");
     let (code, stdout, stderr, _home) = run_with_files(&[("late.v2", &timer("5000"))], &["late.v2"]);
     assert_eq!((code, stdout.as_str()), (Some(0), "body done\n"), "{stderr}");
-    assert_eq!(stderr, "v2: note: JavaScript was still running 1 s after the script ended (a timer, a server or a promise), and was stopped: wait for it in an exported async function\n");
+    let js_note = "v2: note: JavaScript was still running 1 s after the script ended (a timer, a server or a child process), and was stopped: wait for it in an exported async function\n";
+    assert_eq!(stderr, js_note);
     let (code, stdout, stderr, _home) = run_with_files(&[("soon.v2", &timer("200"))], &["soon.v2"]);
     assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "body done\ntimer done\n", ""));
+    // Both: in the order the languages started (the review).
+    let both = thread("5").replace("print(\"body done\")\n", "") + &timer("5000");
+    let (code, stdout, stderr, _home) = run_with_files(&[("both.v2", &both)], &["both.v2"]);
+    assert_eq!((code, stdout.as_str(), stderr), (Some(0), "body done\n", format!("{py_note}{js_note}")));
 }
 
 #[test]
@@ -4430,7 +4436,9 @@ fn doctor_starts_node_under_a_memory_limit() {
 fn a_library_that_cant_be_mapped_under_a_memory_limit_names_the_limit() {
     // Round 23, 7.8: under ulimit -v, Node.js's loader says "failed to map segment from shared
     // object", or Node.js dies of a signal before it answers --version: the limit, in a run and
-    // in doctor alike, once, never "isn't installed". Without a limit, the loader's own words.
+    // in doctor alike, once, never "isn't installed", also for a configured command. Without a
+    // limit, or under one far above what Node.js needs, no fix names a cause the skipped lines
+    // don't show (the review).
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
     let home = TempHome::new();
@@ -4447,9 +4455,12 @@ fn a_library_that_cant_be_mapped_under_a_memory_limit_names_the_limit() {
     }
     std::fs::write(home.0.join("j.v2"), "print(@js { 1 })\n").unwrap();
     let path = std::env::join_paths([&first, &second]).unwrap();
-    let v2 = |args: &[&str], limit: Option<libc::rlim_t>| {
+    let v2_with = |args: &[&str], limit: Option<libc::rlim_t>, command: Option<&Path>| {
         let mut cmd = v2_command(&home.0);
         cmd.args(args).current_dir(&home.0).env("PATH", &path).env_remove("NODE_OPTIONS").stdin(Stdio::null());
+        if let Some(node) = command {
+            cmd.env("V2_ENGINE_JS", node);
+        }
         if let Some(bytes) = limit {
             // SAFETY: setrlimit is async-signal-safe and touches only the child.
             unsafe {
@@ -4465,6 +4476,7 @@ fn a_library_that_cant_be_mapped_under_a_memory_limit_names_the_limit() {
         let out = cmd.output().unwrap();
         (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     };
+    let v2 = |args: &[&str], limit: Option<libc::rlim_t>| v2_with(args, limit, None);
     let limit = "fix: a memory limit (ulimit -v) of 1024 MB is set for this shell, and Node.js reserves about 1 GB as it starts: raise it\n";
     let (code, stdout, stderr) = v2(&["doctor"], Some(1 << 30));
     assert_eq!(code, Some(0), "{stderr}");
@@ -4474,14 +4486,29 @@ fn a_library_that_cant_be_mapped_under_a_memory_limit_names_the_limit() {
     assert_eq!(code, Some(3), "{stderr}");
     assert_eq!(stderr.matches(limit).count(), 1, "{stderr}");
     assert!(!stderr.contains("isn't installed"), "{stderr}");
-    // No limit: what the loader said, about the one it said it of.
-    let words = format!("fix: {} can't load libbrotlienc.so.1 (failed to map segment from shared object)\n", unmapped.display());
-    let (code, stdout, stderr) = v2(&["doctor"], None);
-    assert_eq!(code, Some(0), "{stderr}");
-    assert!(stdout.contains(&format!("  js: {words}")) && !stdout.contains("memory limit"), "{stdout}");
-    let (code, _, stderr) = v2(&["j.v2"], None);
-    assert_eq!(code, Some(3), "{stderr}");
-    assert!(stderr.contains(&words) && !stderr.contains("memory limit"), "{stderr}");
+    // A configured command: doctor shows the run's fix line too, each program's.
+    for node in [&crashes, &unmapped] {
+        let (code, stdout, stderr) = v2_with(&["doctor"], Some(1 << 30), Some(node));
+        assert_eq!(code, Some(0), "{stderr}");
+        assert_eq!(stdout.matches(&format!("  js: {limit}")).count(), 1, "{stdout}");
+        let (code, _, stderr) = v2_with(&["j.v2"], Some(1 << 30), Some(node));
+        assert_eq!(code, Some(3), "{stderr}");
+        assert_eq!(stderr.matches(limit).count(), 1, "{stderr}");
+    }
+    // No limit, or one far above what Node.js needs (8 GB): the skipped lines say what went
+    // wrong, and doctor's fix is the general one.
+    for limit in [None, Some(8 << 30)] {
+        let (code, stdout, stderr) = v2(&["doctor"], limit);
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!stdout.contains("memory limit") && !stdout.contains("can't load"), "{stdout}");
+        assert!(stdout.contains("\n  js: fix: repair that Node.js, or install one: "), "{stdout}");
+        let (code, _, stderr) = v2(&["j.v2"], limit);
+        assert_eq!(code, Some(3), "{stderr}");
+        assert!(!stderr.contains("memory limit") && !stderr.contains("fix:"), "{stderr}");
+        let (code, stdout, stderr) = v2_with(&["doctor"], limit, Some(&crashes));
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!stdout.contains("memory limit") && !stdout.contains("fix:"), "{stdout}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4837,6 +4864,17 @@ fn doctor_names_the_programs_it_could_not_use() {
     assert_eq!(doctor_rows(&stdout)["py"][0], "broken", "{stdout}");
     let note = format!("\n  py: skipped {py} (version probe failed (exit code 109))\n  py: fix: repair that Python, or install one: ");
     assert!(stdout.contains(&note), "{stdout}");
+}
+
+#[test]
+fn a_fence_closed_with_more_on_its_line_in_an_imported_file_names_the_line() {
+    // Round 23's review, 6.4: an imported file's syntax error shows its own line and hint but no
+    // notes, so the hint names the line whose closing fence goes on.
+    let files = [("main.v2", "import \"./mf.v2\" as m\nprint(\"x\")\n"), ("mf.v2", "t(@py ```\n    1\n```)\n")];
+    let (code, out, err, _home) = run_with_files(&files, &["main.v2"]);
+    assert_eq!((code, out.as_str()), (Some(1), ""), "{err}");
+    assert!(err.starts_with("main.v2:1:1: ImportError: cannot import './mf.v2': mf.v2:1:3: SyntaxError: @py block is never closed\n"), "{err}");
+    assert!(err.contains("\n  hint: the closing ``` on line 3 must stand alone on its line: put what follows it (the ')') on the next line\n"), "{err}");
 }
 
 #[test]
