@@ -12,11 +12,14 @@ pub struct Name {
     pub span: Span,
     /// Where a declaration of this name goes in its frame (`syntax/resolve`, 5.6).
     pub slot: u32,
+    /// A method name's last lookup (`interp::method_target`): which methods table, and where in
+    /// it; 0 before the first.
+    pub method: std::cell::Cell<u32>,
 }
 
 impl Name {
     pub fn new(text: Rc<str>, span: Span) -> Name {
-        Name { text, span, slot: 0 }
+        Name { text, span, slot: 0, method: std::cell::Cell::new(0) }
     }
 }
 
@@ -99,6 +102,8 @@ pub struct FuncDecl {
     /// The call frame's names (5.6).
     pub layout: Layout,
     pub span: Span,
+    /// An anonymous function's name, `func@main.v2:12` (5.7), made the first time it is needed.
+    pub anon_name: std::cell::OnceCell<Rc<str>>,
 }
 
 #[allow(dead_code)]

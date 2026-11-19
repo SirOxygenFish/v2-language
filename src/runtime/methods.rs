@@ -190,6 +190,17 @@ pub static DICT_METHODS: &[MethodDef] = &[
 ];
 
 /// The method table of a receiver type.
+/// Which methods table `table` gives `v`: 1 to 4, 0 for none (a method name's cache, 5.5).
+pub fn table_kind(v: &Value) -> u32 {
+    match v {
+        Value::Str(_) => 1,
+        Value::Bytes(_) => 2,
+        Value::List(_) => 3,
+        Value::Dict(_) => 4,
+        _ => 0,
+    }
+}
+
 pub fn table(v: &Value) -> Option<&'static [MethodDef]> {
     match v {
         Value::Str(_) => Some(STR_METHODS),
