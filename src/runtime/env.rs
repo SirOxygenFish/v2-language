@@ -339,7 +339,8 @@ thread_local! {
 /// A closure over `env` is going and leaves at most one holder: each remembered frame from `env`
 /// up may be garbage now, so it is checked again at the next scope exit.
 pub fn closure_dropped(env: &Env) {
-    if CHECKING.try_with(Cell::get).unwrap_or(true) {
+    // Only a remembered frame is acted on, and none is before the collector has kept one.
+    if !GC_ACTIVE.try_with(Cell::get).unwrap_or(false) || CHECKING.try_with(Cell::get).unwrap_or(true) {
         return;
     }
     let mut frame = Some(env);
