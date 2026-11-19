@@ -1924,10 +1924,16 @@ impl Interp {
             MethodTarget::Handle(h) => return self.handle_call(&h, Some(&name.text), pos, named, name.span),
             MethodTarget::Method(def) => def,
         };
-        let fname = format!("{}.{}", o.type_name(), def.name);
-        // `b.decode("latin-1")`: what to do instead; `b.decode("utf-8")`: no argument (5.4).
-        let utf8 = def.params.is_empty() && methods::names_utf8(&pos, &named);
-        let args = self.at(bind_spec(&fname, def.params, pos, named), name.span).inspect_err(|f| methods::utf8_only(&fname, f, utf8))?;
+        // The method's name (`str.split`) is for the binder's messages only: made when it checks.
+        let args = match super::call::bind_plain(def.params, pos, &named) {
+            Ok(args) => args,
+            Err(pos) => {
+                let fname = format!("{}.{}", o.type_name(), def.name);
+                // `b.decode("latin-1")`: what to do instead; `b.decode("utf-8")`: no argument (5.4).
+                let utf8 = def.params.is_empty() && methods::names_utf8(&pos, &named);
+                self.at(bind_spec(&fname, def.params, pos, named), name.span).inspect_err(|f| methods::utf8_only(&fname, f, utf8))?
+            }
+        };
         let r = (def.f)(self, o, args, name.span);
         self.at(r, name.span)
     }
