@@ -1,0 +1,26 @@
+// Closures: made, called through a dict, over a counter, and passed to map.
+let n = int(args().get(0, "200000"))
+func make(i) {
+    let k = i
+    let ops = {add: func(a) => a + k}
+    return ops.add(1)
+}
+func twice(xs) {
+    return xs.map(func(x) => x * 2)
+}
+let s = 0
+for i in 0..n {
+    s = s + make(i) + twice([i, 1])[0]
+}
+func counter() {
+    let c = 0
+    return func() {
+        c = c + 1
+        return c
+    }
+}
+for i in 0..int(n / 2) {
+    let c = counter()
+    c()
+}
+print(s)

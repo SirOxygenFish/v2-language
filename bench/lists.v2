@@ -1,0 +1,16 @@
+// Lists: push, a for over them, indexing, map, filter and sort.
+let n = int(args().get(0, "300000"))
+let xs = []
+for i in 0..n {
+    xs.push(i * 37 % 1000)
+}
+let total = 0
+for x in xs {
+    total += x
+}
+for i in 0..len(xs) {
+    total += xs[i]
+}
+let ys = xs.map(func(x) => x + 1).filter(func(x) => x % 2 == 0)
+xs.sort()
+print(total, len(ys), xs[0], xs[len(xs) - 1])

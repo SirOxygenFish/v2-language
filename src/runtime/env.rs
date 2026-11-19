@@ -61,6 +61,9 @@ thread_local! {
     static COUNTED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     /// Slot arrays of frames that are gone: a malloc and a free less per call.
     static SPARE: RefCell<Vec<Vec<Option<Slot>>>> = const { RefCell::new(Vec::new()) };
+    /// Frames that were left with nothing else holding them, emptied, for `new_frame` to reuse:
+    /// a call or a loop iteration makes no allocation (5.6).
+    static POOL: RefCell<Vec<Env>> = const { RefCell::new(Vec::new()) };
 }
 
 /// How many spare arrays to keep: about the depth of a program's usual recursion.
@@ -74,6 +77,19 @@ pub fn made(n: usize) {
 
 pub fn new_frame(layout: &Layout, parent: Option<&Env>) -> Env {
     made(layout.len() + 1);
+    if let Some(mut env) = POOL.with(|p| p.borrow_mut().pop()) {
+        let born = TICKS.with(Cell::get);
+        let f = Rc::get_mut(&mut env).expect("a pooled frame has no other holder");
+        if !Rc::ptr_eq(f.layout.get_mut(), layout) {
+            *f.layout.get_mut() = layout.clone();
+        }
+        f.slots.get_mut().resize_with(layout.len(), || None);
+        f.parent = parent.cloned();
+        f.born = born;
+        f.weight.set(0);
+        f.checked.set(0);
+        return env;
+    }
     let mut slots = SPARE.with(|s| s.borrow_mut().pop()).unwrap_or_default();
     slots.resize_with(layout.len(), || None);
     Rc::new(Frame {
@@ -323,8 +339,8 @@ pub fn leave(env: Env) {
     }
     // Nothing else holds it, so no closure does: it goes when `env` does.
     if env.closures.get() == 0 || Rc::strong_count(&env) == 1 {
+        pool(env);
         if due {
-            drop(env);
             collect();
         }
         return;
@@ -355,6 +371,24 @@ pub fn leave(env: Env) {
     if due {
         collect();
     }
+}
+
+/// A frame being left: kept emptied for `new_frame` when nothing else holds it or can find it (no
+/// weak handle: the collector's lists), no closure was ever made over it, and the collector isn't
+/// keeping it; else dropped. Its values go first, then its parent, as when it is dropped.
+fn pool(mut env: Env) {
+    if env.closures.get() != 0 || env.remembered.get() || env.queued.get() || Rc::weak_count(&env) != 0 {
+        return;
+    }
+    let Some(f) = Rc::get_mut(&mut env) else { return };
+    f.slots.get_mut().clear();
+    f.parent = None;
+    let _ = POOL.try_with(|p| {
+        let mut pool = p.borrow_mut();
+        if pool.len() < MAX_SPARE {
+            pool.push(env);
+        }
+    });
 }
 
 /// Check the remembered frames a closure has let go of, each once the frames left since its
