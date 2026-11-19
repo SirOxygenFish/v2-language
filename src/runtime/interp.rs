@@ -1925,9 +1925,9 @@ impl Interp {
             MethodTarget::Method(def) => def,
         };
         // The method's name (`str.split`) is for the binder's messages only: made when it checks.
-        let args = match super::call::bind_plain(def.params, pos, &named) {
+        let args = match super::call::bind_plain(def.params, pos, named) {
             Ok(args) => args,
-            Err(pos) => {
+            Err((pos, named)) => {
                 let fname = format!("{}.{}", o.type_name(), def.name);
                 // `b.decode("latin-1")`: what to do instead; `b.decode("utf-8")`: no argument (5.4).
                 let utf8 = def.params.is_empty() && methods::names_utf8(&pos, &named);
