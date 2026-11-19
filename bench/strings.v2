@@ -1,0 +1,15 @@
+// Strings: split, methods, f-strings, += growth.
+let n = int(args().get(0, "200000"))
+let line = "alpha,beta,gamma,delta"
+let out = 0
+let log = ""
+for i in 0..n {
+    let parts = line.split(",")
+    let word = parts[i % 4].upper()
+    let s = f"${word}-${i}"
+    out += len(s.replace("-", "+").trim())
+    if i % 10 == 0 {
+        log += s
+    }
+}
+print(out, len(log))

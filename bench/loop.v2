@@ -1,0 +1,7 @@
+// A for loop over a range with arithmetic in its body.
+let n = int(args().get(0, "10000000"))
+let s = 0
+for i in 0..n {
+    s = s + i
+}
+print(s)

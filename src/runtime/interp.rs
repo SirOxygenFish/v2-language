@@ -37,6 +37,9 @@ enum MethodTarget {
     Handle(Rc<HandleRef>),
 }
 
+/// A loop iteration's variables: the first, and the second of a two-name `for`.
+type LoopVars<'n> = ((&'n Name, Value), Option<(&'n Name, Value)>);
+
 /// One active call of a V2 function, or a module import (nameless) (5.8).
 struct CallRecord {
     name: Option<Rc<str>>,
@@ -541,13 +544,33 @@ impl Interp {
         Value::func(Callable::Closure { decl: decl.clone(), env: env.clone(), name })
     }
 
-    /// Whether `cond` holds. A bool is by far the usual case.
+    /// Whether `cond` holds. A bool is by far the usual case, and a comparison the usual
+    /// condition: `binary` without `eval`'s dispatch.
     #[inline]
     fn condition(&mut self, cond: &Expr, env: &Env) -> Exec<bool> {
-        Ok(match self.eval(cond, env)? {
+        let v = match &cond.kind {
+            ExprKind::Binary(op, span, a, b) => self.binary(*op, *span, a, b, env)?,
+            _ => self.eval(cond, env)?,
+        };
+        Ok(match v {
             Value::Bool(b) => b,
             other => other.truthy(),
         })
+    }
+
+    /// `e`'s value, with the two commonest leaves, an int and a variable, read here: an operand,
+    /// an argument or a returned value is one of them more often than not, and `eval`'s entry and
+    /// dispatch cost more than the read.
+    #[inline(always)]
+    fn leaf(&mut self, e: &Expr, env: &Env) -> Exec<Value> {
+        match &e.kind {
+            ExprKind::Int(n) => Ok(Value::Int(*n)),
+            ExprKind::Name(_, Loc::Slot { hops, index }) => match env::read(env, *hops, *index) {
+                Some(v) => Ok(v),
+                None => self.eval(e, env),
+            },
+            _ => self.eval(e, env),
+        }
     }
 
     /// A body in a new frame whose parent is `parent`. Nothing here needs the stack guard: the
@@ -587,6 +610,28 @@ impl Interp {
                     Err(e) => self.write_failed(n, e, env),
                 }
             }
+            // `i += 1`: ints added in place of the general path (overflow goes on to it).
+            StmtKind::Assign { target: target @ Target::Name(n, loc @ Loc::Slot { hops, index }), op: Some((op, op_span)), value } => match env::read(env, *hops, *index) {
+                Some(Value::Int(p)) => {
+                    let rhs = self.leaf(value, env)?;
+                    if let Value::Int(q) = rhs {
+                        let fast = match op {
+                            BinOp::Add => p.checked_add(q),
+                            BinOp::Sub => p.checked_sub(q),
+                            BinOp::Mul => p.checked_mul(q),
+                            _ => None,
+                        };
+                        if let Some(r) = fast {
+                            return match env::write(env, *hops, *index, Value::Int(r)) {
+                                Ok(()) => Ok(()),
+                                Err(e) => self.write_failed(n, e, env),
+                            };
+                        }
+                    }
+                    self.compound(n, *loc, *op, *op_span, Value::Int(p), rhs, env)
+                }
+                _ => self.assign(target, Some((*op, *op_span)), value, env),
+            },
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value, env),
             StmtKind::If { arms, else_ } => {
                 for (cond, body) in arms {
@@ -599,7 +644,7 @@ impl Interp {
                     None => Ok(()),
                 }
             }
-            StmtKind::Return(Some(e)) => Err(Flow::Return(self.eval(e, env)?)),
+            StmtKind::Return(Some(e)) => Err(Flow::Return(self.leaf(e, env)?)),
             _ => self.exec_other(s, env),
         }
     }
@@ -783,32 +828,45 @@ impl Interp {
 
     /// `target = value` / `target op= value`: the target's container and key are evaluated once,
     /// before the value (5.3). `+=` on two strs grows the target's string in place where it can.
+/// `n op= rhs` once both sides are known (5.3): a string grows in place when it can
+    /// (`in_place`), else `old op rhs` is stored.
+    #[allow(clippy::too_many_arguments)]
+    fn compound(&mut self, n: &Name, loc: Loc, op: BinOp, op_span: Span, old: Value, rhs: Value, env: &Env) -> Exec<()> {
+        let old = match in_place(op, old, &rhs, |s, piece| match loc {
+            Loc::Slot { hops, index } => env::append_at(env, hops, index, s, piece),
+            _ => Err(s),
+        }) {
+            Ok(()) => return Ok(()),
+            Err(old) => old,
+        };
+        let new = self.at(ops::binop(op, &old, &rhs), op_span)?;
+        self.store(n, loc, new, env)
+    }
+
+    /// Store `new` in the variable `n` (5.6).
+    fn store(&mut self, n: &Name, loc: Loc, new: Value, env: &Env) -> Exec<()> {
+        match loc {
+            Loc::Slot { hops, index } => match env::write(env, hops, index, new) {
+                Ok(()) => Ok(()),
+                Err(e) => self.write_failed(n, e, env),
+            },
+            _ => self.assign_by_name(n, new, env),
+        }
+    }
+
     fn assign(&mut self, target: &Target, op: Option<(BinOp, Span)>, value: &Expr, env: &Env) -> Exec<()> {
         match target {
-            Target::Name(n, loc) => {
-                let new = match op {
-                    None => self.eval(value, env)?,
-                    Some((op, op_span)) => {
-                        let Some(old) = self.read(&n.text, *loc, env) else { return self.not_declared(&n.text, n.span, env, true) };
-                        let rhs = self.eval(value, env)?;
-                        let old = match in_place(op, old, &rhs, |s, piece| match *loc {
-                            Loc::Slot { hops, index } => env::append_at(env, hops, index, s, piece),
-                            _ => Err(s),
-                        }) {
-                            Ok(()) => return Ok(()),
-                            Err(old) => old,
-                        };
-                        self.at(ops::binop(op, &old, &rhs), op_span)?
-                    }
-                };
-                match *loc {
-                    Loc::Slot { hops, index } => match env::write(env, hops, index, new) {
-                        Ok(()) => Ok(()),
-                        Err(e) => self.write_failed(n, e, env),
-                    },
-                    _ => self.assign_by_name(n, new, env),
+            Target::Name(n, loc) => match op {
+                None => {
+                    let new = self.eval(value, env)?;
+                    self.store(n, *loc, new, env)
                 }
-            }
+                Some((op, op_span)) => {
+                    let Some(old) = self.read(&n.text, *loc, env) else { return self.not_declared(&n.text, n.span, env, true) };
+                    let rhs = self.eval(value, env)?;
+                    self.compound(n, *loc, op, op_span, old, rhs, env)
+                }
+            },
             Target::Member(obj, name) => {
                 let o = self.eval(obj, env)?;
                 let new = match op {
@@ -864,10 +922,12 @@ impl Interp {
 
     /// One loop iteration in a fresh frame holding the loop variables (5.6). `Ok(false)` ends
     /// the loop.
-    fn iteration(&mut self, body: &Body, env: &Env, vars: &[(&Name, Value)]) -> Exec<bool> {
+    fn iteration(&mut self, body: &Body, env: &Env, vars: LoopVars) -> Exec<bool> {
         let frame = new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env));
-        for (n, v) in vars {
-            declare_at(&frame, n.slot, v.clone(), false);
+        let ((n, v), second) = vars;
+        declare_at(&frame, n.slot, v, false);
+        if let Some((n, v)) = second {
+            declare_at(&frame, n.slot, v, false);
         }
         let r = self.exec_in(body, &frame);
         env::leave(frame);
@@ -881,10 +941,10 @@ impl Interp {
     /// `for` evaluates its iterable once and walks a snapshot of it (5.8).
     fn exec_for(&mut self, first: &Name, second: Option<&Name>, iter: &ForIter, body: &Body, env: &Env) -> Exec<()> {
         // With two variables, the first gets the index (the key for a dict).
-        let pair = |a: Value, b: Value| -> Vec<(&Name, Value)> {
+        let pair = |a: Value, b: Value| -> LoopVars {
             match second {
-                Some(s) => vec![(first, a), (s, b)],
-                None => vec![(first, b)],
+                Some(s) => ((first, a), Some((s, b))),
+                None => ((first, b), None),
             }
         };
         match iter {
@@ -900,7 +960,7 @@ impl Interp {
                 };
                 let mut i = lo;
                 while i < hi {
-                    if !self.iteration(body, env, &[(first, Value::Int(i))])? {
+                    if !self.iteration(body, env, ((first, Value::Int(i)), None))? {
                         break;
                     }
                     i += 1;
@@ -912,7 +972,7 @@ impl Interp {
                     let (start, step, count) = self.at(super::builtins::range_bounds(&args), e.span)?;
                     let mut x = start as i128;
                     for i in 0..count {
-                        if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::Int(x as i64)))? {
+                        if !self.iteration(body, env, pair(Value::Int(i as i64), Value::Int(x as i64)))? {
                             break;
                         }
                         x += step as i128;
@@ -940,7 +1000,7 @@ impl Interp {
                     Value::List(l) => {
                         let items = l.borrow().clone();
                         for (i, x) in items.into_iter().enumerate() {
-                            if !self.iteration(body, env, &pair(Value::Int(i as i64), x))? {
+                            if !self.iteration(body, env, pair(Value::Int(i as i64), x))? {
                                 break;
                             }
                         }
@@ -949,10 +1009,10 @@ impl Interp {
                         let entries: Vec<(Rc<str>, Value)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                         for (k, v) in entries {
                             let vars = match second {
-                                Some(s) => vec![(first, Value::Str(k.into())), (s, v)],
-                                None => vec![(first, Value::Str(k.into()))],
+                                Some(s) => ((first, Value::Str(k.into())), Some((s, v))),
+                                None => ((first, Value::Str(k.into())), None),
                             };
-                            if !self.iteration(body, env, &vars)? {
+                            if !self.iteration(body, env, vars)? {
                                 break;
                             }
                         }
@@ -960,14 +1020,14 @@ impl Interp {
                     Value::Str(s) => {
                         for (i, ch) in s.chars().enumerate() {
                             let mut buf = [0u8; 4];
-                            if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::str(ch.encode_utf8(&mut buf))))? {
+                            if !self.iteration(body, env, pair(Value::Int(i as i64), Value::str(ch.encode_utf8(&mut buf))))? {
                                 break;
                             }
                         }
                     }
                     Value::Bytes(b) => {
                         for (i, byte) in b.iter().enumerate() {
-                            if !self.iteration(body, env, &pair(Value::Int(i as i64), Value::Int(*byte as i64)))? {
+                            if !self.iteration(body, env, pair(Value::Int(i as i64), Value::Int(*byte as i64)))? {
                                 break;
                             }
                         }
@@ -1009,17 +1069,17 @@ impl Interp {
                         _ => return self.fail_at("ProtocolError", format!("engine '{}' sent a mapping item that is not a pair", h.tag), at),
                     };
                     match second {
-                        Some(s) => vec![(first, k), (s, v)],
-                        None => vec![(first, k)],
+                        Some(s) => ((first, k), Some((s, v))),
+                        None => ((first, k), None),
                     }
                 } else {
                     match second {
-                        Some(s) => vec![(first, Value::Int(index)), (s, item)],
-                        None => vec![(first, item)],
+                        Some(s) => ((first, Value::Int(index)), Some((s, item))),
+                        None => ((first, item), None),
                     }
                 };
                 index += 1;
-                if !self.iteration(body, env, &vars)? {
+                if !self.iteration(body, env, vars)? {
                     return Ok(());
                 }
             }
@@ -1126,8 +1186,8 @@ impl Interp {
     /// `a op b`, with the int cases `ops::binop` would reach anyway done here. Overflow goes on to
     /// `binop`, which raises it. The parser bounds an expression's height (4.1), so no guard.
     fn binary(&mut self, op: BinOp, span: Span, a: &Expr, b: &Expr, env: &Env) -> Exec<Value> {
-        let x = self.eval(a, env)?;
-        let y = self.eval(b, env)?;
+        let x = self.leaf(a, env)?;
+        let y = self.leaf(b, env)?;
         if let (&Value::Int(p), &Value::Int(q)) = (&x, &y) {
             let fast = match op {
                 BinOp::Add => p.checked_add(q).map(Value::Int),
@@ -1381,7 +1441,7 @@ impl Interp {
         let frame = new_frame(&decl.layout, Some(captured));
         for (i, a) in args.iter().enumerate() {
             let Arg::Pos(x) = a else { unreachable!("checked above") };
-            let v = self.eval(x, env)?;
+            let v = self.leaf(x, env)?;
             declare_at(&frame, i as u32, v, false);
         }
         self.enter(name, at)?;

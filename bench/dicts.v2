@@ -1,0 +1,17 @@
+// Dicts: counting with get, string keys, a two-name for over a dict.
+let n = int(args().get(0, "300000"))
+let words = ["apple", "pear", "fig", "plum", "kiwi", "lime", "date"]
+let counts = {}
+for i in 0..n {
+    let w = words[i % len(words)]
+    counts[w] = counts.get(w, 0) + 1
+}
+let d = {}
+for i in 0..n {
+    d[str(i % 5000)] = i
+}
+let total = 0
+for k, v in d {
+    total += v
+}
+print(counts["fig"], len(d), total)

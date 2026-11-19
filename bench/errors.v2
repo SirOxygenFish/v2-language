@@ -1,0 +1,18 @@
+// try/catch in a loop: most iterations succeed, some throw.
+let n = int(args().get(0, "3000000"))
+func check(i) {
+    if i % 100 == 0 {
+        throw error("ValueError", f"bad ${i}")
+    }
+    return i
+}
+let ok = 0
+let bad = 0
+for i in 0..n {
+    try {
+        ok += check(i)
+    } catch (e) {
+        bad += 1
+    }
+}
+print(ok, bad)

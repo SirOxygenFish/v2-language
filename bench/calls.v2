@@ -1,0 +1,14 @@
+// Small helpers called with positional, default and named arguments.
+let n = int(args().get(0, "1000000"))
+func add(a, b) {
+    return a + b
+}
+func scale(x, by = 2, plus = 0) {
+    return x * by + plus
+}
+let s = 0
+for i in 0..n {
+    s = add(s, i % 7)
+    s = s + scale(i % 5, plus: 1)
+}
+print(s)
