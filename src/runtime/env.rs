@@ -357,12 +357,24 @@ pub fn closure_dropped(env: &Env) {
 /// in a slot or in a list or dict in one, makes an `Rc` cycle. If only that cycle holds the
 /// frame now, its slots are cleared so it goes; if something else still does (a closure that
 /// was returned), it is remembered, for rechecks and collections (5.1).
+#[inline]
 pub fn leave(env: Env) {
     let ticks = TICKS.with(|t| {
         let n = t.get().wrapping_add(1);
         t.set(n);
         n
     });
+    // The usual frame: the collector has nothing to do, and no closure was made over it.
+    if env.closures.get() == 0 && !GC_ACTIVE.with(Cell::get) {
+        pool(env);
+        return;
+    }
+    leave_checked(env, ticks);
+}
+
+/// `leave` when the collector may have work, or a closure was made over the frame.
+#[inline(never)]
+fn leave_checked(env: Env, ticks: u32) {
     let (pending, due) = if GC_ACTIVE.with(Cell::get) {
         let so_far = MADE.with(Cell::get);
         let Ok(state) = GC.try_with(|g| {
@@ -423,9 +435,13 @@ fn pool(mut env: Env) {
         return;
     }
     let Some(f) = Rc::get_mut(&mut env) else { return };
-    // Emptied in place: the next frame of the same layout needn't size the array again.
+    // Emptied in place: the next frame of the same layout needn't size the array again. A
+    // scalar (an int, a bool) needs no drop.
     for slot in f.slots.get_mut().iter_mut() {
-        *slot = None;
+        match slot {
+            Some(Slot { value: Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_), .. }) => std::mem::forget(slot.take()),
+            _ => *slot = None,
+        }
     }
     f.parent = None;
     let _ = POOL.try_with(|p| {
