@@ -254,7 +254,7 @@ fn repeat_list(items: &[Value], count: i64) -> Exec<Value> {
 }
 
 /// Floor remainder: the result takes the divisor's sign (5.3).
-fn floor_rem_int(a: i64, b: i64) -> i64 {
+pub(crate) fn floor_rem_int(a: i64, b: i64) -> i64 {
     let r = a.wrapping_rem(b);
     if r != 0 && (r < 0) != (b < 0) {
         r + b

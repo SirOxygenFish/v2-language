@@ -29,6 +29,9 @@ use crate::syntax::span::{shown_path, FileId, SourceMap, Span};
 /// Past this many nested calls a call raises `RecursionError` (5.9).
 const MAX_CALLS: usize = 10_000;
 
+/// The most parameters `direct_call` binds without the binder (named and default arguments).
+const MAX_DIRECT: usize = 8;
+
 /// What `r.name(args)` calls: a function held under a dict key, a method (5.5), or a handle's
 /// method in one round trip (11.3).
 enum MethodTarget {
@@ -86,6 +89,26 @@ pub struct Interp {
     /// the stack guard allows (5.9).
     stack_base: usize,
     stack_limit: usize,
+}
+
+/// `p op q` for the int cases `ops::binop` would reach anyway; `None` for the others and on
+/// overflow, which `binop` raises.
+#[inline(always)]
+fn int_op(op: BinOp, p: i64, q: i64) -> Option<Value> {
+    match op {
+        BinOp::Add => p.checked_add(q).map(Value::Int),
+        BinOp::Sub => p.checked_sub(q).map(Value::Int),
+        BinOp::Mul => p.checked_mul(q).map(Value::Int),
+        // By zero: `binop` raises it.
+        BinOp::Rem => (q != 0).then(|| Value::Int(ops::floor_rem_int(p, q))),
+        BinOp::Eq => Some(Value::Bool(p == q)),
+        BinOp::Ne => Some(Value::Bool(p != q)),
+        BinOp::Lt => Some(Value::Bool(p < q)),
+        BinOp::Gt => Some(Value::Bool(p > q)),
+        BinOp::Le => Some(Value::Bool(p <= q)),
+        BinOp::Ge => Some(Value::Bool(p >= q)),
+        _ => None,
+    }
 }
 
 /// The address of a local in the caller's frame.
@@ -533,7 +556,7 @@ impl Interp {
     fn closure(&mut self, decl: &Rc<FuncDecl>, env: &Env) -> Value {
         let name = match &decl.name {
             Some(n) => n.text.clone(),
-            None => format!("func@{}:{}", self.sm.file(decl.span.file).display, decl.span.line).into(),
+            None => decl.anon_name.get_or_init(|| format!("func@{}:{}", self.sm.file(decl.span.file).display, decl.span.line).into()).clone(),
         };
         // A cycle through this closure can run through any frame from here up (5.1).
         let mut frame = Some(env);
@@ -558,6 +581,17 @@ impl Interp {
         })
     }
 
+    /// `e` as an int when it is one that reading can't change anything for: an int literal, or a
+    /// variable holding an int. `None` for anything else, evaluating nothing.
+    #[inline(always)]
+    fn peek_int(&self, e: &Expr, env: &Env) -> Option<i64> {
+        match &e.kind {
+            ExprKind::Int(n) => Some(*n),
+            ExprKind::Name(_, Loc::Slot { hops, index }) => env::read_int(env, *hops, *index),
+            _ => None,
+        }
+    }
+
     /// `e`'s value, with the two commonest leaves, an int and a variable, read here: an operand,
     /// an argument or a returned value is one of them more often than not, and `eval`'s entry and
     /// dispatch cost more than the read.
@@ -569,6 +603,8 @@ impl Interp {
                 Some(v) => Ok(v),
                 None => self.eval(e, env),
             },
+            ExprKind::Binary(op, span, a, b) => self.binary(*op, *span, a, b, env),
+            ExprKind::Call { callee, args, .. } if matches!(callee.kind, ExprKind::Name(..)) => self.call_name(callee, args, env),
             _ => self.eval(e, env),
         }
     }
@@ -611,27 +647,22 @@ impl Interp {
                 }
             }
             // `i += 1`: ints added in place of the general path (overflow goes on to it).
-            StmtKind::Assign { target: target @ Target::Name(n, loc @ Loc::Slot { hops, index }), op: Some((op, op_span)), value } => match env::read(env, *hops, *index) {
-                Some(Value::Int(p)) => {
-                    let rhs = self.leaf(value, env)?;
-                    if let Value::Int(q) = rhs {
-                        let fast = match op {
-                            BinOp::Add => p.checked_add(q),
-                            BinOp::Sub => p.checked_sub(q),
-                            BinOp::Mul => p.checked_mul(q),
-                            _ => None,
-                        };
-                        if let Some(r) = fast {
-                            return match env::write(env, *hops, *index, Value::Int(r)) {
-                                Ok(()) => Ok(()),
-                                Err(e) => self.write_failed(n, e, env),
-                            };
-                        }
+            StmtKind::Assign { target: target @ Target::Name(n, loc @ Loc::Slot { hops, index }), op: Some((op, op_span)), value } => {
+                // A right side that can't change anything (an int, a variable holding one): the
+                // order of the two reads doesn't matter, so the slot is updated under one borrow.
+                if let Some(q) = self.peek_int(value, env) {
+                    let done = env::update_int(env, *hops, *index, |p| match op {
+                        BinOp::Add => p.checked_add(q),
+                        BinOp::Sub => p.checked_sub(q),
+                        BinOp::Mul => p.checked_mul(q),
+                        _ => None,
+                    });
+                    if done {
+                        return Ok(());
                     }
-                    self.compound(n, *loc, *op, *op_span, Value::Int(p), rhs, env)
                 }
-                _ => self.assign(target, Some((*op, *op_span)), value, env),
-            },
+                self.compound_slot(target, n, *loc, *hops, *index, *op, *op_span, value, env)
+            }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value, env),
             StmtKind::If { arms, else_ } => {
                 for (cond, body) in arms {
@@ -646,6 +677,33 @@ impl Interp {
             }
             StmtKind::Return(Some(e)) => Err(Flow::Return(self.leaf(e, env)?)),
             _ => self.exec_other(s, env),
+        }
+    }
+
+    /// `x op= value` on a slot, the general way (5.3): ints added unless they overflow, else the
+    /// compound path.
+    #[allow(clippy::too_many_arguments)]
+    fn compound_slot(&mut self, target: &Target, n: &Name, loc: Loc, hops: u32, index: u32, op: BinOp, op_span: Span, value: &Expr, env: &Env) -> Exec<()> {
+        match env::read(env, hops, index) {
+            Some(Value::Int(p)) => {
+                let rhs = self.leaf(value, env)?;
+                if let Value::Int(q) = rhs {
+                    let fast = match op {
+                        BinOp::Add => p.checked_add(q),
+                        BinOp::Sub => p.checked_sub(q),
+                        BinOp::Mul => p.checked_mul(q),
+                        _ => None,
+                    };
+                    if let Some(r) = fast {
+                        return match env::write(env, hops, index, Value::Int(r)) {
+                            Ok(()) => Ok(()),
+                            Err(e) => self.write_failed(n, e, env),
+                        };
+                    }
+                }
+                self.compound(n, loc, op, op_span, Value::Int(p), rhs, env)
+            }
+            _ => self.assign(target, Some((op, op_span)), value, env),
         }
     }
 
@@ -1134,12 +1192,9 @@ impl Interp {
     /// the call itself.
     fn call_name(&mut self, callee: &Expr, args: &[Arg], env: &Env) -> Exec<Value> {
         let f = self.eval(callee, env)?;
-        // `let str = ""`, then `str(i)`: the variable hides the builtin of that name (5.7).
-        if let (ExprKind::Name(name, _), false) = (&callee.kind, matches!(f, Value::Func(_) | Value::Handle(_))) {
-            if super::builtins::BUILTINS.iter().any(|b| b.name == &**name) {
-                let err = ErrorValue::new("TypeError", format!("'{name}' is {} here, not a function", f.a_type_name()));
-                let _ = err.hint.set(format!("a variable named '{name}' hides V2's {name}(): give the variable another name").into());
-                return Err(self.raise(Flow::Error(Rc::new(err)), callee.span));
+        if !matches!(f, Value::Func(_) | Value::Handle(_)) {
+            if let Some(flow) = self.hidden_builtin(callee, &f) {
+                return Err(flow);
             }
         }
         if let Some(v) = self.direct_call(&f, args, env, callee.span)? {
@@ -1147,6 +1202,19 @@ impl Interp {
         }
         let (pos, named) = self.args(args, env)?;
         self.call_value(&f, pos, named, callee.span).inspect_err(|flow| self.decimal_comma_args(flow, &f, args))
+    }
+
+    /// `let str = ""`, then `str(i)`: the variable hides the builtin of that name (5.7).
+    #[cold]
+    #[inline(never)]
+    fn hidden_builtin(&self, callee: &Expr, f: &Value) -> Option<Flow> {
+        let ExprKind::Name(name, _) = &callee.kind else { return None };
+        if !super::builtins::BUILTINS.iter().any(|b| b.name == &**name) {
+            return None;
+        }
+        let err = ErrorValue::new("TypeError", format!("'{name}' is {} here, not a function", f.a_type_name()));
+        let _ = err.hint.set(format!("a variable named '{name}' hides V2's {name}(): give the variable another name").into());
+        Some(self.raise(Flow::Error(Rc::new(err)), callee.span))
     }
 
     /// `sleep(0,5)`: an `ArityError` of a builtin given more arguments than it takes, two or more
@@ -1186,27 +1254,29 @@ impl Interp {
     /// `a op b`, with the int cases `ops::binop` would reach anyway done here. Overflow goes on to
     /// `binop`, which raises it. The parser bounds an expression's height (4.1), so no guard.
     fn binary(&mut self, op: BinOp, span: Span, a: &Expr, b: &Expr, env: &Env) -> Exec<Value> {
+        // Two operands that are ints to read (a literal, a variable): no values made or dropped.
+        if let Some(p) = self.peek_int(a, env) {
+            if let Some(q) = self.peek_int(b, env) {
+                if let Some(v) = int_op(op, p, q) {
+                    return Ok(v);
+                }
+            }
+        }
         let x = self.leaf(a, env)?;
         let y = self.leaf(b, env)?;
         if let (&Value::Int(p), &Value::Int(q)) = (&x, &y) {
-            let fast = match op {
-                BinOp::Add => p.checked_add(q).map(Value::Int),
-                BinOp::Sub => p.checked_sub(q).map(Value::Int),
-                BinOp::Mul => p.checked_mul(q).map(Value::Int),
-                BinOp::Eq => Some(Value::Bool(p == q)),
-                BinOp::Ne => Some(Value::Bool(p != q)),
-                BinOp::Lt => Some(Value::Bool(p < q)),
-                BinOp::Gt => Some(Value::Bool(p > q)),
-                BinOp::Le => Some(Value::Bool(p <= q)),
-                BinOp::Ge => Some(Value::Bool(p >= q)),
-                _ => None,
-            };
-            if let Some(v) = fast {
+            if let Some(v) = int_op(op, p, q) {
                 // Two ints need no dropping, and this is the hottest path there is.
                 std::mem::forget((x, y));
                 return Ok(v);
             }
         }
+        self.binary_values(op, span, a, b, x, y)
+    }
+
+    /// `binary` for anything but the int fast path: kept out of it, so its frame stays small.
+    #[inline(never)]
+    fn binary_values(&mut self, op: BinOp, span: Span, a: &Expr, b: &Expr, x: Value, y: Value) -> Exec<Value> {
         let r = ops::binop(op, &x, &y);
         // `doppelt(4) + 1` with a doppelt that has no return: where the null came from.
         if let (Err(Flow::Error(err)), true) = (&r, matches!(x, Value::Null) || matches!(y, Value::Null)) {
@@ -1430,25 +1500,100 @@ impl Interp {
         }
     }
 
-    /// The usual call: a V2 function given exactly its positional parameters. They go straight
-    /// into its frame, with nothing for the binder to do. `None`: not such a call.
+    /// The usual call: a V2 function given plain arguments (positional ones, then named ones; no
+    /// `...`, no rest parameter), which bind without the binder's vectors: each argument goes to
+    /// its parameter, and the parameters left take their defaults in order, in the call's frame,
+    /// as `run_closure_in` does. `None`: not such a call, or one the binder would refuse (too many
+    /// arguments, an unknown name, a value given twice, a required parameter left out), which
+    /// `call_value` then raises as before, nothing having been evaluated.
     fn direct_call(&mut self, f: &Value, args: &[Arg], env: &Env, at: Span) -> Exec<Option<Value>> {
         let Value::Func(c) = f else { return Ok(None) };
         let Callable::Closure { decl, env: captured, name } = &**c else { return Ok(None) };
-        if decl.rest.is_some() || args.len() != decl.params.len() || !args.iter().all(|a| matches!(a, Arg::Pos(_))) {
+        let params = &decl.params;
+        if decl.rest.is_some() || args.len() > params.len() {
             return Ok(None);
         }
-        let frame = new_frame(&decl.layout, Some(captured));
+        // Exactly its positional parameters: each straight into its slot (parameter i is slot i).
+        if args.len() == params.len() && args.iter().all(|a| matches!(a, Arg::Pos(_))) {
+            let frame = new_frame(&decl.layout, Some(captured));
+            for (i, a) in args.iter().enumerate() {
+                let Arg::Pos(x) = a else { unreachable!("checked above") };
+                let v = self.leaf(x, env)?;
+                declare_at(&frame, i as u32, v, false);
+            }
+            self.enter(name, at)?;
+            let r = self.run_body(decl, &frame);
+            self.calls.pop();
+            env::leave(frame);
+            return r.map(Some);
+        }
+        self.direct_call_named(decl, captured, name, args, env, at)
+    }
+
+    /// `direct_call` with named arguments or defaults to fill (5.7): kept out of its fast path,
+    /// whose frame stays small.
+    #[inline(never)]
+    fn direct_call_named(&mut self, decl: &Rc<FuncDecl>, captured: &Env, name: &Rc<str>, args: &[Arg], env: &Env, at: Span) -> Exec<Option<Value>> {
+        let params = &decl.params;
+        if params.len() > MAX_DIRECT {
+            return Ok(None);
+        }
+        // Where each argument goes; the parser keeps positional ones first and each name once.
+        let mut to = [0usize; MAX_DIRECT];
+        let mut given = [false; MAX_DIRECT];
         for (i, a) in args.iter().enumerate() {
-            let Arg::Pos(x) = a else { unreachable!("checked above") };
-            let v = self.leaf(x, env)?;
-            declare_at(&frame, i as u32, v, false);
+            let p = match a {
+                Arg::Pos(_) => i,
+                Arg::Named(n, _) => match params.iter().position(|(p, _)| p.text == n.text) {
+                    Some(p) if !given[p] => p,
+                    _ => return Ok(None),
+                },
+                Arg::Spread(_) => return Ok(None),
+            };
+            given[p] = true;
+            to[i] = p;
+        }
+        if params.iter().zip(&given).any(|((_, default), &g)| !g && default.is_none()) {
+            return Ok(None);
+        }
+        let mut values: [Option<Value>; MAX_DIRECT] = Default::default();
+        for (i, a) in args.iter().enumerate() {
+            let (Arg::Pos(x) | Arg::Named(_, x)) = a else { unreachable!("checked above") };
+            values[to[i]] = Some(self.leaf(x, env)?);
         }
         self.enter(name, at)?;
-        let r = self.run_body(decl, &frame);
+        let frame = new_frame(&decl.layout, Some(captured));
+        let r = self.fill_params(decl, &frame, &mut values).and_then(|()| self.run_body(decl, &frame));
         self.calls.pop();
         env::leave(frame);
         r.map(Some)
+    }
+
+    /// Each parameter in order: the next of `pos`, or its default evaluated in `frame` (5.7 step 4).
+    fn fill_params_pos(&mut self, decl: &FuncDecl, frame: &Env, pos: Vec<Value>) -> Exec<()> {
+        let mut pos = pos.into_iter();
+        for (pname, default) in &decl.params {
+            let v = match (pos.next(), default) {
+                (Some(v), _) => v,
+                (None, Some(d)) => self.eval(d, frame)?,
+                (None, None) => unreachable!("checked by the caller"),
+            };
+            declare_at(frame, pname.slot, v, false);
+        }
+        Ok(())
+    }
+
+    /// Each parameter in order: its argument, or its default evaluated in `frame` (5.7 step 4).
+    fn fill_params(&mut self, decl: &FuncDecl, frame: &Env, values: &mut [Option<Value>]) -> Exec<()> {
+        for (i, (pname, default)) in decl.params.iter().enumerate() {
+            let v = match (values[i].take(), default) {
+                (Some(v), _) => v,
+                (None, Some(d)) => self.eval(d, frame)?,
+                (None, None) => unreachable!("checked by the caller"),
+            };
+            declare_at(frame, pname.slot, v, false);
+        }
+        Ok(())
     }
 
     /// One more active call, or `RecursionError` (5.9).
@@ -1494,6 +1639,12 @@ impl Interp {
                 FPart::Expr { expr, fixed } => {
                     let v = self.eval(expr, env)?;
                     match fixed {
+                        // A string or an int straight into the text, the usual parts.
+                        None if matches!(v, Value::Str(_) | Value::Int(_)) => match &v {
+                            Value::Str(text) => s.push_str(text),
+                            Value::Int(n) => super::value::push_int(&mut s, *n),
+                            _ => unreachable!("matched above"),
+                        },
                         None => {
                             let text = self.str_of(&v, expr.span);
                             s.push_str(&self.at(text, expr.span)?);
@@ -1568,6 +1719,16 @@ impl Interp {
                 self.call_value(&target, pos, named, call_site)
             }
             Callable::Closure { decl, env, name } => {
+                // Positional arguments that fit, the parameters left with defaults: the binder has
+                // nothing to check, so they go straight in (a callback of map, filter or sort).
+                if named.is_empty() && decl.rest.is_none() && pos.len() <= decl.params.len() && decl.params[pos.len()..].iter().all(|(_, d)| d.is_some()) {
+                    self.enter(name, call_site)?;
+                    let frame = new_frame(&decl.layout, Some(env));
+                    let r = self.fill_params_pos(decl, &frame, pos).and_then(|()| self.run_body(decl, &frame));
+                    env::leave(frame);
+                    self.calls.pop();
+                    return r;
+                }
                 let params: Vec<Param> = decl
                     .params
                     .iter()
@@ -1607,14 +1768,30 @@ impl Interp {
         self.run_body(decl, frame)
     }
 
+    /// A function's body in its frame. One that ends in `return e`, as most do, gives `e`'s value
+    /// at the end without going through `Flow::Return`.
     fn run_body(&mut self, decl: &FuncDecl, frame: &Env) -> Exec<Value> {
-        match &decl.body {
-            FuncBody::Expr(e) => self.eval(e, frame),
-            FuncBody::Block(b) => match self.exec_in(b, frame) {
-                Ok(()) => Ok(Value::Null),
-                Err(Flow::Return(v)) => Ok(v),
-                Err(other) => Err(other),
-            },
+        let b = match &decl.body {
+            FuncBody::Expr(e) => return self.eval(e, frame),
+            FuncBody::Block(b) => b,
+        };
+        if !b.funcs.is_empty() {
+            self.hoist(b.funcs.iter().map(|&i| &b.stmts[i]), frame);
+        }
+        let (tail, init) = match b.stmts.split_last() {
+            Some((Stmt { kind: StmtKind::Return(Some(e)), .. }, init)) => (Some(e), init),
+            _ => (None, &b.stmts[..]),
+        };
+        for s in init {
+            match self.exec(s, frame) {
+                Ok(()) => {}
+                Err(Flow::Return(v)) => return Ok(v),
+                Err(other) => return Err(other),
+            }
+        }
+        match tail {
+            Some(e) => self.leaf(e, frame),
+            None => Ok(Value::Null),
         }
     }
 
@@ -1640,7 +1817,19 @@ impl Interp {
             };
             return self.fail_at("TypeError", msg, name.span);
         };
-        let Some(def) = table.iter().find(|m| *m.name == *name.text) else {
+        // The table's place in `method_tables`, and the method's in it, from this name's last call.
+        let kind = methods::table_kind(o);
+        let cached = name.method.get();
+        if cached >> 16 == kind {
+            if let Some(def) = table.get((cached & 0xFFFF) as usize) {
+                return Ok(MethodTarget::Method(def));
+            }
+        }
+        let found = table.iter().position(|m| *m.name == *name.text);
+        if let Some(i) = found {
+            name.method.set(kind << 16 | i as u32);
+        }
+        let Some(def) = found.map(|i| &table[i]) else {
             let msg = match habit(o, &name.text) {
                 Some(h) => format!("{} has no method '{}' — {h}", o.type_name(), name.text),
                 // An imported .v2 file is a dict of its names: those are the likely ones.
@@ -1891,7 +2080,7 @@ impl Interp {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Int(n) => out.push_str(&n.to_string()),
+        Value::Int(n) => super::value::push_int(out, *n),
         Value::Float(x) => out.push_str(&float_str(*x)),
         Value::Str(s) => quoted(s, out),
         Value::Bytes(b) => out.push_str(&bytes_repr(b)),

@@ -505,6 +505,26 @@ impl Value {
 }
 
 /// Floats print like Rust's `{:?}` (`2.0`, `0.1`, `1e20`), with `nan`, `inf`, `-inf`.
+/// `n` in decimal, appended to `out`, as `n.to_string()` writes it, without the formatting
+/// machinery or a string of its own (5.2).
+pub fn push_int(out: &mut String, n: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut m = n.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        out.push('-');
+    }
+    out.push_str(std::str::from_utf8(&digits[at..]).expect("ASCII digits"));
+}
+
 pub fn float_str(x: f64) -> String {
     if x.is_nan() {
         "nan".into()
