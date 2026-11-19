@@ -1093,7 +1093,11 @@ const errorCallers = new WeakMap();
 
 function serialize(e, depth = 0) {
   // An exception, or any thrown value, as `err.error` (9.6).
-  if (e instanceof Fail) return { type: e.kind, message: wellFormed(e.message), foreign_type: null, trace: [] };
+  if (e instanceof Fail) {
+    const out = { type: e.kind, message: wellFormed(e.message), foreign_type: null, trace: [] };
+    if (errorHints.has(e)) out.hint = errorHints.get(e);
+    return out;
+  }
   const trace = e && e.v2Frame ? [e.v2Frame, ...frames(e)] : frames(e);
   if (e !== null && typeof e === 'object' && errorCallers.has(e)) trace.push(errorCallers.get(e));
   if (e instanceof V2Error) {
@@ -1851,7 +1855,7 @@ function doModule(m) {
     file = req.resolve(m.name);
   } catch (e) {
     // Not found: resolving looks only for the module asked for, not the ones it requires.
-    if (e && NOT_FOUND.has(e.code)) throw new Fail('ImportError', String(e.message).split('\n')[0]);
+    if (e && NOT_FOUND.has(e.code)) throw builtinMember(m.name) || new Fail('ImportError', String(e.message).split('\n')[0]);
     throw e;
   }
   let mod;
@@ -1875,6 +1879,32 @@ function doModule(m) {
     throw e;
   }
   return loaded(mod);
+}
+
+function builtinMember(name) {
+  // `js.path.join`: a member of one of Node's built-in modules named as a module (13.5). Loading
+  // a built-in runs no package's code, so the member is looked up there, with the warning a
+  // deprecated or experimental one would print (punycode, sqlite) held back; null for a name that
+  // isn't a built-in's.
+  const dot = name.lastIndexOf('.');
+  const head = name.slice(0, dot);
+  const last = name.slice(dot + 1);
+  if (dot <= 0 || !Module.isBuiltin(head)) return null;
+  const warn = process.emitWarning;
+  let v;
+  try {
+    process.emitWarning = () => {};
+    v = require(head)[last];
+  } catch {
+    return null;
+  } finally {
+    process.emitWarning = warn;
+  }
+  if (v === undefined) return new Fail('ImportError', `'${head}' is Node's built-in module, and has no '${last}'`);
+  const fail = new Fail('ImportError', `'${name}' is ${typeof v === 'function' ? 'a function' : 'a value'} in Node's module ${head}, not a module`);
+  const ident = /^[A-Za-z_]\w*$/;
+  if (ident.test(last)) errorHints.set(fail, `@import { ${last} } from js.${ident.test(head) ? head : JSON.stringify(head)}`);
+  return fail;
 }
 
 function syntaxFrame(e, req, name) {

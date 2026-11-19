@@ -1,0 +1,29 @@
+ImportError | 'datetime.datetime' is a class in the module datetime, not a module
+  hint: import the module and reach it there: @import py.datetime as m, then m.datetime.fromtimestamp(…)
+ImportError | 'collections.OrderedDict' is a class in the module collections, not a module
+  hint: import the module and reach it there: @import py.collections as m, then m.OrderedDict.fromkeys(…)
+ImportError | 'json.JSONDecoder' is a class in the module json, not a module
+  hint: import the module and reach it there: @import py.json as m, then m.JSONDecoder
+ImportError | 'datetime.datetime' is a class in the module datetime, not a module
+  hint: import the module and reach it there: @import py.datetime as m, then m.datetime.min
+ImportError | 'datetime.datetime' is a class in the module datetime, not a module
+  hint: import the module and reach it there: @import py.datetime as m, then m.datetime
+ImportError | 'os.getcwd' is a function in the module os, not a module
+  hint: @import { getcwd } from py.os
+ImportError | 'os.path.join' is a function in the module os.path, not a module
+  hint: @import { join } from py.os.path
+ImportError | 'math.pi' is a value in the module math, not a module
+  hint: @import { pi } from py.math
+ImportError | No module named 'datetime.datetim'; 'datetime' is not a package
+  hint: 'datetime' is a module, not a package, so it has no 'datetim': check the name after 'datetime.'
+ImportError | No module named 'json.nothere'
+  hint: 'json' is there, but has no 'nothere': check the name after 'json.'
+ImportError | 'path.join' is a function in Node's module path, not a module
+  hint: @import { join } from js.path
+ImportError | 'path.sep' is a value in Node's module path, not a module
+  hint: @import { sep } from js.path
+ImportError | 'path' is Node's built-in module, and has no 'nothere'
+  hint: if 'path.nothere' isn't misspelled, install it with npm install path.nothere
+ImportError | 'fs' is Node's built-in module, and has no 'extra'
+  hint: if 'fs.extra' isn't misspelled, install it with npm install fs.extra
+true func func
