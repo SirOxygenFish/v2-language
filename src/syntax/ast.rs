@@ -87,6 +87,9 @@ pub struct Body {
     pub funcs: Vec<usize>,
     /// Its frame's names; `None` if it needs no frame (5.6). A function's body uses `FuncDecl.layout`.
     pub layout: Option<Layout>,
+    /// A loop body nothing in which can keep its frame (no function, engine block or import at
+    /// any depth): its iterations can share one frame, emptied after each (5.6).
+    pub reusable: bool,
     #[allow(dead_code)]
     pub span: Span,
 }

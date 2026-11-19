@@ -30,7 +30,7 @@ fn builtin(name: &str) -> Option<u32> {
 
 /// Resolve a whole file, after its static checks.
 pub fn resolve(program: &mut [Stmt]) {
-    let mut r = Resolver { scopes: Vec::new() };
+    let mut r = Resolver { scopes: Vec::new(), holders: 0 };
     r.enter(declared(program), true);
     r.stmts(program);
 }
@@ -43,6 +43,8 @@ struct Scope {
 
 struct Resolver {
     scopes: Vec<Scope>,
+    /// Functions, engine blocks and imports seen so far: what could keep a frame (`Body.reusable`).
+    holders: u32,
 }
 
 impl Resolver {
@@ -85,7 +87,9 @@ impl Resolver {
         let frame = !names.is_empty() || b.stmts.iter().any(creates_function);
         let layout = self.enter(names, frame);
         b.layout = frame.then_some(layout);
+        let holders = self.holders;
         self.stmts(&mut b.stmts);
+        b.reusable = self.holders == holders;
         self.leave();
     }
 
@@ -97,7 +101,9 @@ impl Resolver {
         for n in first {
             self.bind(n);
         }
+        let holders = self.holders;
         self.stmts(&mut b.stmts);
+        b.reusable = self.holders == holders;
         self.leave();
     }
 
@@ -124,6 +130,7 @@ impl Resolver {
     }
 
     fn block(&mut self, b: &mut Rc<EngineBlock>) {
+        self.holders += 1;
         let b = Rc::get_mut(b).expect("nothing else holds a block during resolution");
         for (_, e) in &mut b.args {
             self.expr(e);
@@ -143,7 +150,8 @@ impl Resolver {
                 self.expr(e);
             }
             StmtKind::Expr(e) | StmtKind::Throw(e) | StmtKind::Return(Some(e)) => self.expr(e),
-            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue | StmtKind::EngineImport(_) | StmtKind::Extern(_) => {}
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::EngineImport(_) | StmtKind::Extern(_) => self.holders += 1,
             StmtKind::Assign { target, value, .. } => {
                 match target {
                     Target::Name(n, loc) => *loc = self.find(&n.text),
@@ -188,13 +196,17 @@ impl Resolver {
                 }
             }
             StmtKind::Func(f) => {
+                self.holders += 1;
                 let f = Rc::get_mut(f).expect("nothing else holds a function during resolution");
                 if let Some(n) = &mut f.name {
                     self.bind(n);
                 }
                 self.func(f);
             }
-            StmtKind::Import { alias, .. } => self.bind(alias),
+            StmtKind::Import { alias, .. } => {
+                self.holders += 1;
+                self.bind(alias);
+            }
             StmtKind::Block(b) => self.block(b),
         }
     }
@@ -247,7 +259,10 @@ impl Resolver {
                     self.expr(x);
                 }
             }
-            ExprKind::Func(f) => self.func(Rc::get_mut(f).expect("nothing else holds a function during resolution")),
+            ExprKind::Func(f) => {
+                self.holders += 1;
+                self.func(Rc::get_mut(f).expect("nothing else holds a function during resolution"));
+            }
             ExprKind::Block(b) => self.block(b),
         }
     }
