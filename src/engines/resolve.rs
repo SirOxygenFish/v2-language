@@ -1207,7 +1207,7 @@ impl Resolver<'_> {
                         }
                         None => format!("; install {} and name its full path, or leave command out: {}", spec.language, install_hint(&spec.id)),
                     }
-                } else if let Some(fix) = library_fix(&path, reason) {
+                } else if let Some(fix) = library_fix(&spec.id, &path, reason) {
                     format!("\nfix: {fix}")
                 } else if let Some(fix) = probe_fix(&spec.id, &[(path.clone(), reason.to_string())], &self.lookup.startup) {
                     format!("; {fix}")
@@ -1687,18 +1687,55 @@ fn home_of(_: &str) -> Option<PathBuf> {
     None
 }
 
-/// What to do when `path` couldn't start because a shared library is missing (its probe said
-/// `error while loading shared libraries: libatomic.so.1: …`, as Node.js's own Linux build does
-/// on a minimal system): the package for libatomic, else the library to install.
-pub fn library_fix(path: &Path, reason: &str) -> Option<String> {
+/// What to do when `path`'s version probe of engine `id` failed at loading the program (7.8): its
+/// fix line in a run's EngineNotFound, in doctor's notes and after a configured command, all
+/// three from here. `None` when the reason names no such cause.
+pub fn library_fix(id: &str, path: &Path, reason: &str) -> Option<String> {
+    library_fix_under(path, reason, crate::engines::spec::limit_fix(id))
+}
+
+/// `library_fix`, with `limit` the fix line of an address-space limit that may be why
+/// (`spec::limit_fix`). The loader saying `error while loading shared libraries: libatomic.so.1:
+/// cannot open shared object file: No such file or directory`, as for Node.js's own Linux build
+/// on a minimal system: the package for libatomic, else the library to install; `Permission
+/// denied`: its permissions. A library it couldn't map or get memory for, or a probe a signal
+/// stopped, is that limit's doing (`ulimit -v`, round 23). Anything else names no fix: the
+/// skipped line shows the loader's words.
+fn library_fix_under(path: &Path, reason: &str, limit: Option<String>) -> Option<String> {
+    if reason.starts_with("version probe failed (killed by signal") {
+        return limit;
+    }
     let (_, rest) = reason.split_once("error while loading shared libraries: ")?;
-    let lib = rest.split(':').next()?.trim();
-    Some(if lib.starts_with("libatomic.so") {
-        let (family, sudo) = crate::engines::spec::this_linux();
-        format!("{} needs {lib}: {}", path.display(), crate::engines::spec::package_line(family, sudo, "libatomic1", "libatomic", Some(())))
-    } else {
-        format!("{} needs {lib}, which isn't installed: install it with your system's package manager", path.display())
-    })
+    let (lib, said) = rest.split_once(':').map_or((rest.trim(), ""), |(lib, said)| (lib.trim(), said.trim()));
+    let program = path.display();
+    if said.starts_with("cannot open shared object file") && said.contains("No such file or directory") {
+        return Some(if lib.starts_with("libatomic.so") {
+            let (family, sudo) = crate::engines::spec::this_linux();
+            format!("{program} needs {lib}: {}", crate::engines::spec::package_line(family, sudo, "libatomic1", "libatomic", Some(())))
+        } else {
+            format!("{program} needs {lib}, which isn't installed: install it with your system's package manager")
+        });
+    }
+    if said.starts_with("cannot open shared object file") && said.contains("Permission denied") {
+        return Some(format!("{program} can't read {lib}: check that file's permissions"));
+    }
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("failed to map segment") || lower.contains("cannot allocate memory") {
+        return limit;
+    }
+    None
+}
+
+/// `library_fix` of every program skipped, each line once: two that fail under one memory limit
+/// get one line about it.
+pub fn library_fixes(id: &str, skipped: &[(PathBuf, String)]) -> Vec<String> {
+    let mut fixes: Vec<String> = Vec::new();
+    for fix in skipped.iter().filter_map(|(path, reason)| library_fix(id, path, reason)) {
+        if !fixes.contains(&fix) {
+            fixes.push(fix);
+        }
+    }
+    fixes
 }
 
 /// When a version probe failed (the program exited with an error, or a signal stopped it) while
@@ -1707,7 +1744,7 @@ pub fn library_fix(path: &Path, reason: &str) -> Option<String> {
 pub fn probe_fix(id: &str, skipped: &[(PathBuf, String)], set: &[(&'static str, String)]) -> Option<String> {
     let reads = crate::engines::spec::probe_variables(id);
     let vars: Vec<(&str, String)> = set.iter().filter(|(n, _)| reads.contains(n)).cloned().collect();
-    let failed = skipped.iter().any(|(p, why)| why.starts_with("version probe failed (") && library_fix(p, why).is_none());
+    let failed = skipped.iter().any(|(p, why)| why.starts_with("version probe failed (") && library_fix(id, p, why).is_none());
     (failed && !vars.is_empty()).then(|| crate::engines::spec::startup_fix(id, &vars))
 }
 
@@ -1760,7 +1797,7 @@ fn not_found_message(spec: &EngineSpec, skipped: &[(PathBuf, String)], newest_ol
     for (path, reason) in skipped {
         m.push_str(&format!("\nskipped: {} ({reason})", crate::syntax::span::shown_path(&path.display().to_string())));
     }
-    for fix in skipped.iter().filter_map(|(path, reason)| library_fix(path, reason)) {
+    for fix in library_fixes(&spec.id, skipped) {
         m.push_str(&format!("\nfix: {fix}"));
     }
     if let Some(fix) = batch_fix(&spec.id, skipped) {
@@ -2667,12 +2704,38 @@ mod tests {
     fn messages_say_what_to_do() {
         // A missing shared library names its package (7.8).
         let node = Path::new("/usr/local/bin/node");
-        let reason = "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file";
+        let reason = "version probe failed (exit code 127): node: error while loading shared libraries: libatomic.so.1: cannot open shared object file: No such file or directory";
         let (family, sudo) = crate::engines::spec::this_linux();
         let line = crate::engines::spec::package_line(family, sudo, "libatomic1", "libatomic", Some(()));
-        assert_eq!(library_fix(node, reason), Some(format!("/usr/local/bin/node needs libatomic.so.1: {line}")));
-        assert!(library_fix(node, "version probe failed (exit code 127): x: error while loading shared libraries: libfoo.so.2: nope").unwrap().ends_with("needs libfoo.so.2, which isn't installed: install it with your system's package manager"));
-        assert_eq!(library_fix(node, "version probe failed (exit code 1)"), None);
+        assert_eq!(library_fix_under(node, reason, None), Some(format!("/usr/local/bin/node needs libatomic.so.1: {line}")));
+        let missing = "version probe failed (exit code 127): x: error while loading shared libraries: libfoo.so.2: cannot open shared object file: No such file or directory";
+        assert_eq!(library_fix_under(node, missing, None).as_deref(), Some("/usr/local/bin/node needs libfoo.so.2, which isn't installed: install it with your system's package manager"));
+        assert_eq!(library_fix_under(node, "version probe failed (exit code 1)", None), None);
+        // Round 23: "isn't installed" only for a file that isn't there; one it can't read is its
+        // permissions (the review).
+        let denied = "version probe failed (exit code 127): x: error while loading shared libraries: libfoo.so.2: cannot open shared object file: Permission denied";
+        assert_eq!(library_fix_under(node, denied, None).as_deref(), Some("/usr/local/bin/node can't read libfoo.so.2: check that file's permissions"));
+        // A library the loader couldn't map or get memory for, or a probe killed by a signal, is
+        // the memory limit's doing when one that low is set (ulimit -v), never a missing library;
+        // without one, nothing to fix but what the skipped line says.
+        let limit = || Some("a memory limit (ulimit -v) of 48 MB is set for this shell, and Node.js reserves about 1 GB as it starts: raise it".to_string());
+        let unmapped = "version probe failed (exit code 127): /usr/bin/node: error while loading shared libraries: libbrotlienc.so.1: failed to map segment from shared object";
+        let no_memory = "version probe failed (exit code 127): /usr/bin/node: error while loading shared libraries: libc.so.6: cannot create shared object descriptor: Cannot allocate memory";
+        let killed = "version probe failed (killed by signal 11 (SIGSEGV))";
+        for reason in [unmapped, no_memory, killed] {
+            assert_eq!(library_fix_under(node, reason, limit()), limit(), "{reason}");
+            assert_eq!(library_fix_under(node, reason, None), None, "{reason}");
+        }
+        // Another failure to load one isn't the limit's, limit or not.
+        let elf = "version probe failed (exit code 127): /usr/bin/node: error while loading shared libraries: libfoo.so.2: wrong ELF class: ELFCLASS32";
+        assert_eq!(library_fix_under(node, elf, limit()), None);
+        // A library that isn't installed is that, limit or not.
+        assert!(library_fix_under(node, missing, limit()).is_some_and(|f| f.ends_with("which isn't installed: install it with your system's package manager")));
+        assert!(library_fix_under(node, reason, limit()).is_some_and(|f| f.contains("needs libatomic.so.1: ")));
+        assert_eq!(library_fix_under(node, "version probe failed (exit code 1)", limit()), None);
+        // Each line once.
+        let skipped = [(node.to_path_buf(), missing.to_string()), (PathBuf::from("/opt/node"), elf.to_string()), (node.to_path_buf(), missing.to_string())];
+        assert_eq!(library_fixes("js", &skipped), ["/usr/local/bin/node needs libfoo.so.2, which isn't installed: install it with your system's package manager"]);
         // V2_ENGINE_PY holds one program (18.4): a command with arguments when its program is
         // on PATH, a folder as a folder, anything else as not found.
         let d = temp("onecmd");

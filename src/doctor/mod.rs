@@ -351,14 +351,20 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     continue;
                 }
                 notes.push(format!("{id}: {note}"));
+                // A configured command's own fix lines (a library, the memory limit), as a run
+                // shows them (7.8).
+                if nf.command.is_some() {
+                    notes.extend(nf.message.lines().skip(1).filter(|l| l.starts_with("fix: ")).map(|l| format!("{id}: {l}")));
+                }
                 let others: Vec<(std::path::PathBuf, String)> =
                     nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
                 skipped(&others, &mut notes);
                 notes.extend(activated_venv_note(&id, &nf.skipped).filter(|_| nf.command.is_none()));
-                // A program that can't load a library: the package that has it (7.8). One that
-                // stopped at a NODE_OPTIONS its probe reads: that variable. Any other that doesn't
-                // run: repair it, or install one, as for a missing engine.
-                let fixes: Vec<String> = nf.skipped.iter().filter_map(|(p, why)| crate::engines::resolve::library_fix(p, why)).map(|fix| format!("{id}: fix: {fix}")).collect();
+                // A program that can't load a library: the package that has it, or the memory
+                // limit, as a run says (7.8). One that stopped at a NODE_OPTIONS its probe reads:
+                // that variable. Any other that doesn't run: repair it, or install one, as for a
+                // missing engine.
+                let fixes: Vec<String> = crate::engines::resolve::library_fixes(&id, &nf.skipped).into_iter().map(|fix| format!("{id}: fix: {fix}")).collect();
                 if fixes.is_empty() && matches!(nf.status, Status::Broken) && nf.command.is_none() {
                     let program = if id == "py" { "Python" } else { "Node.js" };
                     // A batch file passed over in a \\server\share folder: the program is fine.

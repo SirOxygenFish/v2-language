@@ -452,6 +452,16 @@ impl Interp {
         self.at(fail(kind, message), span)
     }
 
+    /// `f` run for what is at `need`, as an imported module's top level runs for its `import`:
+    /// what it raises has its own place, then `need`'s frames below (an `@import` that waited
+    /// and runs at a use of its language, 12.7).
+    pub(crate) fn run_for<T>(&mut self, need: Span, f: impl FnOnce(&mut Interp) -> Exec<T>) -> Exec<T> {
+        self.calls.push(CallRecord { name: None, call_site: need });
+        let r = f(self);
+        self.calls.pop();
+        r
+    }
+
     /// Innermost first: the raise location, then each call's site (5.9, 2.5).
     pub(crate) fn trace_at(&self, span: Span) -> Rc<[Rc<str>]> {
         let mut out: Vec<Rc<str>> = Vec::with_capacity(self.calls.len() + 1);

@@ -117,11 +117,19 @@ pub fn run_script(path: &str, args: Vec<String>, cfg: Rc<crate::config::Config>)
     };
     // Then the engines stop: `bye`, one shared grace period that still forwards their output,
     // kill and reap; late output is flushed too (6.5, 8.7).
-    interp.shutdown_sessions();
+    let cut_off = interp.shutdown_sessions();
     let late = lost(&mut interp.out);
     if let (None, Some(m)) = (&flushed, &late) {
         builtins::start_line();
         stderrln!("v2: {m}");
+    }
+    // A worker the grace period cut off: a note each, which doesn't change the exit code; none
+    // when stdout's reader went away, as nothing else is reported then (8.7).
+    if !broken.get() {
+        for note in cut_off {
+            builtins::start_line();
+            stderrln!("{note}");
+        }
     }
     // `exit(n)` or an uncaught error: a block's live display may never have ended (6.5).
     if ended_early {
