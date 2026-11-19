@@ -658,7 +658,9 @@ nowhere or in a loop (a junction too) is named in the error, with what fixes it,
 Linux symlink seen from Windows through `\\wsl.localhost`, which Windows can't follow; a pipe or a
 device of WSL's there is refused by `read_file` and `write_file` before it is opened (`it is a pipe or a device, not a file`). `write_file` replaces a file's
 contents in place, not all at once: for a file another program reads, write a new file and rename
-it over the old one (`os.replace` in a `@py` block). On Linux and macOS, `write_file("/dev/stdout", data)`
+it over the old one (`os.replace` in a `@py` block); on Windows the rename works only while no
+program has the old file open (else `PermissionError`, Access is denied): try again once it is
+closed, or write it in place with `write_file`. On Linux and macOS, `write_file("/dev/stdout", data)`
 (and `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`) writes through V2's own stream, after what `print`
 wrote, and `read_file("/dev/stdin")` reads the rest of standard input, after what `input()` read. The file
 functions raise `IOError` when they fail (`exists` just returns `false`); on Windows, for a file
@@ -717,8 +719,15 @@ runs Linux). A `str` or `bytes`
 `{code, stdout, stderr}`, both outputs captured whole (up to 1 GiB each: past that, as for
 `exec(["yes"])`, the program is stopped and `exec` raises `IOError`) and decoded as UTF-8 (invalid bytes become
 U+FFFD; UTF-16 output, with a byte order mark or, on Windows, as `cmd /u` and `wsl --list` write it,
-is read as UTF-16; on Windows, other output that isn't UTF-8 is read in the console's code page
-first, as `cmd` and other console programs write it). A non-zero
+is read as UTF-16; on Windows, other output is read in the console's code page, as `cmd` and
+other console programs write it, or at a UTF-8 console (`chcp 65001`) in the ANSI one, as `attrib`
+writes it whatever the console says, a line at a time in a single-byte code page, so that a UTF-8
+line stays; UTF-8 cut inside its last character stays UTF-8). Tools that write another code page
+still come back wrong: at the usual console (437, 850) those that write the ANSI one (`attrib`,
+`xcopy`, `findstr`), at a UTF-8 console those that write the OEM one (`robocopy`, `icacls`). Take
+names from `list_dir`, or run the tool in a `@py` block and decode there, as in
+`@py(p) { import subprocess; subprocess.run(["icacls", p], capture_output=True).stdout.decode("oem") }`
+(`"mbcs"` for the ANSI ones). A non-zero
 `code` is not an error; on
 Linux and macOS a program killed by a signal has `code` 128 + the signal number; on Windows a
 crashed program's `code` is Windows' unsigned 32-bit one, 3221225477 (0xC0000005) for an access
@@ -726,7 +735,12 @@ violation, which `exit` takes, so `exit(r.code)` passes it on. A program that
 can't start raises `IOError: exec: cannot start 'gitt': <reason>` (`there is no such file` for a
 path that isn't there, with the Windows spelling of a Git Bash or WSL path, as for the file functions;
 on Windows `ls`, `grep`, `sed`, `awk` or `sh` not on `PATH` gets `exec(["wsl.exe", "-e", "ls", …])`,
-which runs it in WSL).
+which runs it in WSL). V2 can't start a program from a path over 259 characters (Windows allows
+that only to programs marked long-path aware), so it starts one by its folder's short 8.3 path
+when the drive has 8.3 names, and else says so (`its path is 431 characters long`); a command line
+over 32,766 characters is refused as such (`its command line is 118,967 characters`), with a hint:
+pass the data as input, in a file, or a part at a time (on Linux and macOS the same hint goes with
+`Argument list too long`).
 For cmd.exe, the one string after `/c` (or `/k`) is a command line, passed as written, as cmd reads what you type: `exec(["cmd", "/c", "cd /d \"my dir\" && dir"])`. It runs in V2's working
 directory and environment (plus `PYTHONIOENCODING=utf-8` when that isn't set, so a Python program
 writes UTF-8, which V2 reads), with no timeout. cmd.exe can't work in a `\\server\share` folder,

@@ -1,0 +1,84 @@
+// requires: py js
+// Round 23 (W4), INTERNALS 13.5: a class, function or value of a module named as a module says
+// what it is and how to reach it; a name the module lacks keeps Python's message and its hint.
+func show(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", e.hint)
+    }
+}
+show(func() {
+    @import { fromtimestamp } from py.datetime.datetime
+    return fromtimestamp
+})
+show(func() {
+    @import { fromkeys } from py.collections.OrderedDict
+    return fromkeys
+})
+show(func() {
+    @import py.json.JSONDecoder as d
+    return d
+})
+// Not callable, and not there: the class itself.
+show(func() {
+    @import { min } from py.datetime.datetime
+    return min
+})
+show(func() {
+    @import { nothere } from py.datetime.datetime
+    return nothere
+})
+show(func() {
+    @import { x } from py.os.getcwd
+    return x
+})
+show(func() {
+    @import { x } from py.os.path.join
+    return x
+})
+show(func() {
+    @import { x } from py.math.pi
+    return x
+})
+show(func() {
+    @import { now } from py.datetime.datetim
+    return now
+})
+show(func() {
+    @import { x } from py.json.nothere
+    return x
+})
+// Node's built-in modules only: a dot is part of an npm package's name (lodash.chunk).
+show(func() {
+    @import { x } from js.path.join
+    return x
+})
+show(func() {
+    @import { x } from js.path.sep
+    return x
+})
+// A built-in without that member says so (review of round 23), and the hint keeps the npm
+// install line, as fs-extra's kind of name can be a package's (its second review).
+func show_npm(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", e.hint.split(" in ")[0])
+    }
+}
+show_npm(func() {
+    @import { x } from js.path.nothere
+    return x
+})
+show_npm(func() {
+    @import { x } from js."fs.extra"
+    return x
+})
+// The way the hints show.
+@import py.datetime as m
+@import { getcwd } from py.os
+@import { join } from js.path
+print(m.datetime.fromtimestamp(0).year > 1960, type(getcwd), type(join))
