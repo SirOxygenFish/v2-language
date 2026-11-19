@@ -20,7 +20,7 @@ ForeignError: 'utf-8' codec can't decode byte 0xe9 in position 3: invalid contin
   hint: blocks run Python in UTF-8 mode, so open() reads UTF-8: for a file in another encoding, name it, as in open(path, encoding="cp1252")
 KeyError: key 'keys' not found
   hint: keys is a method of dicts, so call it, as in d.keys()
-MarshalError: value too large to send to V2 (20000000 items, more than 64 MiB)
+MarshalError: value too large to send to V2 (about 115 MiB, limit 64 MiB)
   hint: write it to a file and pass the file's path, or send it in parts
 MarshalError: this handle belongs to engine 'py' and can't be passed to 'js' — a datetime.datetime isn't data: make plain data of it in a block, as in @py(h) { h.isoformat() } (at args[0])
   hint: none

@@ -1,0 +1,4 @@
+["Error", "'jsfn' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results"]
+["Error", "V2 function 'twice' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results"]
+scheduled
+["Error", "'pyfn' called outside an active V2 call: JavaScript called it while V2 wasn't waiting on JavaScript (a server, timer or event after its call returned); keep V2 in a call while it serves, as in an exported async function that resolves when the server should stop"]

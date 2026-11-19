@@ -2312,7 +2312,7 @@ print(go())
     // The thread's errors, reported, turn exit code 0 into 1 (INTERNALS 6.5, 9.9).
     assert_eq!((code, stdout.as_str()), (Some(1), "2\n"));
     assert!(stderr.contains("line 14, in <lambda>"), "{stderr}");
-    assert!(stderr.contains("V2Error: V2 function 'boom' called from another thread"), "{stderr}");
+    assert!(stderr.contains("V2Error: 'boom' called from another thread"), "{stderr}");
     assert!(stderr.contains("V2Error: ValueError: from v2"), "{stderr}");
     assert!(!stderr.contains("py.py"), "{stderr}");
     // No caret under a .v2 line (Python 3.13+ underlines library lines, which stay as Python shows them).
@@ -4690,6 +4690,25 @@ fn a_deleted_current_folder_is_said() {
         String::from_utf8_lossy(&out.stderr),
         "v2: cannot find 'hello.v2': the current folder no longer exists (it was deleted or moved)\ncd to another folder, or give the script's full path\n"
     );
+}
+
+#[test]
+fn exit_inside_a_call_from_python_writes_its_open_files() {
+    // Round 23: exit(n) in a V2 function Python called ends the worker without unwinding (9.10),
+    // yet what its open files still buffer is written, as at the end of a Python script: a file
+    // a definition block opened, and text and binary files opened in the call.
+    let src = "func bye() {\n    exit(3)\n}\n@py keeper {\n    @import { bye } from v2\n    import atexit\n    f = open(\"top.txt\", \"w\")\n    f.write(\"written at the top level\")\n    atexit.register(lambda: open(\"atexit.txt\", \"w\").write(\"atexit ran\"))\n    def deep():\n        g = open(\"call.txt\", \"w\", encoding=\"utf-8\")\n        g.write(\"written in the call é\")\n        b = open(\"call.bin\", \"wb\")\n        b.write(b\"bytes\")\n        bye()\n    @export { deep }\n}\n@import { deep } from keeper\nprint(\"before\")\ndeep()\nprint(\"not reached\")\n";
+    let (code, stdout, stderr, home) = run_with_files(&[("flush.v2", src)], &["flush.v2"]);
+    let required = std::env::var("V2_TEST_REQUIRE").unwrap_or_default().split([',', ' ']).any(|t| t == "py");
+    if stderr.contains("EngineNotFound") && !required {
+        return;
+    }
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(3), "before\n", ""));
+    let read = |name: &str| std::fs::read(home.0.join(name)).unwrap_or_default();
+    assert_eq!(read("atexit.txt"), b"atexit ran");
+    assert_eq!(read("top.txt"), b"written at the top level");
+    assert_eq!(String::from_utf8_lossy(&read("call.txt")), "written in the call é");
+    assert_eq!(read("call.bin"), b"bytes");
 }
 
 #[test]
