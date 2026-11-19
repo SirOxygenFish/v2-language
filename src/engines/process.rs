@@ -1151,13 +1151,17 @@ fn spawn_error(program: &OsString, e: &std::io::Error, short: Option<OsString>) 
 
 /// Windows: the length of `program`'s path in UTF-16 units, without a `\\?\` in front, when it
 /// is over 259, the most V2 starts a program from: CreateProcessW takes more only from a program
-/// marked long-path aware, which v2.exe isn't (5.10).
+/// marked long-path aware, which v2.exe isn't (5.10). A batch file's limit is 246: from 247 Rust
+/// gives cmd.exe its path with `\\?\` in front, which cmd.exe can't run ("The system cannot find
+/// the path specified").
 #[cfg(windows)]
 pub fn long_program(program: &std::ffi::OsStr) -> Option<usize> {
     let full = std::path::absolute(program).unwrap_or_else(|_| program.into());
     let shown = full.to_string_lossy();
     let plain = shown.strip_prefix(r"\\?\UNC\").map(|rest| format!(r"\\{rest}")).unwrap_or_else(|| shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string());
-    Some(plain.encode_utf16().count()).filter(|&n| n > 259)
+    let ext = full.extension().map(|e| e.to_ascii_lowercase());
+    let limit = if ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref()) { 246 } else { 259 };
+    Some(plain.encode_utf16().count()).filter(|&n| n > limit)
 }
 
 /// Windows: a program whose path is too long to start from (`long_program`) by a shorter one
@@ -1271,9 +1275,26 @@ pub fn command_line_units(program: &std::ffi::OsStr, args: &[OsString], raw_tail
             }
         })
         .sum();
-    // A batch file runs as `cmd.exe /e:ON /v:OFF /d /c ""script" args"`.
-    let shell = if batch { "cmd.exe /e:ON /v:OFF /d /c \"\"".len() } else { 0 };
-    shell + units(program).len() + 2 + line
+    // A batch file runs as `cmd.exe /e:ON /v:OFF /d /c ""script" args"`, its path as Rust's
+    // `to_user_path` gives it (`batch_script_units`).
+    let (shell, script) = if batch { ("cmd.exe /e:ON /v:OFF /d /c \"\"".len(), batch_script_units(&units(program))) } else { (0, units(program).len()) };
+    shell + script + 2 + line
+}
+
+/// How long Rust makes a batch file's path on cmd.exe's command line (its `to_user_path`): one of
+/// 247 to 259 units gets `\\?\` in front (`\\?\UNC\` for a share's), as Rust's `get_long_path`
+/// adds it from 248 with the NUL; a `\\?\` one of at most 259 loses it; a longer one stays.
+#[cfg(any(windows, test))]
+fn batch_script_units(path: &[u16]) -> usize {
+    let starts = |s: &str| s.encode_utf16().enumerate().all(|(i, u)| path.get(i) == Some(&u));
+    match path.len() {
+        n if n > 259 => n,
+        n if starts(r"\\?\UNC\") => n - 6,
+        n if starts(r"\\?\") => n - 4,
+        n if n < 247 || starts(r"\\.\") => n,
+        n if starts(r"\\") => n + 6,
+        n => n + 4,
+    }
 }
 
 /// Windows: one argument as the command line carries it, so that both kinds of program read it
@@ -2185,6 +2206,13 @@ pub(crate) mod tests {
         // A batch file (review of round 23): `cmd.exe /e:ON /v:OFF /d /c ""C:\b.bat" …"`, an
         // argument with a symbol in quotes, `%` as `%%cd:~,%`, `"` doubled, a `\` at the end quoted.
         assert_eq!(units(r"C:\b.bat", &["x,yz", "%a%", "plain", "q\"x", "tail\\"], false), 29 + 10 + 7 + 20 + 6 + 7 + 9);
+        // Its path as Rust gives it to cmd.exe: from 247 to 259 units with \\?\ in front (second
+        // review of round 23), a share's with \\?\UNC\; a \\?\ one of at most 259 without.
+        let path = |head: &str, n: usize| format!("{head}{}.bat", "a".repeat(n - head.len() - 4)).encode_utf16().collect::<Vec<u16>>();
+        let lengths = [246, 247, 259, 260].map(|n| batch_script_units(&path(r"C:\", n)));
+        assert_eq!(lengths, [246, 251, 263, 260]);
+        assert_eq!((batch_script_units(&path(r"\\srv\share\", 250)), batch_script_units(&path(r"\\?\C:\", 200)), batch_script_units(&path(r"\\?\UNC\srv\s\", 200))), (256, 196, 194));
+        assert_eq!(units(&String::from_utf16(&path(r"C:\", 250)).unwrap(), &["x"], false), 29 + 254 + 2 + 2);
         // On Windows, the count is the length the child sees.
         #[cfg(windows)]
         {
@@ -2203,6 +2231,21 @@ pub(crate) mod tests {
             let c = run_captured(&argv, &[], None, None, false).unwrap();
             let line = String::from_utf8_lossy(&c.stdout);
             assert_eq!(line.trim_end_matches(['\r', '\n']).encode_utf16().count(), command_line_units(&argv[0], &argv[1..], false), "{line}");
+            // At a path of 250 units, which Rust gives cmd.exe with \\?\ in front.
+            let room = 250 - d.as_os_str().len() - r"\\line.bat".len();
+            let folder = d.join("f".repeat(room));
+            std::fs::create_dir_all(&folder).unwrap();
+            let bat = folder.join("line.bat");
+            assert_eq!(bat.as_os_str().len(), 250);
+            std::fs::write(&bat, "@echo off\r\necho %CMDCMDLINE%\r\n").unwrap();
+            // cmd.exe can't run it by that path, so it starts by its 8.3 one (long_program's 246
+            // for a batch file), and the count is of the path it started by.
+            let argv = [bat.into_os_string(), OsString::from("x,yz")];
+            let c = run_captured(&argv, &[], None, None, false).unwrap();
+            let line = String::from_utf8_lossy(&c.stdout);
+            let started = short_program(&argv[0]).expect("an 8.3 path for the batch file");
+            assert!(line.contains('~') && !line.contains(r"\\?\"), "{line} | {}", String::from_utf8_lossy(&c.stderr));
+            assert_eq!(line.trim_end_matches(['\r', '\n']).encode_utf16().count(), command_line_units(&started, &argv[1..], false), "{line}");
             let _ = std::fs::remove_dir_all(&d);
         }
     }

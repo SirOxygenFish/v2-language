@@ -23,5 +23,7 @@ ImportError | 'path.join' is a function in Node's module path, not a module
 ImportError | 'path.sep' is a value in Node's module path, not a module
   hint: @import { sep } from js.path
 ImportError | 'path' is Node's built-in module, and has no 'nothere'
-  hint: null
+  hint: if 'path.nothere' isn't misspelled, install it with npm install path.nothere
+ImportError | 'fs' is Node's built-in module, and has no 'extra'
+  hint: if 'fs.extra' isn't misspelled, install it with npm install fs.extra
 true func func

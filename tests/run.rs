@@ -1938,8 +1938,14 @@ fn exec_of_a_program_at_a_long_path_starts_it_or_says_why_not() {
         let mut buf = vec![0u16; 1024];
         // SAFETY: `wide` is NUL-terminated and `buf` holds 1,024 units.
         let n = unsafe { windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024) };
-        n as usize - 4
+        // No short path at all: as if it were too long, so both are refused.
+        if n == 0 { usize::MAX / 2 } else { n as usize - 4 }
     };
+    // A folder whose 8.3 path fits w.exe but not long-tool-name.exe (a temp folder of about 230
+    // characters) starts the second by its whole 8.3 path: not what this test checks.
+    if short_folder + "\\w.exe".len() <= 259 && short_folder + "\\long-tool-name.exe".len() > 259 {
+        return;
+    }
     let want: Vec<String> = if short_folder + "\\long-tool-name.exe".len() <= 259 {
         let line = short_folder + "\\w.exe".len() + 2 + (0..5000).map(|i: usize| 1 + i.to_string().len() + 20).sum::<usize>();
         let line = line.to_string();
