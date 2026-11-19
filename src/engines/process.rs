@@ -1132,16 +1132,169 @@ pub struct SpawnError {
     pub message: String,
     /// The OS message alone, which `exec` words its own way (5.10).
     pub reason: String,
+    /// The OS's error code, when the OS refused the start.
+    pub code: Option<i32>,
+    /// Windows: the shorter path the program was started by, its own being too long
+    /// (`short_program`).
+    pub short: Option<OsString>,
 }
 
 /// Windows messages such as `%1 is not a valid Win32 application` come with their `%1`
-/// unfilled.
-fn spawn_error(program: &OsString, e: &std::io::Error) -> SpawnError {
+/// unfilled. `program` is the path as given, also when it started by its `short` one.
+fn spawn_error(program: &OsString, e: &std::io::Error, short: Option<OsString>) -> SpawnError {
     let mut reason = crate::syntax::span::os_message(e).replace("%1", "the program");
     if cfg!(windows) && e.raw_os_error() == Some(193) {
         reason.push_str(" (not a valid program for this machine)");
     }
-    SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason }
+    SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason, code: e.raw_os_error(), short }
+}
+
+/// Windows: the length of `program`'s path in UTF-16 units, without a `\\?\` in front, when it
+/// is over 259, the most V2 starts a program from: CreateProcessW takes more only from a program
+/// marked long-path aware, which v2.exe isn't (5.10). A batch file's limit is 246: from 247 Rust
+/// gives cmd.exe its path with `\\?\` in front, which cmd.exe can't run ("The system cannot find
+/// the path specified").
+#[cfg(windows)]
+pub fn long_program(program: &std::ffi::OsStr) -> Option<usize> {
+    let full = std::path::absolute(program).unwrap_or_else(|_| program.into());
+    let shown = full.to_string_lossy();
+    let plain = shown.strip_prefix(r"\\?\UNC\").map(|rest| format!(r"\\{rest}")).unwrap_or_else(|| shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string());
+    let ext = full.extension().map(|e| e.to_ascii_lowercase());
+    let limit = if ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref()) { 246 } else { 259 };
+    Some(plain.encode_utf16().count()).filter(|&n| n > limit)
+}
+
+/// Windows: a program whose path is too long to start from (`long_program`) by a shorter one
+/// (5.10): its folder's 8.3 path and its own name, which a multi-call program (or clang's driver)
+/// reads, when that is at most 259 units; else its whole 8.3 path, when that is.
+#[cfg(windows)]
+fn short_program(program: &std::ffi::OsStr) -> Option<OsString> {
+    long_program(program)?;
+    let full = std::path::absolute(program).ok()?;
+    let fits = |p: OsString| long_program(&p).is_none().then_some(p);
+    let named = short_path(full.parent()?.as_os_str()).map(|folder| std::path::Path::new(&folder).join(full.file_name().unwrap_or_default()).into_os_string());
+    named.and_then(fits).or_else(|| short_path(full.as_os_str()).and_then(fits))
+}
+
+#[cfg(not(windows))]
+fn short_program(_: &std::ffi::OsStr) -> Option<OsString> {
+    None
+}
+
+/// Windows: `path` with each part by its 8.3 name where the volume has one (`GetShortPathNameW`,
+/// which reaches a long path by its `\\?\` form), without a `\\?\` in front.
+#[cfg(windows)]
+fn short_path(path: &std::ffi::OsStr) -> Option<OsString> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let text = path.to_string_lossy();
+    let verbatim = if text.starts_with(r"\\?\") {
+        text.into_owned()
+    } else if let Some(share) = text.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{share}")
+    } else {
+        format!(r"\\?\{text}")
+    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(&verbatim).encode_wide().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated; a null buffer of size 0 asks for the size.
+    let n = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    let mut short = vec![0u16; usize::try_from(n).ok().filter(|&n| n > 0)?];
+    // SAFETY: `short` holds the `n` units the first call asked for.
+    let m = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), n) };
+    short.truncate(usize::try_from(m).ok().filter(|&m| m > 0 && m < short.len())?);
+    let short = String::from_utf16(&short).ok()?;
+    Some(OsString::from(match short.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => short.strip_prefix(r"\\?\").unwrap_or(&short).to_string(),
+    }))
+}
+
+/// Windows: the length in UTF-16 units of the command line `ChildProc::spawn_as` makes of
+/// `program` (the path it starts) and `args` (8.3), of which CreateProcessW takes at most 32,766
+/// (32,767 with its closing NUL).
+#[cfg(any(windows, test))]
+pub fn command_line_units(program: &std::ffi::OsStr, args: &[OsString], raw_tail: bool) -> usize {
+    let units = |a: &std::ffi::OsStr| a.to_string_lossy().encode_utf16().collect::<Vec<u16>>();
+    let path = std::path::Path::new(program);
+    let ext = path.extension().map(|e| e.to_ascii_lowercase());
+    let batch = ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref());
+    let cmd_exe = path.file_name().is_some_and(|f| f.eq_ignore_ascii_case("cmd.exe"));
+    let is = |u: u16, c: u8| u == u16::from(c);
+    // Rust's for cmd.exe: quotes around one with a space or a tab (or an empty one), a backslash
+    // before each `"` and the backslashes before it, and before the closing quote.
+    let rust = |a: &[u16]| {
+        let quote = a.is_empty() || a.iter().any(|&u| is(u, b' ') || is(u, b'\t'));
+        let (mut n, mut run) = (a.len() + if quote { 2 } else { 0 }, 0);
+        for &u in a {
+            if is(u, b'\\') {
+                run += 1;
+            } else {
+                if is(u, b'"') {
+                    n += run + 1;
+                }
+                run = 0;
+            }
+        }
+        n + if quote { run } else { 0 }
+    };
+    // Rust's for a batch file: quotes around one with an ASCII symbol but `#$*+-./:?@\_`, a
+    // control character, or none at all or a `\` at its end; `"` doubled after the backslashes
+    // before it, `%` as `%%cd:~,%`, and the backslashes before the closing quote doubled.
+    let bat = |a: &[u16]| {
+        let symbol = |u: u16| u8::try_from(u).is_ok_and(|b| b.is_ascii() && !b.is_ascii_alphanumeric() && !b"#$*+-./:?@\\_".contains(&b));
+        let control = |u: u16| char::from_u32(u32::from(u)).is_some_and(char::is_control);
+        let quote = a.is_empty() || a.last().is_some_and(|&u| is(u, b'\\')) || a.iter().any(|&u| symbol(u) || control(u));
+        let (mut n, mut run) = (a.len() + if quote { 2 } else { 0 }, 0);
+        for &u in a {
+            if is(u, b'\\') {
+                run += 1;
+            } else {
+                if is(u, b'"') {
+                    n += run + 1;
+                } else if is(u, b'%') || is(u, b'\r') {
+                    n += "%%cd:~,".len();
+                }
+                run = 0;
+            }
+        }
+        n + if quote { run } else { 0 }
+    };
+    let last = args.len().saturating_sub(1);
+    let line: usize = args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            1 + if raw_tail && i == last && args.len() > 1 {
+                units(a).len()
+            } else if batch {
+                bat(&units(a))
+            } else if cmd_exe || raw_tail {
+                rust(&units(a))
+            } else {
+                command_line_arg(&units(a)).len()
+            }
+        })
+        .sum();
+    // A batch file runs as `cmd.exe /e:ON /v:OFF /d /c ""script" args"`, its path as Rust's
+    // `to_user_path` gives it (`batch_script_units`).
+    let (shell, script) = if batch { ("cmd.exe /e:ON /v:OFF /d /c \"\"".len(), batch_script_units(&units(program))) } else { (0, units(program).len()) };
+    shell + script + 2 + line
+}
+
+/// How long Rust makes a batch file's path on cmd.exe's command line (its `to_user_path`): one of
+/// 247 to 259 units gets `\\?\` in front (`\\?\UNC\` for a share's), as Rust's `get_long_path`
+/// adds it from 248 with the NUL; a `\\?\` one of at most 259 loses it; a longer one stays.
+#[cfg(any(windows, test))]
+fn batch_script_units(path: &[u16]) -> usize {
+    let starts = |s: &str| s.encode_utf16().enumerate().all(|(i, u)| path.get(i) == Some(&u));
+    match path.len() {
+        n if n > 259 => n,
+        n if starts(r"\\?\UNC\") => n - 6,
+        n if starts(r"\\?\") => n - 4,
+        n if n < 247 || starts(r"\\.\") => n,
+        n if starts(r"\\") => n + 6,
+        n => n + 4,
+    }
 }
 
 /// Windows: one argument as the command line carries it, so that both kinds of program read it
@@ -1202,21 +1355,25 @@ impl ChildProc {
     pub fn spawn_as(s: &Spawn, arg0: Option<&std::ffi::OsStr>) -> Result<ChildProc, SpawnError> {
         stop_if_interrupted();
         let program = &s.argv[0];
+        // V2 starts no program from a path over 259 characters: by a shorter one, when the
+        // volume has 8.3 names that short (5.10). Messages name the path as given.
+        let short = short_program(program);
+        let started = short.as_ref().unwrap_or(program);
         // Windows runs a batch file through cmd.exe, which would expand `%NAME%` in its path
         // (Rust escapes only the arguments) and run something else (7.5).
         let ext = std::path::Path::new(program).extension().map(|e| e.to_ascii_lowercase());
         let batch = cfg!(windows) && (ext.as_deref() == Some("bat".as_ref()) || ext.as_deref() == Some("cmd".as_ref()));
-        if batch && program.to_string_lossy().contains('%') {
+        if batch && started.to_string_lossy().contains('%') {
             let reason = "a batch file whose path contains '%' can't be started safely: move it to a folder whose path has no %, or start the program it runs directly".to_string();
-            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
+            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason, code: None, short: None });
         }
         // Rust refuses them ("batch file arguments are invalid"): cmd.exe would end the command
         // line there.
         if batch && s.argv[1..].iter().any(|a| a.as_encoded_bytes().iter().any(|b| matches!(b, b'\n' | b'\r'))) {
             let reason = "a batch file can't take an argument with a line break: pass the text as input, as in exec(argv, input: text)".to_string();
-            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason });
+            return Err(SpawnError { message: format!("could not start '{}': {reason}", program.to_string_lossy()), reason, code: None, short: None });
         }
-        let mut cmd = Command::new(program);
+        let mut cmd = Command::new(started);
         // `ls: cannot access …` as from a shell, not `/usr/bin/ls: …`; Windows's command line
         // starts with the path either way.
         #[cfg(unix)]
@@ -1251,7 +1408,7 @@ impl ChildProc {
         // Under the watchdog's lock: the interrupt path can't run between the spawn and the
         // registration, so it never misses a child (6.5).
         let mut w = lock();
-        let (child, kill) = platform_spawn(&mut cmd, s.keep).map_err(|e| spawn_error(program, &e))?;
+        let (child, kill) = platform_spawn(&mut cmd, s.keep).map_err(|e| spawn_error(program, &e, short.clone()))?;
         let reg = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         w.children.push((reg, kill.clone()));
         drop(w);
@@ -1840,6 +1997,20 @@ pub(crate) mod tests {
                 plain_helper(&format!("late:{arg}")).stdin(Stdio::null()).spawn().unwrap();
                 wait_for(&started(arg));
             }
+            // The length of the command line this process was started with, as Windows keeps it.
+            #[cfg(windows)]
+            "cmdline" => {
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn GetCommandLineW() -> *const u16;
+                }
+                // SAFETY: Windows keeps the process's NUL-terminated command line for its lifetime.
+                let n = unsafe {
+                    let line = GetCommandLineW();
+                    (0..).take_while(|&i| *line.add(i) != 0).count()
+                };
+                writeln!(out, "\ncmdline {n}").unwrap();
+            }
             "cat" => {
                 let mut input = Vec::new();
                 std::io::stdin().read_to_end(&mut input).unwrap();
@@ -2020,6 +2191,90 @@ pub(crate) mod tests {
             let line = format!("{} {} x", encoded(w), encoded("~"));
             assert_eq!(c_runtime_args(&line), [w.as_str(), "~", "x"], "{w:?} as {line}");
         }
+    }
+
+    #[test]
+    fn command_line_units_counts_what_createprocess_gets() {
+        // Round 23 (W5), 5.10: exec's error names the command line's length past 32,766. The
+        // program in quotes, then each argument after a space, quoted as `command_line_arg` does.
+        let argv = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        let units = |program: &str, args: &[&str], raw_tail| command_line_units(program.as_ref(), &argv(args), raw_tail);
+        assert_eq!(units(r"C:\p\x.exe", &["a b", "c"], false), 12 + 6 + 2);
+        // cmd.exe: Rust's quoting, and with /c the last argument as written.
+        assert_eq!(units("cmd.exe", &["/c", "echo \"hi\""], true), 9 + 3 + 10);
+        assert_eq!(units("cmd.exe", &["/c", "a b", "q\"x"], false), 9 + 3 + 6 + 5);
+        // A batch file (review of round 23): `cmd.exe /e:ON /v:OFF /d /c ""C:\b.bat" …"`, an
+        // argument with a symbol in quotes, `%` as `%%cd:~,%`, `"` doubled, a `\` at the end quoted.
+        assert_eq!(units(r"C:\b.bat", &["x,yz", "%a%", "plain", "q\"x", "tail\\"], false), 29 + 10 + 7 + 20 + 6 + 7 + 9);
+        // Its path as Rust gives it to cmd.exe: from 247 to 259 units with \\?\ in front (second
+        // review of round 23), a share's with \\?\UNC\; a \\?\ one of at most 259 without.
+        let path = |head: &str, n: usize| format!("{head}{}.bat", "a".repeat(n - head.len() - 4)).encode_utf16().collect::<Vec<u16>>();
+        let lengths = [246, 247, 259, 260].map(|n| batch_script_units(&path(r"C:\", n)));
+        assert_eq!(lengths, [246, 251, 263, 260]);
+        assert_eq!((batch_script_units(&path(r"\\srv\share\", 250)), batch_script_units(&path(r"\\?\C:\", 200)), batch_script_units(&path(r"\\?\UNC\srv\s\", 200))), (256, 196, 194));
+        assert_eq!(units(&String::from_utf16(&path(r"C:\", 250)).unwrap(), &["x"], false), 29 + 254 + 2 + 2);
+        // On Windows, the count is the length the child sees.
+        #[cfg(windows)]
+        {
+            let words = ["plain", "with space", "q\"uote", "trail\\", "a\\\\\"b", "", "*.v2", "{a,b}", "Čeština", "x,yz", "%a%"];
+            let (mut argv, env) = helper("cmdline");
+            argv.extend(words.map(OsString::from));
+            let c = run_captured(&argv, &env, None, None, false).unwrap();
+            let out = String::from_utf8_lossy(&c.stdout);
+            let seen = out.lines().find_map(|l| l.strip_prefix("cmdline ")).unwrap_or_else(|| panic!("{out}"));
+            assert_eq!(command_line_units(&argv[0], &argv[1..], false).to_string(), seen);
+            // A batch file sees its command line as %CMDCMDLINE%.
+            let d = temp("batchline");
+            let bat = d.join("line.bat");
+            std::fs::write(&bat, "@echo off\r\necho %CMDCMDLINE%\r\n").unwrap();
+            let argv: Vec<OsString> = std::iter::once(bat.into_os_string()).chain(words.into_iter().filter(|w| !w.is_empty()).map(OsString::from)).collect();
+            let c = run_captured(&argv, &[], None, None, false).unwrap();
+            let line = String::from_utf8_lossy(&c.stdout);
+            assert_eq!(line.trim_end_matches(['\r', '\n']).encode_utf16().count(), command_line_units(&argv[0], &argv[1..], false), "{line}");
+            // At a path of 250 units, which Rust gives cmd.exe with \\?\ in front.
+            let room = 250 - d.as_os_str().len() - r"\\line.bat".len();
+            let folder = d.join("f".repeat(room));
+            std::fs::create_dir_all(&folder).unwrap();
+            let bat = folder.join("line.bat");
+            assert_eq!(bat.as_os_str().len(), 250);
+            std::fs::write(&bat, "@echo off\r\necho %CMDCMDLINE%\r\n").unwrap();
+            // cmd.exe can't run it by that path, so it starts by its 8.3 one (long_program's 246
+            // for a batch file), and the count is of the path it started by.
+            let argv = [bat.into_os_string(), OsString::from("x,yz")];
+            let c = run_captured(&argv, &[], None, None, false).unwrap();
+            let line = String::from_utf8_lossy(&c.stdout);
+            let started = short_program(&argv[0]).expect("an 8.3 path for the batch file");
+            assert!(line.contains('~') && !line.contains(r"\\?\"), "{line} | {}", String::from_utf8_lossy(&c.stderr));
+            assert_eq!(line.trim_end_matches(['\r', '\n']).encode_utf16().count(), command_line_units(&started, &argv[1..], false), "{line}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_program_at_a_long_path_starts_by_a_shorter_one_but_is_named_as_given() {
+        // Review of round 23 (W5), 5.10: the folder by its 8.3 path, the file by its own name
+        // (multi-call programs read it); a start that fails names the path as given.
+        let d = temp("longprogram");
+        let mut folder = d.clone();
+        for _ in 0..3 {
+            folder.push("d".repeat(100));
+        }
+        std::fs::create_dir_all(&folder).unwrap();
+        let junk = folder.join("clang-cl-like.exe");
+        std::fs::write(&junk, "not a program").unwrap();
+        let argv = [junk.clone().into_os_string()];
+        let Err(e) = ChildProc::spawn(&Spawn { argv: &argv, env: &[], stdin: Pipe::Null, stdout: Pipe::Null, stderr: Pipe::Null, keep: &[], raw_tail: false }) else {
+            panic!("a text file started")
+        };
+        assert!(e.message.starts_with(&format!("could not start '{}': ", junk.display())), "{}", e.message);
+        // Where the volume has 8.3 names (not every CI drive does).
+        if let Some(short) = &e.short {
+            let short = std::path::Path::new(short);
+            assert_eq!(short.file_name(), junk.file_name());
+            assert!(short.to_string_lossy().contains('~') && long_program(short.as_os_str()).is_none(), "{}", short.display());
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn temp(name: &str) -> PathBuf {

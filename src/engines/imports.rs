@@ -703,7 +703,9 @@ fn missing_package_hint(message: &str, site: &Site, python: Option<&PipFor>) -> 
             (None, _) => install,
         });
     }
-    let name = quoted("Cannot find module '")?;
+    // `js."fs.extra"`, which js.js `builtinMember` says fs lacks, may be an npm package's name.
+    let lacks = || message.strip_suffix('\'')?.split_once("' is Node's built-in module, and has no '").map(|(head, last)| format!("{}.{last}", head.trim_start_matches('\'')));
+    let name = quoted("Cannot find module '").or_else(lacks)?;
     if name.starts_with(['.', '/']) || name.contains(':') {
         // `ts."./money"` for money.ts: Node finds a file by its whole name.
         let relative = name.starts_with("./") || name.starts_with("../");

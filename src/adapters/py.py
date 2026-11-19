@@ -1686,6 +1686,34 @@ if __name__ == "__main__":
             return True
         return t.__module__ == "numpy" and t.__name__ == "ndarray"
 
+    def member_error(name, names):
+        """`py.datetime.datetime`: a member of a module named as a module (13.5). Python imported
+        its parent, so the member is looked up there, importing nothing more: the message and
+        hint for a class, a function or another value; None for a name the parent lacks."""
+        parent, _, last = name.rpartition(".")
+        mod = sys.modules.get(parent)
+        if not parent or mod is None:
+            return None
+        try:
+            v = getattr(mod, last)
+        except Exception:
+            return None
+        if isinstance(v, types.ModuleType):
+            return None
+        if isinstance(v, type):
+            reach = "m." + last
+            first = next((n for n in names or () if isinstance(n, str) and n == well_formed(n)), None)
+            try:
+                attr = getattr(v, first) if first else _absent
+            except Exception:
+                attr = _absent
+            if attr is not _absent:
+                reach += "." + first + ("(…)" if callable(attr) else "")
+            return ("'%s' is a class in the module %s, not a module" % (name, parent),
+                    "import the module and reach it there: @import py.%s as m, then %s" % (parent, reach))
+        kind = "a function" if callable(v) else "a value"
+        return ("'%s' is %s in the module %s, not a module" % (name, kind, parent), "@import { %s } from py.%s" % (last, parent))
+
     def do_module(m):
         """A module unit (13.5): imported once per unit, then the names asked for."""
         lead = add_file_dir(m["from"])
@@ -1701,6 +1729,9 @@ if __name__ == "__main__":
                 # Only the module asked for (or a parent of it) missing is an ImportError; a
                 # missing dependency is the module's own failure.
                 if e.name is not None and (name == e.name or name.startswith(e.name + ".")):
+                    member = member_error(name, m.get("names")) if e.name == name else None
+                    if member:
+                        raise Fail("ImportError", member[0], member[1])
                     message = str(e)
                     hint = package_hint(e.name, lead)
                     near = near_module(e.name) if "." not in e.name and not hint else None

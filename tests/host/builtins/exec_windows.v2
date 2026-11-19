@@ -4,14 +4,16 @@ let r = exec(["cmd", "/d", "/c", "echo", "hi"])
 print(r.code, json_stringify(r.stdout), json_stringify(r.stderr))
 // Exit codes are unsigned 32-bit numbers on Windows, as 8.6 prints them.
 print(exec(["cmd", "/d", "/c", "exit", "3"]).code, exec(["cmd", "/d", "/c", "exit", "-1"]).code)
-// Output that isn't UTF-8 is read in the console's code page, as console programs write it
-// (INTERNALS 5.10): the byte is one character there, which is U+FFFD only when that code page is
-// UTF-8 (65001, as on CI's runners). chcp, started the same way, names the code page.
+// Output that isn't UTF-8 is read in the console's code page, as console programs write it, and
+// at a UTF-8 console (65001, as on CI's runners) in the ANSI one (INTERNALS 5.10): the byte is one
+// character there, which is U+FFFD only when both are UTF-8. chcp, started the same way, names
+// the console's code page; the registry, the ANSI one.
 let home = getenv("USERPROFILE")
 write_file(home + "/v2_exec_ff.bin", b"a\xffb")
 let typed = exec(["cmd", "/d", "/c", "type", home + r"\v2_exec_ff.bin"]).stdout
 let utf8 = "65001" in exec(["cmd", "/d", "/c", "chcp"]).stdout
-print(len(typed), ("\u{fffd}" in typed) == utf8)
+let ansi_utf8 = "65001" in exec(["reg", "query", r"HKLM\SYSTEM\CurrentControlSet\Control\Nls\CodePage", "/v", "ACP"]).stdout
+print(len(typed), ("\u{fffd}" in typed) == (utf8 && ansi_utf8))
 // UTF-16 output, as cmd /u writes it, is decoded (INTERNALS 5.10).
 print(json_stringify(exec(["cmd", "/d", "/u", "/c", "echo h\u{e9}llo"]).stdout))
 // The one string after /c is cmd's own command line: its quotes reach cmd as written (5.10).
