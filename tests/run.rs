@@ -1876,6 +1876,9 @@ fn exec_output_is_decoded_a_line_at_a_time() {
     let cut = "Łódź utf8\r\nŁódź".as_bytes();
     std::fs::write(home.0.join("cut.txt"), &cut[..cut.len() - 1]).unwrap();
     std::fs::write(home.0.join("gbk.txt"), b"\xcd\xbc\xc6\xac\r\n\xce\xc4\xb5\xb5\r\n\xcf\xc2\xd4\xd8\r\n\xca\xd3\xc6\xb5\r\n").unwrap();
+    // 图片恪 with no line break: valid GBK, which also reads as UTF-8 cut at its end (the second
+    // review of round 23): a double-byte code page in which the whole output is valid comes first.
+    std::fs::write(home.0.join("gbk_end.txt"), b"\xcd\xbc\xc6\xac\xe3\xa1").unwrap();
     let src = "for f in args() {\n    let r = exec([\"cmd\", \"/d\", \"/c\", f\"type ${f}\"])\n    for l in r.stdout.lines() { print(json_stringify(l)) }\n}\n";
     std::fs::write(home.0.join("mixed.v2"), src).unwrap();
     let json = |lines: &str| lines.lines().map(|l| serde_json::to_string(l).unwrap() + "\n").collect::<String>();
@@ -1886,7 +1889,7 @@ fn exec_output_is_decoded_a_line_at_a_time() {
     for (chcp, files, want) in [
         ("65001", "mixed.txt cut.txt", json(&format!("{}\ncafé utf8", in_code_page(&ansi_line[..ansi_line.len() - 2], ansi))) + &cut_lines),
         (oem_text.as_str(), "mixed.txt cut.txt", json(&format!("{}\ncafé utf8", in_code_page(&ansi_line[..ansi_line.len() - 2], oem))) + &cut_lines),
-        ("936", "mixed.txt gbk.txt cut.txt", json(&in_code_page(&mixed, 936)) + &json("图片\n文档\n下载\n视频") + &cut_lines),
+        ("936", "mixed.txt gbk.txt cut.txt gbk_end.txt", json(&in_code_page(&mixed, 936)) + &json("图片\n文档\n下载\n视频") + &cut_lines + &json("图片恪")),
     ] {
         let out = Command::new("cmd.exe")
             .raw_arg(format!("/d /c chcp {chcp} >nul & \"{BIN}\" mixed.v2 {files}"))

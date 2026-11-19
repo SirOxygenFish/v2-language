@@ -360,7 +360,13 @@ fn child_text(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
-    if cut_utf8(bytes) {
+    // A double-byte code page first, when the whole output is valid in it: its characters can
+    // read as UTF-8 cut at the end (cp936's 图片恪).
+    #[cfg(windows)]
+    if let Some(s) = other_code_page().filter(|&cp| !single_byte(cp)).and_then(|cp| strict_code_page_text(bytes, cp)) {
+        return s;
+    }
+    if cut_output(bytes) {
         return String::from_utf8_lossy(bytes).into_owned();
     }
     #[cfg(windows)]
@@ -370,14 +376,15 @@ fn child_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// UTF-8 cut inside its last character, as `head -c` or a program stopped while it wrote leaves
-/// it: valid up to an incomplete character at the end, after one past ASCII on its last line
-/// (an ANSI line that ends in `é` is not one).
-fn cut_utf8(bytes: &[u8]) -> bool {
+/// Output, or a line of it, that is UTF-8 cut inside its last character, as `head -c` or a
+/// program stopped while it wrote leaves it: `cut_utf8` (read_file's rule: two characters past
+/// ASCII before the cut) on its last line, as an ANSI line that ends in `é` after UTF-8 ones is
+/// not one (5.10).
+fn cut_output(bytes: &[u8]) -> bool {
     match std::str::from_utf8(bytes) {
         Err(e) if e.error_len().is_none() => {
             let valid = &bytes[..e.valid_up_to()];
-            valid.rsplit(|&b| b == b'\n' || b == b'\r').next().unwrap_or(valid).iter().any(|&b| b >= 0x80)
+            cut_utf8(valid.rsplit(|&b| b == b'\n' || b == b'\r').next().unwrap_or(valid), &e)
         }
         _ => false,
     }
@@ -411,7 +418,7 @@ fn by_lines(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<String>) -> String {
     while at < bytes.len() {
         let end = bytes[at..].iter().position(|&b| b == b'\n' || b == b'\r').map_or(bytes.len(), |n| at + n + 1);
         let line = &bytes[at..end];
-        let utf8 = std::str::from_utf8(line).is_ok() || cut_utf8(line);
+        let utf8 = std::str::from_utf8(line).is_ok() || cut_output(line);
         if utf8 {
             if let Some(start) = run.take() {
                 other(&bytes[start..at], &mut out);
@@ -491,13 +498,25 @@ fn utf16_text(bytes: &[u8]) -> Option<String> {
 /// `bytes` in the code page `cp`; `None` when Windows can't read them so.
 #[cfg(windows)]
 fn code_page_text(bytes: &[u8], cp: u32) -> Option<String> {
+    multi_byte_text(bytes, cp, 0)
+}
+
+/// `bytes` in code page `cp` when every byte of it is valid there (MB_ERR_INVALID_CHARS), else
+/// `None`.
+#[cfg(windows)]
+fn strict_code_page_text(bytes: &[u8], cp: u32) -> Option<String> {
+    multi_byte_text(bytes, cp, windows_sys::Win32::Globalization::MB_ERR_INVALID_CHARS)
+}
+
+#[cfg(windows)]
+fn multi_byte_text(bytes: &[u8], cp: u32, flags: u32) -> Option<String> {
     use windows_sys::Win32::Globalization::MultiByteToWideChar;
     let len = i32::try_from(bytes.len()).ok()?;
     // SAFETY: the input is `len` readable bytes; a null output with size 0 asks for the length.
-    let n = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    let n = unsafe { MultiByteToWideChar(cp, flags, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
     let mut wide = vec![0u16; usize::try_from(n).ok().filter(|&n| n > 0)?];
     // SAFETY: `wide` holds the `n` units the first call asked for.
-    let m = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n) };
+    let m = unsafe { MultiByteToWideChar(cp, flags, bytes.as_ptr(), len, wide.as_mut_ptr(), n) };
     wide.truncate(usize::try_from(m).ok().filter(|&m| m > 0)?);
     Some(String::from_utf16_lossy(&wide))
 }
@@ -3053,7 +3072,10 @@ mod tests {
         let cut = &cut[..cut.len() - 1];
         assert_eq!(child_text(cut), "Łódź utf8\nŁód\u{FFFD}");
         assert_eq!(by_lines(&[b"caf\xe9 ansi\n", cut].concat(), latin1), "café ansi\nŁódź utf8\nŁód\u{FFFD}");
-        assert!(!cut_utf8(b"caf\xc3\xa9 utf8\nlast caf\xe9") && cut_utf8(&"ßŁ".as_bytes()[..3]) && !cut_utf8(b"caf\xe9 x\n\xc5\x81\xc5"));
+        assert!(!cut_output(b"caf\xc3\xa9 utf8\nlast caf\xe9") && cut_output(&"ßŁó".as_bytes()[..5]) && !cut_output(b"caf\xe9 x\n\xc5\x81\xc5"));
+        // One character past ASCII before the cut isn't enough (read_file's rule): cp1251's Пёс
+        // (CF B8 F1) reads as ϸ and a cut lead byte (the second review of round 23).
+        assert!(!cut_output(&"ßŁ".as_bytes()[..3]) && !cut_output(b"\xcf\xb8\xf1"));
         assert_eq!(by_lines(b"caf\xc3\xa9 utf8\nlast caf\xe9", latin1), "café utf8\nlast café");
         // A double-byte code page reads the output whole: GBK's 图片 (CD BC C6 AC) is valid UTF-8
         // (ͼƬ), which a line at a time would keep.
