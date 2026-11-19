@@ -726,13 +726,15 @@ impl Interp {
             StmtKind::Return(_) => return Err(Flow::Return(Value::Null)),
             StmtKind::Throw(e) => return Err(self.throw(e, s.span, env)),
             StmtKind::While { cond, body } => {
-                while self.condition(cond, env)? {
-                    match self.exec_body(body, env) {
-                        Ok(()) | Err(Flow::Continue) => {}
-                        Err(Flow::Break) => break,
-                        Err(other) => return Err(other),
-                    }
+                let shared = match &body.layout {
+                    Some(layout) if body.reusable => Some(new_frame(layout, Some(env))),
+                    _ => None,
+                };
+                let r = self.exec_while(cond, body, env, shared.as_ref());
+                if let Some(frame) = shared {
+                    env::leave(frame);
                 }
+                r?
             }
             StmtKind::For { first, second, iter, body } => self.exec_for(first, second.as_ref(), iter, body, env)?,
             StmtKind::Try { body, catch, finally } => self.exec_try(body, catch.as_ref(), finally.as_ref(), env)?,
@@ -978,17 +980,56 @@ impl Interp {
         }
     }
 
+    /// `while`: its body in a frame of its own each time, or in `shared` (`Body.reusable`),
+    /// emptied after each, as a fresh one would be left (5.6).
+    fn exec_while(&mut self, cond: &Expr, body: &Body, env: &Env, shared: Option<&Env>) -> Exec<()> {
+        while self.condition(cond, env)? {
+            let r = match shared {
+                Some(frame) => {
+                    let r = self.exec_in(body, frame);
+                    env::reset(frame);
+                    env::tick();
+                    r
+                }
+                None => self.exec_body(body, env),
+            };
+            match r {
+                Ok(()) | Err(Flow::Continue) => {}
+                Err(Flow::Break) => break,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
+    }
+
     /// One loop iteration in a fresh frame holding the loop variables (5.6). `Ok(false)` ends
     /// the loop.
-    fn iteration(&mut self, body: &Body, env: &Env, vars: LoopVars) -> Exec<bool> {
-        let frame = new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env));
+    fn iteration(&mut self, body: &Body, env: &Env, vars: LoopVars, shared: Option<&Env>) -> Exec<bool> {
         let ((n, v), second) = vars;
-        declare_at(&frame, n.slot, v, false);
-        if let Some((n, v)) = second {
-            declare_at(&frame, n.slot, v, false);
-        }
-        let r = self.exec_in(body, &frame);
-        env::leave(frame);
+        let r = match shared {
+            // One frame for every iteration of a body nothing can keep it from (5.6): emptied
+            // after each, as a fresh one would be left.
+            Some(frame) => {
+                declare_at(frame, n.slot, v, false);
+                if let Some((n, v)) = second {
+                    declare_at(frame, n.slot, v, false);
+                }
+                let r = self.exec_in(body, frame);
+                env::reset(frame);
+                env::tick();
+                r
+            }
+            None => {
+                let frame = new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env));
+                declare_at(&frame, n.slot, v, false);
+                if let Some((n, v)) = second {
+                    declare_at(&frame, n.slot, v, false);
+                }
+                let r = self.exec_in(body, &frame);
+                env::leave(frame);
+                r
+            }
+        };
         match r {
             Ok(()) | Err(Flow::Continue) => Ok(true),
             Err(Flow::Break) => Ok(false),
@@ -998,6 +1039,15 @@ impl Interp {
 
     /// `for` evaluates its iterable once and walks a snapshot of it (5.8).
     fn exec_for(&mut self, first: &Name, second: Option<&Name>, iter: &ForIter, body: &Body, env: &Env) -> Exec<()> {
+        let shared = body.reusable.then(|| new_frame(body.layout.as_ref().expect("a loop body has a frame"), Some(env)));
+        let r = self.exec_for_in(first, second, iter, body, env, shared.as_ref());
+        if let Some(frame) = shared {
+            env::leave(frame);
+        }
+        r
+    }
+
+    fn exec_for_in(&mut self, first: &Name, second: Option<&Name>, iter: &ForIter, body: &Body, env: &Env, shared: Option<&Env>) -> Exec<()> {
         // With two variables, the first gets the index (the key for a dict).
         let pair = |a: Value, b: Value| -> LoopVars {
             match second {
@@ -1018,7 +1068,7 @@ impl Interp {
                 };
                 let mut i = lo;
                 while i < hi {
-                    if !self.iteration(body, env, ((first, Value::Int(i)), None))? {
+                    if !self.iteration(body, env, ((first, Value::Int(i)), None), shared)? {
                         break;
                     }
                     i += 1;
@@ -1030,7 +1080,7 @@ impl Interp {
                     let (start, step, count) = self.at(super::builtins::range_bounds(&args), e.span)?;
                     let mut x = start as i128;
                     for i in 0..count {
-                        if !self.iteration(body, env, pair(Value::Int(i as i64), Value::Int(x as i64)))? {
+                        if !self.iteration(body, env, pair(Value::Int(i as i64), Value::Int(x as i64)), shared)? {
                             break;
                         }
                         x += step as i128;
@@ -1058,7 +1108,7 @@ impl Interp {
                     Value::List(l) => {
                         let items = l.borrow().clone();
                         for (i, x) in items.into_iter().enumerate() {
-                            if !self.iteration(body, env, pair(Value::Int(i as i64), x))? {
+                            if !self.iteration(body, env, pair(Value::Int(i as i64), x), shared)? {
                                 break;
                             }
                         }
@@ -1070,7 +1120,7 @@ impl Interp {
                                 Some(s) => ((first, Value::Str(k.into())), Some((s, v))),
                                 None => ((first, Value::Str(k.into())), None),
                             };
-                            if !self.iteration(body, env, vars)? {
+                            if !self.iteration(body, env, vars, shared)? {
                                 break;
                             }
                         }
@@ -1078,19 +1128,19 @@ impl Interp {
                     Value::Str(s) => {
                         for (i, ch) in s.chars().enumerate() {
                             let mut buf = [0u8; 4];
-                            if !self.iteration(body, env, pair(Value::Int(i as i64), Value::str(ch.encode_utf8(&mut buf))))? {
+                            if !self.iteration(body, env, pair(Value::Int(i as i64), Value::str(ch.encode_utf8(&mut buf))), shared)? {
                                 break;
                             }
                         }
                     }
                     Value::Bytes(b) => {
                         for (i, byte) in b.iter().enumerate() {
-                            if !self.iteration(body, env, pair(Value::Int(i as i64), Value::Int(*byte as i64)))? {
+                            if !self.iteration(body, env, pair(Value::Int(i as i64), Value::Int(*byte as i64)), shared)? {
                                 break;
                             }
                         }
                     }
-                    Value::Handle(h) => self.for_handle(&h, first, second, body, env, e.span)?,
+                    Value::Handle(h) => self.for_handle(&h, first, second, body, env, e.span, shared)?,
                     other => {
                         let err = ErrorValue::new("TypeError", format!("cannot iterate over {}", other.type_name()));
                         let hint = match &other {
@@ -1112,7 +1162,8 @@ impl Interp {
     /// `for` over a handle (11.4): batches of items from the worker's iterator. A mapping gives
     /// `[key, value]` pairs, so one variable is the key and two are key and value, as for a
     /// dict; anything else gives items, or index and item, as for a list.
-    fn for_handle(&mut self, h: &HandleRef, first: &Name, second: Option<&Name>, body: &Body, env: &Env, at: Span) -> Exec<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn for_handle(&mut self, h: &HandleRef, first: &Name, second: Option<&Name>, body: &Body, env: &Env, at: Span, shared: Option<&Env>) -> Exec<()> {
         let (it, mapping) = self.handle_iter(h, second.is_some(), at)?;
         let mut index = 0;
         loop {
@@ -1137,7 +1188,7 @@ impl Interp {
                     }
                 };
                 index += 1;
-                if !self.iteration(body, env, vars)? {
+                if !self.iteration(body, env, vars, shared)? {
                     return Ok(());
                 }
             }

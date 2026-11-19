@@ -436,6 +436,43 @@ fn pool(mut env: Env) {
     });
 }
 
+/// A frame that a loop's iterations share (`Body.reusable`), after one: its values go, as a fresh
+/// frame's would on leaving it, and the next iteration starts with nothing declared (5.6). Each
+/// value goes outside the borrow, so its drop may look at frames.
+pub fn reset(env: &Env) {
+    let n = env.slots.borrow().len();
+    for i in 0..n {
+        let old = env.slots.borrow_mut()[i].take();
+        drop(old);
+    }
+}
+
+/// What leaving a frame does for the collector, for an iteration that shares its frame: the
+/// count of frames left that paces it, its rechecks and its collections (5.1).
+pub fn tick() {
+    let ticks = TICKS.with(|t| {
+        let n = t.get().wrapping_add(1);
+        t.set(n);
+        n
+    });
+    if !GC_ACTIVE.with(Cell::get) {
+        return;
+    }
+    let so_far = MADE.with(Cell::get);
+    let Ok((pending, due)) = GC.try_with(|g| {
+        let g = g.borrow();
+        (!g.recheck.is_empty(), !g.remembered.is_empty() && so_far.wrapping_sub(g.since) >= g.due)
+    }) else {
+        return;
+    };
+    if pending {
+        recheck(ticks);
+    }
+    if due {
+        collect();
+    }
+}
+
 /// Check the remembered frames a closure has let go of, each once the frames left since its
 /// last check pay for it; the rest wait for a collection.
 fn recheck(ticks: u32) {

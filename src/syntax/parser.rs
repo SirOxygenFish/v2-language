@@ -712,7 +712,7 @@ impl<'a> Parser<'a> {
         let close = self.bump().span;
         self.depth -= 1;
         let funcs = stmts.iter().enumerate().filter(|(_, s)| matches!(s.kind, StmtKind::Func(_))).map(|(i, _)| i).collect();
-        Ok(Body { stmts, funcs, layout: None, span: open.to(close) })
+        Ok(Body { stmts, funcs, layout: None, reusable: false, span: open.to(close) })
     }
 
     fn statement(&mut self) -> Result<Stmt, Diag> {
