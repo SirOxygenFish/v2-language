@@ -1,0 +1,5 @@
+// platform: unix
+// A device's name with a slash after it names no folder, and is no file either (DOCS 3.11,
+// INTERNALS 5.10).
+try { read_file("/dev/null/") } catch (e) { print(e.message, "|", e.hint) }
+print(exists("/dev/null/"), exists("/dev/"))

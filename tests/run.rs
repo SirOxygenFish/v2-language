@@ -5222,8 +5222,9 @@ fn a_drive_or_share_that_isnt_there_is_named() {
     let src = format!(
         "{SHOW}show(func() => write_file(\"{q}:\\\\reports\\\\out.csv\", \"x\"))\nshow(func() => make_dir(\"{q}:\\\\reports\"))\nshow(func() => make_dir(\"{q}:/\"))\n\
          show(func() => read_file(\"{q}:/data.csv\"))\nshow(func() => list_dir(\"{q}:/\"))\nshow(func() => remove_file(\"{q}:/x.txt\"))\n\
-         show(func() => write_file(\"{lower}:y.txt\", \"x\"))\nprint(exists(\"{q}:/x\"))\n\
-         show(func() => read_file(\"\\\\\\\\localhost\\\\v2-no-such-share-r19\\\\x.txt\"))\nshow(func() => make_dir(\"//localhost/v2-no-such-share-r19/out\"))\n"
+         show(func() => write_file(\"{lower}:y.txt\", \"x\"))\nshow(func() => write_file(\"{q}:/\", \"x\"))\nprint(exists(\"{q}:/x\"))\n\
+         show(func() => read_file(\"\\\\\\\\localhost\\\\v2-no-such-share-r19\\\\x.txt\"))\nshow(func() => make_dir(\"//localhost/v2-no-such-share-r19/out\"))\n\
+         show(func() => write_file(\"//localhost/v2-no-such-share-r19/\", \"x\"))\n"
     );
     let home = TempHome::new();
     std::fs::write(home.0.join("d.v2"), src).unwrap();
@@ -5239,6 +5240,8 @@ fn a_drive_or_share_that_isnt_there_is_named() {
         ("list", format!("{q}:/")),
         ("remove", format!("{q}:/x.txt")),
         ("write", format!("{lower}:y.txt")),
+        // A root with its separator (the second review of round 23).
+        ("write", format!("{q}:/")),
     ] {
         want.push(format!("cannot {verb} '{path}': {none}"));
         want.push("null".into());
@@ -5255,7 +5258,14 @@ fn a_drive_or_share_that_isnt_there_is_named() {
         return;
     }
     let cant = format!("the share {share} can't be reached (is that computer on and connected, and is the share's name right?)");
-    let rest = [format!("cannot read '{share}\\x.txt': {cant}"), "null".into(), format!("cannot create '//localhost/v2-no-such-share-r19/out': {cant}"), "null".into()];
+    let rest = [
+        format!("cannot read '{share}\\x.txt': {cant}"),
+        "null".into(),
+        format!("cannot create '//localhost/v2-no-such-share-r19/out': {cant}"),
+        "null".into(),
+        format!("cannot write '//localhost/v2-no-such-share-r19/': {cant}"),
+        "null".into(),
+    ];
     assert_eq!(lines[want.len()..], rest, "{stdout}");
 }
 
@@ -7685,35 +7695,47 @@ fn write_file_leaves_a_locked_or_mapped_file_as_it_was() {
 
 #[cfg(windows)]
 #[test]
-fn other_programs_read_a_file_while_write_file_rewrites_it() {
-    // 5.10 (round 23's review): write_file looks for another program's lock by taking one and
-    // letting it go at once: held through the write, it made another program's reads meanwhile
-    // fail (ERROR_LOCK_VIOLATION), where they had read the file whole or in part.
+fn write_file_leaves_a_file_whole_when_another_program_locks_it_on_and_off() {
+    // 5.10 (the second review of round 23): a program that locks and unlocks a part of a file
+    // again and again (a database's short transactions, here 0.5 ms each way) could take its lock
+    // between a look for one and the cut, and the write then failed on a cut file. write_file holds
+    // its lock from before the cut to after the write: each write is refused with the file whole,
+    // or done. (With a look alone, some of the 300 writes left the file cut.)
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFile, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
     let home = TempHome::new();
     let d = &home.0;
-    let size = 20 * 1048576;
-    std::fs::write(d.join("status.txt"), "x".repeat(size)).unwrap();
-    std::fs::write(d.join("w.v2"), "let big = \"x\" * (20 * 1048576)\nfor i in 0..10 { write_file(\"status.txt\", big) }\nprint(\"written\")\n").unwrap();
+    std::fs::write(d.join("db.bin"), "D".repeat(4000)).unwrap();
+    let src = "let data = \"N\" * 4000\nlet cut = 0\nfor i in 0..300 {\n\
+               \x20   try { write_file(\"db.bin\", data) } catch (e) {\n\
+               \x20       let now = -1\n\
+               \x20       while now < 0 {\n            try { now = len(read_file(\"db.bin\", binary: true)) } catch (e2) { now = -1 }\n        }\n\
+               \x20       if now != 4000 { cut += 1 }\n    }\n}\nprint(\"cut\", cut)\n";
+    std::fs::write(d.join("w.v2"), src).unwrap();
+    let held = std::fs::OpenOptions::new().read(true).write(true).open(d.join("db.bin")).unwrap();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let path = d.join("status.txt");
-    let reader = {
-        let stop = stop.clone();
+    let churn = {
+        let (stop, h) = (stop.clone(), held.as_raw_handle() as usize);
         std::thread::spawn(move || {
-            let (mut reads, mut failures) = (0, Vec::new());
             while !stop.load(Ordering::Relaxed) {
-                match std::fs::read(&path) {
-                    Ok(_) => reads += 1,
-                    Err(e) => failures.push(e.to_string()),
+                // SAFETY: a zeroed OVERLAPPED (the range starts at 0), for the handle `held` keeps
+                // open until this thread has ended.
+                unsafe {
+                    let mut at: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+                    if LockFileEx(h as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &mut at) != 0 {
+                        std::thread::sleep(Duration::from_micros(500));
+                        UnlockFile(h as _, 0, 0, 100, 0);
+                    }
                 }
+                std::thread::sleep(Duration::from_micros(500));
             }
-            (reads, failures)
         })
     };
     let (code, stdout, stderr) = run_in_home(d, &["w.v2"], &[]);
     stop.store(true, Ordering::Relaxed);
-    let (reads, failures) = reader.join().unwrap();
-    assert_eq!((code, stdout.as_str()), (Some(0), "written\n"), "{stderr}");
-    assert!(reads > 0 && failures.is_empty(), "{reads} reads, {} failed: {:?}", failures.len(), failures.first());
+    churn.join().unwrap();
+    drop(held);
+    assert_eq!((code, stdout.as_str()), (Some(0), "cut 0\n"), "{stderr}");
 }
 
 #[cfg(windows)]
@@ -7772,6 +7794,98 @@ fn write_file_to_a_named_pipe_opens_it_once() {
     let mut from_v2: Vec<Vec<u8>> = got.lock().unwrap().iter().filter(|d| d.as_slice() != b"cleanup").cloned().collect();
     from_v2.sort();
     assert_eq!(from_v2, [b"again".to_vec(), b"hello".to_vec()]);
+}
+
+#[cfg(windows)]
+#[test]
+fn device_paths_of_a_disk_file_append_and_roots_keep_their_messages() {
+    // 5.10 (the second review of round 23): a file reached by its volume's device path
+    // (\\?\GLOBALROOT\Device\HarddiskVolumeN\…, \\?\HarddiskVolumeN\…) is appended to at its end
+    // and made when missing (append had written it from its start, as for a pipe), and a slash
+    // after its name is refused there too (it was dropped before the check). A root with its
+    // separator is no name with a slash: exists() of \\?\C:\, \\.\C:\ and \\?\Volume{…}\ is true,
+    // and write_file of \\?\C:\ says it is a folder.
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, QueryDosDeviceW};
+    let home = TempHome::new();
+    let real = real_path(&home.0);
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let mut buf = [0u16; 1024];
+    // SAFETY: NUL-terminated names and a buffer of the length given.
+    let n = unsafe { QueryDosDeviceW(wide(&real[..2]).as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    assert!(n > 0, "QueryDosDeviceW");
+    let device = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()]);
+    // SAFETY: as above.
+    let ok = unsafe { GetVolumeNameForVolumeMountPointW(wide(&real[..3]).as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    assert_ne!(ok, 0, "GetVolumeNameForVolumeMountPointW");
+    let volume = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()]);
+    let lit = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\"));
+    let mut src = String::from("func show(f) {\n    try { print(f()) } catch (e) { print(e.message + \" | \" + str(e.hint)) }\n}\n");
+    for (name, at) in [("gr.txt", format!(r"\\?\GLOBALROOT{device}")), ("hv.txt", format!(r"\\?\{}", device.rsplit('\\').next().unwrap()))] {
+        let file = format!(r"{at}{}\{name}", &real[2..]);
+        src.push_str(&format!(
+            "write_file({0}, \"data\")\nwrite_file({0}, \"XY\", append: true)\nprint(read_file({0}))\nwrite_file({1}, \"fresh\", append: true)\nprint(read_file({1}))\n",
+            lit(&file),
+            lit(&format!("{file}.new"))
+        ));
+        src.push_str(&format!("show(func() => read_file({}))\nprint(exists({}))\n", lit(&format!("{file}/")), lit(&format!("{file}/"))));
+    }
+    for root in [r"\\?\C:\", r"\\.\C:\", volume.as_str()] {
+        src.push_str(&format!("print(exists({}))\n", lit(root)));
+    }
+    for root in [r"\\?\C:\", r"\\.\C:\"] {
+        src.push_str(&format!("show(func() => write_file({}, \"x\"))\n", lit(root)));
+    }
+    std::fs::write(home.0.join("dev.v2"), src).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["dev.v2"], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let mut want = String::new();
+    for (name, at) in [("gr.txt", format!(r"\\?\GLOBALROOT{device}")), ("hv.txt", format!(r"\\?\{}", device.rsplit('\\').next().unwrap()))] {
+        let file = format!(r"{at}{}\{name}", &real[2..]);
+        let mut q = file.replace('\\', "\\\\");
+        q = format!("\"{q}\"");
+        want.push_str(&format!("dataXY\nfresh\ncannot read '{file}\\': it is a file, not a folder | leave out the slash at its end: read_file({q})\nfalse\n"));
+    }
+    want.push_str("true\ntrue\ntrue\ncannot write '\\\\?\\C:\\': it is a folder | null\ncannot write '\\\\.\\C:\\': it is a folder | null\n");
+    assert_eq!(stdout, want);
+}
+
+#[cfg(windows)]
+#[test]
+fn write_file_to_a_mailslot_writes_it() {
+    // 5.10 (the review of round 23): a mailslot's handle is FILE_TYPE_UNKNOWN to GetFileType,
+    // and can't be cut ("The parameter is incorrect"): it is written as it is, appended to too.
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::Mailslots::{CreateMailslotW, GetMailslotInfo};
+    let home = TempHome::new();
+    let name = format!(r"\\.\mailslot\v2-test-{}", std::process::id());
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-terminated name; the handle is closed below.
+    let slot = unsafe { CreateMailslotW(wide.as_ptr(), 0, 0, std::ptr::null()) };
+    assert_ne!(slot, INVALID_HANDLE_VALUE, "CreateMailslotW");
+    let lit = name.replace('\\', "\\\\");
+    std::fs::write(home.0.join("slot.v2"), format!("write_file(\"{lit}\", \"hi\")\nwrite_file(\"{lit}\", \"more\", append: true)\nprint(\"ok\")\n")).unwrap();
+    let (code, stdout, stderr) = run_in_home(&home.0, &["slot.v2"], &[]);
+    let mut got = Vec::new();
+    loop {
+        let (mut next, mut count) = (0u32, 0u32);
+        // SAFETY: the mailslot made above; each message is read into a buffer of its size.
+        unsafe {
+            GetMailslotInfo(slot, std::ptr::null_mut(), &mut next, &mut count, std::ptr::null_mut());
+            if count == 0 {
+                break;
+            }
+            let mut message = vec![0u8; next as usize];
+            let mut n = 0u32;
+            ReadFile(slot, message.as_mut_ptr(), next, &mut n, std::ptr::null_mut());
+            message.truncate(n as usize);
+            got.push(message);
+        }
+    }
+    // SAFETY: the handle made above, closed once.
+    unsafe { CloseHandle(slot) };
+    assert_eq!((code, stdout.as_str()), (Some(0), "ok\n"), "{stderr}");
+    assert_eq!(got, [b"hi".to_vec(), b"more".to_vec()]);
 }
 
 #[cfg(windows)]
