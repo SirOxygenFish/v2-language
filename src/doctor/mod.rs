@@ -351,6 +351,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     continue;
                 }
                 notes.push(format!("{id}: {note}"));
+                // A configured command's own fix lines (a library, the memory limit), as a run
+                // shows them (7.8).
+                if nf.command.is_some() {
+                    notes.extend(nf.message.lines().skip(1).filter(|l| l.starts_with("fix: ")).map(|l| format!("{id}: {l}")));
+                }
                 let others: Vec<(std::path::PathBuf, String)> =
                     nf.skipped.iter().filter(|(p, _)| shown_old.as_deref() != Some(&*p.display().to_string())).cloned().collect();
                 skipped(&others, &mut notes);
