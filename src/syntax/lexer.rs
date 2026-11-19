@@ -1217,6 +1217,29 @@ pub(crate) const LABEL_HINT: &str = "a label is a name, like stats or calc_2";
 
 const FENCE_HINT: &str = "if the block's code has braces V2 can't match, use the fence form: put ``` after the header and close it with ``` on its own line";
 
+/// The never-closed error's hint for a fence whose closing line, line `line`, goes on with
+/// `after` (4.2). It names what to move (`the ')'`, `the ', 2]'`, `the comment`) with control and
+/// bidi characters escaped, or a first character that can't be seen by its code point
+/// (`U+00A0 (a no-break space)`), and has the line, as an imported file's error shows no notes.
+fn near_fence_hint(fence: &str, line: u32, after: &str) -> String {
+    let head = format!("the closing {fence} on line {line} must stand alone on its line");
+    if after.starts_with("//") || after.starts_with("/*") {
+        return format!("{head}: put what follows it (the comment) on the next line");
+    }
+    let first = after.chars().next().unwrap_or(' ');
+    let (named, _) = shown_char(first);
+    if named.starts_with("U+") {
+        let rest = after[first.len_utf8()..].trim_matches([' ', '\t']);
+        let more = if rest.is_empty() { "" } else { ", and put what follows it on the next line" };
+        return format!("{head}, but {named} follows it: delete that{more}");
+    }
+    let mut shown: String = after.chars().take(20).collect();
+    if after.chars().count() > 20 {
+        shown.push('…');
+    }
+    format!("{head}: put what follows it (the '{}') on the next line", crate::syntax::span::shown_path(&shown))
+}
+
 /// Embedded blocks, selectors, directives and `extern` bodies (3.6, 3.7, 3.9).
 impl<'a> Lexer<'a> {
     /// `@import`, `@export`, a selector tag, or a block head (3.6).
@@ -1459,13 +1482,35 @@ impl<'a> Lexer<'a> {
         let body_mark = self.mark();
         let fence = "`".repeat(n);
         let mut line_start = self.pos;
+        // A line that starts with the closing fence and goes on (`` ```) ``, a fenced block in an
+        // expression): its offset and what follows the fence (4.2). The first whose rest starts
+        // as text after a block does (`)`, `,`, a comment) wins over the first other one.
+        let mut near: Option<(usize, &str)> = None;
+        let mut likely = false;
         loop {
             if line_start >= self.src.len() {
-                return Err(Diag::new(format!("{} is never closed", head.name()), self.span_of_mark(head.at, 1))
-                    .note("the fence opens here", open));
+                let mut d = Diag::new(format!("{} is never closed", head.name()), self.span_of_mark(head.at, 1)).note("the fence opens here", open);
+                if let Some((at, after)) = near {
+                    let span = self.span_at(at, n);
+                    d = d.note(format!("this line starts with the closing {fence}, but more follows it"), span).hint(near_fence_hint(&fence, span.line, after));
+                }
+                return Err(d);
             }
             let line_end = self.src[line_start..].find('\n').map(|i| line_start + i).unwrap_or(self.src.len());
-            if self.src[line_start..line_end].trim_matches([' ', '\t']) == fence {
+            let line = &self.src[line_start..line_end];
+            let lead = line.len() - line.trim_start_matches([' ', '\t']).len();
+            if let Some(after) = line.trim_matches([' ', '\t']).strip_prefix(&*fence).map(|a| a.trim_start_matches([' ', '\t'])) {
+                // Exactly the fence's backticks: a longer run is another fence's, and a word
+                // after them a Markdown fence's language in the code (```python).
+                if !after.is_empty() && !after.starts_with('`') && !after.starts_with(char::is_alphabetic) {
+                    let closes = after.starts_with([')', ']', '}', ',', ';', '.']) || after.starts_with("//") || after.starts_with("/*");
+                    if near.is_none() || (closes && !likely) {
+                        near = Some((line_start + lead, after));
+                        likely = closes;
+                    }
+                }
+            }
+            if line.trim_matches([' ', '\t']) == fence {
                 let text = &self.src[body_mark.pos..line_start];
                 self.advance_to(line_start);
                 let text_span = Span { hi: line_start as u32, ..self.span_from(body_mark) };
@@ -2000,6 +2045,43 @@ let n = names
         let notes: Vec<&str> = d.notes.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(notes, vec!["this { inside the block is still open", "this string never closes"]);
         assert!(d.hint.as_deref().unwrap_or("").contains("fence form"));
+    }
+
+    #[test]
+    fn a_fence_closed_with_more_on_its_line_is_pointed_at() {
+        // Round 23, 4.2: `` ```) `` doesn't close a fence; the never-closed error points at the
+        // first line that starts with the closing backticks and goes on, and says what to move.
+        let diag = |src: &str| {
+            let mut sm = SourceMap::new();
+            let id = sm.add(PathBuf::from("t.v2"), "t.v2".into(), src);
+            lex(&sm, id).unwrap_err()
+        };
+        let d = diag("t(func() => @js ```\n    \"a{\"\n  ```)\nprint(1)\n```), 2\n");
+        assert_eq!(d.message, "@js block is never closed");
+        let notes: Vec<(&str, u32, u32)> = d.notes.iter().map(|(t, s)| (t.as_str(), s.line, s.col)).collect();
+        assert_eq!(notes, [("the fence opens here", 1, 17), ("this line starts with the closing ```, but more follows it", 3, 3)]);
+        assert_eq!(d.hint.as_deref(), Some("the closing ``` on line 3 must stand alone on its line: put what follows it (the ')') on the next line"));
+        let hint = |src: &str| diag(src).hint;
+        assert_eq!(hint("let xs = [@py ```\n    \"a{\"\n```, 2]\n").as_deref(), Some("the closing ``` on line 3 must stand alone on its line: put what follows it (the ', 2]') on the next line"));
+        assert_eq!(hint("let v = @py ```\n    1\n```  // trailing comment\n").as_deref(), Some("the closing ``` on line 3 must stand alone on its line: put what follows it (the comment) on the next line"));
+        assert_eq!(hint("@py ````\n````.strip() + another_long_name\n").as_deref(), Some("the closing ```` on line 2 must stand alone on its line: put what follows it (the '.strip() + another_l…') on the next line"));
+        // The review: what can't be seen is named by its code point, and what acts on a terminal
+        // or reorders the line is escaped.
+        assert_eq!(hint("print(@js ```\n    1\n```\u{a0}\n").as_deref(), Some("the closing ``` on line 3 must stand alone on its line, but U+00A0 (a no-break space) follows it: delete that"));
+        assert_eq!(hint("print(@js ```\n    1\n```\u{200b})\n").as_deref(), Some("the closing ``` on line 3 must stand alone on its line, but U+200B (an invisible zero-width character) follows it: delete that, and put what follows it on the next line"));
+        assert_eq!(hint("print(@py ```\n    1\n```\u{1b}[31mred)\n").as_deref(), Some("the closing ``` on line 3 must stand alone on its line, but U+001B follows it: delete that, and put what follows it on the next line"));
+        assert_eq!(hint("print(@py ```\n    1\n```)\u{202e}abc\u{1b}\n").as_deref(), Some("the closing ``` on line 3 must stand alone on its line: put what follows it (the ')\\u{202e}abc\\u{1b}') on the next line"));
+        // A word after the backticks is a Markdown fence's language in the code (```python):
+        // passed over; and a line whose rest starts as text after a block does wins.
+        assert_eq!(hint("let d = @py ```\n    s = \"\"\"\n```python\n\"\"\"\n").as_deref(), None);
+        assert_eq!(hint("print(@py ```\n``` # note\n```python\n```)\n").as_deref(), Some("the closing ``` on line 4 must stand alone on its line: put what follows it (the ')') on the next line"));
+        assert_eq!(hint("print(@py ```\n``` # note\n").as_deref(), Some("the closing ``` on line 2 must stand alone on its line: put what follows it (the '# note') on the next line"));
+        // Only exactly the fence's backticks: a longer or shorter run, or text before them, is
+        // code of the block.
+        for src in ["@py ```\n````)\n", "@py ````\n```)\n", "@py ```\nx = ```)\n", "@py ```\nx\n"] {
+            let d = diag(src);
+            assert_eq!((d.message.as_str(), d.notes.len(), d.hint.as_deref()), ("@py block is never closed", 1, None), "{src}");
+        }
     }
 
     #[test]

@@ -290,7 +290,8 @@ impl Interp {
                     self.line.need = None;
                     done
                 }
-                Waiting::Import(imp, seen) => self.resolve_import(imp, Some(seen)).map(|_| ()),
+                // At its own place, with what needed the language below it, as a block's (12.7).
+                Waiting::Import(imp, seen) => self.run_for(need, |it| it.resolve_import(imp, Some(seen))).map(|_| ()),
             };
             self.line.running = outer;
             self.xdepth = depth;
