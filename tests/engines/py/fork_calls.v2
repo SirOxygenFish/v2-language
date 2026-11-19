@@ -1,0 +1,41 @@
+// requires: py js
+// platform: unix
+// A process multiprocessing forks can't call V2 or another language: the error says what to do,
+// and names the function, which may be another language's (INTERNALS 9.8, 9.9).
+func v2fn(x) {
+    return x * 100
+}
+func twice(x) {
+    return x * 2
+}
+@js jsside {
+    function jsfn(x) { return x + 0.5 }
+    @export { jsfn }
+}
+@py forker {
+    @import { v2fn } from v2
+    @import { jsfn } from jsside
+    import multiprocessing as mp
+    def in_child(f):
+        ctx = mp.get_context("fork")
+        q = ctx.Queue()
+        def run():
+            try:
+                q.put(["ok", f(3)])
+            except V2Error as e:
+                q.put([e.type, e.message])
+        p = ctx.Process(target=run)
+        p.start()
+        got = q.get(timeout=20)
+        p.join(20)
+        return got
+    def imported():
+        return [in_child(v2fn), in_child(jsfn)]
+    @export { in_child, imported }
+}
+@import { in_child, imported } from forker
+for r in imported() {
+    print(r)
+}
+print(in_child(twice))
+print("end")

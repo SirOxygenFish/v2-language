@@ -65,6 +65,9 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+    # For bye's file flush (9.10). Built into Python, so no folder on sys.path can stand in for
+    # them, nor a stale PYTHONPATH break them: not in doctor's check of step 1 (19.2).
+    import gc, _io
 
     # 3. The adapter's own folder leaves sys.path; init puts the project root on it (9.3). Python
     # resolves symlinks in sys.path[0] (macOS's temp folder is one), so both sides are resolved
@@ -241,8 +244,9 @@ if __name__ == "__main__":
             raise TooBig(len(data) - 1)
         write_all(data)
 
-    def too_big_message(n):
-        return "value too large to send to V2 (%d MiB, limit %d MiB)" % ((n + (1 << 20) - 1) >> 20, LIMIT >> 20)
+    def too_big_message(n, about=False):
+        """A frame's size as measured, or (`about`) as far as a walk or a sample tells (9.1, 11.5)."""
+        return "value too large to send to V2 (%s%d MiB, limit %d MiB)" % ("about " if about else "", (int(n) + (1 << 20) - 1) >> 20, LIMIT >> 20)
 
     class Walk(set):
         """The containers open on the way down, and the least the frame can come to: a value too
@@ -258,7 +262,7 @@ if __name__ == "__main__":
         def spend(self, n):
             self.cost += n
             if self.cost > LIMIT:
-                f = Fail("MarshalError", "value too large to send to V2 (more than %d MiB)" % (LIMIT >> 20))
+                f = Fail("MarshalError", too_big_message(self.cost, True))
                 f.located = True
                 raise f
 
@@ -556,8 +560,9 @@ if __name__ == "__main__":
         after_import("colorama.ansitowin32", lambda m: setattr(m, "winapi_test", lambda: False))
 
     _streams = (Output("stdout", 1), Output("stderr", 2))
+    _no_input = NoInput()
     sys.stdout, sys.stderr = _streams
-    sys.stdin = NoInput()
+    sys.stdin = _no_input
     sys.__stdout__, sys.__stderr__, sys.__stdin__ = sys.stdout, sys.stderr, sys.stdin
 
     forked = [False]
@@ -1133,6 +1138,10 @@ if __name__ == "__main__":
             sys.path[:] = saved
         return asyncio
 
+    # Why a coroutine can't be awaited for V2, and what to do instead (9.8).
+    NESTED_LOOP = (" while Python is already running an event loop in this thread (an async function that called "
+                   "into V2): await it in Python itself, or make it a plain function")
+
     def await_if_awaitable(x, refusal):
         """x, awaited on the session's loop if awaitable; `refusal` is the error when a loop is
         already running in this thread (9.8)."""
@@ -1159,13 +1168,15 @@ if __name__ == "__main__":
 
     def host_call(target, args, kwargs, name):
         if forked[0]:
-            raise V2Error("Error", "V2 function '%s' called from a forked process" % name)
+            raise V2Error("Error", "'%s' called from a forked process: a process multiprocessing forks can't call V2 or other languages: return the data to the parent and call it there" % name)
+        # A route (an @import in a block) may lead to another language: only a stub is V2's (13.7).
+        what = "'%s'" % name if "route" in target else "V2 function '%s'" % name
         if not stack or stack[-1][0] != "request":
-            raise V2Error("Error", "V2 function '%s' called outside an active V2 call: Python called it while V2 wasn't waiting on Python (a thread, a timer or a finalizer after its call returned); call V2 from the code V2 called, and return to V2 when done" % name)
+            raise V2Error("Error", "%s called outside an active V2 call: Python called it while V2 wasn't waiting on Python (a thread, a timer or a finalizer after its call returned); call V2 from the code V2 called, and return to V2 when done" % what)
         if threading.get_ident() != DISPATCH:
-            raise V2Error("Error", "V2 function '%s' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results" % name)
+            raise V2Error("Error", "%s called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results" % what)
         if _send_owner[0] == DISPATCH:  # a finalizer that runs while a frame is being sent
-            raise V2Error("Error", "V2 function '%s' called outside an active V2 call" % name)
+            raise V2Error("Error", "%s called outside an active V2 call" % what)
         try:
             frame = {"t": "call", "id": 0, "target": target,
                      "args": [encode_value(a, "args[%d]" % i) for i, a in enumerate(args)],
@@ -1654,7 +1665,7 @@ if __name__ == "__main__":
                 e.text = _lines.get(path, {}).get(last.lineno)
                 raise e.with_traceback(None)
             value = eval(tail_code, g) if tail_code is not None else None
-            value = await_if_awaitable(value, "the block's value is a coroutine while another coroutine is being awaited in this thread")
+            value = await_if_awaitable(value, "the block's value is a coroutine" + NESTED_LOOP)
             if m["kind"] == "action":
                 return {"value": encode_value(value, "value") if m["want_value"] else None, "exports": [], "missing": []}
             reply = export_reply(g, name, m["exports"])
@@ -1793,7 +1804,7 @@ if __name__ == "__main__":
         args = [decode(a) for a in m.get("args") or []]
         kwargs = {k: decode(v) for k, v in (m.get("kwargs") or {}).items()}
         value = f(*args, **kwargs)
-        value = await_if_awaitable(value, "'%s' returned a coroutine while another coroutine is being awaited; call it directly from V2" % name)
+        value = await_if_awaitable(value, "'%s' returned a coroutine" % name + NESTED_LOOP)
         return {"value": encode_value(value, "value")}
 
     def float_text(x):
@@ -1836,6 +1847,52 @@ if __name__ == "__main__":
         else:
             return "to_v2(): a key inside h has the type %s: make plain data of h in a block first, with str(k) for each such key k" % name
         return "to_v2(): %s has the type %s: make plain data of h in a block first, as in @py(h) { %s }" % (what, name, how)
+
+    SAMPLE = 500  # rows or items of a big table or array that to_v2 converts first, to tell its size (11.5)
+
+    def refuse_big(x, hook, size):
+        """A pandas or numpy object too big to send is refused before its hook converts it, which
+        would hold all of it as Python objects (gigabytes) to fail anyway: when its items alone pass
+        the limit (each takes at least 2 bytes as sent, "0,", 6 in to_dict's form, {"0":0,}), or when
+        a sample of it, converted, puts it clearly over (11.5). What passes is measured at send."""
+        least = size * (6 if hook == "to_dict" else 2)
+        about = max(least, sampled_size(x, size) or 0) if least > LIMIT // 64 else least
+        if least > LIMIT or about > LIMIT * 3 // 2:
+            raise Fail("MarshalError", too_big_message(about, True))
+
+    def sampled_size(x, size):
+        """About the bytes x converts to, from its first and last rows (a pandas object's head and
+        tail, about 2,000 items in all) or items (a numpy array's flat), converted; None when it
+        can't tell (11.5)."""
+        try:
+            if callable(getattr(x, "head", None)) and callable(getattr(x, "tail", None)):
+                n = len(x)
+                k = max(1, min(SAMPLE, SAMPLE * 2 * n // max(size, 1)))
+                parts = (x.head(k), x.tail(k))
+                got = sum(len(p) for p in parts)
+            elif getattr(x, "flat", None) is not None:
+                n = size
+                parts = (x.flat[:SAMPLE], x.flat[-SAMPLE:])
+                # Items, not len: a numpy matrix's flat slice is one row of them.
+                got = sum(p.size if isinstance(getattr(p, "size", None), int) else len(p) for p in parts)
+            else:
+                return None
+            if n <= 0 or got <= 0:
+                return None
+            return sum(len(dumps(to_v2(p))) for p in parts) * n // got
+        except Exception:
+            return None  # what doesn't convert says why when the object itself converts
+
+    def table_hint(x):
+        """A table too big to send (a pandas DataFrame or Series): what to send instead (11.5)."""
+        try:
+            if callable(getattr(x, "head", None)):
+                for way in ("to_parquet", "to_csv"):
+                    if callable(getattr(x, way, None)):
+                        return "convert part of it, as in to_v2(df.head(1000)), or keep it in Python and write it to a file: df.%s(path)" % way
+        except Exception:
+            pass
+        return None
 
     def to_v2(x, depth=0, path=None):
         """`op value`: the object as plain data, converted here (11.5). `depth` is the level the
@@ -1891,12 +1948,9 @@ if __name__ == "__main__":
                     raise Fail("MarshalError", "to_v2(): can't convert a %s that contains itself" % type_name(x))
                 if path.hooks >= MAX_DEPTH:
                     raise Fail("MarshalError", "to_v2(): value nested deeper than %d levels" % MAX_DEPTH)
-                # A pandas or numpy object whose items alone pass the limit is refused before it
-                # converts, which would hold all of it as Python objects (gigabytes) to fail anyway:
-                # each item takes at least 2 bytes as sent ("0,"), 6 in to_dict's form ({"0":0,}).
                 size = getattr(x, "size", None)
-                if isinstance(size, numbers.Integral) and not isinstance(size, bool) and int(size) * (6 if hook == "to_dict" else 2) > LIMIT:
-                    raise Fail("MarshalError", "value too large to send to V2 (%d items, more than %d MiB)" % (size, LIMIT >> 20))
+                if isinstance(size, numbers.Integral) and not isinstance(size, bool):
+                    refuse_big(x, hook, int(size))
                 path.add(id(x))
                 path.hooks += 1
                 chain = path.chain
@@ -1970,7 +2024,12 @@ if __name__ == "__main__":
         if op == "str":
             return {"value": well_formed(str(obj))}
         if op == "value":
-            return {"value": to_v2(obj)}
+            try:
+                return {"value": to_v2(obj)}
+            except Fail as f:
+                if f.message.startswith("value too large") and f.hint is None:
+                    f.hint = table_hint(obj)
+                raise
         if op == "iter":
             # Two loop variables: a mapping, or anything with an items() method (a pandas
             # Series or DataFrame), gives each key and value (11.4).
@@ -2048,7 +2107,12 @@ if __name__ == "__main__":
                     bind_importers(m["unit"])
             except TooBig as t:
                 reply_lost(m)
-                send(plain_err(rid, "MarshalError", too_big_message(t.args[0])))
+                err = plain_err(rid, "MarshalError", too_big_message(t.args[0]))
+                entry = _handles.get(m.get("h")) if m["t"] == "op" and m.get("op") == "value" else None
+                hint = table_hint(entry[0]) if entry is not None else None
+                if hint:
+                    err["error"]["hint"] = hint
+                send(err)
             except BaseException as e:
                 rollback_counts()
                 reply_lost(m)
@@ -2065,8 +2129,31 @@ if __name__ == "__main__":
         try:
             atexit._run_exitfuncs()
         finally:
+            flush_files()
             final_flush()
             os._exit(0)
+
+    def flush_files():
+        """bye inside a stub (9.10): what Python's open files still buffer is written, as at the end
+        of a Python script, but without unwinding through user code: one pass over what the
+        collector tracks, flush only (nothing is closed), text files first, as their text then
+        reaches their binary buffers. The adapter's own streams are final_flush's."""
+        try:
+            own = set(map(id, _streams + tuple(_byte_streams) + (_no_input,)))
+            text, rest = [], []
+            for o in gc.get_objects():
+                # By its type: isinstance would read __class__, which runs a lazy object's setup.
+                t = type(o)
+                if issubclass(t, _io._IOBase) and id(o) not in own:
+                    (text if issubclass(t, _io._TextIOBase) else rest).append(o)
+            for o in text + rest:
+                try:
+                    if not o.closed:
+                        o.flush()
+                except BaseException:
+                    pass
+        except BaseException:
+            pass
 
     def serve(wait_id):
         """The loop (14.2): handles requests until the reply to `wait_id` (None: forever)."""

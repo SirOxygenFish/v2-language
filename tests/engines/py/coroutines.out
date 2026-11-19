@@ -1,4 +1,4 @@
 42
 awaited in statement position
-Error | the block's value is a coroutine while another coroutine is being awaited in this thread
+Error | the block's value is a coroutine while Python is already running an event loop in this thread (an async function that called into V2): await it in Python itself, or make it a plain function
 []
