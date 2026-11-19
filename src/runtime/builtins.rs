@@ -775,8 +775,10 @@ fn verbatim_parts(path: &str) -> std::borrow::Cow<'_, str> {
             p => kept.push(p),
         }
     }
-    // A path that ends at its root keeps the `\` after it (`\\?\C:\`).
-    let tail = if kept.len() == root && root == 1 { r"\" } else { "" };
+    // A path that ends at its root keeps the `\` after it (`\\?\C:\`), and so does one written
+    // with a separator (or `/.`) at its end, which names a folder (`slash_after_a_file`).
+    let folder = matches!(parts.last(), Some(&"" | &".")) && kept.len() > root;
+    let tail = if (kept.len() == root && root == 1) || folder { r"\" } else { "" };
     format!(r"\\?\{}{tail}", kept.join(r"\")).into()
 }
 
@@ -2140,11 +2142,14 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     wsl_special("write", &path)?;
     slash_after_a_file("write", &path)?;
     let r = if append {
-        // A pipe or a device has no end to add at, and a pipe refuses the access that appends
-        // (FILE_APPEND_DATA is a pipe's FILE_CREATE_PIPE_INSTANCE): it is written.
-        let mut open = std::fs::OpenOptions::new();
-        if device_path(&path) { open.write(true) } else { open.append(true).create(true) };
-        open.open(&*path).and_then(|mut f| f.write_all(bytes))
+        // A named pipe refuses a write with only the access that appends (FILE_APPEND_DATA is a
+        // pipe's FILE_CREATE_PIPE_INSTANCE): a pipe or a console has no end to add at, and is
+        // written, opened once. Anything else, a disk file reached by its volume's device path
+        // too (`\\?\GLOBALROOT\Device\HarddiskVolume3\…`), is appended to.
+        match device_path(&path).then(|| write_to_stream(&path, bytes)).flatten() {
+            Some(written) => written,
+            None => std::fs::OpenOptions::new().append(true).create(true).open(&*path).and_then(|mut f| f.write_all(bytes)),
+        }
     } else {
         replace_file(&path, bytes)
     };
@@ -2157,58 +2162,85 @@ fn write_file(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
 /// `write_file`'s new contents for `path`, created if missing (5.10). Unix: `fs::write`, whose
 /// locks are advisory. Windows: `fs::write` cuts a file before it writes, and another program's
 /// lock of a part of it (a database's) doesn't stop the cut, only the write after it, so a failed
-/// write left it empty. So the file is opened as it is, and a lock of the whole of it is tried
-/// and let go at once (`try_lock`): another program's lock anywhere in it, past the end too,
-/// refuses it, as ERROR_LOCK_VIOLATION, before anything changed (a file system without locks goes
-/// on). Held through the write, the lock would make other programs' reads fail meanwhile; a lock
-/// taken during the write is the race of a write in place. Then it is cut (a file another program
-/// has mapped refuses that, ERROR_USER_MAPPED_FILE, still whole) and written; never written first
-/// and cut after, which would leave a mapped file part old, part new. A pipe or a console
-/// (`GetFileType`) is only written, and so is a handle that can't be cut (ERROR_INVALID_FUNCTION
-/// or ERROR_INVALID_PARAMETER from the cut).
+/// write left it empty. So the file is opened as it is and locked whole (`try_lock`: another
+/// program's lock anywhere in it, past the end too, refuses it, as ERROR_LOCK_VIOLATION, before
+/// anything changed; a file system without locks goes on without one), cut (a file another
+/// program has mapped refuses that, ERROR_USER_MAPPED_FILE, still whole), written and unlocked.
+/// The lock is held throughout, as a program that locks and unlocks a part of it again and again
+/// (a database's short transactions) could take its lock between a look and the cut: other
+/// programs' reads of it fail meanwhile. Never written first and cut after, which would leave a
+/// mapped file part old, part new. A pipe or a console (`GetFileType`) is only written, and so is
+/// a handle whose type the OS can't say (`FILE_TYPE_UNKNOWN`: a mailslot) when the cut fails with
+/// ERROR_INVALID_FUNCTION or ERROR_INVALID_PARAMETER.
 fn replace_file(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR, FILE_TYPE_PIPE};
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR, FILE_TYPE_PIPE, FILE_TYPE_UNKNOWN};
         // Opened as `OPEN_ALWAYS`, as `fs::write` does: a hidden or system file keeps working.
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
         // SAFETY: a handle that `f` keeps open during the call.
-        if matches!(unsafe { GetFileType(f.as_raw_handle()) }, FILE_TYPE_PIPE | FILE_TYPE_CHAR) {
+        let kind = unsafe { GetFileType(f.as_raw_handle()) };
+        if matches!(kind, FILE_TYPE_PIPE | FILE_TYPE_CHAR) {
             return f.write_all(bytes);
         }
-        match f.try_lock() {
-            Ok(()) => {
-                let _ = f.unlock();
-            }
+        let locked = match f.try_lock() {
+            Ok(()) => true,
             Err(std::fs::TryLockError::WouldBlock) => return Err(std::io::Error::from_raw_os_error(33)),
-            Err(std::fs::TryLockError::Error(_)) => {}
+            Err(std::fs::TryLockError::Error(_)) => false,
+        };
+        let cut = match f.set_len(0) {
+            Err(e) if kind == FILE_TYPE_UNKNOWN && matches!(e.raw_os_error(), Some(1 | 87)) => Ok(()),
+            cut => cut,
+        };
+        let written = cut.and_then(|()| f.write_all(bytes));
+        if locked {
+            let _ = f.unlock();
         }
-        match f.set_len(0) {
-            Err(e) if !matches!(e.raw_os_error(), Some(1 | 87)) => return Err(e),
-            _ => {}
-        }
-        f.write_all(bytes)
+        written
     }
     #[cfg(not(windows))]
     std::fs::write(path, bytes)
 }
 
-/// A path that ends in a slash (`f.txt/`, `f.txt\`, `f.txt/.`: `module::trim_separators`) names a
-/// folder: refused before the OS sees it when the name before the slash is a file, or, for a
-/// write, nothing in a folder that is there, as rm and Linux refuse it, where Windows takes it for
-/// the name without the slash (`remove_file("f.txt/")` deleted f.txt, `write_file("new.txt/")`
-/// made new.txt) (5.10). A folder, or a link to one, goes on.
+/// Windows: `write_file`'s append to a `device_path`: `path` opened for writing and written when
+/// its handle is a pipe's or a console's (`GetFileType`); `None` when it can't be opened so, or
+/// is anything else, a disk file's handle above all, which would be written from its start: that
+/// is appended to (5.10).
+fn write_to_stream(path: &str, bytes: &[u8]) -> Option<std::io::Result<()>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR, FILE_TYPE_PIPE};
+        let mut f = std::fs::OpenOptions::new().write(true).open(path).ok()?;
+        // SAFETY: a handle that `f` keeps open during the call.
+        matches!(unsafe { GetFileType(f.as_raw_handle()) }, FILE_TYPE_PIPE | FILE_TYPE_CHAR).then(|| f.write_all(bytes))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, bytes);
+        None
+    }
+}
+
+/// A path that ends in a slash (`f.txt/`, `f.txt\`, `f.txt/.`: `module::trim_separators`; a
+/// `\\?\` one keeps it through `verbatim_parts`) names a folder: refused before the OS sees it
+/// when the name before the slash is a file (or a device: not a folder), or, for a write, nothing
+/// in a folder that is there, as rm and Linux refuse it, where Windows takes it for the name
+/// without the slash (`remove_file("f.txt/")` deleted f.txt, `write_file("new.txt/")` made
+/// new.txt) (5.10). A folder, or a link to one, goes on, and so does a root or a share (`C:/`,
+/// `\\server\share\`, `\\?\Volume{…}\`), which has no name: what is wrong with it is the OS's.
 fn slash_after_a_file(verb: &str, path: &str) -> Exec<()> {
     let name = super::module::trim_separators(path);
-    if name.is_empty() || name.len() == path.len() {
+    if name.len() == path.len() || std::path::Path::new(name).file_name().is_none() {
         return Ok(());
     }
     let why = match std::fs::metadata(name) {
         Ok(m) if m.is_dir() => return Ok(()),
-        Ok(_) => "it is a file, not a folder",
+        Ok(m) if m.is_file() => "it is a file, not a folder",
+        Ok(_) => "it is not a folder",
         // A link that leads nowhere, or a folder on the way that isn't there, is the OS's to say.
-        Err(_) if verb == "write" && std::fs::symlink_metadata(name).is_err() && std::path::Path::new(name).parent().is_none_or(|d| d.as_os_str().is_empty() || d.is_dir()) => {
+        Err(_) if verb == "write" && std::fs::symlink_metadata(name).is_err() && std::path::Path::new(name).parent().is_some_and(|d| d.as_os_str().is_empty() || d.is_dir()) => {
             "with the slash at its end it names a folder, which isn't there"
         }
         Err(_) => return Ok(()),
@@ -2230,9 +2262,10 @@ fn exists(_it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     // `exists("~/.config/x")` would be false for a file that is there: refused as in the others.
     shell_shorthand("check", &path)?;
     let path = verbatim_parts(&path);
-    // `f.txt/` names a folder: Windows would find the file, Linux and macOS don't.
+    // `f.txt/` names a folder: Windows would find the file, Linux and macOS don't. A root or a
+    // share (`C:/`, `\\?\C:\`, `\\server\share\`) has no name, and is looked at as it is.
     let name = super::module::trim_separators(&path);
-    if !name.is_empty() && name.len() < path.len() {
+    if name.len() < path.len() && std::path::Path::new(name).file_name().is_some() {
         return Ok(Value::Bool(std::fs::metadata(name).is_ok_and(|m| m.is_dir())));
     }
     Ok(Value::Bool(std::fs::metadata(&*path).is_ok()))
@@ -3007,7 +3040,11 @@ mod tests {
         // The review: such a script's script_dir() is a \\?\ path, where Windows reads no / or ..
         assert_eq!(verbatim_parts(r"\\?\C:\x\dots./data.csv"), r"\\?\C:\x\dots.\data.csv");
         assert_eq!(verbatim_parts(r"\\?\C:\x\dots.\./..\top.txt"), r"\\?\C:\x\top.txt");
-        assert_eq!(verbatim_parts(r"\\?\UNC\srv\share\a/../b/"), r"\\?\UNC\srv\share\b");
+        // A separator (or `/.`) at the end stays: it names a folder (the second review of round 23).
+        assert_eq!(verbatim_parts(r"\\?\UNC\srv\share\a/../b/"), r"\\?\UNC\srv\share\b\");
+        assert_eq!(verbatim_parts(r"\\?\C:\x\f.txt/"), r"\\?\C:\x\f.txt\");
+        assert_eq!(verbatim_parts(r"\\?\C:\x/f.txt/."), r"\\?\C:\x\f.txt\");
+        assert_eq!(verbatim_parts(r"\\?\UNC\srv\share/"), r"\\?\UNC\srv\share");
         assert_eq!(verbatim_parts(r"\\?\C:\x\..\.."), r"\\?\C:\");
         for kept in [r"\\?\C:\x\notes.txt ", "C:/x/../y", r"\\.\C:/x", "./a/../b"] {
             assert!(matches!(verbatim_parts(kept), std::borrow::Cow::Borrowed(k) if k == kept), "{kept}");

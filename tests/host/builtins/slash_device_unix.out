@@ -1,0 +1,2 @@
+cannot read '/dev/null/': it is not a folder | leave out the slash at its end: read_file("/dev/null")
+false true
