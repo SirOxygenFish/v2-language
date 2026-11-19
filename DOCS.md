@@ -722,7 +722,8 @@ U+FFFD; UTF-16 output, with a byte order mark or, on Windows, as `cmd /u` and `w
 is read as UTF-16; on Windows, other output is read in the console's code page, as `cmd` and
 other console programs write it, or at a UTF-8 console (`chcp 65001`) in the ANSI one, as `attrib`
 writes it whatever the console says, a line at a time in a single-byte code page, so that a UTF-8
-line stays; UTF-8 cut inside its last character stays UTF-8). Tools that write another code page
+line stays; UTF-8 cut inside its last character stays UTF-8 when its line has two non-ASCII
+characters before the cut). Tools that write another code page
 still come back wrong: at the usual console (437, 850) those that write the ANSI one (`attrib`,
 `xcopy`, `findstr`), at a UTF-8 console those that write the OEM one (`robocopy`, `icacls`). Take
 names from `list_dir`, or run the tool in a `@py` block and decode there, as in
