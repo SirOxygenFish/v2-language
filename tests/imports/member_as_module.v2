@@ -59,9 +59,22 @@ show(func() {
     @import { x } from js.path.sep
     return x
 })
-// A built-in without that member: no npm install for it (review of round 23).
-show(func() {
+// A built-in without that member says so (review of round 23), and the hint keeps the npm
+// install line, as fs-extra's kind of name can be a package's (its second review).
+func show_npm(f) {
+    try {
+        print(f())
+    } catch (e) {
+        print(e.type, "|", e.message)
+        print("  hint:", e.hint.split(" in ")[0])
+    }
+}
+show_npm(func() {
     @import { x } from js.path.nothere
+    return x
+})
+show_npm(func() {
+    @import { x } from js."fs.extra"
     return x
 })
 // The way the hints show.
