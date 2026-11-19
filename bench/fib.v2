@@ -1,0 +1,9 @@
+// Function calls and recursion: fib(n), about 1.6 * 1.618^n calls.
+let n = int(args().get(0, "32"))
+func fib(n) {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+print(fib(n))
