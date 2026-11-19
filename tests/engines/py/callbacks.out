@@ -16,4 +16,4 @@ true
 3
 ValueError negative: -2 kept 107
 ["check (callbacks.v2:107)", "each (callbacks.v2:115, in @py apply)", "run (callbacks.v2:123)", "callbacks.v2:129"]
-Error py V2 function 'score' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results
+Error py 'score' called from another thread: Python may call V2 only from the thread V2 called it on: do the threaded work in Python and call V2 with the results
