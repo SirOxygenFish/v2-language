@@ -2982,18 +2982,25 @@ pub fn bool_arg(v: &Value, func: &str, param: &str) -> Exec<bool> {
 
 /// `print(...values, sep: " ", end: "\n", stderr: false)`: one write to `Out`, or with
 /// `stderr` one write to the host's stderr after flushing `Out` (5.10).
-fn print(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
+fn print(it: &mut Interp, mut args: Vec<Value>, at: Span) -> Exec<Value> {
     let sep = str_arg(&args[1], "print", "sep")?;
     let end = str_arg(&args[2], "print", "end")?;
     let on_stderr = bool_arg(&args[3], "print", "stderr")?;
-    let Value::List(values) = &args[0] else { unreachable!("the rest parameter is a list") };
-    let values = values.borrow().clone();
-    let mut text = String::new();
+    let Value::List(values) = std::mem::replace(&mut args[0], Value::Null) else { unreachable!("the rest parameter is a list") };
+    // The rest parameter's list was made for this call: its items are taken, not copied.
+    let values = std::mem::take(&mut *values.borrow_mut());
+    // The whole text first, so a value that can't be shown prints nothing (5.10); a string or an
+    // int goes straight in.
+    let mut text = String::with_capacity(24);
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
             text.push_str(&sep);
         }
-        text.push_str(&it.str_of(v, at)?);
+        match v {
+            Value::Str(s) => text.push_str(s),
+            Value::Int(n) => super::value::push_int(&mut text, *n),
+            _ => text.push_str(&it.str_of(v, at)?),
+        }
     }
     text.push_str(&end);
     if !on_stderr {
