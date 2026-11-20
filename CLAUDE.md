@@ -51,8 +51,10 @@ it is loaded automatically into every session and every subagent.
 - `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
   commit it; it is in `.git/info/exclude`.
 - macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
-  2026-11-10); run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14) from `~/v2-test`,
-  copied with tar excluding target, .git, .claude. Node 22 (owner-approved brew `node@22`) is
+  2026-11-10); run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14) from
+  `~/Desktop/v2/v2-test`, copied with tar excluding target, .git, .claude. Every V2 file on the Mac
+  (scripts, logs, test folders) goes inside `~/Desktop/v2`, never loose in the home folder (the
+  owner's request, 2026-11-20); a test's temp HOME goes in `mktemp -d` and is removed after. Node 22 (owner-approved brew `node@22`) is
   keg-only: `export PATH=/opt/homebrew/opt/node@22/bin:$PATH` first.
 - Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
   finders a round, each with a refuter. Keep them lean.
