@@ -27,49 +27,37 @@ it is loaded automatically into every session and every subagent.
   published GitHub pre-release with the binaries; `main` = its tag, 80cee2c; CI green; the README
   one-liners install it on Windows, Linux and macOS). Pre-publish and milestone 1.15 (interpreter
   speed) are done: ROADMAP.
-- Next, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order. Pushing
-  `v2-reboot` and CI are fine; merging, tags and publishing wait for the owner's OK. Ask before
-  creating OS user accounts.
+- Next, only when the owner says go: `llms.txt`, then Phase 2 in the ROADMAP's order; the owner
+  wants a compiler designed in the next phase (2026-11-19). Pushing `v2-reboot` and CI are fine;
+  merging, tags and publishing wait for the owner's OK. Ask before creating OS user accounts.
+- 2026-11-22: the owner is moving the project (with `.claude/`) to another machine. Everything
+  machine-specific is in "This machine's setup" below: check it there before relying on it.
 - A `[release]` push now fails (release.yml leaves a published release alone): the next release
   first bumps the version in Cargo.toml, install.sh and install.ps1 (release.yml checks all three).
 - Owner decisions still open: `#!` lines, static members of imported classes, `v2 check` finding
-  undeclared names.
+  undeclared names. Open proposals from 2026-11-10 (not decided): imported classes have no static
+  members, `#!` lines, narrower closure capture.
 - Newcomer rounds ended after round 23 (2026-11-19; about 4M tokens a round, and the owner stopped
   round 23's agents over usage): no round 24 unless the owner asks, and then a lean one (one
   newcomer, one implementer, one review). How they ran is in the ROADMAP log. Agents always get
-  this file and the memory index, so newcomers are told to ignore them; they work as root only,
-  with no OS user accounts (the owner's rule). Clean Linux: `wsl --import` of the official Ubuntu
-  base images in scratchpad/distro-images; remove with `wsl --unregister`.
-- The owner's Windows PATH has an old v2 (`%LOCALAPPDATA%\Programs\v2\bin`): never touch it
-  (install.ps1 warns that it shadows a new install). `C:\tmp` and `C:\var` are round 19's test
-  leftovers: leave them; tmp_on_windows_points_to_temp skips while they are there.
-- Installer changes run on Windows, WSL and the Mac before they are pushed (tests/install/
-  paths.{sh,ps1}; paths.ps1 changes the user PATH only with -ModifyPath, in CI). WSL-share tests:
-  V2_TEST_WSL_DISTRO=v2win21, set from PowerShell, never Git Bash. CI's minimum Node for local
-  checks: WSL's ~/node2213/node-v22.13.0-linux-x64/bin first on PATH. A swap-out proof in WSL:
-  `touch` the restored files after the rsync (rsync -a keeps Windows' older mtimes).
-- `готово/` in the repo root is the owner's folder (empty now, not V2): never touch, delete or
-  commit it; it is in `.git/info/exclude`.
-- macOS: the owner's Mac Mini, `ssh -o BatchMode=yes siroxygen@192.168.100.2` (key, owner-approved
-  2026-11-10); run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14) from
-  `~/Desktop/v2/v2-test`, copied with tar excluding target, .git, .claude. Every V2 file on the Mac
-  (scripts, logs, test folders) goes inside `~/Desktop/v2`, never loose in the home folder (the
-  owner's request, 2026-11-20); a test's temp HOME goes in `mktemp -d` and is removed after. Node 22 (owner-approved brew `node@22`) is
-  keg-only: `export PATH=/opt/homebrew/opt/node@22/bin:$PATH` first.
+  this file, so newcomers are told to ignore it; they work as root only, with no OS user accounts
+  (the owner's rule).
+- Installer changes run on Windows, Linux and the Mac before they are pushed (tests/install/
+  paths.{sh,ps1}; paths.ps1 changes the user PATH only with -ModifyPath, in CI).
+- `готово/` in the repo root is the owner's folder (not V2): never touch, delete or commit it.
+  `pierwiastek/` (and `pierwiastek.zip`) is a homework program the owner asked for on 2026-11-20,
+  not V2: leave it out of commits. Both are in `.git/info/exclude`, which a copy of the folder
+  keeps and a fresh clone doesn't.
 - Reviews that worked best: oracle fuzzers written from DOCS/INTERNALS (not old-vs-new), two
-  finders a round, each with a refuter. Keep them lean.
-- Reviewer agents run every program through scratchpad `capped.py EXE FILE 2048 [TIMEOUT_S]` (kills
-  v2 and its workers past 2 GB together or the time limit; a test ran away to 47 GB on
-  2026-11-02; in WSL `~/v2snap/capped.py`, a /proc version, with snapshots `~/v2snap/v2*`), never
-  kill by name, and stop and report when an action is refused.
+  finders a round, each with a refuter. Keep them lean. Reviewer agents run every program under a
+  memory and time cap (a `capped.py` that kills v2 and its workers past 2 GB together: a test ran
+  away to 47 GB on 2026-11-02), never kill by name, and stop and report when an action is refused.
 - Per milestone: read its § sections, ch. 21 rows and R-tests → build + tests → cargo test +
-  clippy on Windows and WSL → run its DOCS examples → review workflow (finders + refuters) → fix
-  with regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
-- Open proposals from 2026-11-10 (not decided): imported classes have no static members, `#!`
-  lines, narrower closure capture. (`s +=` and `dict.remove` were fixed at the release gate.)
-- Scratchpad helpers are session-local and can vanish (the app crash of 2026-11-02 wiped them):
-  bench/measure.py re-measures release numbers; rewrite fuzzers if needed. Never generate a sweep
-  test's .out from the binary: its output comes from DOCS.
+  clippy on Windows and Linux → run its DOCS examples → review (finders + refuters) → fix with
+  regression tests (swap-out proofs) → check boxes, ROADMAP log, code map → commit.
+- Scratchpad helpers are session-local and vanish (fuzzers, `capped.py`, the differential scripts,
+  newcomer prompts): rewrite them when needed. bench/measure.py and bench/callgrind.sh are in the
+  repo. Never generate a sweep test's .out from the binary: its output comes from DOCS.
 
 ## Working rules (from the owner / ROADMAP)
 - Ultracode: workflows for substantive work; adversarial review per milestone (reviewers find,
@@ -81,27 +69,67 @@ it is loaded automatically into every session and every subagent.
   disagree, fix one of them on purpose in the same change.
 - Phases go in order; nothing from a later phase is stubbed in early.
 - Commit per milestone; message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- Verify end to end before claiming anything works.
-- Owner: casual hobbyist, hates bloat, wants me to make the technical calls.
-
-## Environment gotchas
-- Windows 11, MSVC Rust 1.91. Bash tool is Git Bash: **heredocs (even quoted) and `sed`
-  mangle backslashes** — for any edit containing `\` write a Python script with the Write tool
-  and run it, or use the Edit tool.
-- Linux check: WSL Ubuntu has cargo (nightly 1.93):
-  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude .git --exclude .claude '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
-  (the repo lives in `Desktop\My Stuff\v2-language`; quote the path, it has a space)
-  (also `cargo clippy --all-targets` there: nightly has extra lints, and cfg(unix) code only
-  compiles there).
-- WSL's `Catastrophic failure ... E_UNEXPECTED` during heavy runs: most likely the VM running out
-  of memory (2026-11-19: generated programs of 5 GB each, an OOM kill in `dmesg`). Cap each
-  program's address space (RLIMIT_AS, 3 GB at most 8 at a time) and send output to files, not
-  pipes; `wsl --shutdown` recovers.
-- For review workflows, copy `target/debug/v2.exe` to the scratchpad and let agents use that
-  snapshot (never cargo in the repo while agents run).
 - `cargo test` = unit tests + `tests/run.rs` (the .v2 harness + CLI tests). Clippy must be clean.
 - Never name a file `nul`, `con`, `aux`, `prn`, `com1`… (any extension): Windows device names;
   git can't add them.
+
+## The owner (moved here from my memory notes on 2026-11-22, so they travel with the repo)
+- Casual hobbyist (git user SirOxygenFish), informal tone, not deep in language theory. The old
+  V2 was bloated by weaker assistants; the owner wants lean, honest designs, hates bloat, and
+  trusts me with the technical calls: decide with a short reason, and ask only real product or
+  scope questions, in plain language, with the option I recommend. Likes blunt evaluations.
+- Verify before claiming: I once said FFI worked while `extern` calls returned null, and that
+  `@py` worked while it was a stub, and the owner lost trust. Run the documented example and
+  read its output before saying something works; say plainly what is unverified.
+- For approval requests: a numbered list grouped by theme, one or two plain lines each, marked
+  ⭐ (I recommend) or (opt) (taste), with what each costs (code or docs only), plus a short
+  "considered and kept" list. That format got "I approve of all" for 43 items on 2026-10-24.
+- Usage matters: the owner stopped work twice over usage (2026-11-18). Work without agents where
+  I can, keep agents few and lean, and stop when asked.
+- The polyglot reach is the language (see "What this is"): on 2026-10-24 I suggested cutting
+  bridged engines and `extern`, and the owner pushed back hard.
+- On 2026-10-30 the owner proposed making V2 compiled-only and accepted my advice against it:
+  compilers that are ready still carry an interpreter, and truly native ones can't run the
+  libraries V2 exists to reach. The worker-lifetime rules approved then are in INTERNALS (12.7,
+  13.4, 8.8); follow them there.
+
+## This machine's setup (as of 2026-11-22; after a move, check each before relying on it)
+- Windows 11 PC, repo at `C:\Users\SirOxygen\Desktop\My Stuff\v2-language` (quote it: a space),
+  MSVC Rust 1.91. Bash tool is Git Bash: **heredocs (even quoted) and `sed` mangle
+  backslashes**: for any edit containing `\`, use the Edit tool, or write a script with the Write
+  tool and run it. In Git Bash `python3` is the Store stub (use PowerShell's `python`, 3.11).
+- Linux checks: WSL Ubuntu with cargo (nightly 1.93):
+  `wsl.exe -e bash -lc "rsync -a --delete --exclude target --exclude .git --exclude .claude '/mnt/c/Users/SirOxygen/Desktop/My Stuff/v2-language/' ~/v2/ && cd ~/v2 && cargo test"`
+  (also `cargo clippy --all-targets` there: nightly has extra lints, and cfg(unix) code only
+  compiles there). Long scripts: write them to a file and run `wsl.exe -e bash -l FILE`
+  (PowerShell expands `$` in inline commands). CI's minimum Node for local checks: WSL's
+  `~/node2213/node-v22.13.0-linux-x64/bin` first on PATH. A swap-out proof in WSL: `touch` the
+  restored files after the rsync (rsync -a keeps Windows' older mtimes). WSL keeps release
+  snapshots in `~/v2snap/` (`v2-base` = dcad23e, 1.15's baseline) and the differential corpora in
+  `~/dt/`.
+- WSL's `Catastrophic failure ... E_UNEXPECTED` during heavy runs: most likely the VM running out
+  of memory (2026-11-19: generated programs of 5 GB each, an OOM kill in `dmesg`). Cap each
+  program's address space (RLIMIT_AS, 3 GB, at most 8 at a time) and send output to files, not
+  pipes; `wsl --shutdown` recovers.
+- WSL-share tests: `V2_TEST_WSL_DISTRO=v2win21` (a distro made for them), set from PowerShell,
+  never Git Bash. Clean Linux for newcomer tests: `wsl --import` of the official Ubuntu base
+  images (they were in the scratchpad, now gone); remove with `wsl --unregister`.
+- The owner's Windows PATH has a very old v2 (`%LOCALAPPDATA%\Programs\v2\bin`): never touch it
+  (install.ps1 warns that it shadows a new install). `C:\tmp` and `C:\var` are round 19's test
+  leftovers: leave them; tmp_on_windows_points_to_temp skips while they are there.
+- macOS: the owner's Mac Mini (Apple M4) on the home network, `ssh -o BatchMode=yes
+  siroxygen@192.168.100.2` (key, owner-approved 2026-11-10; the key is this PC's, so a new machine
+  needs the owner to set one up). Run tests in `zsh -lic` (Homebrew's PATH: cargo, python3 3.14)
+  from `~/Desktop/v2/v2-test`, copied with tar excluding target, .git, .claude. Every V2 file on
+  the Mac goes inside `~/Desktop/v2`, never loose in the home folder (the owner's request,
+  2026-11-20); a test's temp HOME goes in `mktemp -d` and is removed after. Node 22
+  (owner-approved brew `node@22`) is keg-only: `export PATH=/opt/homebrew/opt/node@22/bin:$PATH`.
+- For review workflows, copy `target/debug/v2.exe` to the scratchpad and let agents use that
+  snapshot (never cargo in the repo while agents run).
+- On a new machine: install Rust stable, Python 3.10+ and Node 22.13+, run `cargo test` and
+  `cargo clippy --all-targets`, and recreate WSL, the Mac link or scratchpad helpers only when a
+  task needs them (ask the owner about the Mac). The built-in browser needs the owner's GitHub
+  sign-in to read CI and publish releases.
 
 ## Code map (src/)
 - `main.rs`: threads (interp thread 256 MiB stack), exit codes, panic hook → 101. Defines the
