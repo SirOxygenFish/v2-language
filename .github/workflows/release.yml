@@ -1,7 +1,6 @@
 # Build the prebuilt binaries (INTERNALS 22.6) and put them on a DRAFT GitHub release; a person
-# publishes it. Three ways to run it: Actions > Release > Run workflow (once this file is on the
-# default branch), pushing a `v*` tag, or, before that, a push to v2-reboot whose commit message
-# contains [release]. The tag must be `v` + Cargo.toml's version, and install.sh and install.ps1
+# publishes it. Three ways to run it: Actions > Release > Run workflow, pushing a `v*` tag, or a push to
+# main whose commit message contains [release]. The tag must be `v` + Cargo.toml's version, and install.sh and install.ps1
 # must name it. A draft creates no tag: publishing it does, at the commit it targets.
 name: Release
 
@@ -13,7 +12,7 @@ on:
         required: true
   push:
     tags: ["v*"]
-    branches: [v2-reboot]
+    branches: [main]
 
 permissions:
   contents: write

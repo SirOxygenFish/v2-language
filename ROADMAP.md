@@ -244,7 +244,7 @@ fast V2 runs.
 Started 2026-11-19, before the next phase designs a compiler: the tree-walking
 interpreter as fast as it goes, behavior unchanged (§5.6, §5.7).
 - [x] `bench/`: nine interpreter benchmarks and the engine ones, `measure.py` (wall time) and
-      `callgrind.sh` (instruction counts); the baseline is v2-reboot at eb495c8
+      `callgrind.sh` (instruction counts); the baseline is eb495c8
 - [x] Frames reused (a pool; a loop body nothing can keep shares one frame across iterations),
       arguments bound without the binder when nothing can go wrong (V2 functions, callbacks,
       builtins, methods, `print`), ints read in place, guard clauses and tail returns without
@@ -451,7 +451,7 @@ come after.
 - [ ] New Windows installer, and DOCS 2 "Install" describing it
 - [ ] A short `README.md`: what V2 is, the taste example from DOCS 1, install, links to DOCS and
       this roadmap
-- [ ] Merge `v2-reboot` into `main`, tag `v0.1.0`
+- [ ] Tag `v0.1.0`
 
 ---
 
