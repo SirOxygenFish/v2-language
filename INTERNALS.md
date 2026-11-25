@@ -2904,7 +2904,7 @@ The `engines/process` and `engines/session` tests need no Python or Node: the un
 | --- | --- | --- | --- | --- | --- |
 | windows-latest, MSVC | 3.13 | 22 (≥ 22.13) | `cl` found via vswhere, outside a Developer Prompt | stable | py,js,ts,c,cpp,rust |
 | ubuntu-latest | 3.13 | 22 (≥ 22.13) | gcc/g++ | stable | py,js,ts,c,cpp,rust |
-| macOS: the owner's Mac (Apple Silicon), run by hand over SSH, not a CI job | 3.10+ | 22 (≥ 22.13) | Apple clang | stable | py,js,ts,c,cpp,rust |
+| macOS: my Mac (Apple Silicon), run by hand over SSH, not a CI job | 3.10+ | 22 (≥ 22.13) | Apple clang | stable | py,js,ts,c,cpp,rust |
 | ubuntu-22.04, minimum versions (7.2) | 3.10 | 22.13 | gcc/g++ | 1.56 | py,js,ts,c,cpp,rust |
 
 - **Build and test.** Every job builds V2 with stable Rust and runs `cargo test`. On Windows the host target is `x86_64-pc-windows-msvc`, which also proves that libffi builds with MSVC. `@rust` blocks compile with that column's toolchain: the minimum-versions job installs Rust 1.56 beside stable and sets `V2_TEST_RUST_TOOLCHAIN=1.56` (22.2).

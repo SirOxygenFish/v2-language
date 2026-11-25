@@ -1,5 +1,5 @@
-# Build and test V2 on Windows and Linux (INTERNALS 22.5). macOS is tested on the owner's Mac (the
-# owner's choice, 2026-11-10). The C/C++ and @rust columns are added when roadmap Phase 2 lands.
+# Build and test V2 on Windows and Linux (INTERNALS 22.5). macOS is tested by hand on my Mac
+# (2026-11-10). The C/C++ and @rust columns are added when roadmap Phase 2 lands.
 name: CI
 
 on:
