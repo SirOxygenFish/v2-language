@@ -783,10 +783,6 @@ impl Interp {
     }
 
     fn not_declared<T>(&self, name: &str, span: Span, env: &Env, assigning: bool) -> Exec<T> {
-        // A builtin of a later version (DOCS 13.3), said as `extern` and the later tags are.
-        if name == "define_engine" {
-            return Err(self.not_yet("define_engine (custom engines)", span));
-        }
         // Declared, but further on: no did-you-mean, as it isn't a typo.
         if let Some(msg) = self.declared_later(span.file, name, env) {
             return self.fail_at("NameError", msg, span);

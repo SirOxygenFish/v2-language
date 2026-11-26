@@ -1,0 +1,3 @@
+[engines.fake]
+kind = "bridged"
+command = ["fake_adapter", "vep2"]

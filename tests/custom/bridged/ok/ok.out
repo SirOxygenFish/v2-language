@@ -1,0 +1,9 @@
+42 x [1, {"a": null}]
+hi
+7
+ForeignError FakeError boom fake
+from an action
+[1, 2]
+pkgfn
+ImportError @export lists 'nope' but @fake block at ok.v2:20 does not define it
+true

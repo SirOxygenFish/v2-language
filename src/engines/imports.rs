@@ -1175,7 +1175,7 @@ fn named_items(items: &[ImportItem]) -> Vec<Item> {
 impl Interp {
     /// The selector as written, for messages (13.1).
     /// Where a selector is written: the caret for its own errors (2.2).
-    fn selector_span(&self, sel: &Selector) -> Span {
+    pub(crate) fn selector_span(&self, sel: &Selector) -> Span {
         match sel {
             Selector::Union { tag } => tag.span,
             Selector::Exact { tag, label } => tag.span.to(label.span),
@@ -1687,6 +1687,10 @@ impl Interp {
     fn import_module(&mut self, file: FileId, sel: &Selector, names: Json, at: Span) -> Exec<ModuleAnswer> {
         let Selector::Module { lang, path } = sel else { unreachable!("a module selector") };
         let key = self.selector_key(lang).map_err(|f| self.raise(f, at))?;
+        // Only bridged engines take module selectors (13.5): nothing is run or sent.
+        if self.registry.canonical(&key).is_some_and(|s| s.kind == crate::engines::spec::EngineKind::Run) {
+            return Err(self.raise(import_error(format!("module imports need a bridged engine — '{key}' is a run engine")), at));
+        }
         let joined = path.iter().map(|n| &*n.text).collect::<Vec<_>>().join(".");
         let unit = self.module_unit(file, &key, &joined).map_err(|f| self.raise(f, at))?;
         let s = self.start_engine(&key, at)?;

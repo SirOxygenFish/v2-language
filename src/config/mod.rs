@@ -39,6 +39,9 @@ pub struct Sourced<T> {
 #[derive(Clone, Debug, Default)]
 pub struct EngineCfg {
     pub command: Option<Sourced<Vec<String>>>,
+    /// A built-in run engine's `V2_ENGINE_<TAG>`: it replaces only the program, `command[0]` or
+    /// the found one, keeping the rest (18.4).
+    pub program: Option<Sourced<String>>,
     pub flags: Option<Sourced<Vec<String>>>,
     pub startup_timeout: Option<Sourced<f64>>,
     pub call_timeout: Option<Sourced<f64>>,
@@ -55,6 +58,8 @@ pub struct Config {
     /// Custom engines' tables as written, by canonical tag; their relative paths resolve against
     /// `root` (17.1).
     pub custom: IndexMap<String, toml::Table>,
+    /// The custom engines declared with a `kind`, validated (17.1), by tag.
+    pub custom_engines: IndexMap<String, crate::engines::spec::CustomCfg>,
     pub python_venv: Option<Sourced<PathBuf>>,
 }
 
@@ -62,13 +67,16 @@ pub struct Config {
 #[derive(Debug, PartialEq)]
 pub struct ConfigError(pub String);
 
-pub const BUILTIN_TAGS: &[&str] = &["py", "js", "ts", "c", "cpp", "rust"];
+pub const BUILTIN_TAGS: &[&str] = &["py", "js", "ts", "c", "cpp", "rust", "bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"];
+
+/// The built-in run engines (7.2's Run rows): their `command` is the whole argv, with `{file}`.
+pub const RUN_TAGS: &[&str] = &["bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"];
 
 const SECTIONS: &[&str] = &["engines", "python"];
 const ENGINE_KEYS: &[&str] = &["command", "flags", "startup_timeout", "call_timeout"];
 const PYTHON_KEYS: &[&str] = &["venv"];
 /// The names `[engines.…]` takes for the built-in engines a did-you-mean offers (18.2).
-const ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs"];
+const ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs", "bash", "sh", "pwsh", "powershell", "cmd", "lua", "ruby", "go", "java", "zig", "cs", "csharp"];
 /// The engine names a bare key with another keyboard's letter may have meant (`[engines.tş]`):
 /// ts's too, which `bare_key_hint` sends to `[engines.js]` (18.5).
 const KEY_ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "ts", "typescript", "c", "cpp", "cxx", "rust", "rs"];
@@ -111,18 +119,44 @@ fn load_from(start: &Path, env: impl Iterator<Item = (OsString, OsString)>) -> R
     // a tag nobody declares is ignored: environments hold unrelated variables (18.4).
     for (tag, (path, var)) in overrides {
         let path_text = path.to_string_lossy().into_owned();
-        if BUILTIN_TAGS.contains(&tag.as_str()) {
+        if RUN_TAGS.contains(&tag.as_str()) {
+            let e = cfg.engines.entry(tag).or_default();
+            if let Some(c) = e.command.as_mut() {
+                c.value[0] = path_text.clone();
+            }
+            e.program = Some(Sourced { value: path_text, from: ConfigSource::Env(var) });
+        } else if BUILTIN_TAGS.contains(&tag.as_str()) {
             cfg.engines.entry(tag).or_default().command = Some(Sourced { value: vec![path_text], from: ConfigSource::Env(var) });
         } else if let Some(table) = cfg.custom.get_mut(&tag) {
             match table.get_mut("command") {
-                Some(toml::Value::Array(items)) if !items.is_empty() => items[0] = toml::Value::String(path_text),
+                Some(toml::Value::Array(items)) if !items.is_empty() => items[0] = toml::Value::String(path_text.clone()),
                 _ => {
-                    table.insert("command".into(), toml::Value::Array(vec![toml::Value::String(path_text)]));
+                    table.insert("command".into(), toml::Value::Array(vec![toml::Value::String(path_text.clone())]));
                 }
+            }
+            if let Some(e) = cfg.custom_engines.get_mut(&tag) {
+                e.command[0] = path_text;
+                e.origin = var;
             }
         }
     }
     Ok(cfg)
+}
+
+/// A `define_engine` command's paths rewritten against `base`, the calling file's folder, as
+/// 18.1 rewrites a `v2.toml`'s (17.2). `Err` is the problem's text.
+pub fn rewrite_command(base: &Path, argv: Vec<String>) -> Result<Vec<String>, String> {
+    let f = File { shown: String::new(), base: base.to_path_buf(), from: ConfigSource::Env(String::new()) };
+    f.argv("command", argv).map_err(|ConfigError(m)| m.trim_start_matches(": config error: ").to_string())
+}
+
+/// The program a `V2_ENGINE_<TAG>` variable names, read when `define_engine` declares that tag
+/// (18.4): a path with a separator against the cwd, else a name for the PATH walk.
+pub fn engine_override(tag: &str) -> Option<(String, String)> {
+    let var = format!("V2_ENGINE_{}", tag.to_ascii_uppercase());
+    let v = std::env::var_os(&var).filter(|v| !v.is_empty())?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    Some((from_cwd(&cwd, Path::new(&v)).to_string_lossy().into_owned(), var))
 }
 
 /// `V2_ENGINE_<TAG>` (18.4): one executable path each, never split; empty means unset. The prefix
@@ -703,16 +737,27 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
             return Err(f.error(format!("[engines.{name}] names a program, not an engine: it runs the {engine} engine, so write [engines.{engine}] command = [\"{name}\"]")));
         }
         // A misspelled engine (`[engines.pyy]`, `[engines.Python]`) would configure nothing, with
-        // no word (18.2); a later engine's name (`ruby`) isn't a misspelling, nor is a table with
-        // a `kind`, which only a custom engine has (`[engines.r]`, DOCS 13).
+        // no word (18.2); a later engine's name isn't a misspelling, nor is a table with a `kind`,
+        // which only a custom engine has (`[engines.r]`, DOCS 13).
         let custom = t.contains_key("kind");
         if !BUILTIN_TAGS.contains(&tag.as_str()) && crate::engines::registry::later_language(&tag).is_none() && !custom {
             if let Some(near) = crate::runtime::error::did_you_mean(name, ENGINE_NAMES.iter().copied()) {
-                return Err(f.error(format!("[engines.{name}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")));
+                return Err(f.error(format!("[engines.{name}] isn't an engine of this version: did you mean [engines.{near}]? (a custom engine's table needs a kind: \"bridged\" or \"run\")")));
             }
         }
         if !BUILTIN_TAGS.contains(&tag.as_str()) {
-            // A custom engine (17.1, roadmap Phase 3).
+            // A custom engine (17.1): every other tag's table declares one, so 17.1's rules, `kind`
+            // included, apply to it.
+            {
+                let what = format!("[engines.{name}] command");
+                // A command written as one string gets the array to write instead (18.2).
+                if let Some(kv @ toml::Value::String(_)) = t.get("command") {
+                    f.strings(&what, kv, true, true)?;
+                }
+                let mut e = crate::engines::spec::validate(&tag, t, f.shown.clone()).map_err(|m| f.error(format!("[engines.{name}]: {m}")))?;
+                e.command = f.argv(&what, e.command)?;
+                cfg.custom_engines.insert(tag.clone(), e);
+            }
             cfg.custom.insert(tag, t.clone());
             continue;
         }
@@ -721,8 +766,15 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
             let what = format!("[engines.{name}] {k}");
             match k.as_str() {
                 "kind" => return Err(f.error(format!("built-in engine '{tag}' can't change 'kind'"))),
-                "command" if overrides.contains_key(&tag) => {}
-                "command" => e.command = Some(f.sourced(f.argv(&what, f.strings(&what, kv, true, true)?)?)),
+                "command" if overrides.contains_key(&tag) && !RUN_TAGS.contains(&tag.as_str()) => {}
+                "command" => {
+                    let argv = f.argv(&what, f.strings(&what, kv, true, true)?)?;
+                    // A built-in run engine's command is the whole argv (18.2, 17.1).
+                    if RUN_TAGS.contains(&tag.as_str()) && !argv.iter().any(|a| a.contains("{file}")) {
+                        return Err(f.error(format!("[engines.{name}]: command must contain {{file}}")));
+                    }
+                    e.command = Some(f.sourced(argv));
+                }
                 "flags" => {
                     if !matches!(tag.as_str(), "c" | "cpp" | "rust") {
                         return Err(f.error(format!("{what} only applies to c, cpp and rust")));
@@ -731,6 +783,9 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
                 }
                 "startup_timeout" => {
                     if !matches!(tag.as_str(), "py" | "js") {
+                        if RUN_TAGS.contains(&tag.as_str()) {
+                            return Err(f.error(format!("{what} doesn't apply to run engines, which have no startup: use call_timeout")));
+                        }
                         return Err(f.error(format!("{what} only applies to py and js")));
                     }
                     e.startup_timeout = Some(f.sourced(f.seconds(&what, kv)?));
@@ -852,7 +907,7 @@ mod tests {
 
     #[test]
     fn finds_the_root_and_reads_values() {
-        let cfg = project("ok", "[engines.python]\ncommand = [\"py.exe\"]\ncall_timeout = 5\n[engines.c]\nflags = [\"-O2\"]\n[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n").unwrap();
+        let cfg = project("ok", "[engines.python]\ncommand = [\"py.exe\"]\ncall_timeout = 5\n[engines.c]\nflags = [\"-O2\"]\n[engines.perl]\nkind = \"run\"\ncommand = [\"perl\", \"{file}\"]\n").unwrap();
         assert!(cfg.root.join("v2.toml").is_file());
         assert_eq!(cfg.file, Some(cfg.root.join("v2.toml")));
         let venv = project("venv", "[python]\nvenv = \".venv\"\n").unwrap();
@@ -860,7 +915,7 @@ mod tests {
         assert_eq!(cfg.engines["py"].command.as_ref().unwrap().value, vec!["py.exe"]);
         assert_eq!(cfg.engines["py"].call_timeout.as_ref().unwrap().value, 5.0);
         assert_eq!(cfg.engines["c"].flags.as_ref().unwrap().value, vec!["-O2"]);
-        assert!(cfg.custom.contains_key("ruby"));
+        assert!(cfg.custom.contains_key("perl") && cfg.custom_engines.contains_key("perl"));
         // An empty v2.toml stops the upward search and sets nothing.
         let d = temp("nofile").join("deeper");
         std::fs::create_dir_all(&d).unwrap();
@@ -989,9 +1044,17 @@ mod tests {
         // name (ruby, close to rust) and any other name are kept for custom engines.
         for (table, near) in [("pyy", "py"), ("Python", "python"), ("PY", "py"), ("jss", "js")] {
             let e = project(&format!("typo{table}"), &format!("[engines.{table}]\ncommand = [\"x\"]\n")).unwrap_err().0;
-            assert!(e.ends_with(&format!("[engines.{table}] isn't an engine of this version: did you mean [engines.{near}]? (custom engines aren't in this version of V2 yet)")), "{e}");
+            assert!(e.ends_with(&format!("[engines.{table}] isn't an engine of this version: did you mean [engines.{near}]? (a custom engine's table needs a kind: \"bridged\" or \"run\")")), "{e}");
         }
-        assert!(project("later", "[engines.ruby]\ncommand = [\"ruby\"]\n[engines.perl]\ncommand = [\"perl\"]\n").is_ok());
+        // A built-in run engine's command is the whole argv, with {file}; another tag's table
+        // declares a custom engine, which needs a kind (17.1).
+        assert!(project("later", "[engines.ruby]\ncommand = [\"ruby\", \"{file}\"]\n[engines.perl]\nkind = \"run\"\ncommand = [\"perl\", \"{file}\"]\n").is_ok());
+        let e = project("runfile", "[engines.ruby]\ncommand = [\"ruby\"]\n").unwrap_err().0;
+        assert!(e.ends_with("[engines.ruby]: command must contain {file}"), "{e}");
+        let e = project("nokind", "[engines.perl]\ncommand = [\"perl\", \"{file}\"]\n").unwrap_err().0;
+        assert!(e.ends_with("[engines.perl]: 'kind' is required: \"run\" or \"bridged\""), "{e}");
+        let e = project("runkind", "[engines.sh]\nkind = \"run\"\ncommand = [\"bash\", \"{file}\"]\n").unwrap_err().0;
+        assert!(e.ends_with("built-in engine 'bash' can't change 'kind'"), "{e}");
         // A table with `kind` is a custom engine's (DOCS 13.1), not a misspelling: `r` isn't `rs`.
         let cfg = project("custom", "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\next = \"R\"\n").unwrap();
         assert!(cfg.custom.contains_key("r"));
@@ -1186,12 +1249,15 @@ mod tests {
 
     #[test]
     fn overrides_of_custom_and_undeclared_tags() {
-        // A custom engine gets command[0]; a tag nobody declares is ignored (18.4).
-        let env = [("V2_ENGINE_RUBY", "r3"), ("V2_ENGINE_LUA", "lua5")];
-        let cfg = project_env("custom-env", "[engines.ruby]\nkind = \"run\"\ncommand = [\"ruby\", \"{file}\"]\n", &env).unwrap();
-        let ruby = cfg.custom["ruby"]["command"].as_array().unwrap();
-        assert!(ruby[0].as_str() == Some("r3") && ruby[1].as_str() == Some("{file}"));
-        assert!(!cfg.custom.contains_key("lua") && !cfg.engines.contains_key("lua"));
+        // A custom engine and a built-in run engine get command[0]; a tag nobody declares is
+        // ignored (18.4).
+        let env = [("V2_ENGINE_PERL", "p5"), ("V2_ENGINE_LUA", "lua5"), ("V2_ENGINE_NOSUCH", "x")];
+        let cfg = project_env("custom-env", "[engines.perl]\nkind = \"run\"\ncommand = [\"perl\", \"{file}\"]\n", &env).unwrap();
+        let perl = &cfg.custom_engines["perl"];
+        assert_eq!((perl.command.as_slice(), perl.origin.as_str()), (&["p5".to_string(), "{file}".to_string()][..], "V2_ENGINE_PERL"));
+        assert_eq!(cfg.engines["lua"].program.as_ref().map(|p| p.value.as_str()), Some("lua5"));
+        assert!(cfg.engines["lua"].command.is_none());
+        assert!(!cfg.custom.contains_key("nosuch") && !cfg.engines.contains_key("nosuch"));
     }
 
     #[test]

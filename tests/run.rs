@@ -164,7 +164,16 @@ fn v2_command(home: &Path) -> Command {
         cmd.env("PATH", path);
     }
     cmd.env("HOME", home).env("USERPROFILE", home).env("RUSTUP_HOME", rustup).env("CARGO_HOME", cargo);
+    // tests/custom's bridged engines run the scripted adapter; a script that doesn't declare
+    // `fake` ignores the variable (22.2, 18.4).
+    cmd.env("V2_ENGINE_FAKE", fake_adapter());
     cmd
+}
+
+/// `examples/fake_adapter.rs`, which `cargo test` builds next to the binary (22.3).
+fn fake_adapter() -> PathBuf {
+    let dir = Path::new(BIN).parent().expect("the binary's folder").join("examples");
+    dir.join(if cfg!(windows) { "fake_adapter.exe" } else { "fake_adapter" })
 }
 
 /// Wait for `child` with a deadline. Stdin is fed and stdout/stderr (those that are piped) are
@@ -4879,28 +4888,35 @@ fn a_signal_during_exec_stops_the_next_statement() {
 
 #[test]
 fn doctor_notes_engine_tables_of_later_versions() {
-    // INTERNALS 19.2: a v2.toml written for R or @sh says, before any block is written, that
-    // this version doesn't run them.
-    let toml = "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\n\n[engines.sh]\ncommand = [\"bash\"]\n";
+    // INTERNALS 19.2: a v2.toml written for C says, before any block is written, that this
+    // version doesn't run it; a custom run engine and a configured built-in one get rows.
+    let toml = "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\n\n[engines.c]\nflags = [\"-O2\"]\n\n[engines.sh]\ncommand = [\"bash\", \"-e\", \"{file}\"]\n";
     let (code, stdout, stderr, _home) = run_with_files(&[("v2.toml", toml)], &["doctor"]);
     assert_eq!(code, Some(0), "{stderr}");
-    assert!(stdout.contains("\n  r: [engines.r] in v2.toml is a custom engine, and custom engines aren't in this version of V2 yet: @r blocks won't run\n"), "{stdout}");
-    assert!(stdout.contains("\n  sh: [engines.sh] in v2.toml configures @sh, which isn't in this version of V2 yet\n"), "{stdout}");
+    assert!(stdout.contains("\n  c: [engines.c] in v2.toml configures @c, which isn't in this version of V2 yet\n"), "{stdout}");
+    let rows = doctor_rows(&stdout);
+    assert!(rows.contains_key("r"), "{stdout}");
+    if Command::new("bash").arg("--version").output().is_ok() {
+        assert_eq!(rows["bash"][0], "ok", "{stdout}");
+        assert!(rows["bash"].iter().any(|c| c.ends_with("bash -e {file}")), "{stdout}");
+    }
 }
 
 #[test]
 fn doctor_prints_the_engine_table() {
-    // INTERNALS 19.2: one row per registered engine, in order; exit 0 even when some are missing.
-    let probe = "print(engine_available(\"py\"), engine_available(\"js\"), engine_available(\"ts\"))\n";
-    let (code, stdout, stderr, home) = run_with_files(&[("probe.v2", probe)], &["probe.v2"]);
+    // INTERNALS 19.2: one row per registered engine, in order, the built-in run engines included
+    // (R58); exit 0 even when some are missing.
+    const ALL: [&str; 12] = ["py", "js", "ts", "bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"];
+    let probe: String = ALL.iter().map(|t| format!("print(engine_available(\"{t}\"))\n")).collect();
+    let (code, stdout, stderr, home) = run_with_files(&[("probe.v2", &probe)], &["probe.v2"]);
     assert_eq!(code, Some(0), "{stderr}");
     let available: Vec<bool> = stdout.split_whitespace().map(|w| w == "true").collect();
     let (code, stdout, stderr, _) = run_with_files(&[], &["doctor"]);
     assert_eq!(code, Some(0), "{stderr}");
-    let ids: Vec<&str> = stdout.lines().skip(1).take(3).map(|l| l.split_whitespace().next().unwrap_or_default()).collect();
-    assert_eq!(ids, ["py", "js", "ts"], "{stdout}");
+    let ids: Vec<&str> = stdout.lines().skip(1).take(ALL.len()).map(|l| l.split_whitespace().next().unwrap_or_default()).collect();
+    assert_eq!(ids, ALL, "{stdout}");
     let rows = doctor_rows(&stdout);
-    for (id, avail) in ["py", "js", "ts"].iter().zip(available) {
+    for (id, avail) in ALL.iter().zip(available) {
         let row = &rows[*id];
         assert!(["ok", "missing", "old", "unsupported", "broken"].contains(&row[0].as_str()), "{stdout}");
         assert_eq!(row[0] == "ok", avail, "{id}: doctor and engine_available agree:\n{stdout}");
@@ -4910,7 +4926,7 @@ fn doctor_prints_the_engine_table() {
     }
     assert!(stdout.contains("config file: none"), "{stdout}");
     // The summary names the engines that are ready (19.2).
-    let ok: Vec<&str> = ["py", "js", "ts"].into_iter().filter(|id| rows[*id][0] == "ok").collect();
+    let ok: Vec<&str> = ALL.into_iter().filter(|id| rows[*id][0] == "ok").collect();
     let ready = if ok.is_empty() { "none".to_string() } else { ok.join(", ") };
     assert!(stdout.contains(&format!("\nready: {ready}\n")), "{stdout}");
     drop(home);
@@ -6281,8 +6297,12 @@ fn doctor_and_a_js_run_name_a_conda_run_that_cant_work() {
         let status = |told: bool| if told { "broken" } else { "ok" };
         let js_told = js_note.is_some();
         assert_eq!((&*rows["py"][0], &*rows["js"][0], &*rows["ts"][0]), (status(py_told), status(js_told), status(js_told)), "{stdout}");
-        let ready: Vec<&str> = [("py", py_told), ("js", js_told), ("ts", js_told)].iter().filter(|(_, told)| !told).map(|(id, _)| *id).collect();
-        assert!(stdout.contains(&format!("\nready: {}\n", if ready.is_empty() { "none".to_string() } else { ready.join(", ") })), "{stdout}");
+        // The run engines this machine has are ready too; py, js and ts as told.
+        let line = stdout.lines().find_map(|l| l.strip_prefix("ready: ")).unwrap_or_default();
+        let listed: Vec<&str> = line.split(", ").collect();
+        for (id, told) in [("py", py_told), ("js", js_told), ("ts", js_told)] {
+            assert_eq!(listed.contains(&id), !told, "{id}: {stdout}");
+        }
         assert_eq!(stdout.contains("\n  ts: @ts blocks run on the js engine: see js above\n"), js_told, "{stdout}");
         assert_eq!(stdout.contains(&py_note), py_told, "{py}: {stdout}");
         match js_note {
@@ -6687,7 +6707,7 @@ fn doctor_without_engines_notes_install_hints() {
     assert!(unset.contains("\n  ts: not found: PATH isn't set, so nothing was searched; set it, or name the program in v2.toml, [engines.js] command\n"), "{unset}");
     // Then the version line for bug reports and what it means for the user's scripts (19.2).
     let end = format!(
-        "config file: none\nv2 {} (VEP/1), {} {}\nready: none\nnot ready: py, js, ts (see the notes); plain V2 scripts still run\n",
+        "config file: none\nv2 {} (VEP/1), {} {}\nready: none\nnot ready: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs (see the notes); plain V2 scripts still run\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
@@ -8980,4 +9000,43 @@ fn doctor_in_a_linked_folder_shows_the_v2_toml_a_run_there_uses() {
     let out = wait_with_timeout(cmd.spawn().expect("start v2"), Vec::new(), Duration::from_secs(120)).unwrap();
     let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
     assert!(stdout.contains(&format!("\nconfig file: {}\n", real_path(&d.join("B").join("v2.toml")))), "{stdout}");
+}
+
+/// A minimal VEP/1 adapter (no caps): echoes `load`s, sums `call` args (INTERNALS 17.5, 17.6).
+const FAKE_ADAPTER: &str = r#"import sys, os, json
+inp = os.fdopen(os.dup(0), 'rb'); out = os.fdopen(os.dup(1), 'wb')
+def send(f): out.write(json.dumps(f, separators=(',', ':')).encode() + b'\n'); out.flush()
+send({"t": "hello", "vep": 1, "version": "0.1", "pid": os.getpid(), "caps": []})
+for line in inp:
+    m = json.loads(line)
+    if m["t"] == "bye": sys.exit(0)
+    if m["t"] == "init": send({"t": "ret", "id": m["id"], "value": None})
+    elif m["t"] == "load":
+        send({"t": "out", "stream": "stdout", "text": "load " + m["lang"] + "\n"})
+        send({"t": "ret", "id": m["id"], "value": 42 if m["want_value"] else None, "exports": [{"name": n, "kind": "func"} for n in m["exports"]], "missing": []})
+    elif m["t"] == "call": send({"t": "ret", "id": m["id"], "value": sum(m["args"])})
+    else: send({"t": "err", "id": m["id"], "error": {"type": "ProtocolError", "message": "unknown", "foreign_type": None, "trace": []}})
+"#;
+
+#[test]
+fn custom_bridged_engines_run_through_their_adapter() {
+    // INTERNALS 17.1, 17.2, 17.5: a v2.toml table and define_engine both start the adapter named
+    // in `command`, relative to their own folder; without `reverse`, an inner @import is refused.
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let toml = "[engines.pyfake]\nkind = \"bridged\"\ncommand = [\"python3\", \"adapters/fake.py\"]\n";
+    let src = "@pyfake {\n  @export { add }\n}\n@import { add } from @pyfake\nprint(add(2, 3))\nprint(@pyfake { x })\n\
+               define_engine(\"other\", kind: \"bridged\", command: [\"python3\", \"./adapters/fake.py\"])\nprint(@other { y })\n\
+               try { define_engine(\"pyfake\", kind: \"bridged\", command: [\"x\"]) } catch (e) { print(e.message) }\n\
+               func hi() { return 1 }\ntry { @pyfake {\n  @import { hi } from v2\n} } catch (e) { print(e.type) }\n";
+    let files = [("v2.toml", toml), ("adapters/fake.py", FAKE_ADAPTER), ("t.v2", src)];
+    let (code, stdout, stderr, _home) = run_with_files(&files, &["t.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let want = "load pyfake\n5\nload pyfake\n42\nload other\n42\ndefine_engine: engine 'pyfake' is already declared (v2.toml)\nImportError\n";
+    assert_eq!(stdout.replace(&*format!("({}", _home.0.join("v2.toml").display()), "(v2.toml"), want);
+    // A bad table is a configuration error (18.5).
+    let (code, _, stderr, _home) = run_with_files(&[("v2.toml", "[engines.pyfake]\nkind = \"bridged\"\ncomand = [\"x\"]\n"), ("t.v2", "print(1)\n")], &["t.v2"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("[engines.pyfake]: unknown key 'comand' (did you mean 'command'?)"), "{stderr}");
 }

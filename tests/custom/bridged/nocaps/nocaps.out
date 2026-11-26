@@ -1,0 +1,4 @@
+1
+ArityError fake functions take positional arguments only (got 'x')
+ImportError engine 'fake' cannot import packages
+ImportError @import inside @fake blocks needs the 'reverse' capability, which engine 'fake' doesn't declare

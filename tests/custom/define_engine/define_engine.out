@@ -1,0 +1,8 @@
+EngineUnknown true
+3
+ValueError define_engine: engine 'nd' is already declared (define_engine.v2:8)
+ValueError define_engine: 'py' is a built-in engine — configure it in [engines.py] in v2.toml
+ValueError define_engine: command must contain {file}
+ValueError define_engine: invalid engine tag 'Bad': a tag is a lowercase letter, then up to 31 lowercase letters, digits and _
+ArityError
+runner.js ran: hello from the block

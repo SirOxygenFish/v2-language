@@ -1,0 +1,9 @@
+// requires: js
+// R47 (INTERNALS 17.3 step 5): a child the block started, not detached, stops with the block,
+// so the marker it would write after 1 s never appears.
+@nd {
+    require("child_process").spawn(process.execPath, ["-e", "setTimeout(() => require('fs').writeFileSync('marker.txt', 'x'), 1000)"], { stdio: "ignore" }).unref()
+}
+print("returned")
+@nd { setTimeout(() => {}, 2000) }
+print(exists("marker.txt"))

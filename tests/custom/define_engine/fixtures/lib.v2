@@ -1,0 +1,3 @@
+// Declared in a file of another folder: its command's ./runner.js is next to this file (18.1).
+define_engine("rn", kind: "run", command: ["node", "./runner.js", "{file}"], ext: "txt")
+@rn { hello from the block }

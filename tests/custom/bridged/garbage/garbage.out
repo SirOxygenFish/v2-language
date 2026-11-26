@@ -1,0 +1,2 @@
+ProtocolError engine 'fake' broke the protocol: not valid JSON (expected ident at line 1 column 2) (got: this is not a frame)
+EngineCrashed

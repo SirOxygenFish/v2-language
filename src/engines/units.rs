@@ -312,6 +312,22 @@ impl Interp {
         let at = b.tag.span;
         let need = self.line.need.take();
         let engine = self.registry.resolve_tag(&b.tag.text).map_err(|f| self.raise(f, at))?;
+        if engine.spec.kind == crate::engines::spec::EngineKind::Run {
+            // 12.1 step 3, after the tag is resolved and before the args: a run engine has no
+            // namespace to export from or import into.
+            if b.directives.exports.is_some() || !b.directives.imports.is_empty() {
+                let span = b.directives.exports.as_ref().and_then(|e| e.at).or_else(|| b.directives.imports.first().map(|i| self.selector_span(&i.selector))).unwrap_or(at);
+                let tag = &engine.spec.id;
+                return Err(self.raise(error("ImportError", format!("@{tag} blocks cannot @export or @import — '{tag}' is a run engine")), span));
+            }
+            let mut args = Vec::with_capacity(b.args.len());
+            for (name, expr) in &b.args {
+                args.push((name.text.clone(), self.eval(expr, env)?, expr.span));
+            }
+            let _ = need;
+            let value = self.run_engine_block(&engine, &b.body, &args, want_value, at)?;
+            return Ok((value, Vec::new()));
+        }
         let mut args = Vec::with_capacity(b.args.len());
         for (name, expr) in &b.args {
             args.push((name, self.eval(expr, env)?, expr.span));
@@ -320,6 +336,14 @@ impl Interp {
         let imports = self.inner_imports(b, &key)?;
         let s = self.session_for(&engine, at)?;
         self.check_alive(s, at)?;
+        // A route-only entry (a V2 function, another language) can only be served by calling back
+        // into the host, which needs `reverse` (17.5); before `load`. An entry with a `unit` is
+        // this session's own, which the adapter looks up itself.
+        if !self.sessions[s].caps.reverse && imports.iter().any(|e| e.get("route").is_some() && e.get("unit").is_none()) {
+            let span = b.directives.imports.first().map_or(at, |imp| self.selector_span(&imp.selector));
+            let msg = format!("@import inside @{key} blocks needs the 'reverse' capability, which engine '{key}' doesn't declare");
+            return Err(self.raise(error("ImportError", msg), span));
+        }
         let mut encoded = Map::new();
         for (name, value, span) in args {
             match self.wire(s).encode(&value, &name.text) {
@@ -393,6 +417,11 @@ impl Interp {
     /// again (8.2).
     pub(crate) fn session_for(&mut self, e: &Rc<ResolvedEngine>, at: Span) -> Exec<SessionId> {
         let key = e.spec.session_of.clone().unwrap_or_else(|| e.spec.id.clone());
+        // A run engine has no session: a block of one runs a program (17.3), and nothing can be
+        // imported from it.
+        if e.spec.kind == crate::engines::spec::EngineKind::Run {
+            return Err(self.raise(error("ImportError", format!("@{key} blocks cannot @export or @import — '{key}' is a run engine")), at));
+        }
         let s = match self.sessions.iter().position(|s| s.key == key) {
             Some(s) => s,
             None => {
@@ -402,12 +431,18 @@ impl Interp {
                     Some(owner) => self.registry.resolve_tag(owner).map_err(|f| self.raise(f, at))?,
                     None => e.clone(),
                 };
-                let (file, text) = crate::adapters::for_session(&key).expect("a built-in bridged engine");
-                let adapter = match crate::adapters::materialize(file, text) {
-                    Ok(path) => path,
-                    Err(msg) => return Err(self.raise(error("IOError", msg), at)),
+                // A custom bridged engine's command is its adapter (17.5): its argv as resolved,
+                // nothing written to the run dir, no variables added.
+                let (argv, env) = if engine.spec.is_bridged_custom() {
+                    (engine.argv.clone(), Vec::new())
+                } else {
+                    let (file, text) = crate::adapters::for_session(&key).expect("a built-in bridged engine");
+                    let adapter = match crate::adapters::materialize(file, text) {
+                        Ok(path) => path,
+                        Err(msg) => return Err(self.raise(error("IOError", msg), at)),
+                    };
+                    worker_command(&engine, &adapter)
                 };
-                let (argv, env) = worker_command(&engine, &adapter);
                 let timeouts = self.timeouts(&key);
                 match self.start_session(engine, &argv, &env, timeouts, at) {
                     Ok(s) => s,
@@ -437,8 +472,12 @@ impl Interp {
     /// `[engines.<key>] startup_timeout` (default 30 s) and `call_timeout` (default none); 0 is
     /// none (18.2).
     fn timeouts(&self, key: &str) -> Timeouts {
-        let cfg = self.registry.config().engines.get(key);
         let limit = |secs: f64| Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero());
+        // A custom engine's timeouts live in its spec (17.1): a define_engine one has no table.
+        if let Some(c) = self.registry.canonical(key).and_then(|spec| spec.custom.clone()) {
+            return Timeouts { startup: limit(c.startup_timeout.unwrap_or(STARTUP_DEFAULT)), call: c.call_timeout.and_then(limit) };
+        }
+        let cfg = self.registry.config().engines.get(key);
         Timeouts {
             startup: limit(cfg.and_then(|c| c.startup_timeout.as_ref()).map_or(STARTUP_DEFAULT, |t| t.value)),
             call: cfg.and_then(|c| c.call_timeout.as_ref()).and_then(|t| limit(t.value)),

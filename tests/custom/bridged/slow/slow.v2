@@ -1,0 +1,11 @@
+// R37, chapter 21: a call past call_timeout is an EngineTimeout; the engine is stopped.
+@fake lib {
+    @export { f }
+    {"f": 1}
+}
+@import { f } from lib
+try {
+    f()
+} catch (e) {
+    print(e.type, e.message)
+}

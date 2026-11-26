@@ -1,0 +1,27 @@
+// INTERNALS 17.5, R37: a custom bridged engine through its adapter: exports, calls, out, err,
+// named args (the kwargs cap) and module imports (the modules cap).
+@fake lib {
+    @export { answer, echo, fail, say }
+    {"answer": 42, "echo": "$0", "fail": "!boom", "say": "@out:hi"}
+}
+@import { answer, echo, fail, say } from lib
+print(answer(), echo("x"), echo([1, {"a": null}]))
+say()
+print(echo(nothing: 7))
+try {
+    fail()
+} catch (e) {
+    print(e.type, e.foreign_type, e.message, e.lang)
+}
+print(@fake { {"say": "@out:from an action", "value": [1, 2]} })
+@import { pkgfn } from fake.pkg
+print(pkgfn())
+try {
+    @fake {
+        @export { nope }
+        {}
+    }
+} catch (e) {
+    print(e.type, e.message)
+}
+print(engine_available("fake"))

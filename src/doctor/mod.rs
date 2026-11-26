@@ -244,6 +244,40 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         };
         // V2_ENGINE_PY, left set, wins over the project's venv (18.3): said first.
         notes.extend(crate::engines::resolve::unused_venv(&cfg).filter(|_| id == "py").map(|(_, note)| format!("py: {note}")));
+        // A run engine (built-in or custom) or a custom bridged one (19.2): COMMAND is its template,
+        // `{file}` included; a custom engine has no probe, so no VERSION.
+        let run = spec.kind == crate::engines::spec::EngineKind::Run;
+        if run || spec.custom.is_some() {
+            match reg.resolve(spec) {
+                Ok(e) => {
+                    let command = if run { crate::engines::resolve::join_words(&reg.run_command(&e)).replace("\"{file}\"", "{file}") } else { e.shown() };
+                    let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
+                    rows.push([id.clone(), "ok".into(), command, version, e.origin.label()]);
+                    skipped(&e.skipped, &mut notes);
+                    ready.push(id);
+                }
+                Err(nf) => {
+                    let (status, version) = match nf.status {
+                        Status::Missing => ("missing", "-".to_string()),
+                        Status::Old(v) => ("old", v.to_string()),
+                        Status::Broken => ("broken", "-".to_string()),
+                    };
+                    let dash = || "-".to_string();
+                    rows.push([id.clone(), status.into(), nf.command.clone().unwrap_or_else(dash), version, nf.from.clone().unwrap_or_else(dash)]);
+                    skipped(&nf.skipped, &mut notes);
+                    // A missing built-in run engine is just `not found` (19.2); cmd says it is
+                    // Windows only; the others say their message's first line.
+                    let first = nf.message.lines().next().unwrap_or_default().to_string();
+                    let note = match nf.status {
+                        Status::Missing if spec.custom.is_none() && id != "cmd" => "not found".to_string(),
+                        _ => first,
+                    };
+                    notes.push(format!("{id}: {note}"));
+                    not_ready.push(id);
+                }
+            }
+            continue;
+        }
         match reg.resolve(spec) {
             Ok(e) => {
                 let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
@@ -379,12 +413,10 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
             }
         }
     }
-    // An engine table in v2.toml for a language this version doesn't run yet (17.1).
-    for tag in cfg.custom.keys() {
-        notes.push(match crate::engines::registry::later_language(tag) {
-            Some(_) => format!("{tag}: [engines.{tag}] in v2.toml configures @{tag}, which isn't in this version of V2 yet"),
-            None => format!("{tag}: [engines.{tag}] in v2.toml is a custom engine, and custom engines aren't in this version of V2 yet: @{tag} blocks won't run"),
-        });
+    // An engine table in v2.toml for a built-in language this version doesn't run yet (19.2):
+    // the compiled engines of Phase 2.
+    for tag in cfg.engines.keys().filter(|t| crate::engines::registry::later_language(t).is_some()) {
+        notes.push(format!("{tag}: [engines.{tag}] in v2.toml configures @{tag}, which isn't in this version of V2 yet"));
     }
     // Blocks also need a temp folder (20.3).
     if let Some(problem) = crate::config::rundir::temp_problem() {

@@ -1,5 +1,4 @@
-//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11 without `define_engine` (roadmap
-//! Phase 3).
+//! Builtins and the `Out` writer (INTERNALS 5.10): DOCS 3.11.
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
@@ -105,6 +104,18 @@ pub static BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef { name: "to_v2", params: &[ParamSpec::req("h")], f: to_v2 },
     BuiltinDef { name: "engine_available", params: &[ParamSpec::req("tag")], f: engine_available },
+    BuiltinDef {
+        name: "define_engine",
+        params: &[
+            ParamSpec::req("tag"),
+            ParamSpec::opt("kind", || Value::Null),
+            ParamSpec::opt("command", || Value::Null),
+            ParamSpec::opt("ext", || Value::Null),
+            ParamSpec::opt("startup_timeout", || Value::Null),
+            ParamSpec::opt("call_timeout", || Value::Null),
+        ],
+        f: define_engine,
+    },
 ];
 
 /// What the program printed and stdout hasn't taken yet. Outside `Out`, so the interrupt path
@@ -535,6 +546,48 @@ fn to_v2(it: &mut Interp, mut args: Vec<Value>, at: Span) -> Exec<Value> {
 fn engine_available(it: &mut Interp, args: Vec<Value>, _at: Span) -> Exec<Value> {
     let tag = str_arg(&args[0], "engine_available", "tag")?;
     Ok(Value::Bool(it.registry.engine_available(&tag)))
+}
+
+/// A `define_engine` argument as the TOML value a `v2.toml` would hold, for 17.1's validator;
+/// `None` for a value no table can hold.
+fn toml_of(v: &Value) -> Option<toml::Value> {
+    Some(match v {
+        Value::Str(s) => toml::Value::String(s.to_string()),
+        Value::Int(n) => toml::Value::Integer(*n),
+        Value::Float(x) => toml::Value::Float(*x),
+        Value::Bool(b) => toml::Value::Boolean(*b),
+        Value::List(l) => toml::Value::Array(l.borrow().iter().map(toml_of).collect::<Option<_>>()?),
+        _ => return None,
+    })
+}
+
+/// `define_engine(tag, kind:, command:, …)` (DOCS 13.3, INTERNALS 17.2): a custom engine declared
+/// from a script, through `v2.toml`'s validator, with the calling file's folder as `base_dir`.
+fn define_engine(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
+    let tag = str_arg(&args[0], "define_engine", "tag")?.to_string();
+    fn refuse<T>(m: String) -> Exec<T> {
+        value_error(format!("define_engine: {m}"))
+    }
+    let mut table = toml::Table::new();
+    for (key, v) in ["kind", "command", "ext", "startup_timeout", "call_timeout"].iter().zip(&args[1..]) {
+        if matches!(v, Value::Null) {
+            continue;
+        }
+        let Some(t) = toml_of(v) else {
+            return refuse(format!("'{key}' can't be {}", v.a_type_name()));
+        };
+        table.insert(key.to_string(), t);
+    }
+    let file = it.sm.file(at.file);
+    let origin = format!("{}:{}", file.display, at.line);
+    let base = file.path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    let mut cfg = crate::engines::spec::validate(&tag, &table, origin).or_else(refuse)?;
+    cfg.command = crate::config::rewrite_command(&base, cfg.command).or_else(refuse)?;
+    if let Some((program, _)) = crate::config::engine_override(&tag) {
+        cfg.command[0] = program;
+    }
+    it.registry.declare(&tag, cfg).or_else(refuse)?;
+    Ok(Value::Null)
 }
 
 fn io_error<T>(message: String) -> Exec<T> {

@@ -1133,8 +1133,6 @@ usually in about a millisecond, longer if its memory has to return from disk. A 
 
 ### Built-in run engines
 
-> **Not built yet** (ROADMAP Phase 3): these tags raise `EngineUnknown` for now
-> (`unknown engine '@sh': shell blocks aren't in this version of V2 yet`).
 
 These work exactly like a custom `run` engine ([13.1](#131-run-engines-execute-a-file): output
 printed, or the block's value as a `str`; args as `V2_ARG_<name>` variables; no `@export` or
@@ -1924,9 +1922,6 @@ function not in the library), `MarshalError` (argument or result doesn't fit), a
 
 ## 13. Custom engines
 
-> **Not built yet** (ROADMAP Phase 3): a custom tag raises `EngineUnknown`, and `define_engine`
-> raises `Error: define_engine (custom engines) isn't in this version of V2 yet`, for now.
-
 Any language can be added as a custom engine, declared in an `[engines.<tag>]` table in
 `v2.toml` ([chapter 14](#14-project-file-v2toml)) or with `define_engine` in the script
 ([13.3](#133-declaring-an-engine-in-the-script)). Tags are lowercase letters, digits and `_`,
@@ -2037,12 +2032,6 @@ Relative paths are relative to the folder of the `v2.toml`, and a path that star
 in your home folder; nothing else is expanded (`%USERPROFILE%`, `$HOME`: the message says so).
 In `"…"` a backslash starts an escape (`"C:\new"` holds a line break), so write Windows paths with
 `/` or in single quotes, `'C:\new'`; a path that holds such a character says so.
-
-> **Not built yet** (ROADMAP Phase 3): a custom engine's table (`[engines.lua]`) is read but not
-> checked for now (`kind`, `command`, `{file}`, the tag's spelling), and `v2 doctor` lists it as
-> not in this version. The tables of the built-in engines are checked:
-> `[engines.py] command = "python3"` stops V2 with
-> `[engines.py] command must be an array: write ["python3"]`.
 
 ```toml
 [engines.py]

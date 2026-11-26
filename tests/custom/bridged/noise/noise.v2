@@ -1,0 +1,4 @@
+// stderr: preload noise before hello
+// stderr: more noise
+// R37: lines before hello are noise: copied to stderr, and the engine still starts (9.3).
+print(@fake { {"value": "started"} })

@@ -1,0 +1,6 @@
+// R37, chapter 21: no hello within startup_timeout is an EngineTimeout.
+try {
+    @fake { {} }
+} catch (e) {
+    print(e.type, e.message.starts_with("engine 'fake' did not start within 1 s"))
+}

@@ -1,7 +1,7 @@
 // requires: py js
 // R17 (py and js): with stdout captured, output keeps program order across V2 and its blocks,
-// also text without a newline and output around a callback (DOCS 4.6, INTERNALS 9.9). The
-// compiled and run-engine parts come with Phases 2 and 3.
+// also text without a newline and output around a callback (DOCS 4.6, INTERNALS 9.9), and a
+// run-engine block's (17.3). The compiled part comes with Phase 2.
 print("v2 1")
 @py { print("py print") }
 @py {
@@ -27,4 +27,8 @@ print("v2 3")
     js_say("hi")
     print("py last")
 }
+define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")
+@nd { console.log("run engine log") }
+@nd { process.stdout.write("run engine, no newline: ") }
+print("v2 after run")
 print("v2 end")

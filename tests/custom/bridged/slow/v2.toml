@@ -1,0 +1,4 @@
+[engines.fake]
+kind = "bridged"
+command = ["fake_adapter", "slow"]
+call_timeout = 1

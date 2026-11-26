@@ -1,0 +1,22 @@
+// requires: js
+// R59 (INTERNALS 17.2): a custom engine declared in the script, with no v2.toml beside it.
+try {
+    @nq { x }
+} catch (e) {
+    print(e.type, e.message.ends_with("or with define_engine"))
+}
+define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")
+@nd { console.log(1 + 2) }
+for args in [["nd", ["node", "{file}"]], ["py", ["node", "{file}"]], ["nx", ["node"]], ["Bad", ["node", "{file}"]]] {
+    try {
+        define_engine(args[0], kind: "run", command: args[1])
+    } catch (e) {
+        print(e.type, e.message)
+    }
+}
+try {
+    define_engine("nb", kind: "run", command: ["node", "{file}"], colour: "red")
+} catch (e) {
+    print(e.type)
+}
+import "./fixtures/lib.v2" as lib

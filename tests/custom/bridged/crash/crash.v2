@@ -1,0 +1,16 @@
+// R37, chapter 21: a worker that dies during a call raises EngineCrashed; later uses do too.
+@fake lib {
+    @export { f }
+    {"f": 1}
+}
+@import { f } from lib
+try {
+    f()
+} catch (e) {
+    print(e.type)
+}
+try {
+    f()
+} catch (e) {
+    print(e.type)
+}

@@ -1,0 +1,11 @@
+// R37, chapter 21: a non-frame line after hello is a ProtocolError; the session is Dead.
+try {
+    @fake { {} }
+} catch (e) {
+    print(e.type, e.message)
+}
+try {
+    @fake { {} }
+} catch (e) {
+    print(e.type)
+}

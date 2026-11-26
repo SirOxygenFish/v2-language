@@ -1,0 +1,6 @@
+// requires: bash
+// R58: the built-in bash engine (and its alias sh), with no v2.toml.
+@sh { echo hi }
+let b = @bash { printf ok }
+print(b, type(b))
+print(@bash(n: 41) { echo $((V2_ARG_n + 1)) })

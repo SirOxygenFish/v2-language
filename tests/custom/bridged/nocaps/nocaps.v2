@@ -1,0 +1,28 @@
+// R37, 17.5: without caps, module imports and named args are refused before anything is sent.
+@fake lib {
+    @export { echo }
+    {"echo": "$0"}
+}
+@import { echo } from lib
+print(echo(1))
+try {
+    echo(x: 1)
+} catch (e) {
+    print(e.type, e.message)
+}
+try {
+    @import { pkgfn } from fake.pkg
+} catch (e) {
+    print(e.type, e.message)
+}
+func hi() {
+    return 1
+}
+try {
+    @fake {
+        @import { hi } from v2
+        {}
+    }
+} catch (e) {
+    print(e.type, e.message)
+}

@@ -357,7 +357,7 @@ impl Interp {
                 let reason = crate::syntax::span::os_message(&e);
                 Err(process::SpawnError { message: format!("could not start '{}': {reason}", argv[0].to_string_lossy()), reason, code: e.raw_os_error(), short: None })
             }
-            None => ChildProc::spawn(&Spawn { argv, env: &env, stdin, stdout, stderr: Pipe::Inherit, keep: &keep, raw_tail: false }),
+            None => ChildProc::spawn(&Spawn { argv, env: &env, stdin, stdout, stderr: Pipe::Inherit, remove: &[], keep: &keep, raw_tail: false }),
         };
         let mut child = match spawned {
             Ok(c) => c,

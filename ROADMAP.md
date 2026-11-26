@@ -417,25 +417,28 @@ come after.
       `examples/fake_adapter.rs` (§17.6, §22.3)
 - [ ] A Lua bridged adapter written only from the spec, passing the kit
 
-- [ ] Custom `[engines.<tag>]` tables in `v2.toml`: spec and tag validation, registration,
+- [x] Custom `[engines.<tag>]` tables in `v2.toml`: spec and tag validation, registration,
       resolving only `command[0]`, `V2_ENGINE_<TAG>` replacing `command[0]`, config errors, one
       doctor row each (§7.3, §7.4, §17.1, §17.2, §18.1–18.5, §19.2). The config unit test that
       declares `ruby` as a custom engine changes when `ruby` becomes built in
-- [ ] `run` engines on the 2.1 helper plus the temp file (§17.3 steps 1, 2, 6): `{file}`,
+- [x] `run` engines on the 2.1 helper plus the temp file (§17.3 steps 1, 2, 6): `{file}`,
       `V2_ARG_*`, CRLF for `.bat`/`.cmd`, tree kill (§17.3, §17.4)
-- [ ] `bridged` engines through the normal session code, capability checks (§14.5, §17.5)
-- [ ] `define_engine(…)`: a custom engine declared from a script, through the same validation,
+- [x] `bridged` engines through the normal session code, capability checks (§14.5, §17.5)
+- [x] `define_engine(…)`: a custom engine declared from a script, through the same validation,
       registered at run time, `base_dir` the caller's folder (§17.1, §17.2, §18.1, §18.4); R59
-- [ ] `examples/fake_adapter.rs` (§17.6, §22.3)
-- [ ] Built-in run engines, no `v2.toml` needed: `bash` (`sh`; Git Bash on Windows), `pwsh`
+- [x] `examples/fake_adapter.rs` (§17.6, §22.3)
+- [x] Built-in run engines, no `v2.toml` needed: `bash` (`sh`; Git Bash on Windows), `pwsh`
       (`powershell`), `cmd`, `lua`, `ruby`, `go`, `java`, `zig`, `cs` (`csharp`); their lookups,
       probes and version patterns, not-found messages, `{file}` in a configured command, and
       `v2 doctor` rows (§7.2, §7.6–7.8, §17.3, §18.2, §19.2); R58
-- [ ] Tests: R17 (run part), R35, R37, R47; the custom-engine-table and run-engine cases of the
+- [x] Tests: R17 (run part), R35, R37, R47; the custom-engine-table and run-engine cases of the
       `engines/spec`, `engines/registry` and `engines/resolve` unit tests (§22.3); the ch. 21 rows
       for run and custom engines
 
 **Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37, R47, R58 and R59 pass.
+Status (2026-11-26): all of these pass on Linux (R58's `pwsh` and `cmd` tests skip where those
+engines aren't installed). The Windows-only lookups (Git Bash, the `powershell` fallback, `cmd`) are
+written but not yet run on Windows. The four items above about third-party adapters are still open.
 
 ---
 

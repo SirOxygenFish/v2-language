@@ -12,4 +12,6 @@ js after
 py first
 js called from py: hi
 py last
+run engine log
+run engine, no newline: v2 after run
 v2 end

@@ -1,6 +1,7 @@
 // Tags of engines this build does not have yet say so, before any did-you-mean: `@rs` is Rust,
-// not a typo of `@ts`; another tag and define_engine say custom engines aren't here yet
-// (INTERNALS 7.3, DOCS 5, 13).
+// not a typo of `@ts`; another tag says how to declare a custom engine, and a declared engine
+// whose program isn't there is EngineNotFound, naming where it was declared (INTERNALS 7.3, 7.4,
+// 17.2, DOCS 5, 13).
 try {
     @c { int x = 1; }
 } catch (e) {
@@ -12,18 +13,14 @@ try {
     print(e.message)
 }
 try {
-    @sh { echo hi }
-} catch (e) {
-    print(e.message)
-}
-try {
     @r { cat(1) }
 } catch (e) {
     print(e.message)
 }
+define_engine("r", kind: "run", command: ["v2-no-such-rscript", "{file}"])
 try {
-    define_engine("r", kind: "run", command: ["Rscript", "{file}"])
+    @r { cat(1) }
 } catch (e) {
     print(e.type, e.message)
 }
-print(engine_available("cpp"), engine_available("lua"))
+print(engine_available("cpp"), engine_available("r"), engine_available("nosuch"))

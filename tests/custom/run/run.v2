@@ -1,0 +1,42 @@
+// requires: js
+// stderr: bad
+// R35 (INTERNALS 17.3, 17.4): a custom run engine. Statement output keeps program order, args
+// arrive as V2_ARG_*, an expression's value is its stdout without the last line break, a failing
+// run is an EngineExitError with its status and stderr tail, and @export is refused.
+print("one")
+@nd { console.log("two") }
+print("three")
+let v = @nd(t: "x y", n: [1, 2]) { process.stdout.write(process.env.V2_ARG_t + process.env.V2_ARG_n + "\r\n") }
+print(v, len(v))
+print(@nd(d: {"k": true}, f: 1.5, z: null) { console.log(process.env.V2_ARG_d, process.env.V2_ARG_f, process.env.V2_ARG_z) })
+try {
+    @nd { console.error("bad"); process.exit(3) }
+} catch (e) {
+    print(e.type, e.message, e.data.status, e.data.signal, e.data.stderr.trim(), e.lang)
+}
+try {
+    @nd {
+        @export { f }
+        function f() {}
+    }
+} catch (e) {
+    print(e.type, e.message)
+}
+for bad in [b"x", print, float("nan")] {
+    try {
+        @nd(x: bad) { }
+    } catch (e) {
+        print(e.type, e.message)
+    }
+}
+try {
+    @nd(nul: "a\u{0}b") { }
+} catch (e) {
+    print(e.type, e.message)
+}
+// 13.5: only bridged engines take module selectors.
+try {
+    @import { x } from nd.pkg
+} catch (e) {
+    print(e.type, e.message)
+}

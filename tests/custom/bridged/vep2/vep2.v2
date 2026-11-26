@@ -1,0 +1,6 @@
+// R37, chapter 21: a hello with vep other than 1 is a ProtocolError.
+try {
+    @fake { {} }
+} catch (e) {
+    print(e.type, e.message)
+}

@@ -4,30 +4,20 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::resolve::{CacheMode, Lookup, NotFound, ProbeCache, Prober, RealProber, ResolvedEngine, Resolver};
-use super::spec::{builtins, EngineSpec};
+use super::resolve::{CacheMode, Lookup, NotFound, Origin, ProbeCache, Prober, RealProber, ResolvedEngine, Resolver, Status};
+use super::spec::{builtins, custom_spec, CustomCfg, EngineSpec};
 use crate::config::Config;
 use crate::runtime::error::{did_you_mean, fail, Exec};
 
 type Resolution = Result<Rc<ResolvedEngine>, Rc<NotFound>>;
 
 /// The language of a tag that DOCS 5 lists but this build doesn't register yet: compiled blocks
-/// (roadmap Phase 2) and the built-in run engines (Phase 3). Each row goes when its engine joins
-/// the registry (7.3).
+/// (roadmap Phase 2). Each row goes when its engine joins the registry (7.3).
 pub(crate) fn later_language(tag: &str) -> Option<&'static str> {
     Some(match tag {
         "c" => "C",
         "cpp" | "cxx" => "C++",
         "rust" | "rs" => "Rust",
-        "bash" | "sh" => "shell",
-        "pwsh" | "powershell" => "PowerShell",
-        "cmd" => "cmd",
-        "lua" => "Lua",
-        "ruby" => "Ruby",
-        "go" => "Go",
-        "java" => "Java",
-        "zig" => "Zig",
-        "cs" | "csharp" => "C#",
         _ => return None,
     })
 }
@@ -44,7 +34,9 @@ pub struct Registry {
 
 impl Registry {
     pub fn new(cfg: Rc<Config>, prober: Box<dyn Prober>, lookup: Lookup, cache: ProbeCache) -> Registry {
-        let specs = builtins().into_iter().map(Rc::new).collect();
+        let mut specs: Vec<Rc<EngineSpec>> = builtins().into_iter().map(Rc::new).collect();
+        // Custom engines (17.2): every validated `[engines.<tag>]` table with a `kind`.
+        specs.extend(cfg.custom_engines.iter().map(|(tag, c)| Rc::new(custom_spec(tag, c.clone()))));
         Registry { specs, cfg, lookup, prober, cache: RefCell::new(cache), resolved: RefCell::new(HashMap::new()) }
     }
 
@@ -76,6 +68,7 @@ impl Registry {
             return r.clone();
         }
         let r = match &spec.session_of {
+            _ if spec.custom.is_some() => self.resolve_custom(spec),
             Some(host) => {
                 let host_spec = self.specs.iter().find(|s| s.id == *host).cloned().expect("a built-in session engine");
                 let js = self.resolve(&host_spec);
@@ -94,6 +87,74 @@ impl Registry {
         let r: Resolution = r.map(Rc::new).map_err(Rc::new);
         self.resolved.borrow_mut().insert(spec.id.clone(), r.clone());
         r
+    }
+
+    /// A custom engine resolves only `command[0]` (17.1, 7.5): a path (already absolute, 18.1)
+    /// must be a file; a bare name is looked up on `PATH`. Nothing is probed or started.
+    fn resolve_custom(&self, spec: &Rc<EngineSpec>) -> Result<ResolvedEngine, NotFound> {
+        let c = spec.custom.as_ref().expect("a custom spec");
+        let program = &c.command[0];
+        let from = || Some(c.origin.clone());
+        let found = if program.contains(['/', '\\']) || std::path::Path::new(program).is_absolute() {
+            let p = std::path::PathBuf::from(program);
+            p.is_file().then_some(p)
+        } else {
+            super::resolve::first_program(program, &self.lookup)
+        };
+        match found {
+            Some(path) => {
+                let argv = std::iter::once(path.into_os_string()).chain(c.command[1..].iter().map(std::ffi::OsString::from)).collect();
+                // Doctor's FROM: `v2.toml`, the variable's name, or the define_engine call site.
+                let source = if c.origin.ends_with("v2.toml") {
+                    crate::config::ConfigSource::Project(c.origin.clone().into())
+                } else {
+                    crate::config::ConfigSource::Env(c.origin.clone())
+                };
+                let origin = Origin::Config(source);
+                Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: None, skipped: Vec::new() })
+            }
+            None => Err(NotFound {
+                status: Status::Missing,
+                // 7.4: `'perl' not found on PATH (engine declared in C:\proj\v2.toml)`, or `at
+                // main.v2:3` for a define_engine call.
+                message: format!(
+                    "'{program}' not found{} (engine declared {} {})",
+                    if program.contains(['/', '\\']) { "" } else { " on PATH" },
+                    if c.origin.ends_with("v2.toml") { "in" } else { "at" },
+                    c.origin
+                ),
+                command: Some(c.command.join(" ")),
+                from: from(),
+                skipped: Vec::new(),
+            }),
+        }
+    }
+
+    /// A run engine's whole argv, `{file}` still in it (17.3): the resolved program, then a
+    /// configured command's other words, else 7.2's fixed args.
+    pub fn run_command(&self, e: &ResolvedEngine) -> Vec<std::ffi::OsString> {
+        let configured: Option<&[String]> = match &e.spec.custom {
+            Some(c) => Some(&c.command),
+            None => self.cfg.engines.get(&*e.spec.id).and_then(|c| c.command.as_ref()).map(|c| c.value.as_slice()),
+        };
+        let rest: Vec<std::ffi::OsString> = match configured {
+            Some(words) => words[1..].iter().map(std::ffi::OsString::from).collect(),
+            None => e.spec.fixed_args.iter().map(|a| std::ffi::OsString::from(&**a)).collect(),
+        };
+        e.argv.iter().cloned().chain(rest).collect()
+    }
+
+    /// `define_engine` (17.2): a custom engine registered at run time. `Err` is the reason it
+    /// is refused, after `define_engine: `.
+    pub fn declare(&mut self, tag: &str, cfg: CustomCfg) -> Result<(), String> {
+        if let Some(existing) = self.canonical(tag) {
+            return Err(match &existing.custom {
+                Some(c) => format!("engine '{tag}' is already declared ({})", c.origin),
+                None => format!("'{tag}' is a built-in engine — configure it in [engines.{}] in v2.toml", existing.session_of.as_deref().unwrap_or(&existing.id)),
+            });
+        }
+        self.specs.push(Rc::new(custom_spec(tag, cfg)));
+        Ok(())
     }
 
     /// Doctor: whether a resolved engine's program really starts, with the startup variables set
@@ -134,7 +195,7 @@ impl Registry {
         match did_you_mean(tag, names).and_then(|n| self.canonical(n)) {
             Some(spec) => format!("unknown engine '@{tag}' (did you mean '@{}'?)", spec.id),
             // A custom engine's tag (`@r`, DOCS 13): those come in a later version (7.3).
-            None => format!("unknown engine '@{tag}' — known engines: {} (custom engines aren't in this version of V2 yet)", ids.join(", ")),
+            None => format!("unknown engine '@{tag}' — known engines: {}; declare it in [engines.{tag}] in v2.toml, or with define_engine", ids.join(", ")),
         }
     }
 
@@ -174,10 +235,10 @@ mod tests {
     #[test]
     fn aliases_canonicalize() {
         let (reg, _) = registry(None);
-        for (tag, id) in [("py", "py"), ("python", "py"), ("js", "js"), ("javascript", "js"), ("ts", "ts"), ("typescript", "ts")] {
+        for (tag, id) in [("py", "py"), ("python", "py"), ("js", "js"), ("javascript", "js"), ("ts", "ts"), ("typescript", "ts"), ("sh", "bash"), ("powershell", "pwsh"), ("csharp", "cs"), ("lua", "lua")] {
             assert_eq!(reg.canonical(tag).map(|s| &*s.id), Some(id), "{tag}");
         }
-        for tag in ["PY", "c", "cpp", "rust", "rs", "cxx", "lua"] {
+        for tag in ["PY", "c", "cpp", "rust", "rs", "cxx", "perl"] {
             assert!(reg.canonical(tag).is_none(), "{tag}");
         }
     }
@@ -188,12 +249,12 @@ mod tests {
         assert_eq!(reg.unknown_message("pyhton"), "unknown engine '@pyhton' (did you mean '@py'?)");
         assert_eq!(reg.unknown_message("javscript"), "unknown engine '@javscript' (did you mean '@js'?)");
         assert_eq!(reg.unknown_message("PY"), "unknown engine '@PY' (did you mean '@py'?)");
-        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts (custom engines aren't in this version of V2 yet)");
-        assert_eq!(reg.unknown_message("lua"), "unknown engine '@lua': Lua blocks aren't in this version of V2 yet — known engines: py, js, ts");
-        assert_eq!(reg.unknown_message("c"), "unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.perl] in v2.toml, or with define_engine");
+        let known = "py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs";
+        assert_eq!(reg.unknown_message("c"), format!("unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: {known}"));
         // A later tag one edit away from a known one is not a typo of it.
-        assert_eq!(reg.unknown_message("rs"), "unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: py, js, ts");
-        assert_eq!(reg.unknown_message("cs"), "unknown engine '@cs': C# blocks aren't in this version of V2 yet — known engines: py, js, ts");
+        assert_eq!(reg.unknown_message("rs"), format!("unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: {known}"));
+        assert_eq!(reg.unknown_message("rubby"), "unknown engine '@rubby' (did you mean '@ruby'?)");
         let Err(crate::runtime::error::Flow::Error(e)) = reg.resolve_tag("nosuch") else { panic!("an error") };
         assert_eq!(&*e.kind, "EngineUnknown");
     }
@@ -208,8 +269,8 @@ mod tests {
             assert!(e.message.starts_with("engine 'py' (Python) not found\ntried: python3, python"), "{}", e.message);
         }
         assert_eq!(reg.resolved.borrow().len(), 1);
-        assert!(!reg.engine_available("lua"));
-        assert!(!reg.resolved.borrow().contains_key("lua"));
+        assert!(!reg.engine_available("nosuch"));
+        assert!(!reg.resolved.borrow().contains_key("nosuch"));
         assert_eq!(calls.get(), 0, "nothing on PATH to probe");
     }
 

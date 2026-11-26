@@ -1,0 +1,4 @@
+[engines.fake]
+kind = "bridged"
+command = ["fake_adapter", "nohello"]
+startup_timeout = 1

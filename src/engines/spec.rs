@@ -36,6 +36,35 @@ pub enum VersionPattern {
     Python,
     /// `^v(\d+)\.(\d+)\.(\d+)` at the start of a line.
     Node,
+    /// The run engines: the first `(\d+)\.(\d+)(?:\.(\d+))?` (`go version go1.22.1 linux/amd64`
+    /// is 1.22.1); a missing part is 0 (7.7).
+    Generic,
+    /// java: `^\S+ (\d+)(?:\.(\d+))?(?:\.(\d+))?` on the first line (`openjdk 21 2023-09-19` is
+    /// 21.0.0) (7.7).
+    Java,
+}
+
+/// `(\d+)(?:\.(\d+))?(?:\.(\d+))?` at the start of `s`, a missing part 0; `need_dot`: the
+/// minor part is required (Generic's pattern).
+fn up_to_three(s: &str, need_dot: bool) -> Option<Version> {
+    let mut nums = [0u32; 3];
+    let mut rest = s;
+    for (i, slot) in nums.iter_mut().enumerate() {
+        if i > 0 {
+            match rest.strip_prefix('.') {
+                Some(r) if r.starts_with(|c: char| c.is_ascii_digit()) => rest = r,
+                _ if i == 1 && need_dot => return None,
+                _ => break,
+            }
+        }
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        if end == 0 {
+            return None;
+        }
+        *slot = rest[..end].parse().ok()?;
+        rest = &rest[end..];
+    }
+    Some(Version(nums[0], nums[1], nums[2]))
 }
 
 /// `(\d+)\.(\d+)\.(\d+)` at the start of `s`.
@@ -57,6 +86,16 @@ impl VersionPattern {
         match self {
             VersionPattern::Python => output.match_indices("Python ").find_map(|(i, m)| three_numbers(&output[i + m.len()..])),
             VersionPattern::Node => output.lines().find_map(|l| three_numbers(l.strip_prefix('v')?)),
+            // Each digit run that doesn't continue an earlier one (`go1.22.1`'s `1`).
+            VersionPattern::Generic => output
+                .char_indices()
+                .filter(|&(i, c)| c.is_ascii_digit() && !output[..i].ends_with(|p: char| p.is_ascii_digit() || p == '.'))
+                .find_map(|(i, _)| up_to_three(&output[i..], true)),
+            VersionPattern::Java => {
+                let first = output.lines().next()?;
+                let (_, rest) = first.split_once(' ')?;
+                up_to_three(rest, false)
+            }
         }
     }
 
@@ -65,14 +104,26 @@ impl VersionPattern {
         match self {
             VersionPattern::Python => "python",
             VersionPattern::Node => "node",
+            VersionPattern::Generic => "generic",
+            VersionPattern::Java => "java",
         }
     }
+}
+
+/// How an engine runs its blocks (7.1): a worker over VEP, or a program per block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    Bridged,
+    Run,
 }
 
 /// A built-in engine (7.1; the fields Phase 1 uses).
 #[derive(Debug)]
 pub struct EngineSpec {
     pub id: Rc<str>,
+    pub kind: EngineKind,
+    /// A run engine's temp-file extension (7.2, 17.3).
+    pub ext: Option<Rc<str>>,
     pub language: Rc<str>,
     pub aliases: Vec<Rc<str>>,
     /// The engine whose session runs this one's units: `js` for ts, which has no process.
@@ -89,6 +140,8 @@ pub struct EngineSpec {
     /// Unix: the worker speaks the protocol on two fds of its own, named in `V2_VEP_FDS`, so its
     /// fds 0 and 1 can be the null device and stderr. For an adapter without `dup2` (9.9).
     pub protocol_fds: bool,
+    /// A custom engine's settings (17.1); `None` for the built-in engines.
+    pub custom: Option<Rc<CustomCfg>>,
 }
 
 fn strs(items: &[&str]) -> Vec<Rc<str>> {
@@ -104,6 +157,8 @@ pub fn builtins() -> Vec<EngineSpec> {
     vec![
         EngineSpec {
             id: "py".into(),
+            kind: EngineKind::Bridged,
+            ext: None,
             language: "Python".into(),
             aliases: strs(&["python"]),
             session_of: None,
@@ -113,9 +168,12 @@ pub fn builtins() -> Vec<EngineSpec> {
             min_version: Some(Version(3, 10, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Python)),
             protocol_fds: false,
+            custom: None,
         },
         EngineSpec {
             id: "js".into(),
+            kind: EngineKind::Bridged,
+            ext: None,
             language: "JavaScript".into(),
             aliases: strs(&["javascript"]),
             session_of: None,
@@ -127,9 +185,12 @@ pub fn builtins() -> Vec<EngineSpec> {
             min_version: Some(Version(22, 13, 0)),
             probe: Some((strs(&["--version"]), VersionPattern::Node)),
             protocol_fds: true,
+            custom: None,
         },
         EngineSpec {
             id: "ts".into(),
+            kind: EngineKind::Bridged,
+            ext: None,
             language: "TypeScript".into(),
             aliases: strs(&["typescript"]),
             session_of: Some("js".into()),
@@ -139,11 +200,207 @@ pub fn builtins() -> Vec<EngineSpec> {
             min_version: None,
             probe: None,
             protocol_fds: false,
+            custom: None,
         },
     ]
+    .into_iter()
+    .chain(run_builtins())
+    .collect()
+}
+
+/// 7.2's Run rows: the built-in run engines.
+fn run_builtins() -> Vec<EngineSpec> {
+    let generic = |args: &[&str]| Some((strs(args), VersionPattern::Generic));
+    let win = cfg!(windows);
+    // id, language, aliases, candidates, fixed args, ext, probe, minimum
+    let rows: Vec<(&str, &str, &[&str], Vec<Vec<Rc<str>>>, Vec<Rc<str>>, &str, Option<(Vec<Rc<str>>, VersionPattern)>, Option<Version>)> = vec![
+        // Windows: Git Bash only, found by `resolve::git_bash`, never a PATH `bash` (7.6).
+        ("bash", "shell", &["sh"], if win { Vec::new() } else { vec![strs(&["bash"])] }, strs(&["{file}"]), "sh", generic(&["--version"]), None),
+        (
+            "pwsh",
+            "PowerShell",
+            &["powershell"],
+            if win { vec![strs(&["pwsh"]), strs(&["powershell"])] } else { vec![strs(&["pwsh"])] },
+            if win { strs(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{file}"]) } else { strs(&["-NoProfile", "-File", "{file}"]) },
+            "ps1",
+            generic(&["--version"]),
+            None,
+        ),
+        // Not probed; outside Windows never found (7.6).
+        ("cmd", "cmd", &[], if win { vec![strs(&["cmd"])] } else { Vec::new() }, strs(&["/d", "/q", "/c", "{file}"]), "bat", None, None),
+        ("lua", "Lua", &[], vec![strs(&["lua"]), strs(&["lua5.4"])], strs(&["{file}"]), "lua", generic(&["-v"]), None),
+        ("ruby", "Ruby", &[], vec![strs(&["ruby"])], strs(&["{file}"]), "rb", generic(&["--version"]), None),
+        ("go", "Go", &[], vec![strs(&["go"])], strs(&["run", "{file}"]), "go", generic(&["version"]), None),
+        ("java", "Java", &[], vec![strs(&["java"])], strs(&["{file}"]), "java", Some((strs(&["--version"]), VersionPattern::Java)), Some(Version(11, 0, 0))),
+        ("zig", "Zig", &[], vec![strs(&["zig"])], strs(&["run", "{file}"]), "zig", generic(&["version"]), None),
+        ("cs", "C#", &["csharp"], vec![strs(&["dotnet"])], strs(&["run", "{file}"]), "cs", generic(&["--version"]), Some(Version(10, 0, 0))),
+    ];
+    rows.into_iter()
+        .map(|(id, language, aliases, candidates, fixed_args, ext, probe, min_version)| EngineSpec {
+            id: id.into(),
+            kind: EngineKind::Run,
+            ext: Some(ext.into()),
+            language: language.into(),
+            aliases: strs(aliases),
+            session_of: None,
+            candidates,
+            fixed_args,
+            env: Vec::new(),
+            min_version,
+            probe,
+            protocol_fds: false,
+            custom: None,
+        })
+        .collect()
+}
+
+/// A custom engine's kind (17.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomKind {
+    Run,
+    Bridged,
+}
+
+/// A custom engine's validated settings (17.1): from an `[engines.<tag>]` table in `v2.toml` or
+/// a `define_engine` call. `command`'s paths are already rewritten against the declaring file's
+/// folder (18.1), and `V2_ENGINE_<TAG>` has replaced `command[0]` (18.4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomCfg {
+    pub kind: CustomKind,
+    pub command: Vec<String>,
+    pub ext: String,
+    pub startup_timeout: Option<f64>,
+    pub call_timeout: Option<f64>,
+    /// Where it was declared, as messages and doctor name it: the `v2.toml`'s path, a
+    /// `V2_ENGINE_<TAG>` variable's name, or a call site (`main.v2:3`).
+    pub origin: String,
+}
+
+/// The keys a custom engine's table takes (17.1).
+pub const CUSTOM_KEYS: &[&str] = &["kind", "command", "ext", "startup_timeout", "call_timeout"];
+
+/// `[a-z][a-z0-9_]{0,31}`, and not one of V2's own words (17.1).
+pub fn check_custom_tag(tag: &str) -> Result<(), String> {
+    let mut chars = tag.chars();
+    let ok = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && tag.len() <= 32;
+    if !ok {
+        return Err(format!("invalid engine tag '{tag}': a tag is a lowercase letter, then up to 31 lowercase letters, digits and _"));
+    }
+    if matches!(tag, "v2" | "export" | "import") {
+        return Err(format!("'{tag}' is reserved"));
+    }
+    Ok(())
+}
+
+fn toml_type(v: &toml::Value) -> &'static str {
+    match v {
+        toml::Value::String(_) => "string",
+        toml::Value::Integer(_) => "integer",
+        toml::Value::Float(_) => "float",
+        toml::Value::Boolean(_) => "boolean",
+        toml::Value::Datetime(_) => "datetime",
+        toml::Value::Array(_) => "array",
+        toml::Value::Table(_) => "table",
+    }
+}
+
+/// 17.1's validator, shared by `v2.toml` and `define_engine`: the table's keys checked and typed.
+/// `command` comes back as written: the caller rewrites its paths (18.1). Errors are 17.1's texts,
+/// which the caller places (a config error, or `define_engine: …`).
+pub fn validate(tag: &str, table: &toml::Table, origin: String) -> Result<CustomCfg, String> {
+    check_custom_tag(tag)?;
+    for k in table.keys() {
+        if !CUSTOM_KEYS.contains(&k.as_str()) {
+            return Err(match crate::runtime::error::did_you_mean(k, CUSTOM_KEYS.iter().copied()) {
+                Some(near) => format!("unknown key '{k}' (did you mean '{near}'?)"),
+                None => format!("unknown key '{k}'"),
+            });
+        }
+    }
+    let kind = match table.get("kind") {
+        Some(toml::Value::String(s)) if s == "run" => CustomKind::Run,
+        Some(toml::Value::String(s)) if s == "bridged" => CustomKind::Bridged,
+        Some(toml::Value::String(s)) => return Err(format!("'kind' must be \"run\" or \"bridged\", got \"{s}\"")),
+        Some(other) => return Err(format!("'kind' must be \"run\" or \"bridged\", got {}", toml_type(other))),
+        None => return Err("'kind' is required: \"run\" or \"bridged\"".into()),
+    };
+    let command: Vec<String> = match table.get("command") {
+        Some(toml::Value::Array(items)) => {
+            let list: Option<Vec<String>> = items.iter().map(|i| i.as_str().map(str::to_string)).collect();
+            match list {
+                Some(l) if !l.is_empty() && l.iter().all(|w| !w.is_empty()) => l,
+                _ => return Err("'command' must be a non-empty array of non-empty strings".into()),
+            }
+        }
+        Some(toml::Value::String(s)) => return Err(format!("'command' must be an array: write [\"{s}\"]")),
+        Some(other) => return Err(format!("'command' must be an array of strings, got {}", toml_type(other))),
+        None => return Err("'command' is required".into()),
+    };
+    let has_file = command.iter().any(|w| w.contains("{file}"));
+    match kind {
+        CustomKind::Run if !has_file => return Err("command must contain {file}".into()),
+        CustomKind::Bridged if has_file => return Err("a bridged engine's command can't contain {file}: the adapter gets the code over the protocol".into()),
+        _ => {}
+    }
+    let ext = match (table.get("ext"), kind) {
+        (None, _) => tag.to_string(),
+        (Some(_), CustomKind::Bridged) => return Err("'ext' does not apply to bridged engines".into()),
+        (Some(toml::Value::String(s)), CustomKind::Run) => {
+            let e = s.strip_prefix('.').unwrap_or(s);
+            if e.is_empty() || !e.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(format!("'ext' must be letters, digits and _, got \"{s}\""));
+            }
+            e.to_string()
+        }
+        (Some(other), CustomKind::Run) => return Err(format!("'ext' must be a string, got {}", toml_type(other))),
+    };
+    let seconds = |key: &str| -> Result<Option<f64>, String> {
+        let x = match table.get(key) {
+            None => return Ok(None),
+            Some(toml::Value::Integer(n)) => *n as f64,
+            Some(toml::Value::Float(x)) => *x,
+            Some(other) => return Err(format!("'{key}' must be a non-negative number of seconds, got {}", toml_type(other))),
+        };
+        if !x.is_finite() || x < 0.0 {
+            return Err(format!("'{key}' must be a non-negative number of seconds, got {x}"));
+        }
+        Ok(Some(x))
+    };
+    let startup_timeout = seconds("startup_timeout")?;
+    if startup_timeout.is_some() && kind == CustomKind::Run {
+        return Err("'startup_timeout' does not apply to run engines".into());
+    }
+    let call_timeout = seconds("call_timeout")?;
+    Ok(CustomCfg { kind, command, ext, startup_timeout, call_timeout, origin })
+}
+
+/// A custom engine's spec (17.1): no candidates, minimum or probe; its language is its tag.
+pub fn custom_spec(tag: &str, cfg: CustomCfg) -> EngineSpec {
+    EngineSpec {
+        id: tag.into(),
+        kind: if cfg.kind == CustomKind::Run { EngineKind::Run } else { EngineKind::Bridged },
+        ext: (cfg.kind == CustomKind::Run).then(|| cfg.ext.as_str().into()),
+        language: tag.into(),
+        aliases: Vec::new(),
+        session_of: None,
+        candidates: Vec::new(),
+        fixed_args: Vec::new(),
+        env: Vec::new(),
+        min_version: None,
+        probe: None,
+        protocol_fds: false,
+        custom: Some(Rc::new(cfg)),
+    }
 }
 
 impl EngineSpec {
+    /// A custom engine of kind `bridged` (17.5).
+    pub fn is_bridged_custom(&self) -> bool {
+        self.custom.as_ref().is_some_and(|c| c.kind == CustomKind::Bridged)
+    }
+
     /// Why version `v` can't be used (7.2), or `None` when it can: below the minimum, or a Node
     /// 23.0 or 23.1 (one Node rule for js and ts, since ts runs on the js engine).
     pub fn too_old(&self, v: Version) -> Option<String> {
@@ -357,7 +614,13 @@ mod tests {
     fn builtin_rows() {
         let specs = builtins();
         let ids: Vec<&str> = specs.iter().map(|s| &*s.id).collect();
-        assert_eq!(ids, ["py", "js", "ts"]);
+        assert_eq!(ids, ["py", "js", "ts", "bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"]);
+        // 7.2's Run rows: each one's temp-file extension and `{file}` in its fixed args.
+        for s in specs.iter().filter(|s| s.kind == EngineKind::Run) {
+            assert!(s.ext.is_some() && s.fixed_args.iter().any(|a| &**a == "{file}"), "{}", s.id);
+        }
+        let java = specs.iter().find(|s| &*s.id == "java").unwrap();
+        assert_eq!(java.min_version, Some(Version(11, 0, 0)));
         let py = &specs[0];
         let first: Vec<&str> = py.candidates.iter().map(|c| &*c[0]).collect();
         assert_eq!(&first[..2], ["python3", "python"]);
@@ -520,5 +783,42 @@ mod tests {
         assert_eq!(limit_fix_at("js", None), None);
         assert_eq!(limit_fix_at("py", Some(100 << 20)).as_deref(), Some("a memory limit (ulimit -v) of 100 MB is set for this shell, and the engine may need more as it starts: raise it"));
         assert_eq!(limit_fix_at("py", Some(1 << 30)), None);
+    }
+
+    #[test]
+    fn custom_tables_are_validated() {
+        // INTERNALS 17.1: kinds, commands, keys and tags.
+        let t = |text: &str| -> toml::Table { text.parse().unwrap() };
+        let ok = validate("lua", &t("kind = \"bridged\"\ncommand = [\"lua\", \"a.lua\"]\nstartup_timeout = 5"), "v2.toml".into()).unwrap();
+        assert_eq!((ok.kind, ok.command.len(), ok.startup_timeout, ok.ext.as_str()), (CustomKind::Bridged, 2, Some(5.0), "lua"));
+        let run = validate("r", &t("kind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\next = \".R\""), "v2.toml".into()).unwrap();
+        assert_eq!(run.ext, "R");
+        let err = |tag: &str, text: &str| validate(tag, &t(text), String::new()).unwrap_err();
+        assert_eq!(err("r", "kind = \"run\"\ncommand = [\"Rscript\"]"), "command must contain {file}");
+        assert!(err("x", "kind = \"bridged\"\ncommand = [\"x\", \"{file}\"]").starts_with("a bridged engine's command can't contain {file}"));
+        assert_eq!(err("x", "command = [\"x\"]"), "'kind' is required: \"run\" or \"bridged\"");
+        assert_eq!(err("x", "kind = \"bridged\"\ncommand = []"), "'command' must be a non-empty array of non-empty strings");
+        assert_eq!(err("x", "kind = \"bridged\"\ncommand = [\"x\"]\next = \"y\""), "'ext' does not apply to bridged engines");
+        assert_eq!(err("x", "kind = \"bridged\"\ncommand = [\"x\"]\ncall_timeout = -1"), "'call_timeout' must be a non-negative number of seconds, got -1");
+        assert_eq!(err("x", "kind = \"bridged\"\ncomand = [\"x\"]"), "unknown key 'comand' (did you mean 'command'?)");
+        assert_eq!(err("import", "kind = \"bridged\"\ncommand = [\"x\"]"), "'import' is reserved");
+        assert!(err("9x", "kind = \"bridged\"\ncommand = [\"x\"]").starts_with("invalid engine tag '9x'"));
+    }
+
+    #[test]
+    fn run_engine_version_patterns() {
+        // 7.7: the first `\d+.\d+(.\d+)?` for run engines; java's first line.
+        let g = VersionPattern::Generic;
+        assert_eq!(g.find("go version go1.22.1 linux/amd64"), Some(Version(1, 22, 1)));
+        assert_eq!(g.find("GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)"), Some(Version(5, 2, 21)));
+        assert_eq!(g.find("Lua 5.4.6  Copyright (C) 1994-2023 Lua.org, PUC-Rio"), Some(Version(5, 4, 6)));
+        assert_eq!(g.find("ruby 3.3.0 (2023-12-25 revision 5124f9ac75) [x86_64-linux]"), Some(Version(3, 3, 0)));
+        assert_eq!(g.find("0.14.1"), Some(Version(0, 14, 1)));
+        assert_eq!(g.find("PowerShell 7.4"), Some(Version(7, 4, 0)));
+        assert_eq!(g.find("no version here 7"), None);
+        let j = VersionPattern::Java;
+        assert_eq!(j.find("openjdk 21 2023-09-19\nOpenJDK Runtime"), Some(Version(21, 0, 0)));
+        assert_eq!(j.find("java 17.0.2 2022-01-18 LTS"), Some(Version(17, 0, 2)));
+        assert_eq!(j.find("openjdk 25.0.5 2025-10-21"), Some(Version(25, 0, 5)));
     }
 }
