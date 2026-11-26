@@ -9108,7 +9108,16 @@ fn custom_bridged_engines_run_through_their_adapter() {
     let (code, stdout, stderr, _home) = run_with_files(&files, &["t.v2"]);
     assert_eq!(code, Some(0), "{stderr}");
     let want = "load pyfake\n5\nload pyfake\n42\nload other\n42\ndefine_engine: engine 'pyfake' is already declared (v2.toml)\nImportError\n";
-    assert_eq!(stdout.replace(&*format!("({}", _home.0.join("v2.toml").display()), "(v2.toml"), want);
+    // The v2.toml's path as V2 shows it (on Windows its long, canonical form, not the temp
+    // folder's as the harness spelled it): only its end is compared.
+    let shown: String = stdout
+        .lines()
+        .map(|l| match l.find("already declared (") {
+            Some(i) if l.ends_with("v2.toml)") => format!("{}already declared (v2.toml)\n", &l[..i]),
+            _ => format!("{l}\n"),
+        })
+        .collect();
+    assert_eq!(shown, want);
     // A bad table is a configuration error (18.5).
     let (code, _, stderr, _home) = run_with_files(&[("v2.toml", "[engines.pyfake]\nkind = \"bridged\"\ncomand = [\"x\"]\n"), ("t.v2", "print(1)\n")], &["t.v2"]);
     assert_eq!(code, Some(2));
