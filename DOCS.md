@@ -2,8 +2,9 @@
 
 > **Status:** being built; [ROADMAP.md](https://github.com/SirOxygenFish/v2-language/blob/main/ROADMAP.md) "Where we are" says which parts work. Built:
 > the host language, Python, JavaScript and TypeScript blocks, `@export`/`@import` across them,
-> packages, handles, callbacks and errors. Not built yet, and marked where they appear: compiled
-> blocks (`@c`, `@cpp`, `@rust`), `extern`, custom and built-in run engines. How it works under the
+> packages, handles, callbacks and errors, the built-in run engines (`@sh`, `@lua`, …) and custom
+> engines. Not built yet, and marked where they appear: compiled blocks (`@c`, `@cpp`, `@rust`) and
+> `extern`. How it works under the
 > hood is specified in [INTERNALS.md](https://github.com/SirOxygenFish/v2-language/blob/main/INTERNALS.md).
 
 ---
@@ -1989,7 +1990,9 @@ the program when it contains a path separator, and a later element when it start
 Options (`-c`) and elements containing `{` are left alone. Custom blocks are scanned by counting
 braces (4.2), so use the fence form when the code has unbalanced braces. The protocol is specified
 in [INTERNALS.md](https://github.com/SirOxygenFish/v2-language/blob/main/INTERNALS.md), with a checklist of messages an adapter must handle. To test an
-adapter, run a two-line `.v2` file that uses it.
+adapter, run a two-line `.v2` file that uses it, then the conformance kit, which checks it message by
+message against the protocol: `cargo run --example vep_check -- kit.json -- ruby adapters/v2_adapter.rb`
+in a clone of V2's repository (`examples/vep_check.rs` says what `kit.json` holds).
 
 ### 13.3 Declaring an engine in the script
 

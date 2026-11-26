@@ -10,3 +10,4 @@ MarshalError block arg 'x': a func can't be passed to a run engine
 MarshalError block arg 'x': NaN and infinity have no JSON form
 MarshalError block arg 'nul' contains a NUL character
 ImportError module imports need a bridged engine — 'nd' is a run engine
+["--","x y"]

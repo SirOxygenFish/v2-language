@@ -1,5 +1,5 @@
-// engine_available(tag): false for an unknown tag, never an error (INTERNALS 7.3).
-print(engine_available("lua"), engine_available("PY"), engine_available(""), engine_available("c"))
+// engine_available(tag): false for an unknown tag (perl is no engine unless declared), never an error (INTERNALS 7.3).
+print(engine_available("perl"), engine_available("PY"), engine_available(""), engine_available("c"))
 try {
     engine_available(1)
 } catch (e) {

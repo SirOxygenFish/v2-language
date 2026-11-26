@@ -40,3 +40,5 @@ try {
 } catch (e) {
     print(e.type, e.message)
 }
+// The command's other words reach the program once, in order, after {file} (17.3).
+print(@nd { console.log(JSON.stringify(process.argv.slice(2))) })

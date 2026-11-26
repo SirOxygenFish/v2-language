@@ -250,7 +250,8 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
         if run || spec.custom.is_some() {
             match reg.resolve(spec) {
                 Ok(e) => {
-                    let command = if run { crate::engines::resolve::join_words(&reg.run_command(&e)).replace("\"{file}\"", "{file}") } else { e.shown() };
+                    // The program found, then the rest of its command (a run engine's with `{file}`).
+                    let command = crate::engines::resolve::join_words(&reg.run_command(&e)).replace("\"{file}\"", "{file}");
                     let version = e.version.map_or_else(|| "-".to_string(), |v| v.to_string());
                     rows.push([id.clone(), "ok".into(), command, version, e.origin.label()]);
                     skipped(&e.skipped, &mut notes);

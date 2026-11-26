@@ -341,7 +341,7 @@ impl Interp {
         // this session's own, which the adapter looks up itself.
         if !self.sessions[s].caps.reverse && imports.iter().any(|e| e.get("route").is_some() && e.get("unit").is_none()) {
             let span = b.directives.imports.first().map_or(at, |imp| self.selector_span(&imp.selector));
-            let msg = format!("@import inside @{key} blocks needs the 'reverse' capability, which engine '{key}' doesn't declare");
+            let msg = format!("@import inside @{key} blocks needs the 'reverse' capability");
             return Err(self.raise(error("ImportError", msg), span));
         }
         let mut encoded = Map::new();
@@ -434,7 +434,7 @@ impl Interp {
                 // A custom bridged engine's command is its adapter (17.5): its argv as resolved,
                 // nothing written to the run dir, no variables added.
                 let (argv, env) = if engine.spec.is_bridged_custom() {
-                    (engine.argv.clone(), Vec::new())
+                    (self.registry.run_command(&engine), Vec::new())
                 } else {
                     let (file, text) = crate::adapters::for_session(&key).expect("a built-in bridged engine");
                     let adapter = match crate::adapters::materialize(file, text) {

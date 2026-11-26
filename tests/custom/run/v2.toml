@@ -1,4 +1,4 @@
 [engines.nd]
 kind = "run"
-command = ["node", "{file}"]
+command = ["node", "{file}", "--", "x y"]
 ext = "js"

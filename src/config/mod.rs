@@ -750,6 +750,10 @@ fn read_engines(cfg: &mut Config, f: &File, body: &toml::Table, overrides: &Over
             // included, apply to it.
             {
                 let what = format!("[engines.{name}] command");
+                // Unknown keys in 18.5's words, as for a built-in engine's table.
+                if let Some(k) = t.keys().find(|k| !crate::engines::spec::CUSTOM_KEYS.contains(&k.as_str())) {
+                    return Err(f.error(unknown(&format!("key [engines.{name}] {k}"), k, crate::engines::spec::CUSTOM_KEYS)));
+                }
                 // A command written as one string gets the array to write instead (18.2).
                 if let Some(kv @ toml::Value::String(_)) = t.get("command") {
                     f.strings(&what, kv, true, true)?;
@@ -1076,6 +1080,8 @@ mod tests {
             ("command = [\"node\"]\n", "command goes in an engine's section: put a line such as [engines.py] or [engines.js] above it"),
             ("[engines.py]\ncomand = \"x\"\n", "unknown key [engines.py] comand (did you mean 'command'?)"),
             ("[engines.py]\naliases = [\"p\"]\n", "unknown key [engines.py] aliases"),
+            // A custom engine's table too (17.1).
+            ("[engines.perl]\nkind = \"run\"\ncomand = [\"perl\", \"{file}\"]\n", "unknown key [engines.perl] comand (did you mean 'command'?)"),
             ("[pyton]\n", "unknown section [pyton] (did you mean 'python'?)"),
             ("[project]\nname = \"x\"\n", "unknown section [project]"),
             ("[node]\nmodules = \"m\"\n", "unknown section [node]"),

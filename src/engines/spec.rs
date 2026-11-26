@@ -208,46 +208,57 @@ pub fn builtins() -> Vec<EngineSpec> {
     .collect()
 }
 
+/// One of 7.2's Run rows.
+struct RunRow {
+    id: &'static str,
+    language: &'static str,
+    aliases: &'static [&'static str],
+    candidates: Vec<Vec<Rc<str>>>,
+    fixed_args: Vec<Rc<str>>,
+    ext: &'static str,
+    probe: Option<(Vec<Rc<str>>, VersionPattern)>,
+    min_version: Option<Version>,
+}
+
 /// 7.2's Run rows: the built-in run engines.
 fn run_builtins() -> Vec<EngineSpec> {
     let generic = |args: &[&str]| Some((strs(args), VersionPattern::Generic));
     let win = cfg!(windows);
-    // id, language, aliases, candidates, fixed args, ext, probe, minimum
-    let rows: Vec<(&str, &str, &[&str], Vec<Vec<Rc<str>>>, Vec<Rc<str>>, &str, Option<(Vec<Rc<str>>, VersionPattern)>, Option<Version>)> = vec![
+    let rows = vec![
         // Windows: Git Bash only, found by `resolve::git_bash`, never a PATH `bash` (7.6).
-        ("bash", "shell", &["sh"], if win { Vec::new() } else { vec![strs(&["bash"])] }, strs(&["{file}"]), "sh", generic(&["--version"]), None),
-        (
-            "pwsh",
-            "PowerShell",
-            &["powershell"],
-            if win { vec![strs(&["pwsh"]), strs(&["powershell"])] } else { vec![strs(&["pwsh"])] },
-            if win { strs(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{file}"]) } else { strs(&["-NoProfile", "-File", "{file}"]) },
-            "ps1",
-            generic(&["--version"]),
-            None,
-        ),
+        RunRow { id: "bash", language: "shell", aliases: &["sh"], candidates: if win { Vec::new() } else { vec![strs(&["bash"])] }, fixed_args: strs(&["{file}"]), ext: "sh", probe: generic(&["--version"]), min_version: None },
+        RunRow {
+            id: "pwsh",
+            language: "PowerShell",
+            aliases: &["powershell"],
+            candidates: if win { vec![strs(&["pwsh"]), strs(&["powershell"])] } else { vec![strs(&["pwsh"])] },
+            fixed_args: if win { strs(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{file}"]) } else { strs(&["-NoProfile", "-File", "{file}"]) },
+            ext: "ps1",
+            probe: generic(&["--version"]),
+            min_version: None,
+        },
         // Not probed; outside Windows never found (7.6).
-        ("cmd", "cmd", &[], if win { vec![strs(&["cmd"])] } else { Vec::new() }, strs(&["/d", "/q", "/c", "{file}"]), "bat", None, None),
-        ("lua", "Lua", &[], vec![strs(&["lua"]), strs(&["lua5.4"])], strs(&["{file}"]), "lua", generic(&["-v"]), None),
-        ("ruby", "Ruby", &[], vec![strs(&["ruby"])], strs(&["{file}"]), "rb", generic(&["--version"]), None),
-        ("go", "Go", &[], vec![strs(&["go"])], strs(&["run", "{file}"]), "go", generic(&["version"]), None),
-        ("java", "Java", &[], vec![strs(&["java"])], strs(&["{file}"]), "java", Some((strs(&["--version"]), VersionPattern::Java)), Some(Version(11, 0, 0))),
-        ("zig", "Zig", &[], vec![strs(&["zig"])], strs(&["run", "{file}"]), "zig", generic(&["version"]), None),
-        ("cs", "C#", &["csharp"], vec![strs(&["dotnet"])], strs(&["run", "{file}"]), "cs", generic(&["--version"]), Some(Version(10, 0, 0))),
+        RunRow { id: "cmd", language: "cmd", aliases: &[], candidates: if win { vec![strs(&["cmd"])] } else { Vec::new() }, fixed_args: strs(&["/d", "/q", "/c", "{file}"]), ext: "bat", probe: None, min_version: None },
+        RunRow { id: "lua", language: "Lua", aliases: &[], candidates: vec![strs(&["lua"]), strs(&["lua5.4"])], fixed_args: strs(&["{file}"]), ext: "lua", probe: generic(&["-v"]), min_version: None },
+        RunRow { id: "ruby", language: "Ruby", aliases: &[], candidates: vec![strs(&["ruby"])], fixed_args: strs(&["{file}"]), ext: "rb", probe: generic(&["--version"]), min_version: None },
+        RunRow { id: "go", language: "Go", aliases: &[], candidates: vec![strs(&["go"])], fixed_args: strs(&["run", "{file}"]), ext: "go", probe: generic(&["version"]), min_version: None },
+        RunRow { id: "java", language: "Java", aliases: &[], candidates: vec![strs(&["java"])], fixed_args: strs(&["{file}"]), ext: "java", probe: Some((strs(&["--version"]), VersionPattern::Java)), min_version: Some(Version(11, 0, 0)) },
+        RunRow { id: "zig", language: "Zig", aliases: &[], candidates: vec![strs(&["zig"])], fixed_args: strs(&["run", "{file}"]), ext: "zig", probe: generic(&["version"]), min_version: None },
+        RunRow { id: "cs", language: "C#", aliases: &["csharp"], candidates: vec![strs(&["dotnet"])], fixed_args: strs(&["run", "{file}"]), ext: "cs", probe: generic(&["--version"]), min_version: Some(Version(10, 0, 0)) },
     ];
     rows.into_iter()
-        .map(|(id, language, aliases, candidates, fixed_args, ext, probe, min_version)| EngineSpec {
-            id: id.into(),
+        .map(|r| EngineSpec {
+            id: r.id.into(),
             kind: EngineKind::Run,
-            ext: Some(ext.into()),
-            language: language.into(),
-            aliases: strs(aliases),
+            ext: Some(r.ext.into()),
+            language: r.language.into(),
+            aliases: strs(r.aliases),
             session_of: None,
-            candidates,
-            fixed_args,
+            candidates: r.candidates,
+            fixed_args: r.fixed_args,
             env: Vec::new(),
-            min_version,
-            probe,
+            min_version: r.min_version,
+            probe: r.probe,
             protocol_fds: false,
             custom: None,
         })

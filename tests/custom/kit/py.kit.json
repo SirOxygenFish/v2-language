@@ -1,0 +1,11 @@
+{
+  "definition": "def echo(x):\n    return x\n\ndef fail(msg):\n    raise ValueError(msg)\n\ndef say(text):\n    print(text)\n\nanswer = 42\n",
+  "fail_line": 5,
+  "action_value": "1 + 2",
+  "action_print": "print('hi')\nprint('there')\n",
+  "syntax_error": "x = 1\ny = (\n",
+  "syntax_error_line": 2,
+  "module": {"name": "string", "member": "capwords"},
+  "apply": "def apply(f, x):\n    return f(x)\n",
+  "route": "def twice(x):\n    return host_double(x)\n"
+}

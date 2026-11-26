@@ -6,10 +6,13 @@
 //!   * `"$N"`: returns its Nth argument (`"echo": "$0"`)
 //!   * `"!text"`: raises a ForeignError with that message (`"fail": "!boom"`)
 //!   * `"@out:text"`: prints `text` and a line break, returns null (`"say": "@out:hi"`)
+//!   * `{"const": x}`: not a function but a constant, `x` (`"answer": {"const": 42}`)
 //!   * anything else: returns that value (`"answer": 42`)
+//!
 //! An action block does the same for each entry in order (printing, failing) and its value is
 //! the `"value"` member, or null. A module (`fake.name`) exports each requested name as a
-//! function returning its name.
+//! function returning its name; a name starting with `no_such` is missing, and a module named
+//! `v2_no_such…` isn't there (`vep_check`'s module checks).
 //!
 //! The first argument picks the mode (default `ok`): `ok`, `garbage` (a non-JSON line instead
 //! of the first reply), `vep2` (`hello` with `vep: 2`), `nohello` (silent), `noise` (lines
@@ -119,7 +122,12 @@ fn main() {
                     let star = wanted.iter().any(|n| n == "*");
                     let names: Vec<String> = if star { script.keys().cloned().collect() } else { wanted.clone() };
                     let missing: Vec<&String> = names.iter().filter(|n| !script.contains_key(*n)).collect();
-                    let exports: Vec<Value> = names.iter().filter(|n| script.contains_key(*n)).map(|n| json!({"name": n, "kind": "func"})).collect();
+                    // `{"const": x}` is a constant export; anything else a function.
+                    let export = |n: &String| match script[n].get("const") {
+                        Some(x) => json!({"name": n, "kind": "value", "value": x}),
+                        None => json!({"name": n, "kind": "func"}),
+                    };
+                    let exports: Vec<Value> = names.iter().filter(|n| script.contains_key(*n)).map(export).collect();
                     let reply = json!({"value": null, "exports": exports, "missing": missing});
                     if missing.is_empty() {
                         units.insert(m["unit"].as_str().unwrap_or_default().to_string(), script);
@@ -146,14 +154,24 @@ fn main() {
                 }
             }
             "module" => {
-                let names: Vec<Value> = m["names"].as_array().cloned().unwrap_or_default();
-                let mut script = Map::new();
-                for n in names.iter().filter_map(Value::as_str) {
-                    script.insert(n.to_string(), json!(n));
+                // A module or member named `no_such…` (`v2_no_such…`) isn't there.
+                if m["name"].as_str().is_some_and(|n| n.starts_with("v2_no_such")) {
+                    Err(json!({"type": "ImportError", "message": format!("no module {}", m["name"]), "foreign_type": null, "trace": []}))
+                } else {
+                    let names: Vec<Value> = m["names"].as_array().cloned().unwrap_or_default();
+                    let mut script = Map::new();
+                    let mut missing = Vec::new();
+                    for n in names.iter().filter_map(Value::as_str) {
+                        if n.starts_with("no_such") {
+                            missing.push(n.to_string());
+                        } else {
+                            script.insert(n.to_string(), json!(n));
+                        }
+                    }
+                    let exports: Vec<Value> = script.keys().map(|n| json!({"name": n, "kind": "func"})).collect();
+                    units.insert(m["unit"].as_str().unwrap_or_default().to_string(), script);
+                    Ok(json!({"value": null, "exports": exports, "missing": missing}))
                 }
-                let exports: Vec<Value> = script.keys().map(|n| json!({"name": n, "kind": "func"})).collect();
-                units.insert(m["unit"].as_str().unwrap_or_default().to_string(), script);
-                Ok(json!({"value": null, "exports": exports, "missing": []}))
             }
             "call" => {
                 if mode == "crash" {

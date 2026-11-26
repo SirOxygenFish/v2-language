@@ -1,0 +1,6 @@
+{
+  "definition": "{\"echo\": \"$0\", \"fail\": \"!boom\", \"say\": \"@out:hi\", \"answer\": {\"const\": 42}}",
+  "action_value": "{\"value\": 3}",
+  "action_print": "{\"a\": \"@out:hi\", \"b\": \"@out:there\"}",
+  "module": {"name": "kit", "member": "upper"}
+}

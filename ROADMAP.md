@@ -8,9 +8,9 @@ says *in what order* and *what's done*.
 
 | | |
 | --- | --- |
-| **Current phase** | Pre-publish done: `v0.1.0-alpha.2` published 2026-11-19; Phase 2 is next |
-| **Next task** | `llms.txt`, then Phase 2 in this file's order |
-| **Last update** | 2026-11-19: `v0.1.0-alpha.2` published; milestone 1.15, the interpreter's speed (1.4-3.6× faster); pre-publish newcomer rounds 1 to 23 (progress log) |
+| **Current phase** | Phase 3 (custom engines) built ahead of Phase 2, on Linux; Windows checked by CI |
+| **Next task** | Phase 3's Windows checks in CI, then `llms.txt`, then Phase 2 |
+| **Last update** | 2026-11-26: Phase 3, custom engines and the built-in run engines (progress log) |
 
 ## Rules
 
@@ -409,11 +409,11 @@ How any other language gets in.
 kit come first and are proven by a Lua adapter written only from the spec; the built-in run engines
 come after.
 
-- [ ] VEP/1 frozen before any third-party adapter is invited: frames, tags, caps and their
+- [x] VEP/1 frozen before any third-party adapter is invited: frames, tags, caps and their
       meanings change only in a VEP/2
-- [ ] The minimal adapter profile: what a bridged adapter must do, with every cap optional
+- [x] The minimal adapter profile: what a bridged adapter must do, with every cap optional
       (modules, handles, kwargs, reverse), and the stdio rules it must keep (§9.9, §14.5, §17.5)
-- [ ] A conformance kit: a test runner any adapter can be checked with, beside
+- [x] A conformance kit: a test runner any adapter can be checked with, beside
       `examples/fake_adapter.rs` (§17.6, §22.3)
 - [ ] A Lua bridged adapter written only from the spec, passing the kit
 
@@ -437,8 +437,9 @@ come after.
 
 **Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37, R47, R58 and R59 pass.
 Status (2026-11-26): all of these pass on Linux (R58's `pwsh` and `cmd` tests skip where those
-engines aren't installed). The Windows-only lookups (Git Bash, the `powershell` fallback, `cmd`) are
-written but not yet run on Windows. The four items above about third-party adapters are still open.
+engines aren't installed), and `examples/vep_check.rs` passes the py and fake adapters. The
+Windows-only lookups (Git Bash, the `powershell` fallback, `cmd`) are written but not yet run on
+Windows; CI's Windows job checks them.
 
 ---
 

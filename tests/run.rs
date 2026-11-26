@@ -170,10 +170,53 @@ fn v2_command(home: &Path) -> Command {
     cmd
 }
 
-/// `examples/fake_adapter.rs`, which `cargo test` builds next to the binary (22.3).
-fn fake_adapter() -> PathBuf {
+/// A Cargo example, which `cargo test` builds next to the binary (22.3).
+fn example(name: &str) -> PathBuf {
     let dir = Path::new(BIN).parent().expect("the binary's folder").join("examples");
-    dir.join(if cfg!(windows) { "fake_adapter.exe" } else { "fake_adapter" })
+    dir.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_string() })
+}
+
+/// `examples/fake_adapter.rs` (22.3).
+fn fake_adapter() -> PathBuf {
+    example("fake_adapter")
+}
+
+/// The conformance kit (`examples/vep_check.rs`, 17.6) run against an adapter: its report when it
+/// fails.
+fn kit_check(kit: &str, argv: &[&std::ffi::OsStr], env: &[(&str, &str)]) -> Result<(), String> {
+    let kit = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/custom/kit").join(kit);
+    let out = Command::new(example("vep_check")).arg(kit).arg("--").args(argv).envs(env.iter().copied()).stdin(Stdio::null()).output().unwrap();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+#[test]
+fn the_conformance_kit_passes_the_fake_adapter() {
+    // 17.6, 22.3: every check of the kit, on the scripted adapter.
+    let fake = fake_adapter();
+    if let Err(report) = kit_check("fake.kit.json", &[fake.as_os_str()], &[]) {
+        panic!("{report}");
+    }
+}
+
+#[test]
+fn the_conformance_kit_passes_the_python_adapter() {
+    // 17.6: the built-in py adapter is the reference the kit is held to, so a check that the
+    // spec doesn't ask for fails here first.
+    if !needs("py", "the_conformance_kit_passes_the_python_adapter") {
+        return;
+    }
+    let (code, stdout, stderr, _home) = run_with_files(&[("exe.v2", "@py { import sys; print(sys.executable) }\n")], &["exe.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let python = std::ffi::OsString::from(stdout.trim());
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapters/py.py");
+    let argv = [python.as_os_str(), "-B".as_ref(), "-u".as_ref(), adapter.as_os_str()];
+    if let Err(report) = kit_check("py.kit.json", &argv, &[("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")]) {
+        panic!("{report}");
+    }
 }
 
 /// Wait for `child` with a deadline. Stdin is fed and stdout/stderr (those that are piped) are
@@ -9038,5 +9081,5 @@ fn custom_bridged_engines_run_through_their_adapter() {
     // A bad table is a configuration error (18.5).
     let (code, _, stderr, _home) = run_with_files(&[("v2.toml", "[engines.pyfake]\nkind = \"bridged\"\ncomand = [\"x\"]\n"), ("t.v2", "print(1)\n")], &["t.v2"]);
     assert_eq!(code, Some(2));
-    assert!(stderr.contains("[engines.pyfake]: unknown key 'comand' (did you mean 'command'?)"), "{stderr}");
+    assert!(stderr.contains("unknown key [engines.pyfake] comand (did you mean 'command'?)"), "{stderr}");
 }

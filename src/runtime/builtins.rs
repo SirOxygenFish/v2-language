@@ -568,6 +568,9 @@ fn define_engine(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     fn refuse<T>(m: String) -> Exec<T> {
         value_error(format!("define_engine: {m}"))
     }
+    if let Some(why) = it.registry.taken(&tag) {
+        return refuse(why);
+    }
     let mut table = toml::Table::new();
     for (key, v) in ["kind", "command", "ext", "startup_timeout", "call_timeout"].iter().zip(&args[1..]) {
         if matches!(v, Value::Null) {

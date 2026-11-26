@@ -103,7 +103,8 @@ impl Registry {
         };
         match found {
             Some(path) => {
-                let argv = std::iter::once(path.into_os_string()).chain(c.command[1..].iter().map(std::ffi::OsString::from)).collect();
+                // The program alone, as for a built-in run engine: `run_command` adds the rest.
+                let argv = vec![path.into_os_string()];
                 // Doctor's FROM: `v2.toml`, the variable's name, or the define_engine call site.
                 let source = if c.origin.ends_with("v2.toml") {
                     crate::config::ConfigSource::Project(c.origin.clone().into())
@@ -147,14 +148,21 @@ impl Registry {
     /// `define_engine` (17.2): a custom engine registered at run time. `Err` is the reason it
     /// is refused, after `define_engine: `.
     pub fn declare(&mut self, tag: &str, cfg: CustomCfg) -> Result<(), String> {
-        if let Some(existing) = self.canonical(tag) {
-            return Err(match &existing.custom {
-                Some(c) => format!("engine '{tag}' is already declared ({})", c.origin),
-                None => format!("'{tag}' is a built-in engine — configure it in [engines.{}] in v2.toml", existing.session_of.as_deref().unwrap_or(&existing.id)),
-            });
+        if let Some(why) = self.taken(tag) {
+            return Err(why);
         }
         self.specs.push(Rc::new(custom_spec(tag, cfg)));
         Ok(())
+    }
+
+    /// Why `define_engine` can't declare `tag` (17.2): a built-in tag or alias, or a tag already
+    /// declared. Checked before the other keys, so `define_engine("py")` says what is wrong.
+    pub fn taken(&self, tag: &str) -> Option<String> {
+        let existing = self.canonical(tag)?;
+        Some(match &existing.custom {
+            Some(c) => format!("engine '{tag}' is already declared ({})", c.origin),
+            None => format!("'{tag}' is a built-in engine — configure it in [engines.{}] in v2.toml", existing.session_of.as_deref().unwrap_or(&existing.id)),
+        })
     }
 
     /// Doctor: whether a resolved engine's program really starts, with the startup variables set

@@ -675,15 +675,27 @@ language. An HTTP server in a block serves only while V2 waits on it:
 text. Uncaught, it goes back to V2 as it was.
 
 **What is `VEP/1` in `v2 --version`?** The version of the protocol V2 speaks with its Python and
-Node.js workers.
+Node.js workers, and with the adapters of other languages (DOCS 13.2).
+
+**Can I use another language, like the shell, Lua or R?** The shell (`@sh`), PowerShell (`@pwsh`),
+`@cmd`, `@lua`, `@ruby`, `@go`, `@java`, `@zig` and `@cs` work when that language is installed: the
+block runs as a script, and what it prints is its value (`let n = @sh { ls | wc -l }`). Any other
+language can be added in a few lines, in `v2.toml` or with `define_engine` at the top of the script:
+
+```
+define_engine("r", kind: "run", command: ["Rscript", "{file}"], ext: "R")
+@r { cat("hello from R\n") }
+```
+
+Its block args arrive as `V2_ARG_<name>` environment variables. To `@export` and `@import` with
+another language, it needs a small adapter program: DOCS 13.
 
 **Is there editor support?** Not yet: `.v2` files are plain text in any editor.
 
 ## Known limitations
 
 - **Not built yet:** C, C++ and Rust blocks (`@c`, `@cpp`, `@rust`), `extern` for native
-  libraries, custom engines, the shell and other run engines (`@sh`, `@pwsh`, `@lua`, ...), and
-  `v2 cache clean`. The docs describe them and mark each one "Not built yet"; using one says so.
+  libraries, and `v2 cache clean`. The docs describe them and mark each one "Not built yet"; using one says so.
 - **Ready-made downloads** exist for the three computers listed above. Others, Intel Macs
   included, build from source.
 - **The downloads aren't code-signed**, so a browser may warn about them. The install commands
