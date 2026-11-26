@@ -1,0 +1,3 @@
+EngineUnknown: unknown engine '@sh': V2 has no built-in shell blocks: run a program with exec(["git", "status"]), or declare the shell first: define_engine("sh", kind: "run", command: ["bash", "{file}"], ext: "sh")
+EngineUnknown: unknown engine '@cmd': V2 has no built-in shell blocks: run a program with exec(["git", "status"]), or declare the shell first: define_engine("cmd", kind: "run", command: ["cmd", "/d", "/q", "/c", "{file}"], ext: "bat")
+EngineUnknown: unknown engine '@powershell': V2 has no built-in shell blocks: run a program with exec(["git", "status"]), or declare the shell first: define_engine("powershell", kind: "run", command: ["pwsh", "-NoProfile", "-File", "{file}"], ext: "ps1")

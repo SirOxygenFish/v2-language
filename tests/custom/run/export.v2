@@ -1,10 +1,10 @@
-// requires: bash
+// requires: js
 // exit: 1
-// stderr: export.v2:20:5: ImportError: @bash blocks cannot @export or @import — 'bash' is a run engine
+// stderr: export.v2:20:5: ImportError: @nd blocks cannot @export or @import — 'nd' is a run engine
 // A run engine's definition block fails where it stands (12.1 step 3), stays failed, and leaves
 // other blocks alone; at the top of a file it doesn't wait for a language that never starts (12.7).
 func g() {
-    @bash lib {
+    @nd lib {
         @export { f }
     }
 }
@@ -15,8 +15,8 @@ for i in 0..2 {
         print(e.message)
     }
 }
-@bash { echo still works }
-@bash top {
+@nd { console.log("still works") }
+@nd top {
     @export { f }
 }
 print("not reached")

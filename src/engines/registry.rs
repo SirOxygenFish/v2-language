@@ -11,6 +11,17 @@ use crate::runtime::error::{did_you_mean, fail, Exec};
 
 type Resolution = Result<Rc<ResolvedEngine>, Rc<NotFound>>;
 
+/// The `define_engine` call that makes a shell's tag a run engine (DOCS 5): shells aren't built in.
+pub(crate) fn shell_engine(tag: &str) -> Option<String> {
+    let (command, ext) = match tag {
+        "sh" | "bash" | "zsh" | "shell" => (format!("[\"{}\", \"{{file}}\"]", if tag == "zsh" { "zsh" } else { "bash" }), "sh"),
+        "pwsh" | "powershell" | "ps1" => ("[\"pwsh\", \"-NoProfile\", \"-File\", \"{file}\"]".to_string(), "ps1"),
+        "cmd" | "bat" | "batch" => ("[\"cmd\", \"/d\", \"/q\", \"/c\", \"{file}\"]".to_string(), "bat"),
+        _ => return None,
+    };
+    Some(format!("define_engine(\"{tag}\", kind: \"run\", command: {command}, ext: \"{ext}\")"))
+}
+
 /// The language of a tag that DOCS 5 lists but this build doesn't register yet: compiled blocks
 /// (roadmap Phase 2). Each row goes when its engine joins the registry (7.3).
 pub(crate) fn later_language(tag: &str) -> Option<&'static str> {
@@ -205,6 +216,11 @@ impl Registry {
         if let Some(language) = later_language(tag) {
             return format!("unknown engine '@{tag}': {language} blocks aren't in this version of V2 yet — known engines: {}", ids.join(", "));
         }
+        // A shell isn't a built-in engine (7.2): V2 runs programs itself, and a shell is one
+        // define_engine away.
+        if let Some(declare) = shell_engine(tag) {
+            return format!("unknown engine '@{tag}': V2 has no built-in shell blocks: run a program with exec([\"git\", \"status\"]), or declare the shell first: {declare}");
+        }
         let names = self.specs.iter().flat_map(|s| std::iter::once(&s.id).chain(&s.aliases)).map(|n| &**n);
         match did_you_mean(tag, names).and_then(|n| self.canonical(n)) {
             Some(spec) => format!("unknown engine '@{tag}' (did you mean '@{}'?)", spec.id),
@@ -249,10 +265,10 @@ mod tests {
     #[test]
     fn aliases_canonicalize() {
         let (reg, _) = registry(None);
-        for (tag, id) in [("py", "py"), ("python", "py"), ("js", "js"), ("javascript", "js"), ("ts", "ts"), ("typescript", "ts"), ("sh", "bash"), ("powershell", "pwsh"), ("csharp", "cs"), ("lua", "lua")] {
+        for (tag, id) in [("py", "py"), ("python", "py"), ("js", "js"), ("javascript", "js"), ("ts", "ts"), ("typescript", "ts"), ("csharp", "cs"), ("lua", "lua")] {
             assert_eq!(reg.canonical(tag).map(|s| &*s.id), Some(id), "{tag}");
         }
-        for tag in ["PY", "c", "cpp", "rust", "rs", "cxx", "perl"] {
+        for tag in ["PY", "c", "cpp", "rust", "rs", "cxx", "perl", "sh", "bash", "pwsh", "cmd"] {
             assert!(reg.canonical(tag).is_none(), "{tag}");
         }
     }
@@ -263,12 +279,15 @@ mod tests {
         assert_eq!(reg.unknown_message("pyhton"), "unknown engine '@pyhton' (did you mean '@py'?)");
         assert_eq!(reg.unknown_message("javscript"), "unknown engine '@javscript' (did you mean '@js'?)");
         assert_eq!(reg.unknown_message("PY"), "unknown engine '@PY' (did you mean '@py'?)");
-        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.perl] in v2.toml, or with define_engine");
-        let known = "py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs";
+        assert_eq!(reg.unknown_message("perl"), "unknown engine '@perl' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.perl] in v2.toml, or with define_engine");
+        let known = "py, js, ts, lua, ruby, go, java, zig, cs";
         assert_eq!(reg.unknown_message("c"), format!("unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: {known}"));
         // A later tag one edit away from a known one is not a typo of it.
         assert_eq!(reg.unknown_message("rs"), format!("unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: {known}"));
         assert_eq!(reg.unknown_message("rubby"), "unknown engine '@rubby' (did you mean '@ruby'?)");
+        // A shell says how to declare one (DOCS 5).
+        assert_eq!(reg.unknown_message("sh"), "unknown engine '@sh': V2 has no built-in shell blocks: run a program with exec([\"git\", \"status\"]), or declare the shell first: define_engine(\"sh\", kind: \"run\", command: [\"bash\", \"{file}\"], ext: \"sh\")");
+        assert!(reg.unknown_message("cmd").ends_with("define_engine(\"cmd\", kind: \"run\", command: [\"cmd\", \"/d\", \"/q\", \"/c\", \"{file}\"], ext: \"bat\")"));
         let Err(crate::runtime::error::Flow::Error(e)) = reg.resolve_tag("nosuch") else { panic!("an error") };
         assert_eq!(&*e.kind, "EngineUnknown");
     }

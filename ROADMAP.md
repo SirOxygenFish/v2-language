@@ -428,8 +428,8 @@ come after.
 - [x] `define_engine(…)`: a custom engine declared from a script, through the same validation,
       registered at run time, `base_dir` the caller's folder (§17.1, §17.2, §18.1, §18.4); R59
 - [x] `examples/fake_adapter.rs` (§17.6, §22.3)
-- [x] Built-in run engines, no `v2.toml` needed: `bash` (`sh`; Git Bash on Windows), `pwsh`
-      (`powershell`), `cmd`, `lua`, `ruby`, `go`, `java`, `zig`, `cs` (`csharp`); their lookups,
+- [x] Built-in run engines, no `v2.toml` needed: `lua`, `ruby`, `go`, `java`, `zig`, `cs`
+      (`csharp`); shells (`bash`, `pwsh`, `cmd`) left out on 2026-11-26, one `define_engine` away; their lookups,
       probes and version patterns, not-found messages, `{file}` in a configured command, and
       `v2 doctor` rows (§7.2, §7.6–7.8, §17.3, §18.2, §19.2); R58
 - [x] Tests: R17 (run part), R35, R37, R47; the custom-engine-table and run-engine cases of the
@@ -437,10 +437,8 @@ come after.
       for run and custom engines
 
 **Phase 3 complete when:** `tests/custom`, R17 (run part), R35, R37, R47, R58 and R59 pass.
-Status (2026-11-26): all of these pass on Linux (R58's `pwsh` and `cmd` tests skip where those
-engines aren't installed), and `examples/vep_check.rs` passes the py, fake and Lua adapters. The
-Windows-only lookups (Git Bash, the `powershell` fallback, `cmd`) are written but not yet run on
-Windows; CI's Windows job checks them.
+Status (2026-11-26): all of these pass on Linux, and `examples/vep_check.rs` passes the py, fake and Lua adapters. The
+CI's Windows job checks the rest on Windows.
 
 ---
 
@@ -464,8 +462,8 @@ Windows; CI's Windows job checks them.
 
 These need a DOCS + INTERNALS design pass **before** any code:
 
-- Full `@export`/`@import` (bridged adapters) for the Phase 3 built-in run engines: `bash`,
-  `pwsh`, `cmd`, `lua`, `ruby`, `go`, `java`, `zig`, `cs` (DOCS 5)
+- Full `@export`/`@import` (bridged adapters) for the Phase 3 built-in run engines: `lua`,
+  `ruby`, `go`, `java`, `zig`, `cs` (DOCS 5); Lua's adapter exists as an example (`examples/lua_adapter.lua`)
 - FFI structs, callbacks, variadic functions, `#include` headers (DOCS 12)
 - Cargo crates in `@rust` blocks; lists/dicts/callbacks as direct compiled-function
   parameters (DOCS 11.7)
@@ -542,3 +540,4 @@ These need a DOCS + INTERNALS design pass **before** any code:
 | 2026-11-19 | 1.15, the interpreter's speed (before the compiler phase): frames reused, loop iterations sharing one frame when nothing can keep it, arguments bound without the binder when nothing can go wrong, ints read in place, guard clauses and tail returns, cached method lookups, no formatting on the usual paths. Instructions against the baseline: while -60%, for -55%, calls -50%, lists -45%, fib -42%, strings -41%, errors -40%, dicts -38%, closures -33%; wall time 1.4-3.6x faster on Linux and Windows (numbers in 1.15). Two regressions of its own were caught by wall time, not instruction counts: a copy of a string held through `s +=` made each append copy it (append_cost.v2 now times each kind of target), and copies of every loop variable (needed only for items whose release can be seen, now made only for those) cost a `for` over a range 25%. One review agent wrote programs from 5.1 and 5.6 and found four changes in the order of releases or the collector's pacing, all fixed with tests (1.15). tests/host/functions/fast_paths.v2, its output from the rules (the baseline binary gives it too); the baseline and new binaries agree on every test file and on 13,500 generated programs. Windows: 356 unit, 464 `.v2`, 185 CLI tests; Linux: 350, 470, 184; macOS: 349, 470, 173; clippy clean |
 | 2026-11-19 | `v0.1.0-alpha.2` published: `v2-reboot` fast-forwarded into `main` (151 commits), the tag `v0.1.0-alpha.2` at a096a49 (its release run rebuilt the binaries from the tag), and the draft published as a pre-release with the binaries for Windows, Linux (glibc 2.35+) and macOS (Apple Silicon). CI green on the tag, `main` and `v2-reboot`. The README's one-liners run against it, Windows into a scratch folder without changing the PATH and Linux and macOS with a throwaway HOME: each installed 0.1.0-alpha.2 from the release and ran a program and a Python block |
 | 2026-11-26 | Phase 3, ahead of Phase 2: pull request #2 by IgorCielniak built custom engines (`v2.toml` tables, `define_engine`, `run` and `bridged` kinds), the nine built-in run engines, the fake adapter and their tests. On top of it: a custom run engine got its command twice (`perl -w FILE extra -w FILE extra`); the conformance kit `examples/vep_check.rs` (49 checks from a file of snippets; the py adapter passes them all, which keeps the kit to the spec); `examples/lua_adapter.lua`, written by an agent that read only DOCS and INTERNALS, passing the kit on Lua 5.4 and 5.5, whose twelve questions became spec text (9.1, 9.3, 9.4, 9.6, 9.9, 10.3-10.5, 17.5); VEP/1 frozen and the minimal adapter profile (17.6). A review found eight bugs, each fixed with a test: a run engine's definition block at a file's top waited forever and failed a later block; `define_engine` took Phase 2's tags; its `V2_ENGINE_<TAG>` wasn't trimmed or unquoted; a variable hid where a `v2.toml` engine was declared; a closed stdout or stderr gave EngineExitError or nothing, not 141; missing custom programs lacked 18.1's hints and doctor's `-` columns; a string command's suggestion; a program file that can't run counted as available; past 1 GiB of a block's value said the block failed. CI installs Lua and requires the run engines each runner has. Windows' run-engine lookups wait for CI. Linux: 353 unit, 190 CLI tests and the `.v2` files pass but packages.v2 (Node 24's double line, also before) |
+| 2026-11-26 | Shells out of the built-in run engines: `bash`/`sh`, `pwsh`/`powershell` and `cmd` were wrappers over what `exec` and V2 itself do, the parts that don't travel between systems (cmd Windows only, bash on Windows only through Git Bash, PowerShell rare elsewhere) and most of Phase 3's Windows special cases. A shell is one `define_engine` line, which DOCS 5 shows and their tags' EngineUnknown says. R58 is now the lua engine, the shell tags' message and doctor's rows. |

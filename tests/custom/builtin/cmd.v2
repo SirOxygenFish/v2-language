@@ -1,4 +1,0 @@
-// requires: cmd
-// platform: windows
-// R58: the built-in cmd engine, args as %V2_ARG_x%.
-print(@cmd(x: 1) { echo %V2_ARG_x% })

@@ -1,3 +1,0 @@
-// requires: pwsh
-// R58: the built-in pwsh engine, with no v2.toml.
-print(@pwsh { Write-Output 5 })

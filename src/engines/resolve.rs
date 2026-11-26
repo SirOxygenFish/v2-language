@@ -547,8 +547,6 @@ fn hex(bytes: &[u8]) -> String {
 pub enum Origin {
     Path,
     Venv,
-    /// Windows bash: Git for Windows' (7.6).
-    Git,
     Config(ConfigSource),
 }
 
@@ -557,7 +555,6 @@ impl Origin {
         match self {
             Origin::Path => "PATH".into(),
             Origin::Venv => "venv".into(),
-            Origin::Git => "git".into(),
             Origin::Config(from) => source_label(from),
         }
     }
@@ -1150,11 +1147,7 @@ impl Resolver<'_> {
             return j;
         }
         let mut full = argv.to_vec();
-        // Windows PowerShell has no --version (7.6).
-        let powershell = Path::new(&argv[0]).file_stem().is_some_and(|s| s.eq_ignore_ascii_case("powershell"));
-        if powershell {
-            full.extend(["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"].map(OsString::from));
-        } else if let Some((args, _)) = &spec.probe {
+        if let Some((args, _)) = &spec.probe {
             full.extend(args.iter().map(|a| OsString::from(&**a)));
         }
         let outcome = self.prober.probe(&full, &Self::env(spec), limit);
@@ -1275,33 +1268,8 @@ impl Resolver<'_> {
         let cfg = self.cfg.engines.get(&*spec.id);
         let program = cfg.and_then(|e| e.program.as_ref()).map(|p| (p.value.clone(), p.from.clone()));
         let program = program.or_else(|| cfg.and_then(|e| e.command.as_ref()).map(|c| (c.value[0].clone(), c.from.clone())));
-        if &*spec.id == "cmd" {
-            // Not probed: version None (7.6).
-            if !cfg!(windows) {
-                return Err(NotFound { status: Status::Missing, message: "cmd is Windows only".into(), command: None, from: None, skipped: Vec::new() });
-            }
-            let name = program.as_ref().map_or("cmd", |(p, _)| p.as_str());
-            let origin = program.as_ref().map_or(Origin::Path, |(_, from)| Origin::Config(from.clone()));
-            return match first_program(name, self.lookup) {
-                Some(path) => Ok(ResolvedEngine { spec: spec.clone(), origin, argv: vec![path.into_os_string()], version: None, skipped: Vec::new() }),
-                None => Err(NotFound { status: Status::Missing, message: format!("engine 'cmd' ({}) not found", spec.language), command: None, from: None, skipped: Vec::new() }),
-            };
-        }
         if let Some((program, from)) = program {
             return self.configured(spec, &[program], &from);
-        }
-        // Windows bash: Git Bash only, never System32's WSL launcher (7.6).
-        if &*spec.id == "bash" && cfg!(windows) {
-            let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
-            let Some(path) = git_bash(self.lookup, program_files.as_deref()) else {
-                let message = "engine 'bash' (shell) not found\ntried: Git for Windows' bin\\bash.exe\ninstall: winget install -e --id Git.Git, then open a new terminal\nor set [engines.bash] command in v2.toml, or V2_ENGINE_BASH".to_string();
-                return Err(NotFound { status: Status::Missing, message, command: None, from: None, skipped: Vec::new() });
-            };
-            let argv = vec![path.clone().into_os_string()];
-            return match self.probe(spec, &argv, &path, Some(PROBE_LIMIT)) {
-                Judged::Usable(v) => Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Git, argv, version: Some(v), skipped: Vec::new() }),
-                other => Err(NotFound { status: Status::Broken, message: format!("engine 'bash' (shell) was found but doesn't run: {} ({})", path.display(), other.reason().unwrap_or_default()), command: Some(path.display().to_string()), from: Some("git".into()), skipped: Vec::new() }),
-            };
         }
         self.search(spec)
     }
@@ -2654,34 +2622,22 @@ mod tests {
         // 7.6: a built-in run engine found on PATH and probed with its own args; a configured
         // command resolves and probes command[0] only, never `{file}`; no fallback past it.
         let d = temp("runeng");
-        let bash = exe(&d, "bash");
-        let p = fake(|_| says("GNU bash, version 5.2.21(1)-release"));
-        let e = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "bash");
-        if cfg!(windows) {
-            // Git Bash only, never a PATH bash (System32's is WSL's launcher).
-            assert!(e.is_err() || e.as_ref().unwrap().origin == Origin::Git);
-        } else {
-            let e = e.unwrap();
-            assert_eq!((e.argv.clone(), e.version), (vec![bash.clone().into_os_string()], Some(Version(5, 2, 21))));
-            assert_eq!(p.argvs.borrow()[0][1..], [OsString::from("--version")]);
-        }
-        let cfg = with_command("bash", &["bash", "-e", "{file}"], project_source());
-        let p = fake(|_| says("GNU bash, version 5.2.21(1)-release"));
-        let e = resolve_with(&cfg, &lookup(&[&d], None), &p, &mut ProbeCache::off(), "bash").unwrap();
-        assert_eq!(e.argv, vec![bash.into_os_string()]);
-        assert_eq!(p.argvs.borrow()[0][1..], [OsString::from("--version")]);
+        let lua = exe(&d, "lua");
+        let p = fake(|_| says("Lua 5.4.6  Copyright (C) 1994-2023 Lua.org, PUC-Rio"));
+        let e = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "lua").unwrap();
+        assert_eq!((e.argv.clone(), e.version), (vec![lua.clone().into_os_string()], Some(Version(5, 4, 6))));
+        assert_eq!(p.argvs.borrow()[0][1..], [OsString::from("-v")]);
+        let cfg = with_command("lua", &["lua", "-W", "{file}"], project_source());
+        let p = fake(|_| says("Lua 5.4.6"));
+        let e = resolve_with(&cfg, &lookup(&[&d], None), &p, &mut ProbeCache::off(), "lua").unwrap();
+        assert_eq!(e.argv, vec![lua.into_os_string()]);
+        assert_eq!(p.argvs.borrow()[0][1..], [OsString::from("-v")]);
         let cfg = with_command("lua", &["nowhere-lua", "{file}"], project_source());
         let nf = resolve_with(&cfg, &lookup(&[&d], None), &p, &mut ProbeCache::off(), "lua").unwrap_err();
         assert_eq!(nf.status, Status::Broken);
         // Missing on PATH: no install line for a run engine (7.8 has rows for py and js only).
         let nf = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "ruby").unwrap_err();
         assert_eq!(nf.message, "engine 'ruby' (Ruby) not found\ntried: ruby on PATH\nor set [engines.ruby] command in v2.toml, or V2_ENGINE_RUBY");
-        // cmd is Windows only and never probed (7.6).
-        let cmd = resolve_with(&Config::default(), &lookup(&[&d], None), &p, &mut ProbeCache::off(), "cmd");
-        if !cfg!(windows) {
-            let nf = cmd.unwrap_err();
-            assert_eq!((nf.status, nf.message.as_str()), (Status::Missing, "cmd is Windows only"));
-        }
     }
 
     #[test]

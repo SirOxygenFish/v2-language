@@ -70,16 +70,16 @@ pub struct Config {
 #[derive(Debug, PartialEq)]
 pub struct ConfigError(pub String);
 
-pub const BUILTIN_TAGS: &[&str] = &["py", "js", "ts", "c", "cpp", "rust", "bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"];
+pub const BUILTIN_TAGS: &[&str] = &["py", "js", "ts", "c", "cpp", "rust", "lua", "ruby", "go", "java", "zig", "cs"];
 
 /// The built-in run engines (7.2's Run rows): their `command` is the whole argv, with `{file}`.
-pub const RUN_TAGS: &[&str] = &["bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"];
+pub const RUN_TAGS: &[&str] = &["lua", "ruby", "go", "java", "zig", "cs"];
 
 const SECTIONS: &[&str] = &["engines", "python"];
 const ENGINE_KEYS: &[&str] = &["command", "flags", "startup_timeout", "call_timeout"];
 const PYTHON_KEYS: &[&str] = &["venv"];
 /// The names `[engines.…]` takes for the built-in engines a did-you-mean offers (18.2).
-const ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs", "bash", "sh", "pwsh", "powershell", "cmd", "lua", "ruby", "go", "java", "zig", "cs", "csharp"];
+const ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "c", "cpp", "cxx", "rust", "rs", "lua", "ruby", "go", "java", "zig", "cs", "csharp"];
 /// The engine names a bare key with another keyboard's letter may have meant (`[engines.tş]`):
 /// ts's too, which `bare_key_hint` sends to `[engines.js]` (18.5).
 const KEY_ENGINE_NAMES: &[&str] = &["py", "python", "js", "javascript", "ts", "typescript", "c", "cpp", "cxx", "rust", "rs"];
@@ -1054,8 +1054,10 @@ mod tests {
         assert!(e.ends_with("[engines.ruby]: command must contain {file}"), "{e}");
         let e = project("nokind", "[engines.perl]\ncommand = [\"perl\", \"{file}\"]\n").unwrap_err().0;
         assert!(e.ends_with("[engines.perl]: 'kind' is required: \"run\" or \"bridged\""), "{e}");
-        let e = project("runkind", "[engines.sh]\nkind = \"run\"\ncommand = [\"bash\", \"{file}\"]\n").unwrap_err().0;
-        assert!(e.ends_with("built-in engine 'bash' can't change 'kind'"), "{e}");
+        let e = project("runkind", "[engines.lua]\nkind = \"run\"\ncommand = [\"lua\", \"{file}\"]\n").unwrap_err().0;
+        assert!(e.ends_with("built-in engine 'lua' can't change 'kind'"), "{e}");
+        // A shell is no built-in engine (7.2): its table declares a custom one.
+        assert!(project("shell", "[engines.sh]\nkind = \"run\"\ncommand = [\"bash\", \"{file}\"]\n").is_ok());
         // A table with `kind` is a custom engine's (DOCS 13.1), not a misspelling: `r` isn't `rs`.
         let cfg = project("custom", "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\next = \"R\"\n").unwrap();
         assert!(cfg.custom.contains_key("r"));

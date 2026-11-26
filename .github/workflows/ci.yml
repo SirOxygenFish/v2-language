@@ -15,10 +15,10 @@ jobs:
       matrix:
         include:
           # require: the engines that must be there, so their tests fail instead of skipping
-          # (22.5): the runner images have Git Bash, PowerShell and cmd; Linux gets Lua below.
-          - { name: windows-latest, os: windows-latest, python: '3.13', node: '22', require: 'py,js,ts,bash,pwsh,cmd' }
-          - { name: ubuntu-latest, os: ubuntu-latest, python: '3.13', node: '22', require: 'py,js,ts,bash,pwsh,lua' }
-          - { name: minimum versions, os: ubuntu-22.04, python: '3.10', node: '22.13.0', require: 'py,js,ts,bash,lua' }
+          # (22.5): Linux gets Lua below.
+          - { name: windows-latest, os: windows-latest, python: '3.13', node: '22', require: 'py,js,ts' }
+          - { name: ubuntu-latest, os: ubuntu-latest, python: '3.13', node: '22', require: 'py,js,ts,lua' }
+          - { name: minimum versions, os: ubuntu-22.04, python: '3.10', node: '22.13.0', require: 'py,js,ts,lua' }
     env:
       V2_TEST_REQUIRE: ${{ matrix.require }}
     steps:

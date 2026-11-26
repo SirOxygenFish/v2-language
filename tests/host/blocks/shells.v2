@@ -1,0 +1,9 @@
+// Shells aren't built-in engines (DOCS 5, INTERNALS 7.3): their tags say how V2 runs programs,
+// and the define_engine call that declares one.
+for f in [func() => @sh { echo hi }, func() => @cmd { echo hi }, func() => @powershell { Write-Output 1 }] {
+    try {
+        f()
+    } catch (e) {
+        print(e.type + ": " + e.message)
+    }
+}

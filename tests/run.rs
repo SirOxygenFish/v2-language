@@ -652,8 +652,8 @@ fn a_closed_stdout_stops_the_run_quietly() {
     }
     // A run engine's block writes V2's stdout itself, so it dies of SIGPIPE, and V2 stops as for
     // its own print (17.3), not with an EngineExitError (the review of Phase 3).
-    if needs("bash", "a_closed_stdout_stops_the_run_quietly") {
-        programs.push(("shloop.v2", "@bash {\n    i=0\n    while true; do echo $i; i=$((i+1)); done\n}\nprint(\"not reached\")\n"));
+    if cfg!(unix) {
+        programs.push(("shloop.v2", "define_engine(\"sh\", kind: \"run\", command: [\"sh\", \"{file}\"])\n@sh {\n    i=0\n    while true; do echo $i; i=$((i+1)); done\n}\nprint(\"not reached\")\n"));
     }
     for (name, src) in programs {
         let home = TempHome::new();
@@ -719,8 +719,8 @@ fn a_closed_stderr_stops_the_run_quietly() {
         programs.push(("pyerrloop.v2", "@py {\n    import sys\n    i = 0\n    while True:\n        print(i, file=sys.stderr)\n        i += 1\n}\n"));
     }
     // A run engine's stderr, which V2 copies through (17.3).
-    if needs("bash", "a_closed_stderr_stops_the_run_quietly") {
-        programs.push(("sherrloop.v2", "@bash {\n    i=0\n    while true; do echo $i >&2; i=$((i+1)); done\n}\nprint(\"not reached\")\n"));
+    if cfg!(unix) {
+        programs.push(("sherrloop.v2", "define_engine(\"sh\", kind: \"run\", command: [\"sh\", \"{file}\"])\n@sh {\n    i=0\n    while true; do echo $i >&2; i=$((i+1)); done\n}\nprint(\"not reached\")\n"));
     }
     for (name, src) in programs {
         let home = TempHome::new();
@@ -4965,15 +4965,14 @@ fn a_signal_during_exec_stops_the_next_statement() {
 fn doctor_notes_engine_tables_of_later_versions() {
     // INTERNALS 19.2: a v2.toml written for C says, before any block is written, that this
     // version doesn't run it; a custom run engine and a configured built-in one get rows.
-    let toml = "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\n\n[engines.c]\nflags = [\"-O2\"]\n\n[engines.sh]\ncommand = [\"bash\", \"-e\", \"{file}\"]\n";
+    let toml = "[engines.r]\nkind = \"run\"\ncommand = [\"Rscript\", \"{file}\"]\n\n[engines.c]\nflags = [\"-O2\"]\n\n[engines.lua]\ncommand = [\"lua\", \"-W\", \"{file}\"]\n";
     let (code, stdout, stderr, _home) = run_with_files(&[("v2.toml", toml)], &["doctor"]);
     assert_eq!(code, Some(0), "{stderr}");
     assert!(stdout.contains("\n  c: [engines.c] in v2.toml configures @c, which isn't in this version of V2 yet\n"), "{stdout}");
     let rows = doctor_rows(&stdout);
     assert!(rows.contains_key("r"), "{stdout}");
-    if Command::new("bash").arg("--version").output().is_ok() {
-        assert_eq!(rows["bash"][0], "ok", "{stdout}");
-        assert!(rows["bash"].iter().any(|c| c.ends_with("bash -e {file}")), "{stdout}");
+    if rows["lua"][0] == "ok" {
+        assert!(rows["lua"].iter().any(|c| c.ends_with(" -W {file}")), "{stdout}");
     }
 }
 
@@ -4981,7 +4980,7 @@ fn doctor_notes_engine_tables_of_later_versions() {
 fn doctor_prints_the_engine_table() {
     // INTERNALS 19.2: one row per registered engine, in order, the built-in run engines included
     // (R58); exit 0 even when some are missing.
-    const ALL: [&str; 12] = ["py", "js", "ts", "bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"];
+    const ALL: [&str; 9] = ["py", "js", "ts", "lua", "ruby", "go", "java", "zig", "cs"];
     let probe: String = ALL.iter().map(|t| format!("print(engine_available(\"{t}\"))\n")).collect();
     let (code, stdout, stderr, home) = run_with_files(&[("probe.v2", &probe)], &["probe.v2"]);
     assert_eq!(code, Some(0), "{stderr}");
@@ -6782,7 +6781,7 @@ fn doctor_without_engines_notes_install_hints() {
     assert!(unset.contains("\n  ts: not found: PATH isn't set, so nothing was searched; set it, or name the program in v2.toml, [engines.js] command\n"), "{unset}");
     // Then the version line for bug reports and what it means for the user's scripts (19.2).
     let end = format!(
-        "config file: none\nv2 {} (VEP/1), {} {}\nready: none\nnot ready: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs (see the notes); plain V2 scripts still run\n",
+        "config file: none\nv2 {} (VEP/1), {} {}\nready: none\nnot ready: py, js, ts, lua, ruby, go, java, zig, cs (see the notes); plain V2 scripts still run\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
@@ -9121,13 +9120,13 @@ fn custom_bridged_engines_run_through_their_adapter() {
 fn a_run_engine_value_past_what_a_str_holds_is_an_io_error() {
     // 17.3 with 5.10's cap (the review of Phase 3): a block whose value would pass it is stopped,
     // and the error says V2 stopped it, not that the block failed; one that fits is whole.
-    if !needs("bash", "a_run_engine_value_past_what_a_str_holds_is_an_io_error") {
+    if !cfg!(unix) {
         return;
     }
-    let src = "print(len(@bash { head -c 900 /dev/zero }))\ntry {\n    let v = @bash { head -c 5000 /dev/zero }\n} catch (e) {\n    print(e.type, e.message)\n}\n";
+    let src = "define_engine(\"sh\", kind: \"run\", command: [\"sh\", \"{file}\"])\nprint(len(@sh { head -c 900 /dev/zero }))\ntry {\n    let v = @sh { head -c 5000 /dev/zero }\n} catch (e) {\n    print(e.type, e.message)\n}\n";
     let (code, stdout, stderr, _home) = run_with_files_env(&[("big.v2", src)], &["big.v2"], &[("V2_TEST_MAX_READ", "1000")]);
     assert_eq!(code, Some(0), "{stderr}");
-    assert_eq!(stdout, "900\nIOError @bash block wrote more than 1 GiB of output: send it to a file in the block, or read it in pieces\n");
+    assert_eq!(stdout, "900\nIOError @sh block wrote more than 1 GiB of output: send it to a file in the block, or read it in pieces\n");
 }
 
 #[test]

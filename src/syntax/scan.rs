@@ -43,8 +43,6 @@ pub fn canonical_tag(tag: &str) -> &str {
         "typescript" => "ts",
         "cxx" => "cpp",
         "rs" => "rust",
-        "sh" => "bash",
-        "powershell" => "pwsh",
         "csharp" => "cs",
         other => other,
     }

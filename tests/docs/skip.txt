@@ -3,7 +3,7 @@
 1-1      needs @rust (Phase 2); README's quickstart covers the rest
 3.11-1   runs git: what it prints depends on the repository it runs in
 4.5-1    prints today's year
-5-2      runs git: what it prints depends on the repository it runs in (checked by hand)
+5-2      needs Lua, which the Windows runner lacks; tests/custom/builtin/lua.v2 runs the lua engine
 7-1      needs the npm package lodash, which the CI matrix doesn't install
 7-2      needs numpy, which the CI matrix doesn't install
 8.3-1    needs @rust (Phase 2)

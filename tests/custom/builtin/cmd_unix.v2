@@ -1,8 +1,0 @@
-// platform: unix
-// R58, 7.6: cmd is Windows only.
-try {
-    @cmd { }
-} catch (e) {
-    print(e.type, e.message)
-}
-print(engine_available("cmd"))

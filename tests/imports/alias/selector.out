@@ -1,18 +1,18 @@
-EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
 ImportError | no block in this file is labeled 'lib'
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
-EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib.total directly; @import brings in names from other languages' blocks and packages
-EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): use lib directly; @import brings in names from other languages' blocks and packages
-EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
+EngineUnknown | unknown engine '@lib' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.lib] in v2.toml, or with define_engine
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): a block gets its names through V2, as in let total = lib.total at the file's top level, then @import { total } from v2 in the block
 ImportError | no block in this file is labeled 'lib'
   hint: lib is a V2 module (import "./fixtures/lib.v2" as lib): a block gets its names through V2, as in let total = lib.total at the file's top level, then @import { total } from v2 in the block
-EngineUnknown | unknown engine '@inner' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.inner] in v2.toml, or with define_engine
+EngineUnknown | unknown engine '@inner' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.inner] in v2.toml, or with define_engine
   hint: null
-EngineUnknown | unknown engine '@nolib' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.nolib] in v2.toml, or with define_engine
+EngineUnknown | unknown engine '@nolib' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.nolib] in v2.toml, or with define_engine
   hint: null
 ImportError | no block in this file is labeled 'nolib': a Python module is imported with py.nolib, an npm package with js.nolib
   hint: null

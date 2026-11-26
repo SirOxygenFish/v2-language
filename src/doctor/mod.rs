@@ -266,11 +266,11 @@ pub fn doctor(cfg: Rc<Config>) -> i32 {
                     let dash = || "-".to_string();
                     rows.push([id.clone(), status.into(), nf.command.clone().unwrap_or_else(dash), version, nf.from.clone().unwrap_or_else(dash)]);
                     skipped(&nf.skipped, &mut notes);
-                    // A missing built-in run engine is just `not found` (19.2); cmd says it is
-                    // Windows only; the others say their message's first line.
+                    // A missing built-in run engine is just `not found` (19.2); a custom one
+                    // says its message's first line.
                     let first = nf.message.lines().next().unwrap_or_default().to_string();
                     let note = match nf.status {
-                        Status::Missing if spec.custom.is_none() && id != "cmd" => "not found".to_string(),
+                        Status::Missing if spec.custom.is_none() => "not found".to_string(),
                         _ => first,
                     };
                     notes.push(format!("{id}: {note}"));

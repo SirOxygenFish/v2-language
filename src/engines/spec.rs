@@ -223,22 +223,7 @@ struct RunRow {
 /// 7.2's Run rows: the built-in run engines.
 fn run_builtins() -> Vec<EngineSpec> {
     let generic = |args: &[&str]| Some((strs(args), VersionPattern::Generic));
-    let win = cfg!(windows);
     let rows = vec![
-        // Windows: Git Bash only, found by `resolve::git_bash`, never a PATH `bash` (7.6).
-        RunRow { id: "bash", language: "shell", aliases: &["sh"], candidates: if win { Vec::new() } else { vec![strs(&["bash"])] }, fixed_args: strs(&["{file}"]), ext: "sh", probe: generic(&["--version"]), min_version: None },
-        RunRow {
-            id: "pwsh",
-            language: "PowerShell",
-            aliases: &["powershell"],
-            candidates: if win { vec![strs(&["pwsh"]), strs(&["powershell"])] } else { vec![strs(&["pwsh"])] },
-            fixed_args: if win { strs(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{file}"]) } else { strs(&["-NoProfile", "-File", "{file}"]) },
-            ext: "ps1",
-            probe: generic(&["--version"]),
-            min_version: None,
-        },
-        // Not probed; outside Windows never found (7.6).
-        RunRow { id: "cmd", language: "cmd", aliases: &[], candidates: if win { vec![strs(&["cmd"])] } else { Vec::new() }, fixed_args: strs(&["/d", "/q", "/c", "{file}"]), ext: "bat", probe: None, min_version: None },
         RunRow { id: "lua", language: "Lua", aliases: &[], candidates: vec![strs(&["lua"]), strs(&["lua5.4"])], fixed_args: strs(&["{file}"]), ext: "lua", probe: generic(&["-v"]), min_version: None },
         RunRow { id: "ruby", language: "Ruby", aliases: &[], candidates: vec![strs(&["ruby"])], fixed_args: strs(&["{file}"]), ext: "rb", probe: generic(&["--version"]), min_version: None },
         RunRow { id: "go", language: "Go", aliases: &[], candidates: vec![strs(&["go"])], fixed_args: strs(&["run", "{file}"]), ext: "go", probe: generic(&["version"]), min_version: None },
@@ -631,7 +616,7 @@ mod tests {
     fn builtin_rows() {
         let specs = builtins();
         let ids: Vec<&str> = specs.iter().map(|s| &*s.id).collect();
-        assert_eq!(ids, ["py", "js", "ts", "bash", "pwsh", "cmd", "lua", "ruby", "go", "java", "zig", "cs"]);
+        assert_eq!(ids, ["py", "js", "ts", "lua", "ruby", "go", "java", "zig", "cs"]);
         // 7.2's Run rows: each one's temp-file extension and `{file}` in its fixed args.
         for s in specs.iter().filter(|s| s.kind == EngineKind::Run) {
             assert!(s.ext.is_some() && s.fixed_args.iter().any(|a| &**a == "{file}"), "{}", s.id);

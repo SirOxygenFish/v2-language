@@ -1,3 +1,0 @@
-@bash blocks cannot @export or @import — 'bash' is a run engine
-block 'lib' failed to load: @bash blocks cannot @export or @import — 'bash' is a run engine
-still works

@@ -677,14 +677,14 @@ text. Uncaught, it goes back to V2 as it was.
 **What is `VEP/1` in `v2 --version`?** The version of the protocol V2 speaks with its Python and
 Node.js workers, and with the adapters of other languages (DOCS 13.2).
 
-**Can I use another language, like the shell, Lua or R?** The shell (`@sh`), PowerShell (`@pwsh`),
-`@cmd`, `@lua`, `@ruby`, `@go`, `@java`, `@zig` and `@cs` work when that language is installed: the
-block runs as a script, and what it prints is its value (`let n = @sh { ls | wc -l }`). Any other
-language can be added in a few lines, in `v2.toml` or with `define_engine` at the top of the script:
+**Can I use another language, like Lua, R or the shell?** `@lua`, `@ruby`, `@go`, `@java`, `@zig`
+and `@cs` work when that language is installed: the block runs as a script, and what it prints is
+its value. Any other language, a shell included, is one line at the top of the script (or a table
+in `v2.toml`):
 
 ```
-define_engine("r", kind: "run", command: ["Rscript", "{file}"], ext: "R")
-@r { cat("hello from R\n") }
+define_engine("sh", kind: "run", command: ["bash", "{file}"])
+let n = @sh { ls | wc -l }
 ```
 
 Its block args arrive as `V2_ARG_<name>` environment variables. To `@export` and `@import` with

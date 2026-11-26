@@ -1,0 +1,3 @@
+@nd blocks cannot @export or @import — 'nd' is a run engine
+block 'lib' failed to load: @nd blocks cannot @export or @import — 'nd' is a run engine
+still works

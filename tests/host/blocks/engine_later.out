@@ -1,5 +1,5 @@
-EngineUnknown unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs
-unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs
-unknown engine '@r' — known engines: py, js, ts, bash, pwsh, cmd, lua, ruby, go, java, zig, cs; declare it in [engines.r] in v2.toml, or with define_engine
+EngineUnknown unknown engine '@c': C blocks aren't in this version of V2 yet — known engines: py, js, ts, lua, ruby, go, java, zig, cs
+unknown engine '@rs': Rust blocks aren't in this version of V2 yet — known engines: py, js, ts, lua, ruby, go, java, zig, cs
+unknown engine '@r' — known engines: py, js, ts, lua, ruby, go, java, zig, cs; declare it in [engines.r] in v2.toml, or with define_engine
 EngineNotFound 'v2-no-such-rscript' not found on PATH (engine declared at engine_later.v2:20)
 false false false

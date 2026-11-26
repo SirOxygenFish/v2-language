@@ -2,7 +2,7 @@
 
 > **Status:** being built; [ROADMAP.md](https://github.com/SirOxygenFish/v2-language/blob/main/ROADMAP.md) "Where we are" says which parts work. Built:
 > the host language, Python, JavaScript and TypeScript blocks, `@export`/`@import` across them,
-> packages, handles, callbacks and errors, the built-in run engines (`@sh`, `@lua`, …) and custom
+> packages, handles, callbacks and errors, the built-in run engines (`@lua`, `@ruby`, …) and custom
 > engines. Not built yet, and marked where they appear: compiled blocks (`@c`, `@cpp`, `@rust`) and
 > `extern`. How it works under the
 > hood is specified in [INTERNALS.md](https://github.com/SirOxygenFish/v2-language/blob/main/INTERNALS.md).
@@ -1141,9 +1141,6 @@ printed, or the block's value as a `str`; args as `V2_ARG_<name>` variables; no 
 
 | Tag (aliases)          | Runs                            | File   | Needs                       |
 | ---------------------- | ------------------------------- | ------ | --------------------------- |
-| `bash` (`sh`)          | `bash {file}`                   | `.sh`  | bash; on Windows Git Bash   |
-| `pwsh` (`powershell`)  | `pwsh -NoProfile -File {file}`  | `.ps1` | PowerShell                  |
-| `cmd`                  | `cmd /d /q /c {file}`           | `.bat` | Windows                     |
 | `lua`                  | `lua {file}`                    | `.lua` | Lua (`lua` or `lua5.4`)     |
 | `ruby`                 | `ruby {file}`                   | `.rb`  | Ruby                        |
 | `go`                   | `go run {file}`                 | `.go`  | Go                          |
@@ -1152,15 +1149,23 @@ printed, or the block's value as a `str`; args as `V2_ARG_<name>` variables; no 
 | `cs` (`csharp`)        | `dotnet run {file}`             | `.cs`  | .NET 10+                    |
 
 ```v2
-let branch = @sh { git branch --show-current }
-print(f"on branch ${branch}")
-
-@sh(target: "build") { mkdir -p "$V2_ARG_target" }
+let total = @lua(n: 10) { local s = 0 for i = 1, tonumber(os.getenv("V2_ARG_n")) do s = s + i end print(s) }
+print(f"total ${total}")
 ```
 
-- On Windows, `bash` is Git Bash (found through `git` on `PATH`, else in `C:\Program Files\Git`),
-  never WSL's `System32\bash.exe`; `pwsh` runs with `-ExecutionPolicy Bypass`, falling back to
-  `powershell.exe`. `cmd` is Windows only (elsewhere: `EngineNotFound: cmd is Windows only`).
+- **Shells aren't built in.** V2 itself is the script, and `exec([...])` runs programs
+  ([3.11](#311-builtins)). For shell syntax (pipes, globs), declare a shell as a run engine in
+  one line; `@sh`, `@cmd` and `@pwsh` without one raise `EngineUnknown` with the line to write:
+
+  ```v2
+  define_engine("sh", kind: "run", command: ["bash", "{file}"])
+  let branch = @sh { git branch --show-current }
+  print(f"on branch ${branch}")
+  ```
+
+  On Windows, name Git Bash's path or use `cmd` (`["cmd", "/d", "/q", "/c", "{file}"]` with
+  `ext: "bat"`, which is written with Windows line endings) or PowerShell (`["pwsh", "-NoProfile",
+  "-File", "{file}"]` with `ext: "ps1"`).
 - A `java` block is one source file run directly; a `cs` block is a .NET file-based app.
 - Configure them in `[engines.<tag>]` (`command`, `call_timeout`) or with `V2_ENGINE_<TAG>`
   ([14](#14-project-file-v2toml)); `v2 doctor` lists them.
