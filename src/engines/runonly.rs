@@ -146,6 +146,8 @@ struct Finished {
     /// More than `STDERR_TAIL` bytes were written.
     stderr_cut: bool,
     timed_out: bool,
+    /// Its output in expression position passed `read_cap`, and the tree was stopped.
+    too_much: bool,
 }
 
 /// 17.3 steps 3–5: spawn, stream, time out, then kill what is left of the tree and reap.
@@ -165,8 +167,13 @@ fn run(argv: &[OsString], env: &[(OsString, OsString)], capture: bool, limit: Op
                     Ok(0) => break,
                     Ok(n) => {
                         let mut host = std::io::stderr().lock();
-                        let _ = host.write_all(&chunk[..n]);
-                        let _ = host.flush();
+                        // A reader that went away stops the run quietly with 141, as V2's own
+                        // stderr writes do (6.5); another failure is ignored, as for V2's diagnostics.
+                        if let Err(e) = host.write_all(&chunk[..n]).and_then(|_| host.flush()) {
+                            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                                process::exit_broken_pipe();
+                            }
+                        }
                         total += n;
                         tail.extend_from_slice(&chunk[..n]);
                         if tail.len() > STDERR_TAIL {
@@ -185,10 +192,11 @@ fn run(argv: &[OsString], env: &[(OsString, OsString)], capture: bool, limit: Op
         let kill = child.kill_handle();
         process::spawn_helper(std::thread::Builder::new(), move || {
             let mut bytes = Vec::new();
-            if let Ok(false) = process::read_capped(&mut pipe, process::read_cap(), 0, &mut bytes) {
+            let over = matches!(process::read_capped(&mut pipe, process::read_cap(), 0, &mut bytes), Ok(false));
+            if over {
                 kill.kill_tree();
             }
-            bytes
+            (bytes, over)
         })
         .expect("start a reader thread")
     });
@@ -198,10 +206,10 @@ fn run(argv: &[OsString], env: &[(OsString, OsString)], capture: bool, limit: Op
     child.kill_tree();
     let timed_out = timer.as_ref().is_some_and(process::TimerGuard::fired);
     drop(timer);
-    let stdout = out.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let (stdout, too_much) = out.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
     let (stderr_tail, stderr_cut) = tee.join().unwrap_or_default();
     let status = child.reap();
-    Ok(Finished { status, stdout, stderr_tail, stderr_cut, timed_out })
+    Ok(Finished { status, stdout, stderr_tail, stderr_cut, timed_out, too_much })
 }
 
 /// Bytes as text, invalid UTF-8 as U+FFFD.
@@ -237,11 +245,22 @@ impl Interp {
             Ok(d) => d,
             Err(spawn) => return Err(self.raise(error("EngineNotFound", spawn.message), at)),
         };
+        if done.too_much {
+            // V2 stopped it, not the block's own failure: as exec says it (5.10).
+            return Err(self.raise(error("IOError", format!("@{tag} block wrote more than 1 GiB of output: send it to a file in the block, or read it in pieces")), at));
+        }
         if done.timed_out {
             let secs = limit.map_or(0.0, |l| l.as_secs_f64());
             return Err(self.raise(error("EngineTimeout", format!("@{tag} block ran longer than call_timeout ({secs}s) and was stopped")), at));
         }
         if !done.status.success() {
+            // A block in statement position writes V2's stdout itself: when its reader has gone
+            // (`v2 x.v2 | head`), the block died of SIGPIPE, and the run ends as for V2's own
+            // print, quietly with 141 (6.5).
+            let sigpipe = cfg!(unix) && (done.status.code == Some(141) || done.status.signal == Some(13));
+            if !want_value && sigpipe && process::stdout_gone() {
+                process::exit_broken_pipe();
+            }
             let message = match (done.status.code, done.status.signal) {
                 (_, Some(_)) => format!("@{tag} block was {}", done.status.describe()),
                 (Some(code), None) if cfg!(windows) && code as u32 >= 0x8000_0000 => format!("@{tag} block exited with status 0x{:08X}", code as u32),

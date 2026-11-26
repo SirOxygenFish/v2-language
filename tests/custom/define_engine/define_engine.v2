@@ -7,7 +7,7 @@ try {
 }
 define_engine("nd", kind: "run", command: ["node", "{file}"], ext: "js")
 @nd { console.log(1 + 2) }
-for args in [["nd", ["node", "{file}"]], ["py", ["node", "{file}"]], ["nx", ["node"]], ["Bad", ["node", "{file}"]]] {
+for args in [["nd", ["node", "{file}"]], ["py", ["node", "{file}"]], ["rs", ["node", "{file}"]], ["nx", ["node"]], ["Bad", ["node", "{file}"]]] {
     try {
         define_engine(args[0], kind: "run", command: args[1])
     } catch (e) {

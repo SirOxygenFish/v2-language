@@ -1,0 +1,5 @@
+# The Lua adapter written from the spec alone (INTERNALS 17.6). The harness's V2_ENGINE_LUAB
+# names the Lua it found, lua5.4 or lua (18.4).
+[engines.luab]
+kind = "bridged"
+command = ["lua", "../../../examples/lua_adapter.lua"]

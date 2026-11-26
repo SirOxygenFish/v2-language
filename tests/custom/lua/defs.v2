@@ -1,0 +1,44 @@
+// requires: lua
+// The Lua adapter as a bridged engine (DOCS 13.2, INTERNALS 17.5): definitions, constants,
+// @export { * }, state kept between calls, a missing name, aliases, a module.
+@luab geometry {
+    function area(r) return math.pi * r * r end
+    function greet(name, punct) return "hi " .. name .. (punct or "!") end
+    VERSION = "1.2"
+    LIMITS = {hi = 9}
+    count = 0
+    function bump() count = count + 1; return count end
+    @export { area, greet, VERSION, LIMITS, bump }
+}
+@import { area, greet, VERSION, LIMITS, bump } from geometry
+print(area(2), greet("ada"), greet("ada", "?"), VERSION, LIMITS)
+bump()
+print(bump())
+@luab stars {
+    function one() return 1 end
+    function two() return 2 end
+    function _hidden() return 3 end
+    DATA = 5
+    @export { * }
+}
+@import { one, two } from stars
+print(one() + two())
+// What `*` takes is the adapter's choice (17.5); the message doesn't claim py's or js's rule.
+try {
+    @import { _hidden } from stars
+} catch (e) {
+    print(e.type, e.message)
+}
+try {
+    @luab broken {
+        function f() end
+        @export { f, typo }
+    }
+} catch (e) {
+    print(e.type, e.message)
+}
+@import { greet as g2 } from @luab
+print(g2("grace"))
+@import { upper, rep, format } from luab.string
+print(upper("abc"), rep("ab", 3), format("%03.1f", 3.14159))
+print(@luab { 6 * 7 }, @luab(x: 2) { x ^ 10 })

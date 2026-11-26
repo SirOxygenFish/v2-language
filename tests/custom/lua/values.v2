@@ -1,0 +1,25 @@
+// requires: lua
+// Every value kind through the Lua adapter and back, with the Lua type it arrives as (INTERNALS 10).
+let samples = [null, true, false, 0, -7, 9007199254740991, 9007199254740993, -9223372036854775807 - 1,
+    1.0, -0.0, 0.1, 1e300, 2.5e-8, float("nan"), float("inf"), -float("inf"),
+    "", "héllo ✓ 😀", "tab\tnl\nq\"\\", "\u{2028}", b"", b"\x00\xff\x10abc", [], {}, [1, [2, [3, null]]],
+    {b: 1, a: [null, {c: "d"}]}, {"$v2": "x", other: 2}, [null, null], {k: null}]
+for s in samples {
+    let back = @luab(s) { s }
+    let kind = @luab(s) {
+        if s == nil then return "nil" end
+        local t = type(s)
+        if t == "number" then return math.type(s) end
+        if t == "table" then
+            if V2.isbytes(s) then return "bytes(" .. #s .. ")" end
+            local mt = getmetatable(s)
+            return (mt and mt.__v2 or "?") .. "#" .. #s
+        end
+        return t
+    }
+    print(type(s), s, "->", type(back), back, back == s, kind)
+}
+// float kind and -0.0 sign
+print(@luab { 1 / -math.huge }, @luab { 3 // 1 }, @luab { 3.0 // 1 }, @luab { 2^63 }, @luab { math.maxinteger })
+print(@luab { {} }, @luab { V2.dict() }, @luab { {1, 2, 3} }, @luab { {y = {true}} })
+print(@luab { V2.null }, @luab { V2.bytes("\xff\x00") })

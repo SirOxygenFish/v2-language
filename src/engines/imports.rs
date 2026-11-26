@@ -457,7 +457,9 @@ fn not_exported_by_block<'a>(name: &str, text: &str, exported: impl IntoIterator
         (Some(near), _) if listed => format!("'{name}' is not exported by '{text}' — did you mean '{near}'? (or should its @export say '{name}'?)"),
         (Some(near), _) => format!("'{name}' is not exported by '{text}' — did you mean '{near}'?"),
         (None, Some("py")) => format!("'{name}' is not exported by '{text}' (its @export {{ * }} exports only the functions and classes it defines, and no name that starts with _: list others by name, as in @export {{ {name} }})"),
-        (None, Some(_)) => format!("'{name}' is not exported by '{text}' (its @export {{ * }} exports only functions, and no name that starts with _: list a const, let or class by name, as in @export {{ {name} }})"),
+        (None, Some("js" | "ts")) => format!("'{name}' is not exported by '{text}' (its @export {{ * }} exports only functions, and no name that starts with _: list a const, let or class by name, as in @export {{ {name} }})"),
+        // A custom engine's adapter decides what `*` takes (17.5).
+        (None, Some(_)) => format!("'{name}' is not exported by '{text}' (its @export {{ * }} didn't take it: list it by name, as in @export {{ {name} }})"),
         (None, None) => format!("'{name}' is not exported by '{text}' (did the block @export it?)"),
     }
 }

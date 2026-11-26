@@ -1,0 +1,46 @@
+// requires: lua
+// exit: 1
+// stderr: errors.v2:15:13: ForeignError: error: division by zero
+// stderr:   at divide (errors.v2:15, in @luab risky)
+try {
+    @luab broken {
+        function f() end
+        @export { f, typo }
+    }
+} catch (e) { print("E1", e.type, e.message) }
+
+@luab risky {
+    function divide(a, b)
+        if b == 0 then
+            error("division by zero")
+        end
+        return a // b
+    end
+    function boom(t) return t.x.y end
+    function custom() error({type = "ParseError", message = "bad input", line = 3, why = "x"}) end
+    function quit() os.exit(3) end
+    function readin() return io.read("l") end
+    function nilerr() error() end
+    function tostr_err() error(setmetatable({}, {__tostring = function() return "custom text" end, __name = "MyErr"})) end
+    @export { divide, boom, custom, quit, readin, nilerr, tostr_err }
+}
+@import { divide, boom, custom, quit, readin, nilerr, tostr_err } from risky
+for f in [func() => divide(1, 0), func() => boom({}), custom, quit, readin, nilerr, tostr_err] {
+    try { f() } catch (e) {
+        print(e.type, "|", e.foreign_type, "|", e.message, "|", e.line, "|", e.lang, "|", e.data)
+    }
+}
+try {
+    @luab {
+        local x = 1
+        x = = 2
+    }
+} catch (e) { print("SYN", e.type, e.foreign_type, e.message, e.line) }
+try {
+    let v = @luab {
+        local t = nil
+        return t[1]
+    }
+} catch (e) { print("RT", e.type, e.foreign_type, e.message, e.line, e.trace) }
+// Uncaught: the report points into the block (12.6).
+divide(5, 0)

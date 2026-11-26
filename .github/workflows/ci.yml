@@ -14,11 +14,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: windows-latest, os: windows-latest, python: '3.13', node: '22' }
-          - { name: ubuntu-latest, os: ubuntu-latest, python: '3.13', node: '22' }
-          - { name: minimum versions, os: ubuntu-22.04, python: '3.10', node: '22.13.0' }
+          # require: the engines that must be there, so their tests fail instead of skipping
+          # (22.5): the runner images have Git Bash, PowerShell and cmd; Linux gets Lua below.
+          - { name: windows-latest, os: windows-latest, python: '3.13', node: '22', require: 'py,js,ts,bash,pwsh,cmd' }
+          - { name: ubuntu-latest, os: ubuntu-latest, python: '3.13', node: '22', require: 'py,js,ts,bash,pwsh,lua' }
+          - { name: minimum versions, os: ubuntu-22.04, python: '3.10', node: '22.13.0', require: 'py,js,ts,bash,lua' }
     env:
-      V2_TEST_REQUIRE: py,js,ts
+      V2_TEST_REQUIRE: ${{ matrix.require }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -27,6 +29,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
+      - name: Lua (the lua run engine and the Lua adapter's tests)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --locked

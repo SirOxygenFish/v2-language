@@ -60,6 +60,9 @@ pub struct Config {
     pub custom: IndexMap<String, toml::Table>,
     /// The custom engines declared with a `kind`, validated (17.1), by tag.
     pub custom_engines: IndexMap<String, crate::engines::spec::CustomCfg>,
+    /// `V2_ENGINE_<TAG>` values read at startup for tags no engine had then, as (program, the
+    /// variable's name): `define_engine` uses one when it declares that tag (17.2, 18.4).
+    pub unclaimed: IndexMap<String, (String, String)>,
     pub python_venv: Option<Sourced<PathBuf>>,
 }
 
@@ -136,8 +139,11 @@ fn load_from(start: &Path, env: impl Iterator<Item = (OsString, OsString)>) -> R
             }
             if let Some(e) = cfg.custom_engines.get_mut(&tag) {
                 e.command[0] = path_text;
-                e.origin = var;
+                e.program_from = Some(var);
             }
+        } else {
+            // No engine has it yet: a later define_engine may declare it (17.2).
+            cfg.unclaimed.insert(tag, (path_text, var));
         }
     }
     Ok(cfg)
@@ -148,15 +154,6 @@ fn load_from(start: &Path, env: impl Iterator<Item = (OsString, OsString)>) -> R
 pub fn rewrite_command(base: &Path, argv: Vec<String>) -> Result<Vec<String>, String> {
     let f = File { shown: String::new(), base: base.to_path_buf(), from: ConfigSource::Env(String::new()) };
     f.argv("command", argv).map_err(|ConfigError(m)| m.trim_start_matches(": config error: ").to_string())
-}
-
-/// The program a `V2_ENGINE_<TAG>` variable names, read when `define_engine` declares that tag
-/// (18.4): a path with a separator against the cwd, else a name for the PATH walk.
-pub fn engine_override(tag: &str) -> Option<(String, String)> {
-    let var = format!("V2_ENGINE_{}", tag.to_ascii_uppercase());
-    let v = std::env::var_os(&var).filter(|v| !v.is_empty())?;
-    let cwd = std::env::current_dir().unwrap_or_default();
-    Some((from_cwd(&cwd, Path::new(&v)).to_string_lossy().into_owned(), var))
 }
 
 /// `V2_ENGINE_<TAG>` (18.4): one executable path each, never split; empty means unset. The prefix
@@ -234,7 +231,7 @@ fn home_relative(text: &str) -> Option<PathBuf> {
 /// that a program path with spaces stays one element: in quotes (`"C:\Program Files\…\python.exe"
 /// -X utf8`, without them), the shortest run of words that is a path to an existing file (`exists`),
 /// a path with spaces up to `.exe`, `.cmd` or `.bat`, or a path and the words that continue it.
-fn command_words(s: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
+pub(crate) fn command_words(s: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
     let s = s.trim();
     let split = |program: &str, rest: &str| std::iter::once(program.to_string()).chain(rest.split_whitespace().map(str::to_string)).collect();
     for q in ['"', '\''] {
@@ -1260,10 +1257,14 @@ mod tests {
         let env = [("V2_ENGINE_PERL", "p5"), ("V2_ENGINE_LUA", "lua5"), ("V2_ENGINE_NOSUCH", "x")];
         let cfg = project_env("custom-env", "[engines.perl]\nkind = \"run\"\ncommand = [\"perl\", \"{file}\"]\n", &env).unwrap();
         let perl = &cfg.custom_engines["perl"];
-        assert_eq!((perl.command.as_slice(), perl.origin.as_str()), (&["p5".to_string(), "{file}".to_string()][..], "V2_ENGINE_PERL"));
+        assert_eq!((perl.command.as_slice(), perl.program_from.as_deref()), (&["p5".to_string(), "{file}".to_string()][..], Some("V2_ENGINE_PERL")));
+        // It was still declared in the v2.toml (17.2's "already declared" names that).
+        assert!(perl.origin.ends_with("v2.toml"), "{}", perl.origin);
         assert_eq!(cfg.engines["lua"].program.as_ref().map(|p| p.value.as_str()), Some("lua5"));
         assert!(cfg.engines["lua"].command.is_none());
         assert!(!cfg.custom.contains_key("nosuch") && !cfg.engines.contains_key("nosuch"));
+        // Kept for a later define_engine of that tag (17.2).
+        assert_eq!(cfg.unclaimed.get("nosuch").map(|(_, var)| var.as_str()), Some("V2_ENGINE_NOSUCH"));
     }
 
     #[test]

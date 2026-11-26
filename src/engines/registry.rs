@@ -90,45 +90,47 @@ impl Registry {
     }
 
     /// A custom engine resolves only `command[0]` (17.1, 7.5): a path (already absolute, 18.1)
-    /// must be a file; a bare name is looked up on `PATH`. Nothing is probed or started.
+    /// must be an executable file; a bare name is looked up on `PATH`. Nothing is probed or
+    /// started.
     fn resolve_custom(&self, spec: &Rc<EngineSpec>) -> Result<ResolvedEngine, NotFound> {
+        use crate::config::ConfigSource;
         let c = spec.custom.as_ref().expect("a custom spec");
         let program = &c.command[0];
-        let from = || Some(c.origin.clone());
-        let found = if program.contains(['/', '\\']) || std::path::Path::new(program).is_absolute() {
+        let path_like = program.contains(['/', '\\']) || std::path::Path::new(program).is_absolute();
+        let found = if path_like {
             let p = std::path::PathBuf::from(program);
-            p.is_file().then_some(p)
+            (p.is_file() && super::resolve::executable(&p)).then_some(p)
         } else {
             super::resolve::first_program(program, &self.lookup)
         };
-        match found {
-            Some(path) => {
-                // The program alone, as for a built-in run engine: `run_command` adds the rest.
-                let argv = vec![path.into_os_string()];
-                // Doctor's FROM: `v2.toml`, the variable's name, or the define_engine call site.
-                let source = if c.origin.ends_with("v2.toml") {
-                    crate::config::ConfigSource::Project(c.origin.clone().into())
-                } else {
-                    crate::config::ConfigSource::Env(c.origin.clone())
-                };
-                let origin = Origin::Config(source);
-                Ok(ResolvedEngine { spec: spec.clone(), origin, argv, version: None, skipped: Vec::new() })
+        let in_toml = c.origin.ends_with("v2.toml");
+        // Doctor's FROM: the variable that set the program, else `v2.toml` or the call site.
+        let source = match (&c.program_from, in_toml) {
+            (Some(var), _) => ConfigSource::Env(var.clone()),
+            (None, true) => ConfigSource::Project(c.origin.clone().into()),
+            (None, false) => ConfigSource::Env(c.origin.clone()),
+        };
+        let Some(path) = found else {
+            // 7.4: `'perl' not found on PATH (engine declared in C:\proj\v2.toml)`, or `at
+            // main.v2:3`; with the hints of a configured command (18.1, 18.5).
+            let mut hint = match crate::config::unexpanded(program) {
+                Some(var) => format!("; V2 doesn't expand {var}: write the path out"),
+                None => String::new(),
+            };
+            if c.program_from.is_none() {
+                if let Some(h) = crate::config::configured_escape_hint(std::path::Path::new(program), &source, "command") {
+                    hint = format!("; {h}");
+                }
             }
-            None => Err(NotFound {
-                status: Status::Missing,
-                // 7.4: `'perl' not found on PATH (engine declared in C:\proj\v2.toml)`, or `at
-                // main.v2:3` for a define_engine call.
-                message: format!(
-                    "'{program}' not found{} (engine declared {} {})",
-                    if program.contains(['/', '\\']) { "" } else { " on PATH" },
-                    if c.origin.ends_with("v2.toml") { "in" } else { "at" },
-                    c.origin
-                ),
-                command: Some(c.command.join(" ")),
-                from: from(),
-                skipped: Vec::new(),
-            }),
-        }
+            let set_by = c.program_from.as_ref().map(|v| format!("set by {v}, ")).unwrap_or_default();
+            let declared = format!("{} {}", if in_toml { "in" } else { "at" }, c.origin);
+            let message = format!("'{}' not found{} ({set_by}engine declared {declared}){hint}", super::resolve::shown_program(program), if path_like { "" } else { " on PATH" });
+            // Doctor's missing row: `-` in the other columns, the message in its note (19.2).
+            return Err(NotFound { status: Status::Missing, message, command: None, from: None, skipped: Vec::new() });
+        };
+        // The program alone, as for a built-in run engine: `run_command` adds the rest.
+        let argv = vec![path.into_os_string()];
+        Ok(ResolvedEngine { spec: spec.clone(), origin: Origin::Config(source), argv, version: None, skipped: Vec::new() })
     }
 
     /// A run engine's whole argv, `{file}` still in it (17.3): the resolved program, then a
@@ -158,6 +160,10 @@ impl Registry {
     /// Why `define_engine` can't declare `tag` (17.2): a built-in tag or alias, or a tag already
     /// declared. Checked before the other keys, so `define_engine("py")` says what is wrong.
     pub fn taken(&self, tag: &str) -> Option<String> {
+        // The compiled engines of Phase 2 are built in too, though not in this build yet (DOCS 13).
+        if later_language(tag).is_some() {
+            return Some(format!("'{tag}' is a built-in engine — configure it in [engines.{}] in v2.toml", crate::syntax::scan::canonical_tag(tag)));
+        }
         let existing = self.canonical(tag)?;
         Some(match &existing.custom {
             Some(c) => format!("engine '{tag}' is already declared ({})", c.origin),

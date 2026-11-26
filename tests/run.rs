@@ -167,7 +167,18 @@ fn v2_command(home: &Path) -> Command {
     // tests/custom's bridged engines run the scripted adapter; a script that doesn't declare
     // `fake` ignores the variable (22.2, 18.4).
     cmd.env("V2_ENGINE_FAKE", fake_adapter());
+    // tests/custom/lua's bridged engine runs examples/lua_adapter.lua on the Lua found here.
+    if let Some(lua) = lua_program() {
+        cmd.env("V2_ENGINE_LUAB", lua);
+    }
     cmd
+}
+
+/// A Lua for the Lua adapter: `lua5.4` (Debian and Ubuntu name it so), else `lua`, on PATH.
+fn lua_program() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let names: &[&str] = if cfg!(windows) { &["lua5.4.exe", "lua.exe"] } else { &["lua5.4", "lua"] };
+    names.iter().find_map(|n| std::env::split_paths(&path).map(|d| d.join(n)).find(|p| p.is_file()))
 }
 
 /// A Cargo example, which `cargo test` builds next to the binary (22.3).
@@ -198,6 +209,18 @@ fn the_conformance_kit_passes_the_fake_adapter() {
     // 17.6, 22.3: every check of the kit, on the scripted adapter.
     let fake = fake_adapter();
     if let Err(report) = kit_check("fake.kit.json", &[fake.as_os_str()], &[]) {
+        panic!("{report}");
+    }
+}
+
+#[test]
+fn the_conformance_kit_passes_the_lua_adapter() {
+    // 17.6: examples/lua_adapter.lua, written from the spec alone, passes every check.
+    let Some(lua) = lua_program().filter(|_| needs("lua", "the_conformance_kit_passes_the_lua_adapter")) else {
+        return;
+    };
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/lua_adapter.lua");
+    if let Err(report) = kit_check("lua.kit.json", &[lua.as_os_str(), adapter.as_os_str()], &[]) {
         panic!("{report}");
     }
 }
@@ -627,6 +650,11 @@ fn a_closed_stdout_stops_the_run_quietly() {
     if needs("py", "a_closed_stdout_stops_the_run_quietly") {
         programs.push(("pyloop.v2", "@py {\n    i = 0\n    while True:\n        print(i)\n        i += 1\n}\n"));
     }
+    // A run engine's block writes V2's stdout itself, so it dies of SIGPIPE, and V2 stops as for
+    // its own print (17.3), not with an EngineExitError (the review of Phase 3).
+    if needs("bash", "a_closed_stdout_stops_the_run_quietly") {
+        programs.push(("shloop.v2", "@bash {\n    i=0\n    while true; do echo $i; i=$((i+1)); done\n}\nprint(\"not reached\")\n"));
+    }
     for (name, src) in programs {
         let home = TempHome::new();
         std::fs::write(home.0.join(name), src).unwrap();
@@ -689,6 +717,10 @@ fn a_closed_stderr_stops_the_run_quietly() {
     let mut programs = vec![("errloop.v2", "for i in 0..100000000 {\n    print(i, stderr: true)\n}\n")];
     if needs("py", "a_closed_stderr_stops_the_run_quietly") {
         programs.push(("pyerrloop.v2", "@py {\n    import sys\n    i = 0\n    while True:\n        print(i, file=sys.stderr)\n        i += 1\n}\n"));
+    }
+    // A run engine's stderr, which V2 copies through (17.3).
+    if needs("bash", "a_closed_stderr_stops_the_run_quietly") {
+        programs.push(("sherrloop.v2", "@bash {\n    i=0\n    while true; do echo $i >&2; i=$((i+1)); done\n}\nprint(\"not reached\")\n"));
     }
     for (name, src) in programs {
         let home = TempHome::new();
@@ -9082,4 +9114,59 @@ fn custom_bridged_engines_run_through_their_adapter() {
     let (code, _, stderr, _home) = run_with_files(&[("v2.toml", "[engines.pyfake]\nkind = \"bridged\"\ncomand = [\"x\"]\n"), ("t.v2", "print(1)\n")], &["t.v2"]);
     assert_eq!(code, Some(2));
     assert!(stderr.contains("unknown key [engines.pyfake] comand (did you mean 'command'?)"), "{stderr}");
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the V2_TEST_MAX_READ cap exists in debug builds only")]
+fn a_run_engine_value_past_what_a_str_holds_is_an_io_error() {
+    // 17.3 with 5.10's cap (the review of Phase 3): a block whose value would pass it is stopped,
+    // and the error says V2 stopped it, not that the block failed; one that fits is whole.
+    if !needs("bash", "a_run_engine_value_past_what_a_str_holds_is_an_io_error") {
+        return;
+    }
+    let src = "print(len(@bash { head -c 900 /dev/zero }))\ntry {\n    let v = @bash { head -c 5000 /dev/zero }\n} catch (e) {\n    print(e.type, e.message)\n}\n";
+    let (code, stdout, stderr, _home) = run_with_files_env(&[("big.v2", src)], &["big.v2"], &[("V2_TEST_MAX_READ", "1000")]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, "900\nIOError @bash block wrote more than 1 GiB of output: send it to a file in the block, or read it in pieces\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn custom_engine_programs_their_overrides_and_messages() {
+    // 7.4, 17.2, 18.4, 19.2 (the review of Phase 3): V2_ENGINE_<TAG> for a define_engine tag is
+    // read as at startup (trimmed, one pair of quotes off); a v2.toml engine keeps naming its
+    // v2.toml when a variable sets its program; a missing program's message says both, with the
+    // hint for a variable V2 doesn't expand; doctor's missing row has `-` in its other columns; a
+    // file that can't run isn't available.
+    use std::os::unix::fs::PermissionsExt;
+    let toml = "[engines.perl]\nkind = \"run\"\ncommand = [\"perl\", \"{file}\"]\n";
+    let src = "define_engine(\"mine\", kind: \"run\", command: [\"sh\", \"{file}\"])\n@mine { echo mine ran }\n\
+               try { define_engine(\"perl\", kind: \"run\", command: [\"perl\", \"{file}\"]) } catch (e) { print(e.message) }\n\
+               try { @perl { 1 } } catch (e) { print(e.message) }\n\
+               define_engine(\"q\", kind: \"run\", command: [\"./noexec\", \"{file}\"])\nprint(engine_available(\"q\"))\n\
+               define_engine(\"h\", kind: \"run\", command: [\"$HOME/nope/perl\", \"{file}\"])\ntry { @h { 1 } } catch (e) { print(e.message.ends_with(\"V2 doesn't expand $HOME: write the path out\")) }\n";
+    let files = [("v2.toml", toml), ("t.v2", src), ("noexec", "#!/bin/sh\necho no\n"), ("bin/fake", "#!/bin/sh\necho fake ran\n")];
+    let home = TempHome::new();
+    for (path, text) in files {
+        let p = home.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, text).unwrap();
+    }
+    std::fs::set_permissions(home.0.join("bin/fake"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |args: &[&str]| {
+        let out = v2_command(&home.0).args(args).current_dir(&home.0).env("V2_ENGINE_PERL", "/nonexistent/perl").env("V2_ENGINE_MINE", " \"bin/fake\" ").stdin(Stdio::null()).output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (code, stdout, stderr) = run(&["t.v2"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let toml_path = home.0.join("v2.toml");
+    let want = format!(
+        "fake ran\ndefine_engine: engine 'perl' is already declared ({0})\n'/nonexistent/perl' not found (set by V2_ENGINE_PERL, engine declared in {0})\nfalse\ntrue\n",
+        toml_path.display()
+    );
+    assert_eq!(stdout, want);
+    let (code, stdout, stderr) = run(&["doctor"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let rows = doctor_rows(&stdout);
+    assert_eq!(rows["perl"], ["missing", "-", "-", "-"], "{stdout}");
 }

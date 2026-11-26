@@ -586,8 +586,10 @@ fn define_engine(it: &mut Interp, args: Vec<Value>, at: Span) -> Exec<Value> {
     let base = file.path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
     let mut cfg = crate::engines::spec::validate(&tag, &table, origin).or_else(refuse)?;
     cfg.command = crate::config::rewrite_command(&base, cfg.command).or_else(refuse)?;
-    if let Some((program, _)) = crate::config::engine_override(&tag) {
+    // A V2_ENGINE_<TAG> read at startup replaces the program now (17.2, 18.4).
+    if let Some((program, var)) = it.registry.config().unclaimed.get(&tag).cloned() {
         cfg.command[0] = program;
+        cfg.program_from = Some(var);
     }
     it.registry.declare(&tag, cfg).or_else(refuse)?;
     Ok(Value::Null)

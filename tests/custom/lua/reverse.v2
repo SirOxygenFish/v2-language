@@ -1,0 +1,51 @@
+// requires: lua py
+// The reverse cap (17.5): V2 functions as call and block args, a V2 error coming back through
+// Lua with its type, inner @import from v2 and from another language, and the depth limit (9.7).
+func double(x) {
+    return x * 2
+}
+@luab cb {
+    function apply(f, x) return f(x) end
+    function apply_all(f, xs)
+        local out = V2.list({})
+        for i, x in ipairs(xs) do out[i] = f(x) end
+        return out
+    end
+    function bounce(f, n) return f(n) end
+    @export { apply, apply_all, bounce }
+}
+@import { apply, apply_all, bounce } from cb
+print(apply(double, 21), apply_all(double, [1, 2, 3]))
+print(@luab(f: double) { f(5) })
+func failing(x) {
+    throw error("ValueError", f"bad ${x}")
+}
+try {
+    apply(failing, 7)
+} catch (e) {
+    print(e.type, e.message)
+}
+func deep(n) {
+    return n == 0 ? 0 : 1 + bounce(deep, n - 1)
+}
+print(deep(20))
+try {
+    deep(200)
+} catch (e) {
+    print(e.type, e.message)
+}
+func hello(n) {
+    return f"hello ${n}"
+}
+@luab r {
+    @import { hello } from v2
+    @import { py_up } from pyb
+    function greet(n) return hello(n) .. " / " .. py_up(n) end
+    @export { greet }
+}
+@py pyb {
+    def py_up(s): return s.upper()
+    @export { py_up }
+}
+@import { greet } from r
+print(greet("ada"))

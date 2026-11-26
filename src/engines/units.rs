@@ -211,6 +211,15 @@ impl Interp {
                 }
                 None => {}
             }
+            // A run engine has no session to wait for: its definition block fails here, on the
+            // spec alone, with no probe, and stays failed (12.1 step 3, 12.7).
+            if let Some(spec) = self.registry.canonical(&b.tag.text).filter(|s| s.kind == crate::engines::spec::EngineKind::Run) {
+                let id = spec.id.clone();
+                if let Some(Flow::Error(e)) = self.run_directives(b, &id) {
+                    self.units.insert(b.unit_id, UnitState::Failed(e.clone()));
+                    return Err(Flow::Error(e));
+                }
+            }
             if let Some(key) = self.block_waits(b) {
                 self.units.insert(b.unit_id, UnitState::Waiting);
                 self.line.push(key, Waiting::Block(b.clone()));
@@ -240,6 +249,16 @@ impl Interp {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// 12.1 step 3 for a run engine's block: `@export` or an inner `@import` is an ImportError, at
+    /// the directive.
+    fn run_directives(&self, b: &EngineBlock, tag: &str) -> Option<Flow> {
+        if b.directives.exports.is_none() && b.directives.imports.is_empty() {
+            return None;
+        }
+        let span = b.directives.exports.as_ref().and_then(|e| e.at).or_else(|| b.directives.imports.first().map(|i| self.selector_span(&i.selector))).unwrap_or(b.tag.span);
+        Some(self.raise(error("ImportError", format!("@{tag} blocks cannot @export or @import — '{tag}' is a run engine")), span))
     }
 
     /// Whether a session exists for `key`, a dead one included (12.7).
@@ -315,10 +334,8 @@ impl Interp {
         if engine.spec.kind == crate::engines::spec::EngineKind::Run {
             // 12.1 step 3, after the tag is resolved and before the args: a run engine has no
             // namespace to export from or import into.
-            if b.directives.exports.is_some() || !b.directives.imports.is_empty() {
-                let span = b.directives.exports.as_ref().and_then(|e| e.at).or_else(|| b.directives.imports.first().map(|i| self.selector_span(&i.selector))).unwrap_or(at);
-                let tag = &engine.spec.id;
-                return Err(self.raise(error("ImportError", format!("@{tag} blocks cannot @export or @import — '{tag}' is a run engine")), span));
+            if let Some(flow) = self.run_directives(b, &engine.spec.id) {
+                return Err(flow);
             }
             let mut args = Vec::with_capacity(b.args.len());
             for (name, expr) in &b.args {

@@ -1,0 +1,11 @@
+{
+  "definition": "function echo(x)\n  return x\nend\nfunction fail(msg)\n  error(msg)\nend\nfunction say(text)\n  print(text)\nend\nanswer = 42\n",
+  "fail_line": 5,
+  "action_value": "1 + 2",
+  "action_print": "print(\"hi\")\nprint(\"there\")\n",
+  "syntax_error": "x = 1\ny = = 2\n",
+  "syntax_error_line": 2,
+  "module": {"name": "string", "member": "upper"},
+  "apply": "function apply(f, x)\n  return f(x)\nend\n",
+  "route": "function twice(x)\n  return host_double(x)\nend\n"
+}

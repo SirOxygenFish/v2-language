@@ -282,9 +282,11 @@ pub struct CustomCfg {
     pub ext: String,
     pub startup_timeout: Option<f64>,
     pub call_timeout: Option<f64>,
-    /// Where it was declared, as messages and doctor name it: the `v2.toml`'s path, a
-    /// `V2_ENGINE_<TAG>` variable's name, or a call site (`main.v2:3`).
+    /// Where it was declared, as messages and doctor name it: the `v2.toml`'s path or a call
+    /// site (`main.v2:3`).
     pub origin: String,
+    /// The `V2_ENGINE_<TAG>` variable that replaced `command[0]`, if one did (18.4).
+    pub program_from: Option<String>,
 }
 
 /// The keys a custom engine's table takes (17.1).
@@ -345,7 +347,11 @@ pub fn validate(tag: &str, table: &toml::Table, origin: String) -> Result<Custom
                 _ => return Err("'command' must be a non-empty array of non-empty strings".into()),
             }
         }
-        Some(toml::Value::String(s)) => return Err(format!("'command' must be an array: write [\"{s}\"]")),
+        // define_engine's (a v2.toml says 18.2's first): the words as a V2 list.
+        Some(toml::Value::String(s)) => {
+            let words: Vec<String> = crate::config::command_words(s, |p| std::path::Path::new(p).is_file()).iter().map(|w| serde_json::to_string(w).unwrap_or_default()).collect();
+            return Err(format!("'command' must be a list: write [{}]", words.join(", ")));
+        }
         Some(other) => return Err(format!("'command' must be an array of strings, got {}", toml_type(other))),
         None => return Err("'command' is required".into()),
     };
@@ -384,7 +390,7 @@ pub fn validate(tag: &str, table: &toml::Table, origin: String) -> Result<Custom
         return Err("'startup_timeout' does not apply to run engines".into());
     }
     let call_timeout = seconds("call_timeout")?;
-    Ok(CustomCfg { kind, command, ext, startup_timeout, call_timeout, origin })
+    Ok(CustomCfg { kind, command, ext, startup_timeout, call_timeout, origin, program_from: None })
 }
 
 /// A custom engine's spec (17.1): no candidates, minimum or probe; its language is its tag.

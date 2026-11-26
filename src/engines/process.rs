@@ -90,6 +90,21 @@ pub fn exit_broken_pipe() -> ! {
     hard_exit(EXIT_BROKEN_PIPE)
 }
 
+/// Whether V2's stdout is a pipe or socket whose reader has gone (6.5): what a child that wrote to
+/// it straight, and died of SIGPIPE, found. Windows: `false`; V2's next write finds out there.
+#[cfg(unix)]
+pub fn stdout_gone() -> bool {
+    let mut fd = libc::pollfd { fd: 1, events: libc::POLLOUT, revents: 0 };
+    // SAFETY: one valid pollfd, no timeout.
+    let n = unsafe { libc::poll(&mut fd, 1, 0) };
+    n > 0 && fd.revents & (libc::POLLERR | libc::POLLHUP) != 0
+}
+
+#[cfg(not(unix))]
+pub fn stdout_gone() -> bool {
+    false
+}
+
 fn die(w: &Watch) -> ! {
     for (_, kill) in &w.children {
         kill.kill_tree();

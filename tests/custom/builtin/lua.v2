@@ -1,0 +1,4 @@
+// requires: lua
+// The built-in lua run engine (DOCS 5, INTERNALS 7.2, 17.3): output, a value, args.
+@lua { print("hi from lua") }
+print(@lua(n: 41) { print(tonumber(os.getenv("V2_ARG_n")) + 1) })

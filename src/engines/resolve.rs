@@ -84,7 +84,7 @@ fn is_regular_file(p: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn executable(p: &Path) -> bool {
+pub(crate) fn executable(p: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
     // SAFETY: a NUL-terminated path.
@@ -92,7 +92,7 @@ fn executable(p: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn executable(_: &Path) -> bool {
+pub(crate) fn executable(_: &Path) -> bool {
     true
 }
 
@@ -665,7 +665,7 @@ fn one_separator(name: &str) -> String {
 }
 
 /// `one_separator`, its control characters escaped (2.1).
-fn shown_program(name: &str) -> String {
+pub(crate) fn shown_program(name: &str) -> String {
     crate::syntax::span::shown_path(&one_separator(name))
 }
 

@@ -1,0 +1,34 @@
+null null -> null null true nil
+bool true -> bool true true boolean
+bool false -> bool false true boolean
+int 0 -> int 0 true integer
+int -7 -> int -7 true integer
+int 9007199254740991 -> int 9007199254740991 true integer
+int 9007199254740993 -> int 9007199254740993 true integer
+int -9223372036854775808 -> int -9223372036854775808 true integer
+float 1.0 -> float 1.0 true float
+float -0.0 -> float -0.0 true float
+float 0.1 -> float 0.1 true float
+float 1e300 -> float 1e300 true float
+float 2.5e-8 -> float 2.5e-8 true float
+float nan -> float nan false float
+float inf -> float inf true float
+float -inf -> float -inf true float
+str  -> str  true string
+str héllo ✓ 😀 -> str héllo ✓ 😀 true string
+str tab	nl
+q"\ -> str tab	nl
+q"\ true string
+str   -> str   true string
+bytes b"" -> bytes b"" true bytes(0)
+bytes b"\x00\xff\x10abc" -> bytes b"\x00\xff\x10abc" true bytes(6)
+list [] -> list [] true list#0
+dict {} -> dict {} true dict#0
+list [1, [2, [3, null]]] -> list [1, [2, [3, null]]] true list#2
+dict {"b": 1, "a": [null, {"c": "d"}]} -> dict {"b": 1, "a": [null, {"c": "d"}]} true dict#0
+dict {"$v2": "x", "other": 2} -> dict {"$v2": "x", "other": 2} true dict#0
+list [null, null] -> list [null, null] true list#2
+dict {"k": null} -> dict {"k": null} true dict#0
+-0.0 3 3.0 9.223372036854776e18 9223372036854775807
+[] {} [1, 2, 3] {"y": [true]}
+null b"\xff\x00"

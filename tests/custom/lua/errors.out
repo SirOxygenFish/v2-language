@@ -1,0 +1,10 @@
+E1 ImportError @export lists 'typo' but block 'broken' does not define it
+ForeignError | error | division by zero | 15 | luab | null
+ForeignError | error | attempt to index a nil value (field 'x') | 19 | luab | null
+ForeignError | ParseError | bad input | 20 | luab | {"line": 3, "why": "x"}
+ForeignError | error | os.exit(3) can't end V2's Lua engine; raise an error instead, or end the program with V2's exit(3) | 21 | luab | {"exit_code": 3}
+ForeignError | error | blocks cannot read standard input: V2's input() owns it; pass the data in as a block arg | 29 | luab | null
+ForeignError | error | (error object is a nil value) | 23 | luab | null
+ForeignError | MyErr | custom text | 24 | luab | null
+SYN ForeignError SyntaxError unexpected symbol near '=' 36
+RT ForeignError error attempt to index a nil value (local 't') 42 ["errors.v2:42, in @luab block at errors.v2:40", "errors.v2:40"]
